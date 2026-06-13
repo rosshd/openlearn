@@ -120,6 +120,11 @@ def build_parser() -> argparse.ArgumentParser:
     new_parser.add_argument("--goal", default="", help="Learning goal for this topic")
     new_parser.set_defaults(func=cmd_new)
 
+    delete_parser = sub.add_parser("delete", help="Delete a local learning topic")
+    delete_parser.add_argument("topic", help="Topic slug")
+    delete_parser.add_argument("--yes", action="store_true", help="Confirm deletion without prompting")
+    delete_parser.set_defaults(func=cmd_delete)
+
     list_parser = sub.add_parser("list", help="List local learning topics")
     list_parser.set_defaults(func=cmd_list)
 
@@ -207,7 +212,8 @@ def run_menu(input_func=input, output_func=print) -> int:
         output_func("6. Recent topics")
         output_func("7. New topic")
         output_func("8. Switch active topic")
-        output_func("9. REPL")
+        output_func("9. Delete topic")
+        output_func("10. REPL")
         output_func("q. Quit")
         try:
             choice = input_func("Choose: ").strip().lower()
@@ -244,6 +250,11 @@ def run_menu(input_func=input, output_func=print) -> int:
                 if topic:
                     cmd_active(argparse.Namespace(topic=topic))
             elif choice == "9":
+                topic = input_func("Topic slug to delete: ").strip()
+                if topic:
+                    confirm = input_func(f"Delete {slugify(topic)}? Type the slug to confirm: ").strip()
+                    cmd_delete(argparse.Namespace(topic=topic, yes=confirm == slugify(topic)))
+            elif choice == "10":
                 run_repl(input_func=input_func, output_func=output_func)
             else:
                 output_func("Choose a number, or q to quit.")
@@ -262,7 +273,7 @@ def run_repl(
         set_active_topic(topic_slug)
     output_func("openLearn REPL")
     output_func(
-        "Type a question to ask the active topic. Commands: /help, /resume, /next, /review, /status, /active <topic>, /recent, /new <topic>, /quit"
+        "Type a question to ask the active topic. Commands: /help, /resume, /next, /review, /status, /active <topic>, /recent, /new <topic>, /delete <topic>, /quit"
     )
 
     while True:
@@ -300,7 +311,7 @@ def handle_repl_command(
 
     if name in {"help", "h", "?"}:
         output_func(
-            "Commands: /resume, /next, /review, /status, /active [topic], /recent, /new <topic> [goal], /ask <question>, /quit"
+            "Commands: /resume, /next, /review, /status, /active [topic], /recent, /new <topic> [goal], /delete <topic>, /ask <question>, /quit"
         )
     elif name in {"resume", "r"}:
         cmd_resume(argparse.Namespace(topic=args[0] if args else None, model=model))
@@ -324,6 +335,10 @@ def handle_repl_command(
         if not args:
             raise OpenLearnError("usage: /new <topic> [goal]")
         cmd_new(argparse.Namespace(topic=args[0], goal=" ".join(args[1:])))
+    elif name in {"delete", "del", "rm"}:
+        if not args:
+            raise OpenLearnError("usage: /delete <topic>")
+        output_func("Use the non-interactive command for deletion: openlearn delete " + slugify(args[0]))
     elif name == "ask":
         if not args:
             raise OpenLearnError("usage: /ask <question>")
@@ -430,6 +445,21 @@ def cmd_new(args: argparse.Namespace) -> int:
     write_topic(path, metadata, body)
     set_active_topic(slug)
     print(f"Created {path}")
+    return 0
+
+
+def cmd_delete(args: argparse.Namespace) -> int:
+    slug = slugify(args.topic)
+    path = topic_path(slug)
+    if not path.exists():
+        raise OpenLearnError(f"topic not found: {slug}")
+    if not args.yes:
+        raise OpenLearnError(f"deleting a topic is permanent; rerun with: openlearn delete {slug} --yes")
+
+    path.unlink()
+    if get_active_topic() == slug:
+        clear_active_topic()
+    print(f"Deleted topic: {slug}")
     return 0
 
 
@@ -738,6 +768,13 @@ def set_active_topic(slug: str) -> None:
                 indent=2,
             ),
         )
+
+
+def clear_active_topic() -> None:
+    path = state_path()
+    if path.exists():
+        with file_lock(path):
+            path.unlink(missing_ok=True)
 
 
 def write_topic(path: Path, metadata: dict[str, object], body: str) -> None:

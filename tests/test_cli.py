@@ -122,6 +122,26 @@ class CliStorageTests(unittest.TestCase):
 
         self.assertEqual(cli.resolve_topic_slug(None), "older-topic")
 
+    def test_delete_topic_requires_confirmation_and_clears_active_topic(self) -> None:
+        call_silent(cli.cmd_init, Namespace())
+        call_silent(cli.cmd_new, Namespace(topic="Delete Me", goal="temporary"))
+
+        with self.assertRaises(cli.OpenLearnError):
+            cli.cmd_delete(Namespace(topic="delete-me", yes=False))
+
+        self.assertTrue(cli.topic_path("delete-me").exists())
+
+        call_silent(cli.cmd_delete, Namespace(topic="delete-me", yes=True))
+
+        self.assertFalse(cli.topic_path("delete-me").exists())
+        self.assertIsNone(cli.get_active_topic())
+
+    def test_delete_topic_rejects_missing_topic(self) -> None:
+        call_silent(cli.cmd_init, Namespace())
+
+        with self.assertRaises(cli.OpenLearnError):
+            cli.cmd_delete(Namespace(topic="missing", yes=True))
+
 
 class ProviderResponseTests(unittest.TestCase):
     def test_extract_response_text_supports_chat_completion_shape(self) -> None:

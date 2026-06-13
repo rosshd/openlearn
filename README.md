@@ -31,6 +31,7 @@ python -m openlearn config set-base-url https://api.openai.com/v1
 python -m openlearn config show
 python -m openlearn config clear-key
 python -m openlearn new vim --goal "Learn Vim motions and macros"
+python -m openlearn delete vim --yes
 python -m openlearn list
 python -m openlearn recent
 python -m openlearn active vim
@@ -133,6 +134,7 @@ Fast commands:
 - `openlearn edit`: open the active topic file in `$EDITOR`.
 - `openlearn menu`: open a numbered menu for common actions.
 - `openlearn repl`: start a back-and-forth learning prompt.
+- `openlearn delete vim --yes`: permanently delete a local topic file.
 - `openlearn resume`: recap and continue where you left off.
 - `openlearn next`: generate the next 10-15 minute learning step.
 - `openlearn review vim`: generate a short active-recall review.
@@ -216,6 +218,14 @@ openLearn keeps user data outside Git by default:
 - `config.json`: saved model settings and optional API key.
 
 These files are ignored because they may contain private notes, class material, or credentials.
+
+Delete a topic when you no longer need its local notes:
+
+```bash
+openlearn delete vim --yes
+```
+
+Deletion is permanent. Since topic files are user-owned Markdown files, you can also back up or move them manually before deleting.
 
 ## Pricing Language
 
