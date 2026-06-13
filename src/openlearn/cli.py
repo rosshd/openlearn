@@ -21,6 +21,7 @@ from urllib.request import Request, urlopen
 
 DEFAULT_MODEL = "gpt-4.1-mini"
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
+DEFAULT_MAX_TOKENS = 1600
 STATE_FILE = "state.json"
 CONFIG_FILE = "config.json"
 PROMPT_TOPIC_LINE_LIMIT = 120
@@ -911,6 +912,8 @@ def call_openai(model: str, system: str, user: str) -> str:
 
     payload = {
         "model": model,
+        "max_tokens": DEFAULT_MAX_TOKENS,
+        "include_reasoning": False,
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
@@ -938,8 +941,11 @@ def call_openai(model: str, system: str, user: str) -> str:
         raise OpenLearnError(f"OpenAI request failed: {exc.reason}") from exc
 
     text = extract_response_text(data)
+    text = sanitize_model_output(text)
     if not text:
-        raise OpenLearnError("OpenAI response did not contain output text")
+        raise OpenLearnError(
+            "OpenAI response did not contain output text; the model may have spent its output budget on reasoning. Try a faster non-reasoning model or increase the token limit."
+        )
     return text.strip()
 
 
@@ -953,6 +959,13 @@ def extract_response_text(data: dict[str, object]) -> str:
                 content = message.get("content")
                 if isinstance(content, str):
                     return content
+                if isinstance(content, list):
+                    chunks = []
+                    for item in content:
+                        if isinstance(item, dict) and isinstance(item.get("text"), str):
+                            chunks.append(item["text"])
+                    if chunks:
+                        return "\n".join(chunks)
 
     direct = data.get("output_text")
     if isinstance(direct, str):
@@ -973,6 +986,11 @@ def extract_response_text(data: dict[str, object]) -> str:
                 if isinstance(text, str):
                     chunks.append(text)
     return "\n".join(chunks)
+
+
+def sanitize_model_output(text: str) -> str:
+    text = re.sub(r"(?is)<system-reminder>.*?</system-reminder>", "", text)
+    return text.strip()
 
 
 def print_list(label: str, value: object) -> None:

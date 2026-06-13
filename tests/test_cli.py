@@ -1,5 +1,6 @@
 import contextlib
 import io
+import json
 import os
 import sys
 import tempfile
@@ -139,6 +140,25 @@ class ProviderResponseTests(unittest.TestCase):
 
         self.assertEqual(text, "Practice macros with one repeatable edit.")
 
+    def test_extract_response_text_supports_chat_content_parts(self) -> None:
+        text = cli.extract_response_text(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": [
+                                {"type": "text", "text": "First part."},
+                                {"type": "text", "text": "Second part."},
+                            ],
+                        }
+                    }
+                ]
+            }
+        )
+
+        self.assertEqual(text, "First part.\nSecond part.")
+
     def test_extract_response_text_supports_responses_api_fallback_shape(self) -> None:
         text = cli.extract_response_text(
             {
@@ -154,6 +174,48 @@ class ProviderResponseTests(unittest.TestCase):
         )
 
         self.assertEqual(text, "Review registers before macros.\nThen record a small macro.")
+
+    def test_sanitize_model_output_removes_system_reminder_blocks(self) -> None:
+        text = cli.sanitize_model_output(
+            "Keep this answer.\n<system-reminder>hidden platform text</system-reminder>\n"
+        )
+
+        self.assertEqual(text, "Keep this answer.")
+
+    def test_call_openai_sends_completion_limit(self) -> None:
+        previous_key = os.environ.get("OPENAI_API_KEY")
+        os.environ["OPENAI_API_KEY"] = "sk-test"
+        requests = []
+        original_urlopen = cli.urlopen
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def read(self):
+                return json.dumps({"choices": [{"message": {"content": "short answer"}}]}).encode()
+
+        def fake_urlopen(request, timeout=0):
+            requests.append((request, timeout))
+            return FakeResponse()
+
+        cli.urlopen = fake_urlopen
+        try:
+            answer = cli.call_openai("test-model", "system", "user")
+        finally:
+            cli.urlopen = original_urlopen
+            if previous_key is None:
+                os.environ.pop("OPENAI_API_KEY", None)
+            else:
+                os.environ["OPENAI_API_KEY"] = previous_key
+
+        payload = json.loads(requests[0][0].data.decode("utf-8"))
+        self.assertEqual(answer, "short answer")
+        self.assertEqual(payload["max_tokens"], cli.DEFAULT_MAX_TOKENS)
+        self.assertIs(payload["include_reasoning"], False)
 
 
 class InteractiveTests(unittest.TestCase):
