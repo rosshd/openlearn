@@ -516,8 +516,7 @@ def ask_topic(topic_value: str | None, prompt: str, model: str | None = None) ->
         system=system_prompt(topic),
         user=prompt,
     )
-    print(answer)
-    append_session(topic, "chat", prompt, answer)
+    answer = print_and_append_model_answer(topic, "chat", prompt, answer)
     return answer
 
 
@@ -531,8 +530,7 @@ def cmd_review(args: argparse.Namespace) -> int:
         "brief hints, and an answer key at the end."
     )
     answer = call_openai(model=model, system=system_prompt(topic), user=user)
-    print(answer)
-    append_session(topic, "review", user, answer, mark_reviewed=True)
+    print_and_append_model_answer(topic, "review", user, answer, mark_reviewed=True)
     return 0
 
 
@@ -549,8 +547,7 @@ def cmd_resume(args: argparse.Namespace) -> int:
         "Keep the whole response under 140 words."
     )
     answer = call_openai(model=model, system=system_prompt(topic), user=user)
-    print(answer)
-    append_session(topic, "resume", user, answer)
+    print_and_append_model_answer(topic, "resume", user, answer)
     return 0
 
 
@@ -564,9 +561,21 @@ def cmd_next(args: argparse.Namespace) -> int:
         "Include one explanation, one drill, and a clear stopping point."
     )
     answer = call_openai(model=model, system=system_prompt(topic), user=user)
-    print(answer)
-    append_session(topic, "next", user, answer)
+    print_and_append_model_answer(topic, "next", user, answer)
     return 0
+
+
+def print_and_append_model_answer(
+    topic: Topic,
+    kind: str,
+    prompt: str,
+    answer: str,
+    mark_reviewed: bool = False,
+) -> str:
+    answer = sanitize_model_output(answer)
+    print(answer)
+    append_session(topic, kind, prompt, answer, mark_reviewed=mark_reviewed)
+    return answer
 
 
 def project_home() -> Path:
