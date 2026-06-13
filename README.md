@@ -1,5 +1,9 @@
 # openLearn
 
+[![Tests](https://github.com/rosshd/openlearn/actions/workflows/tests.yml/badge.svg)](https://github.com/rosshd/openlearn/actions/workflows/tests.yml)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](pyproject.toml)
+
 Local-first AI tutoring that keeps learning state in files you own.
 
 openLearn is an open-source, local-first AI learning workspace. It keeps your curriculum, progress, review state, and session notes in files you own, while letting you bring your own model API key.
