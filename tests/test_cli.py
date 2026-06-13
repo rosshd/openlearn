@@ -182,6 +182,13 @@ class ProviderResponseTests(unittest.TestCase):
 
         self.assertEqual(text, "Keep this answer.")
 
+    def test_sanitize_model_output_removes_loose_system_reminder_lines(self) -> None:
+        text = cli.sanitize_model_output(
+            "Keep this answer.\nYour operational mode changed.\nStill useful."
+        )
+
+        self.assertEqual(text, "Keep this answer.\nStill useful.")
+
     def test_call_openai_sends_completion_limit(self) -> None:
         previous_key = os.environ.get("OPENAI_API_KEY")
         os.environ["OPENAI_API_KEY"] = "sk-test"
