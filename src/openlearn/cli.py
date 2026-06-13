@@ -204,16 +204,19 @@ def run_menu(input_func=input, output_func=print) -> int:
         output_func("")
         active = get_active_topic()
         output_func(f"Active topic: {active or 'none'}")
-        output_func("1. Resume")
-        output_func("2. Next step")
-        output_func("3. Ask active topic")
-        output_func("4. Review")
-        output_func("5. Status")
+        unstarted = active_topic_needs_course_start(active)
+        if unstarted:
+            output_func("1. Start course")
+        else:
+            output_func("1. Resume")
+            output_func("2. Next step")
+            output_func("3. Ask active topic")
+            output_func("4. Review")
+            output_func("5. Status")
         output_func("6. Recent topics")
         output_func("7. New topic")
         output_func("8. Switch active topic")
         output_func("9. Delete topic")
-        output_func("10. REPL")
         output_func("q. Quit")
         try:
             choice = input_func("Choose: ").strip().lower()
@@ -224,19 +227,39 @@ def run_menu(input_func=input, output_func=print) -> int:
         try:
             if choice in {"q", "quit", "exit"}:
                 return 0
-            if choice == "1":
+            if choice == "1" and unstarted:
+                start_course(input_func=input_func, output_func=output_func)
+                if not active_topic_needs_course_start(get_active_topic()):
+                    run_repl(input_func=input_func, output_func=output_func)
+            elif choice == "1":
                 cmd_resume(argparse.Namespace(topic=None, model=None))
+                run_repl(input_func=input_func, output_func=output_func)
             elif choice == "2":
+                if unstarted:
+                    output_func("Start the course first.")
+                    continue
                 cmd_next(argparse.Namespace(topic=None, model=None))
+                run_repl(input_func=input_func, output_func=output_func)
             elif choice == "3":
+                if unstarted:
+                    output_func("Start the course first.")
+                    continue
                 prompt = input_func("Ask: ").strip()
                 if prompt:
                     ask_topic(None, prompt, None)
+                    run_repl(input_func=input_func, output_func=output_func)
             elif choice == "4":
+                if unstarted:
+                    output_func("Start the course first.")
+                    continue
                 cmd_review(
                     argparse.Namespace(topic=resolve_topic_slug(None), model=None)
                 )
+                run_repl(input_func=input_func, output_func=output_func)
             elif choice == "5":
+                if unstarted:
+                    output_func("Start the course first.")
+                    continue
                 cmd_status(argparse.Namespace(topic=resolve_topic_slug(None)))
             elif choice == "6":
                 cmd_recent(argparse.Namespace())
@@ -246,16 +269,19 @@ def run_menu(input_func=input, output_func=print) -> int:
                 if name:
                     cmd_new(argparse.Namespace(topic=name, goal=goal))
             elif choice == "8":
-                topic = input_func("Topic slug: ").strip()
+                topic = choose_topic(input_func, output_func, "Switch to topic")
                 if topic:
                     cmd_active(argparse.Namespace(topic=topic))
             elif choice == "9":
-                topic = input_func("Topic slug to delete: ").strip()
+                topic = choose_topic(input_func, output_func, "Delete topic")
                 if topic:
-                    confirm = input_func(f"Delete {slugify(topic)}? Type the slug to confirm: ").strip()
-                    cmd_delete(argparse.Namespace(topic=topic, yes=confirm == slugify(topic)))
-            elif choice == "10":
-                run_repl(input_func=input_func, output_func=output_func)
+                    confirm = input_func(
+                        f"Delete {topic}? This is not reversible. Are you sure? [y/N]: "
+                    ).strip().lower()
+                    if confirm in {"y", "yes"}:
+                        cmd_delete(argparse.Namespace(topic=topic, yes=True))
+                    else:
+                        output_func("Delete cancelled.")
             else:
                 output_func("Choose a number, or q to quit.")
         except OpenLearnError as exc:
@@ -420,6 +446,7 @@ def cmd_new(args: argparse.Namespace) -> int:
         "topic": title,
         "slug": slug,
         "current_focus": "",
+        "course_started": False,
         "level": "beginner",
         "model": configured_model(),
         "created": today(),
@@ -446,6 +473,108 @@ def cmd_new(args: argparse.Namespace) -> int:
     set_active_topic(slug)
     print(f"Created {path}")
     return 0
+
+
+def choose_topic(input_func, output_func, title: str) -> str | None:
+    topics = recent_topic_summaries()
+    if not topics:
+        output_func("No topics yet.")
+        return None
+
+    output_func(title)
+    active = get_active_topic()
+    for index, topic in enumerate(topics, start=1):
+        marker = "*" if topic.slug == active else " "
+        output_func(f"{index}. {marker} {topic.slug}")
+    output_func("q. Cancel")
+
+    choice = input_func("Choose topic: ").strip().lower()
+    if choice in {"", "q", "quit", "cancel"}:
+        return None
+    if not choice.isdigit():
+        raise OpenLearnError("choose a topic number, or q to cancel")
+    index = int(choice)
+    if index < 1 or index > len(topics):
+        raise OpenLearnError("topic choice out of range")
+    return topics[index - 1].slug
+
+
+def active_topic_needs_course_start(active_slug: str | None) -> bool:
+    if not active_slug:
+        return False
+    try:
+        topic = read_topic(active_slug)
+    except OpenLearnError:
+        return False
+    return not bool(topic.metadata.get("course_started"))
+
+
+def start_course(input_func=input, output_func=print, model: str | None = None) -> int:
+    topic = read_topic(resolve_topic_slug(None))
+    set_active_topic(topic.slug)
+    model = model or str(topic.metadata.get("model") or configured_model())
+    feedback = ""
+
+    while True:
+        outline_prompt = course_outline_prompt(topic, feedback)
+        outline = sanitize_model_output(
+            call_openai(model, system_prompt(topic), outline_prompt)
+        )
+        output_func("Course scope")
+        output_func(outline)
+        answer = input_func("Is this an acceptable course outline? [y/N]: ").strip().lower()
+        if answer in {"y", "yes"}:
+            break
+        feedback = input_func("What should change? ").strip()
+        if not feedback:
+            output_func("Course start cancelled.")
+            return 0
+
+    save_course_started(topic, outline_prompt, outline)
+    lesson_prompt = first_lesson_prompt(outline)
+    lesson = sanitize_model_output(
+        call_openai(model, system_prompt(read_topic(topic.slug)), lesson_prompt)
+    )
+    output_func(lesson)
+    append_session(read_topic(topic.slug), "lesson", lesson_prompt, lesson)
+    return 0
+
+
+def course_outline_prompt(topic: Topic, feedback: str = "") -> str:
+    goal = str(topic.metadata.get("goal") or "")
+    feedback_text = f"\nRequested changes: {feedback}" if feedback else ""
+    return (
+        "Create a concise course plan before teaching. "
+        "Do not recap. Do not ask what the learner wants unless required "
+        "details are missing. "
+        "Use exactly these plain-text labels: Scope:, Excludes:, Assumptions:, Units:. "
+        "Create 4-8 ordered units with short titles and one-line outcomes. "
+        "Keep it under 250 words.\n"
+        f"Course name: {topic.metadata.get('topic', topic.slug)}\n"
+        f"Goal: {goal}"
+        f"{feedback_text}"
+    )
+
+
+def first_lesson_prompt(outline: str) -> str:
+    return (
+        "Start teaching unit 1 from this accepted course plan. "
+        "Do not repeat the whole plan. Teach the first concept directly, "
+        "give one concrete example, then ask one short check-for-understanding "
+        "question. Keep it under 220 words.\n\n"
+        f"Accepted course plan:\n{outline}"
+    )
+
+
+def save_course_started(topic: Topic, outline_prompt: str, outline: str) -> None:
+    with file_lock(topic.path):
+        current_text = topic.path.read_text(encoding="utf-8")
+        metadata, body = parse_topic(current_text)
+        metadata = dict(metadata)
+        metadata["course_started"] = True
+        metadata["current_focus"] = metadata.get("current_focus") or "Unit 1"
+        write_text_atomic(topic.path, format_topic(metadata, body))
+    append_session(read_topic(topic.slug), "course_plan", outline_prompt, outline)
 
 
 def cmd_delete(args: argparse.Namespace) -> int:
@@ -588,7 +717,8 @@ def cmd_next(args: argparse.Namespace) -> int:
     user = (
         "Generate the next 10-15 minute learning step for this topic. "
         "Use the current goal, known concepts, weak spots, and notes. "
-        "Include one explanation, one drill, and a clear stopping point."
+        "Include one explanation, one drill, and a clear stopping point. "
+        "End with one question or exercise for the learner to answer next."
     )
     answer = call_openai(model=model, system=system_prompt(topic), user=user)
     print_and_append_model_answer(topic, "next", user, answer)
@@ -901,6 +1031,11 @@ def system_prompt(topic: Topic) -> str:
         and next actions over long lectures. If the user asks about something
         outside the topic, answer normally but connect back to the learning goal
         when useful.
+
+        If course_started is true and the learner asks to learn, continue, or
+        move on, advance through the saved course plan. Do not restart with a
+        generic recap or ask for the learning goal again unless the learner asks
+        to change course direction.
 
         Output only learner-facing text. Keep formatting terminal-friendly: use
         short labels, hyphen bullets, and minimal math notation. Do not use bold

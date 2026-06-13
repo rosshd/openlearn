@@ -62,6 +62,48 @@ openlearn edit
 
 This opens the active topic file in `$EDITOR`, preserving the local-first workflow.
 
+## Efficient Course Start Flow
+
+The tutor should not repeatedly recap an empty topic. New topics should move from course name to structured learning with as few turns as possible.
+
+Target flow:
+
+- Create a topic with a name and goal.
+- Later, support optional file upload or source import before the course starts.
+- If the active topic has not started, the menu shows `Start course` instead of `Resume`, `Next step`, `Ask`, `Review`, or `Status`.
+- `Start course` asks the model for a compact scope: what the course covers, what it excludes, assumptions, and planned units.
+- The user accepts or rejects the scope with a simple yes/no confirmation.
+- Once confirmed, openLearn saves the course plan into the topic file, marks the course started, teaches the first lesson, and enters the REPL for the learner's answer.
+- After a course is started, `Resume`, `Next step`, `Ask`, `Review`, and `Status` become available again and should use the saved course plan to avoid restarting from generic goals.
+
+Efficient implementation notes:
+
+- Store `course_started` and course-plan text in the topic file so this is durable and local-first.
+- Keep prompts strict: no generic recap before a course plan exists; no repeated “what is your goal?” once the goal is known.
+- Prefer one model call for scope and one model call for lesson one. Avoid a loop unless the user rejects the scope.
+- Future file upload should feed source summaries into the same scope-generation prompt rather than becoming a separate course-start path.
+
+Ideas to get from course name to learning faster:
+
+- Infer a default college-course scope from the topic name, but require one confirmation before teaching.
+- Offer optional setup presets later if the goal is too broad, but keep v0.2.0 goal-only.
+- Save the accepted outline and current unit so `learn AI`-style responses advance the course instead of triggering fresh recaps.
+- Later, add quick presets such as `college intro`, `exam prep`, `project based`, and `crash course` to reduce free-form setup.
+
+## v0.2.0 Merge-to-Main Deliverables
+
+Simple core mechanics:
+
+- Default launch opens the menu and supports a complete happy path without memorizing commands.
+- Menu learning actions automatically continue into the REPL when the tutor asks for a learner response.
+- Active topic is reliable across `new`, `resume`, `next`, `review`, `chat`, `status`, `edit`, menu, and REPL flows.
+- Topic files append readable session logs for prompts, model responses, and review sessions without corrupting metadata.
+- `resume`, `next`, `review`, and REPL questions all use the same local topic context and terminal-friendly response style.
+- Recent-topic listing and active-topic switching are fast enough to make topic hopping practical.
+- Deleting a topic requires explicit confirmation and clears active-topic state when needed.
+- Configuration for API key, model, and base URL works locally with environment-variable precedence.
+- Tests cover the menu happy path, REPL command handling, topic persistence, active-topic fallback, deletion safety, config precedence, and model-response parsing.
+
 ## Near-Term Features
 
 - `update` command that asks the model to suggest metadata changes after a session.

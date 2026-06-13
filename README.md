@@ -55,6 +55,8 @@ openlearn init
 openlearn new vim --goal "Use Vim comfortably for real editing"
 ```
 
+New topics start as unstarted courses. In the menu, choose `Start course` to have the tutor propose a compact course scope and unit plan. Confirm the outline with `y` to save the plan, start lesson one, and continue in the REPL.
+
 Check what openLearn knows about the topic:
 
 ```bash
@@ -88,13 +90,13 @@ Review a topic when you want active recall:
 openlearn review vim
 ```
 
-For back-and-forth learning, start the REPL:
+For back-and-forth learning, start the REPL directly:
 
 ```bash
 openlearn repl
 ```
 
-Inside the REPL, type normal questions to ask the active topic without retyping `openlearn chat <topic> ...` every time:
+Inside the REPL, type normal questions to ask the active topic without retyping `openlearn chat <topic> ...` every time. The interactive menu also enters the REPL automatically after learning actions that ask for a learner response.
 
 ```text
 openlearn> I think the answer is registers. Am I right?
@@ -132,7 +134,7 @@ Fast commands:
 - `openlearn active`: show the active topic.
 - `openlearn active os`: switch active topic.
 - `openlearn edit`: open the active topic file in `$EDITOR`.
-- `openlearn menu`: open a numbered menu for common actions.
+- `openlearn menu`: open a numbered menu for common actions; learning actions continue into the REPL automatically.
 - `openlearn repl`: start a back-and-forth learning prompt.
 - `openlearn delete vim --yes`: permanently delete a local topic file.
 - `openlearn resume`: recap and continue where you left off.

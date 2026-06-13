@@ -57,6 +57,22 @@ class CliStorageTests(unittest.TestCase):
         self.assertEqual(summary.slug, "vim")
         self.assertEqual(summary.metadata["known"], ["motions"])
 
+    def test_new_topic_starts_unstarted(self) -> None:
+        call_silent(
+            cli.cmd_new,
+            Namespace(
+                topic="Intro AI",
+                goal="Understand AI fundamentals",
+            ),
+        )
+
+        topic = cli.read_topic("intro-ai")
+
+        self.assertIs(topic.metadata["course_started"], False)
+        self.assertNotIn("description", topic.metadata)
+        self.assertNotIn("## Description", topic.body)
+        self.assertIn("Understand AI fundamentals", topic.body)
+
     def test_append_session_preserves_metadata_and_review_updates_last_reviewed(self) -> None:
         call_silent(cli.cmd_init, Namespace())
         call_silent(cli.cmd_new, Namespace(topic="Append Test", goal="Check appends"))
@@ -76,6 +92,32 @@ class CliStorageTests(unittest.TestCase):
         self.assertEqual(metadata["last_reviewed"], cli.today())
         self.assertIn("review prompt", body)
         self.assertIn("review answer", body)
+
+    def test_model_commands_persist_readable_session_logs(self) -> None:
+        call_silent(cli.cmd_init, Namespace())
+        call_silent(cli.cmd_new, Namespace(topic="Persistence", goal="Check logs"))
+        original_call_openai = cli.call_openai
+
+        cli.call_openai = lambda *_args, **_kwargs: "model answer"
+        try:
+            call_silent(cli.cmd_resume, Namespace(topic="persistence", model=None))
+            call_silent(cli.cmd_next, Namespace(topic="persistence", model=None))
+            call_silent(cli.cmd_review, Namespace(topic="persistence", model=None))
+        finally:
+            cli.call_openai = original_call_openai
+
+        metadata, body = cli.parse_topic(
+            cli.topic_path("persistence").read_text(encoding="utf-8")
+        )
+
+        self.assertEqual(metadata["last_reviewed"], cli.today())
+        self.assertIn("## Session Log", body)
+        self.assertIn(" - resume", body)
+        self.assertIn(" - next", body)
+        self.assertIn(" - review", body)
+        self.assertEqual(body.count("**Prompt**"), 3)
+        self.assertEqual(body.count("**Response**"), 3)
+        self.assertEqual(body.count("model answer"), 3)
 
     def test_config_uses_saved_values_and_environment_precedence(self) -> None:
         call_silent(cli.cmd_config_set_model, Namespace(model="saved-model"))
@@ -121,6 +163,90 @@ class CliStorageTests(unittest.TestCase):
         cli.set_active_topic("older-topic")
 
         self.assertEqual(cli.resolve_topic_slug(None), "older-topic")
+
+    def test_topic_commands_update_active_topic(self) -> None:
+        call_silent(cli.cmd_init, Namespace())
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="motions"))
+        call_silent(cli.cmd_new, Namespace(topic="Operating Systems", goal="processes"))
+        original_call_openai = cli.call_openai
+        original_append_session = cli.append_session
+
+        cli.call_openai = lambda *_args, **_kwargs: "ok"
+        cli.append_session = lambda *_args, **_kwargs: None
+        try:
+            call_silent(cli.cmd_status, Namespace(topic="vim"))
+            self.assertEqual(cli.get_active_topic(), "vim")
+
+            call_silent(
+                cli.cmd_chat,
+                Namespace(topic="operating-systems", prompt="hi", model=None),
+            )
+            self.assertEqual(cli.get_active_topic(), "operating-systems")
+
+            call_silent(cli.cmd_review, Namespace(topic="vim", model=None))
+            self.assertEqual(cli.get_active_topic(), "vim")
+
+            call_silent(cli.cmd_resume, Namespace(topic="operating-systems", model=None))
+            self.assertEqual(cli.get_active_topic(), "operating-systems")
+
+            call_silent(cli.cmd_next, Namespace(topic="vim", model=None))
+            self.assertEqual(cli.get_active_topic(), "vim")
+        finally:
+            cli.call_openai = original_call_openai
+            cli.append_session = original_append_session
+
+    def test_edit_sets_active_topic_before_launching_editor(self) -> None:
+        call_silent(cli.cmd_init, Namespace())
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="motions"))
+        original_execvp = cli.os.execvp
+
+        class EditorLaunched(Exception):
+            pass
+
+        def fake_execvp(_editor, _args):
+            raise EditorLaunched
+
+        cli.os.execvp = fake_execvp
+        try:
+            with self.assertRaises(EditorLaunched):
+                cli.cmd_edit(Namespace(topic="vim"))
+        finally:
+            cli.os.execvp = original_execvp
+
+        self.assertEqual(cli.get_active_topic(), "vim")
+
+    def test_recent_lists_newest_first_and_marks_active_topic(self) -> None:
+        call_silent(cli.cmd_init, Namespace())
+        call_silent(cli.cmd_new, Namespace(topic="Older Topic", goal="old"))
+        call_silent(cli.cmd_new, Namespace(topic="Newer Topic", goal="new"))
+        os.utime(cli.topic_path("older-topic"), (100, 100))
+        os.utime(cli.topic_path("newer-topic"), (200, 200))
+        cli.set_active_topic("older-topic")
+
+        output = capture_stdout(cli.cmd_recent, Namespace()).splitlines()
+
+        self.assertIn("newer-topic", output[0])
+        self.assertTrue(output[0].startswith("  "))
+        self.assertIn("older-topic", output[1])
+        self.assertTrue(output[1].startswith("* "))
+
+    def test_choose_topic_returns_numbered_topic_selection(self) -> None:
+        call_silent(cli.cmd_init, Namespace())
+        call_silent(cli.cmd_new, Namespace(topic="Older Topic", goal="old"))
+        call_silent(cli.cmd_new, Namespace(topic="Newer Topic", goal="new"))
+        os.utime(cli.topic_path("older-topic"), (100, 100))
+        os.utime(cli.topic_path("newer-topic"), (200, 200))
+        cli.set_active_topic("older-topic")
+        output = []
+
+        selected = cli.choose_topic(
+            iter_input(["2"]), output.append, "Switch to topic"
+        )
+
+        self.assertEqual(selected, "older-topic")
+        self.assertIn("Switch to topic", output)
+        self.assertTrue(any("1.   newer-topic" in line for line in output))
+        self.assertTrue(any("2. * older-topic" in line for line in output))
 
     def test_delete_topic_requires_confirmation_and_clears_active_topic(self) -> None:
         call_silent(cli.cmd_init, Namespace())
@@ -281,6 +407,232 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertIn("openLearn", output)
         self.assertTrue(any("Active topic:" in line for line in output))
+        self.assertNotIn("10. REPL", output)
+
+    def test_menu_learning_actions_enter_repl_automatically(self) -> None:
+        cases = [
+            ("1", ["1", "q"], [("resume", None, None), ("repl",)]),
+            ("2", ["2", "q"], [("next", None, None), ("repl",)]),
+            (
+                "3",
+                ["3", "What next?", "q"],
+                [("ask", None, "What next?", None), ("repl",)],
+            ),
+            ("4", ["4", "q"], [("review", "active-topic", None), ("repl",)]),
+        ]
+        original_cmd_resume = cli.cmd_resume
+        original_cmd_next = cli.cmd_next
+        original_ask_topic = cli.ask_topic
+        original_cmd_review = cli.cmd_review
+        original_resolve_topic_slug = cli.resolve_topic_slug
+        original_run_repl = cli.run_repl
+
+        def fake_cmd_resume(args: Namespace) -> int:
+            calls.append(("resume", args.topic, args.model))
+            return 0
+
+        def fake_cmd_next(args: Namespace) -> int:
+            calls.append(("next", args.topic, args.model))
+            return 0
+
+        def fake_ask_topic(topic: str | None, prompt: str, model: str | None) -> str:
+            calls.append(("ask", topic, prompt, model))
+            return "answer"
+
+        def fake_cmd_review(args: Namespace) -> int:
+            calls.append(("review", args.topic, args.model))
+            return 0
+
+        def fake_run_repl(**_kwargs) -> int:
+            calls.append(("repl",))
+            return 0
+
+        for choice, inputs, expected in cases:
+            with self.subTest(choice=choice):
+                calls = []
+                cli.cmd_resume = fake_cmd_resume
+                cli.cmd_next = fake_cmd_next
+                cli.ask_topic = fake_ask_topic
+                cli.cmd_review = fake_cmd_review
+                cli.resolve_topic_slug = lambda _value: "active-topic"
+                cli.run_repl = fake_run_repl
+                try:
+                    exit_code = cli.run_menu(
+                        input_func=iter_input(inputs), output_func=lambda _text: None
+                    )
+                finally:
+                    cli.cmd_resume = original_cmd_resume
+                    cli.cmd_next = original_cmd_next
+                    cli.ask_topic = original_ask_topic
+                    cli.cmd_review = original_cmd_review
+                    cli.resolve_topic_slug = original_resolve_topic_slug
+                    cli.run_repl = original_run_repl
+
+                self.assertEqual(exit_code, 0)
+                self.assertEqual(calls, expected)
+
+    def test_menu_can_create_topic(self) -> None:
+        exit_code = call_silent(
+            cli.run_menu,
+            input_func=iter_input(
+                ["7", "Menu Topic", "Practice menu flow", "q"]
+            ),
+            output_func=lambda _text: None,
+        )
+
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(cli.topic_path("menu-topic").exists())
+        self.assertEqual(cli.get_active_topic(), "menu-topic")
+
+    def test_menu_can_switch_topic_from_numbered_list(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="First Topic", goal="first"))
+        call_silent(cli.cmd_new, Namespace(topic="Second Topic", goal="second"))
+        os.utime(cli.topic_path("first-topic"), (100, 100))
+        os.utime(cli.topic_path("second-topic"), (200, 200))
+
+        exit_code = call_silent(
+            cli.run_menu,
+            input_func=iter_input(["8", "2", "q"]),
+            output_func=lambda _text: None,
+        )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(cli.get_active_topic(), "first-topic")
+
+    def test_menu_can_delete_topic_from_numbered_list_with_yes_no(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="First Topic", goal="first"))
+        call_silent(cli.cmd_new, Namespace(topic="Second Topic", goal="second"))
+        os.utime(cli.topic_path("first-topic"), (100, 100))
+        os.utime(cli.topic_path("second-topic"), (200, 200))
+
+        exit_code = call_silent(
+            cli.run_menu,
+            input_func=iter_input(["9", "2", "y", "q"]),
+            output_func=lambda _text: None,
+        )
+
+        self.assertEqual(exit_code, 0)
+        self.assertFalse(cli.topic_path("first-topic").exists())
+        self.assertTrue(cli.topic_path("second-topic").exists())
+
+    def test_menu_delete_no_cancels_without_error(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="First Topic", goal="first"))
+        output = []
+
+        exit_code = call_silent(
+            cli.run_menu,
+            input_func=iter_input(["9", "1", "n", "q"]),
+            output_func=output.append,
+        )
+
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(cli.topic_path("first-topic").exists())
+        self.assertIn("Delete cancelled.", output)
+        self.assertFalse(any(line.startswith("error:") for line in output))
+
+    def test_menu_shows_start_course_for_unstarted_topic(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Intro AI", goal="basics"))
+        output = []
+
+        exit_code = cli.run_menu(input_func=iter_input(["q"]), output_func=output.append)
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("1. Start course", output)
+        self.assertNotIn("1. Resume", output)
+        self.assertNotIn("2. Next step", output)
+        self.assertNotIn("4. Review", output)
+        self.assertNotIn("5. Status", output)
+
+    def test_start_course_confirms_plan_then_teaches_first_lesson(self) -> None:
+        call_silent(
+            cli.cmd_new,
+            Namespace(topic="Intro AI", goal="college course basics"),
+        )
+        calls = []
+        original_call_openai = cli.call_openai
+
+        def fake_call_openai(_model: str, _system: str, user: str) -> str:
+            calls.append(user)
+            if "Create a concise course plan" in user:
+                return "Scope: AI basics\nUnits:\n1. Definitions - Explain AI."
+            return (
+                "Lesson: AI is building systems that perform intelligent tasks. "
+                "Question: What is AI?"
+            )
+
+        cli.call_openai = fake_call_openai
+        try:
+            exit_code = call_silent(
+                cli.start_course,
+                input_func=iter_input(["y"]),
+                output_func=lambda _text: None,
+            )
+        finally:
+            cli.call_openai = original_call_openai
+
+        metadata, body = cli.parse_topic(
+            cli.topic_path("intro-ai").read_text(encoding="utf-8")
+        )
+
+        self.assertEqual(exit_code, 0)
+        self.assertIs(metadata["course_started"], True)
+        self.assertIn(" - course_plan", body)
+        self.assertIn(" - lesson", body)
+        self.assertIn("Scope: AI basics", body)
+        self.assertIn("What is AI?", body)
+        self.assertIn("college course basics", calls[0])
+
+    def test_start_course_blank_revision_keeps_course_unstarted(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Intro AI", goal="basics"))
+        original_call_openai = cli.call_openai
+
+        cli.call_openai = lambda *_args, **_kwargs: "Scope: AI basics"
+        try:
+            exit_code = call_silent(
+                cli.start_course,
+                input_func=iter_input(["n", ""]),
+                output_func=lambda _text: None,
+            )
+        finally:
+            cli.call_openai = original_call_openai
+
+        topic = cli.read_topic("intro-ai")
+
+        self.assertEqual(exit_code, 0)
+        self.assertIs(topic.metadata["course_started"], False)
+        self.assertNotIn("course_plan", topic.body)
+
+    def test_start_course_rejecting_outline_requests_changes_then_regenerates(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Intro AI", goal="basics"))
+        calls = []
+        original_call_openai = cli.call_openai
+
+        def fake_call_openai(_model: str, _system: str, user: str) -> str:
+            calls.append(user)
+            if len(calls) == 1:
+                return "Scope: Too broad"
+            if len(calls) == 2:
+                return "Scope: More math and search\nUnits:\n1. Search - Learn BFS."
+            return "Lesson: Breadth-first search explores by depth. Question: What does BFS expand first?"
+
+        cli.call_openai = fake_call_openai
+        try:
+            exit_code = call_silent(
+                cli.start_course,
+                input_func=iter_input(["n", "More math and search", "y"]),
+                output_func=lambda _text: None,
+            )
+        finally:
+            cli.call_openai = original_call_openai
+
+        metadata, body = cli.parse_topic(
+            cli.topic_path("intro-ai").read_text(encoding="utf-8")
+        )
+
+        self.assertEqual(exit_code, 0)
+        self.assertIs(metadata["course_started"], True)
+        self.assertIn("Requested changes: More math and search", calls[1])
+        self.assertIn("Scope: More math and search", body)
 
     def test_repl_plain_text_asks_active_topic_and_appends_session(self) -> None:
         call_silent(cli.cmd_init, Namespace())
@@ -360,6 +712,40 @@ class PromptInstructionTests(unittest.TestCase):
         self.assertIn("plain-text labels", captured[0])
         self.assertIn("Do not use Markdown headings", captured[0])
         self.assertIn("under 140 words", captured[0])
+
+    def test_next_prompt_asks_for_learner_response(self) -> None:
+        captured = []
+        topic = cli.Topic(
+            slug="demo",
+            path=Path("demo.md"),
+            metadata={"topic": "Demo", "model": "test-model"},
+            body="# Demo\n",
+        )
+        original_call_openai = cli.call_openai
+        original_append_session = cli.append_session
+        original_read_topic = cli.read_topic
+        original_resolve_topic_slug = cli.resolve_topic_slug
+        original_set_active_topic = cli.set_active_topic
+
+        def fake_call_openai(model: str, system: str, user: str) -> str:
+            captured.append(user)
+            return "ok"
+
+        cli.call_openai = fake_call_openai
+        cli.append_session = lambda *_args, **_kwargs: None
+        cli.read_topic = lambda _slug: topic
+        cli.resolve_topic_slug = lambda _value: "demo"
+        cli.set_active_topic = lambda _slug: None
+        try:
+            call_silent(cli.cmd_next, Namespace(topic=None, model=None))
+        finally:
+            cli.call_openai = original_call_openai
+            cli.append_session = original_append_session
+            cli.read_topic = original_read_topic
+            cli.resolve_topic_slug = original_resolve_topic_slug
+            cli.set_active_topic = original_set_active_topic
+
+        self.assertIn("answer next", captured[0])
 
     def test_resume_sanitizes_answer_before_printing_and_appending(self) -> None:
         appended = []
