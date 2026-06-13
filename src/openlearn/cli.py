@@ -68,30 +68,50 @@ def build_parser() -> argparse.ArgumentParser:
     menu_parser = sub.add_parser("menu", help="Open a simple interactive menu")
     menu_parser.set_defaults(func=cmd_menu)
 
-    repl_parser = sub.add_parser("repl", aliases=["shell"], help="Start an interactive learning session")
-    repl_parser.add_argument("topic", nargs="?", help="Topic slug, defaults to active/recent")
-    repl_parser.add_argument("--model", default=None, help="Override model for model-backed requests")
+    repl_parser = sub.add_parser(
+        "repl", aliases=["shell"], help="Start an interactive learning session"
+    )
+    repl_parser.add_argument(
+        "topic", nargs="?", help="Topic slug, defaults to active/recent"
+    )
+    repl_parser.add_argument(
+        "--model", default=None, help="Override model for model-backed requests"
+    )
     repl_parser.set_defaults(func=cmd_repl)
 
     config_parser = sub.add_parser("config", help="Manage local model configuration")
     config_sub = config_parser.add_subparsers(required=True)
 
-    config_show = config_sub.add_parser("show", help="Show configured provider and model")
+    config_show = config_sub.add_parser(
+        "show", help="Show configured provider and model"
+    )
     config_show.set_defaults(func=cmd_config_show)
 
-    config_set_key = config_sub.add_parser("set-key", help="Save an OpenAI API key locally")
-    config_set_key.add_argument("api_key", nargs="?", help="API key; prompted securely if omitted")
+    config_set_key = config_sub.add_parser(
+        "set-key", help="Save an OpenAI API key locally"
+    )
+    config_set_key.add_argument(
+        "api_key", nargs="?", help="API key; prompted securely if omitted"
+    )
     config_set_key.set_defaults(func=cmd_config_set_key)
 
-    config_set_model = config_sub.add_parser("set-model", help="Save the default model name")
+    config_set_model = config_sub.add_parser(
+        "set-model", help="Save the default model name"
+    )
     config_set_model.add_argument("model", help="Model name, for example gpt-4.1-mini")
     config_set_model.set_defaults(func=cmd_config_set_model)
 
-    config_set_base_url = config_sub.add_parser("set-base-url", help="Save an OpenAI-compatible API base URL")
-    config_set_base_url.add_argument("base_url", help="Base URL, for example https://api.openai.com/v1")
+    config_set_base_url = config_sub.add_parser(
+        "set-base-url", help="Save an OpenAI-compatible API base URL"
+    )
+    config_set_base_url.add_argument(
+        "base_url", help="Base URL, for example https://api.openai.com/v1"
+    )
     config_set_base_url.set_defaults(func=cmd_config_set_base_url)
 
-    config_clear_key = config_sub.add_parser("clear-key", help="Remove the saved API key")
+    config_clear_key = config_sub.add_parser(
+        "clear-key", help="Remove the saved API key"
+    )
     config_clear_key.set_defaults(func=cmd_config_clear_key)
 
     new_parser = sub.add_parser("new", help="Create a new learning topic")
@@ -114,28 +134,42 @@ def build_parser() -> argparse.ArgumentParser:
     active_parser.set_defaults(func=cmd_active)
 
     edit_parser = sub.add_parser("edit", help="Open a topic file in $EDITOR")
-    edit_parser.add_argument("topic", nargs="?", help="Topic slug, defaults to active/recent")
+    edit_parser.add_argument(
+        "topic", nargs="?", help="Topic slug, defaults to active/recent"
+    )
     edit_parser.set_defaults(func=cmd_edit)
 
     chat_parser = sub.add_parser("chat", help="Ask the tutor about a topic")
     chat_parser.add_argument("topic", help="Topic slug")
     chat_parser.add_argument("prompt", help="Question or request")
-    chat_parser.add_argument("--model", default=None, help="Override model for this request")
+    chat_parser.add_argument(
+        "--model", default=None, help="Override model for this request"
+    )
     chat_parser.set_defaults(func=cmd_chat)
 
     review_parser = sub.add_parser("review", help="Generate a focused review session")
     review_parser.add_argument("topic", help="Topic slug")
-    review_parser.add_argument("--model", default=None, help="Override model for this request")
+    review_parser.add_argument(
+        "--model", default=None, help="Override model for this request"
+    )
     review_parser.set_defaults(func=cmd_review)
 
     resume_parser = sub.add_parser("resume", help="Resume the active or selected topic")
-    resume_parser.add_argument("topic", nargs="?", help="Topic slug, defaults to active/recent")
-    resume_parser.add_argument("--model", default=None, help="Override model for this request")
+    resume_parser.add_argument(
+        "topic", nargs="?", help="Topic slug, defaults to active/recent"
+    )
+    resume_parser.add_argument(
+        "--model", default=None, help="Override model for this request"
+    )
     resume_parser.set_defaults(func=cmd_resume)
 
     next_parser = sub.add_parser("next", help="Generate the next short learning step")
-    next_parser.add_argument("topic", nargs="?", help="Topic slug, defaults to active/recent")
-    next_parser.add_argument("--model", default=None, help="Override model for this request")
+    next_parser.add_argument(
+        "topic", nargs="?", help="Topic slug, defaults to active/recent"
+    )
+    next_parser.add_argument(
+        "--model", default=None, help="Override model for this request"
+    )
     next_parser.set_defaults(func=cmd_next)
 
     return parser
@@ -192,7 +226,9 @@ def run_menu(input_func=input, output_func=print) -> int:
                 if prompt:
                     ask_topic(None, prompt, None)
             elif choice == "4":
-                cmd_review(argparse.Namespace(topic=resolve_topic_slug(None), model=None))
+                cmd_review(
+                    argparse.Namespace(topic=resolve_topic_slug(None), model=None)
+                )
             elif choice == "5":
                 cmd_status(argparse.Namespace(topic=resolve_topic_slug(None)))
             elif choice == "6":
@@ -214,12 +250,19 @@ def run_menu(input_func=input, output_func=print) -> int:
             output_func(f"error: {exc}")
 
 
-def run_repl(topic_value: str | None = None, model: str | None = None, input_func=input, output_func=print) -> int:
+def run_repl(
+    topic_value: str | None = None,
+    model: str | None = None,
+    input_func=input,
+    output_func=print,
+) -> int:
     topic_slug = resolve_topic_slug(topic_value) if topic_value else None
     if topic_slug:
         set_active_topic(topic_slug)
     output_func("openLearn REPL")
-    output_func("Type a question to ask the active topic. Commands: /help, /resume, /next, /review, /status, /active <topic>, /recent, /new <topic>, /quit")
+    output_func(
+        "Type a question to ask the active topic. Commands: /help, /resume, /next, /review, /status, /active <topic>, /recent, /new <topic>, /quit"
+    )
 
     while True:
         try:
@@ -242,7 +285,9 @@ def run_repl(topic_value: str | None = None, model: str | None = None, input_fun
             output_func(f"error: {exc}")
 
 
-def handle_repl_command(command: str, model: str | None = None, output_func=print) -> None:
+def handle_repl_command(
+    command: str, model: str | None = None, output_func=print
+) -> None:
     try:
         parts = shlex.split(command)
     except ValueError as exc:
@@ -253,15 +298,23 @@ def handle_repl_command(command: str, model: str | None = None, output_func=prin
     args = parts[1:]
 
     if name in {"help", "h", "?"}:
-        output_func("Commands: /resume, /next, /review, /status, /active [topic], /recent, /new <topic> [goal], /ask <question>, /quit")
+        output_func(
+            "Commands: /resume, /next, /review, /status, /active [topic], /recent, /new <topic> [goal], /ask <question>, /quit"
+        )
     elif name in {"resume", "r"}:
         cmd_resume(argparse.Namespace(topic=args[0] if args else None, model=model))
     elif name in {"next", "n"}:
         cmd_next(argparse.Namespace(topic=args[0] if args else None, model=model))
     elif name == "review":
-        cmd_review(argparse.Namespace(topic=args[0] if args else resolve_topic_slug(None), model=model))
+        cmd_review(
+            argparse.Namespace(
+                topic=args[0] if args else resolve_topic_slug(None), model=model
+            )
+        )
     elif name == "status":
-        cmd_status(argparse.Namespace(topic=args[0] if args else resolve_topic_slug(None)))
+        cmd_status(
+            argparse.Namespace(topic=args[0] if args else resolve_topic_slug(None))
+        )
     elif name == "active":
         cmd_active(argparse.Namespace(topic=args[0] if args else None))
     elif name in {"recent", "topics"}:
@@ -288,7 +341,7 @@ def cmd_config_show(_args: argparse.Namespace) -> int:
     print(f"Model: {model}")
     print(f"Base URL: {base_url}")
     if env_key:
-        print("API key: set by OPENAI_API_KEY")
+        print(f"API key: set by OPENAI_API_KEY ({mask_key(env_key)})")
     elif isinstance(saved_key, str) and saved_key:
         print(f"API key: saved locally ({mask_key(saved_key)})")
     else:
@@ -382,7 +435,9 @@ def cmd_new(args: argparse.Namespace) -> int:
 def cmd_list(_args: argparse.Namespace) -> int:
     paths = sorted(topics_dir().glob("*.md"))
     if not paths:
-        print("No topics yet. Create one with: openlearn new vim --goal 'Learn Vim basics'")
+        print(
+            "No topics yet. Create one with: openlearn new vim --goal 'Learn Vim basics'"
+        )
         return 0
     for path in paths:
         topic = read_topic_summary(path)
@@ -393,13 +448,19 @@ def cmd_list(_args: argparse.Namespace) -> int:
 def cmd_recent(_args: argparse.Namespace) -> int:
     topics = recent_topic_summaries()
     if not topics:
-        print("No topics yet. Create one with: openlearn new vim --goal 'Learn Vim basics'")
+        print(
+            "No topics yet. Create one with: openlearn new vim --goal 'Learn Vim basics'"
+        )
         return 0
     active = get_active_topic()
     for topic in topics:
-        updated = datetime.fromtimestamp(topic.path.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+        updated = datetime.fromtimestamp(topic.path.stat().st_mtime).strftime(
+            "%Y-%m-%d %H:%M"
+        )
         active_marker = "*" if topic.slug == active else " "
-        print(f"{active_marker} {topic.slug}\t{updated}\t{topic.metadata.get('topic', topic.slug)}")
+        print(
+            f"{active_marker} {topic.slug}\t{updated}\t{topic.metadata.get('topic', topic.slug)}"
+        )
     return 0
 
 
@@ -444,7 +505,9 @@ def cmd_chat(args: argparse.Namespace) -> int:
 
 
 def ask_topic(topic_value: str | None, prompt: str, model: str | None = None) -> str:
-    topic = read_topic(resolve_topic_slug(topic_value) if topic_value is None else slugify(topic_value))
+    topic = read_topic(
+        resolve_topic_slug(topic_value) if topic_value is None else slugify(topic_value)
+    )
     set_active_topic(topic.slug)
     model = model or str(topic.metadata.get("model") or configured_model())
     answer = call_openai(
@@ -572,7 +635,11 @@ def configured_base_url(config: dict[str, object] | None = None) -> str:
         return env_base_url.rstrip("/")
     config = read_config() if config is None else config
     base_url = config.get("base_url")
-    return base_url.rstrip("/") if isinstance(base_url, str) and base_url else DEFAULT_BASE_URL
+    return (
+        base_url.rstrip("/")
+        if isinstance(base_url, str) and base_url
+        else DEFAULT_BASE_URL
+    )
 
 
 def configured_openai_api_key() -> str | None:
@@ -610,7 +677,9 @@ def recent_topic_summaries() -> list[TopicSummary]:
 def recent_topic_paths() -> list[Path]:
     if not topics_dir().exists():
         return []
-    return sorted(topics_dir().glob("*.md"), key=lambda path: path.stat().st_mtime, reverse=True)
+    return sorted(
+        topics_dir().glob("*.md"), key=lambda path: path.stat().st_mtime, reverse=True
+    )
 
 
 def resolve_topic_slug(value: str | None) -> str:
@@ -625,7 +694,9 @@ def resolve_topic_slug(value: str | None) -> str:
     if topics:
         return topics[0].stem
 
-    raise OpenLearnError("no active topic; create one with: openlearn new vim --goal 'Learn Vim basics'")
+    raise OpenLearnError(
+        "no active topic; create one with: openlearn new vim --goal 'Learn Vim basics'"
+    )
 
 
 def get_active_topic() -> str | None:
@@ -646,7 +717,13 @@ def set_active_topic(slug: str) -> None:
     with file_lock(path):
         write_text_atomic(
             path,
-            json.dumps({"active_topic": slug, "updated": datetime.now(timezone.utc).isoformat()}, indent=2),
+            json.dumps(
+                {
+                    "active_topic": slug,
+                    "updated": datetime.now(timezone.utc).isoformat(),
+                },
+                indent=2,
+            ),
         )
 
 
@@ -656,7 +733,13 @@ def write_topic(path: Path, metadata: dict[str, object], body: str) -> None:
 
 
 def format_topic(metadata: dict[str, object], body: str) -> str:
-    return "---\n" + json.dumps(metadata, indent=2, sort_keys=True) + "\n---\n\n" + body.rstrip() + "\n"
+    return (
+        "---\n"
+        + json.dumps(metadata, indent=2, sort_keys=True)
+        + "\n---\n\n"
+        + body.rstrip()
+        + "\n"
+    )
 
 
 @contextlib.contextmanager
@@ -675,7 +758,9 @@ def write_text_atomic(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_name = ""
     try:
-        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as temp_file:
+        with tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", dir=path.parent, delete=False
+        ) as temp_file:
             temp_name = temp_file.name
             temp_file.write(text)
             temp_file.flush()
@@ -703,7 +788,9 @@ def read_topic_metadata(path: Path) -> dict[str, object]:
                 break
             metadata_lines.append(line)
         else:
-            raise OpenLearnError(f"invalid topic metadata: missing closing delimiter in {path}")
+            raise OpenLearnError(
+                f"invalid topic metadata: missing closing delimiter in {path}"
+            )
     try:
         data = json.loads("".join(metadata_lines))
     except json.JSONDecodeError as exc:
@@ -723,11 +810,13 @@ def parse_topic(text: str) -> tuple[dict[str, object], str]:
         raise OpenLearnError(f"invalid topic metadata: {exc}") from exc
 
 
-def append_session(topic: Topic, kind: str, prompt: str, answer: str, mark_reviewed: bool = False) -> None:
+def append_session(
+    topic: Topic, kind: str, prompt: str, answer: str, mark_reviewed: bool = False
+) -> None:
     entry = textwrap.dedent(
         f"""
 
-        ### {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} - {kind}
+        ### {datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")} - {kind}
 
         **Prompt**
 
@@ -816,7 +905,9 @@ def last_lines(text: str, limit: int) -> str:
 def call_openai(model: str, system: str, user: str) -> str:
     api_key = configured_openai_api_key()
     if not api_key:
-        raise OpenLearnError("OpenAI API key is required. Run: openlearn config set-key")
+        raise OpenLearnError(
+            "OpenAI API key is required. Run: openlearn config set-key"
+        )
 
     payload = {
         "model": model,
@@ -840,7 +931,9 @@ def call_openai(model: str, system: str, user: str) -> str:
             data = json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
-        raise OpenLearnError(f"OpenAI request failed: HTTP {exc.code}: {detail}") from exc
+        raise OpenLearnError(
+            f"OpenAI request failed: HTTP {exc.code}: {detail}"
+        ) from exc
     except URLError as exc:
         raise OpenLearnError(f"OpenAI request failed: {exc.reason}") from exc
 
@@ -869,8 +962,13 @@ def extract_response_text(data: dict[str, object]) -> str:
     for item in data.get("output", []) if isinstance(data.get("output"), list) else []:
         if not isinstance(item, dict):
             continue
-        for content in item.get("content", []) if isinstance(item.get("content"), list) else []:
-            if isinstance(content, dict) and content.get("type") in {"output_text", "text"}:
+        for content in (
+            item.get("content", []) if isinstance(item.get("content"), list) else []
+        ):
+            if isinstance(content, dict) and content.get("type") in {
+                "output_text",
+                "text",
+            }:
                 text = content.get("text")
                 if isinstance(text, str):
                     chunks.append(text)

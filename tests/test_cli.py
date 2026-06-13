@@ -93,6 +93,13 @@ class CliStorageTests(unittest.TestCase):
         self.assertEqual(cli.configured_base_url(), "https://env.example/v1")
         self.assertEqual(cli.configured_openai_api_key(), "sk-env")
 
+    def test_config_show_masks_environment_api_key(self) -> None:
+        os.environ["OPENAI_API_KEY"] = "sk-or-v1-test-secret-1234"
+        output = capture_stdout(cli.cmd_config_show, Namespace())
+
+        self.assertIn("API key: set by OPENAI_API_KEY (sk-o...1234)", output)
+        self.assertNotIn("test-secret", output)
+
     def test_active_topic_resolution_falls_back_to_most_recent_topic(self) -> None:
         call_silent(cli.cmd_init, Namespace())
         cli.write_topic(
@@ -288,6 +295,13 @@ def session_entry(index: int, marker: str) -> str:
 def call_silent(func, *args, **kwargs):
     with contextlib.redirect_stdout(io.StringIO()):
         return func(*args, **kwargs)
+
+
+def capture_stdout(func, *args, **kwargs):
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        func(*args, **kwargs)
+    return output.getvalue()
 
 
 def iter_input(values):
