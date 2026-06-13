@@ -55,7 +55,7 @@ openlearn init
 openlearn new vim --goal "Use Vim comfortably for real editing"
 ```
 
-New topics start as unstarted courses. In the menu, choose `Start course` to have the tutor propose a compact course scope and unit plan. Confirm the outline with `y` to save the plan, start lesson one, and continue in the REPL.
+New topics start as unstarted courses. In the menu, choose `Start course` to have the tutor propose a compact course scope and unit plan. Accept the outline with `y`, or answer `n` to explain what should change and regenerate it. Once accepted, openLearn saves the plan, starts lesson one, and continues in the REPL.
 
 Check what openLearn knows about the topic:
 
