@@ -7,6 +7,7 @@ import getpass
 import json
 import os
 import re
+import shlex
 import sys
 import tempfile
 import textwrap
@@ -58,10 +59,19 @@ def build_parser() -> argparse.ArgumentParser:
         prog="openlearn",
         description="Local-first AI learning workspace",
     )
-    sub = parser.add_subparsers(required=True)
+    parser.set_defaults(func=cmd_menu)
+    sub = parser.add_subparsers()
 
     init_parser = sub.add_parser("init", help="Create the local learning-topics folder")
     init_parser.set_defaults(func=cmd_init)
+
+    menu_parser = sub.add_parser("menu", help="Open a simple interactive menu")
+    menu_parser.set_defaults(func=cmd_menu)
+
+    repl_parser = sub.add_parser("repl", aliases=["shell"], help="Start an interactive learning session")
+    repl_parser.add_argument("topic", nargs="?", help="Topic slug, defaults to active/recent")
+    repl_parser.add_argument("--model", default=None, help="Override model for model-backed requests")
+    repl_parser.set_defaults(func=cmd_repl)
 
     config_parser = sub.add_parser("config", help="Manage local model configuration")
     config_sub = config_parser.add_subparsers(required=True)
@@ -135,6 +145,137 @@ def cmd_init(_args: argparse.Namespace) -> int:
     topics_dir().mkdir(parents=True, exist_ok=True)
     print(f"Initialized {topics_dir()}")
     return 0
+
+
+def cmd_menu(_args: argparse.Namespace) -> int:
+    return run_menu()
+
+
+def cmd_repl(args: argparse.Namespace) -> int:
+    return run_repl(topic_value=args.topic, model=args.model)
+
+
+def run_menu(input_func=input, output_func=print) -> int:
+    topics_dir().mkdir(parents=True, exist_ok=True)
+    output_func("openLearn")
+    output_func("Local-first AI tutoring")
+
+    while True:
+        output_func("")
+        active = get_active_topic()
+        output_func(f"Active topic: {active or 'none'}")
+        output_func("1. Resume")
+        output_func("2. Next step")
+        output_func("3. Ask active topic")
+        output_func("4. Review")
+        output_func("5. Status")
+        output_func("6. Recent topics")
+        output_func("7. New topic")
+        output_func("8. Switch active topic")
+        output_func("9. REPL")
+        output_func("q. Quit")
+        try:
+            choice = input_func("Choose: ").strip().lower()
+        except EOFError:
+            output_func("")
+            return 0
+
+        try:
+            if choice in {"q", "quit", "exit"}:
+                return 0
+            if choice == "1":
+                cmd_resume(argparse.Namespace(topic=None, model=None))
+            elif choice == "2":
+                cmd_next(argparse.Namespace(topic=None, model=None))
+            elif choice == "3":
+                prompt = input_func("Ask: ").strip()
+                if prompt:
+                    ask_topic(None, prompt, None)
+            elif choice == "4":
+                cmd_review(argparse.Namespace(topic=resolve_topic_slug(None), model=None))
+            elif choice == "5":
+                cmd_status(argparse.Namespace(topic=resolve_topic_slug(None)))
+            elif choice == "6":
+                cmd_recent(argparse.Namespace())
+            elif choice == "7":
+                name = input_func("Topic name: ").strip()
+                goal = input_func("Goal: ").strip()
+                if name:
+                    cmd_new(argparse.Namespace(topic=name, goal=goal))
+            elif choice == "8":
+                topic = input_func("Topic slug: ").strip()
+                if topic:
+                    cmd_active(argparse.Namespace(topic=topic))
+            elif choice == "9":
+                run_repl(input_func=input_func, output_func=output_func)
+            else:
+                output_func("Choose a number, or q to quit.")
+        except OpenLearnError as exc:
+            output_func(f"error: {exc}")
+
+
+def run_repl(topic_value: str | None = None, model: str | None = None, input_func=input, output_func=print) -> int:
+    topic_slug = resolve_topic_slug(topic_value) if topic_value else None
+    if topic_slug:
+        set_active_topic(topic_slug)
+    output_func("openLearn REPL")
+    output_func("Type a question to ask the active topic. Commands: /help, /resume, /next, /review, /status, /active <topic>, /recent, /new <topic>, /quit")
+
+    while True:
+        try:
+            prompt = input_func("openlearn> ").strip()
+        except EOFError:
+            output_func("")
+            return 0
+
+        if not prompt:
+            continue
+        if prompt.lower() in {"/quit", "/exit", "quit", "exit", "q"}:
+            return 0
+
+        try:
+            if prompt.startswith("/"):
+                handle_repl_command(prompt[1:], model=model, output_func=output_func)
+            else:
+                ask_topic(None, prompt, model)
+        except OpenLearnError as exc:
+            output_func(f"error: {exc}")
+
+
+def handle_repl_command(command: str, model: str | None = None, output_func=print) -> None:
+    try:
+        parts = shlex.split(command)
+    except ValueError as exc:
+        raise OpenLearnError(str(exc)) from exc
+    if not parts:
+        return
+    name = parts[0].lower()
+    args = parts[1:]
+
+    if name in {"help", "h", "?"}:
+        output_func("Commands: /resume, /next, /review, /status, /active [topic], /recent, /new <topic> [goal], /ask <question>, /quit")
+    elif name in {"resume", "r"}:
+        cmd_resume(argparse.Namespace(topic=args[0] if args else None, model=model))
+    elif name in {"next", "n"}:
+        cmd_next(argparse.Namespace(topic=args[0] if args else None, model=model))
+    elif name == "review":
+        cmd_review(argparse.Namespace(topic=args[0] if args else resolve_topic_slug(None), model=model))
+    elif name == "status":
+        cmd_status(argparse.Namespace(topic=args[0] if args else resolve_topic_slug(None)))
+    elif name == "active":
+        cmd_active(argparse.Namespace(topic=args[0] if args else None))
+    elif name in {"recent", "topics"}:
+        cmd_recent(argparse.Namespace())
+    elif name == "new":
+        if not args:
+            raise OpenLearnError("usage: /new <topic> [goal]")
+        cmd_new(argparse.Namespace(topic=args[0], goal=" ".join(args[1:])))
+    elif name == "ask":
+        if not args:
+            raise OpenLearnError("usage: /ask <question>")
+        ask_topic(None, " ".join(args), model)
+    else:
+        raise OpenLearnError(f"unknown REPL command: /{name}")
 
 
 def cmd_config_show(_args: argparse.Namespace) -> int:
@@ -298,17 +439,22 @@ def cmd_edit(args: argparse.Namespace) -> int:
 
 
 def cmd_chat(args: argparse.Namespace) -> int:
-    topic = read_topic(slugify(args.topic))
+    ask_topic(args.topic, args.prompt, args.model)
+    return 0
+
+
+def ask_topic(topic_value: str | None, prompt: str, model: str | None = None) -> str:
+    topic = read_topic(resolve_topic_slug(topic_value) if topic_value is None else slugify(topic_value))
     set_active_topic(topic.slug)
-    model = args.model or str(topic.metadata.get("model") or configured_model())
+    model = model or str(topic.metadata.get("model") or configured_model())
     answer = call_openai(
         model=model,
         system=system_prompt(topic),
-        user=args.prompt,
+        user=prompt,
     )
     print(answer)
-    append_session(topic, "chat", args.prompt, answer)
-    return 0
+    append_session(topic, "chat", prompt, answer)
+    return answer
 
 
 def cmd_review(args: argparse.Namespace) -> int:

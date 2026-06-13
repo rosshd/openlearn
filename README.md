@@ -21,7 +21,10 @@ The early version is intentionally small: a Python CLI that creates topic files,
 ## Current Commands
 
 ```bash
+python -m openlearn
 python -m openlearn init
+python -m openlearn menu
+python -m openlearn repl
 python -m openlearn config set-key
 python -m openlearn config set-model gpt-4.1-mini
 python -m openlearn config set-base-url https://api.openai.com/v1
@@ -39,7 +42,8 @@ python -m openlearn chat vim "How should I practice macros?"
 python -m openlearn review vim
 ```
 
-Commands that need model output require an API key: `chat`, `review`, `resume`, and `next`.
+Commands and interactive actions that need model output require an API key: `chat`, `review`, `resume`, `next`, REPL questions, and model-backed menu actions.
+Running `openlearn` with no command opens the interactive menu.
 
 ## Demo
 
@@ -83,6 +87,24 @@ Review a topic when you want active recall:
 openlearn review vim
 ```
 
+For back-and-forth learning, start the REPL:
+
+```bash
+openlearn repl
+```
+
+Inside the REPL, type normal questions to ask the active topic without retyping `openlearn chat <topic> ...` every time:
+
+```text
+openlearn> I think the answer is registers. Am I right?
+openlearn> /next
+openlearn> /review
+openlearn> /status
+openlearn> /quit
+```
+
+Useful REPL commands are `/help`, `/resume`, `/next`, `/review`, `/status`, `/active <topic>`, `/recent`, `/new <topic> [goal]`, `/ask <question>`, and `/quit`.
+
 Your topic notes remain normal Markdown files under `learning-topics/`, so you can inspect or edit them directly at any time.
 
 ## Intended Workflow
@@ -109,6 +131,8 @@ Fast commands:
 - `openlearn active`: show the active topic.
 - `openlearn active os`: switch active topic.
 - `openlearn edit`: open the active topic file in `$EDITOR`.
+- `openlearn menu`: open a numbered menu for common actions.
+- `openlearn repl`: start a back-and-forth learning prompt.
 - `openlearn resume`: recap and continue where you left off.
 - `openlearn next`: generate the next 10-15 minute learning step.
 - `openlearn review vim`: generate a short active-recall review.

@@ -149,6 +149,78 @@ class ProviderResponseTests(unittest.TestCase):
         self.assertEqual(text, "Review registers before macros.\nThen record a small macro.")
 
 
+class InteractiveTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.home = tempfile.TemporaryDirectory()
+        self.previous_env = {name: os.environ.get(name) for name in ("OPENLEARN_HOME", "OPENAI_API_KEY")}
+        os.environ["OPENLEARN_HOME"] = self.home.name
+        os.environ["OPENAI_API_KEY"] = "sk-test"
+        cli._CONFIG_CACHE = None
+
+    def tearDown(self) -> None:
+        for name, value in self.previous_env.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+        cli._CONFIG_CACHE = None
+        self.home.cleanup()
+
+    def test_no_args_defaults_to_menu(self) -> None:
+        parser = cli.build_parser()
+        args = parser.parse_args([])
+
+        self.assertIs(args.func, cli.cmd_menu)
+
+    def test_menu_quits_cleanly(self) -> None:
+        output = []
+
+        exit_code = cli.run_menu(input_func=iter_input(["q"]), output_func=output.append)
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("openLearn", output)
+        self.assertTrue(any("Active topic:" in line for line in output))
+
+    def test_repl_plain_text_asks_active_topic_and_appends_session(self) -> None:
+        call_silent(cli.cmd_init, Namespace())
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
+        calls = []
+        original_call_openai = cli.call_openai
+
+        def fake_call_openai(model: str, system: str, user: str) -> str:
+            calls.append((model, system, user))
+            return "Use h j k l for movement."
+
+        cli.call_openai = fake_call_openai
+        try:
+            exit_code = call_silent(
+                cli.run_repl,
+                input_func=iter_input(["How do I move?", "/quit"]),
+                output_func=lambda _text: None,
+            )
+        finally:
+            cli.call_openai = original_call_openai
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(calls[0][2], "How do I move?")
+        topic = cli.read_topic("vim")
+        self.assertIn("How do I move?", topic.body)
+        self.assertIn("Use h j k l for movement.", topic.body)
+
+    def test_repl_help_and_unknown_commands_use_output_func(self) -> None:
+        output = []
+
+        cli.handle_repl_command("help", output_func=output.append)
+
+        self.assertTrue(any("/resume" in line for line in output))
+        with self.assertRaises(cli.OpenLearnError):
+            cli.handle_repl_command("missing")
+
+    def test_repl_reports_malformed_command_quotes_as_openlearn_error(self) -> None:
+        with self.assertRaises(cli.OpenLearnError):
+            cli.handle_repl_command('new "unfinished')
+
+
 class PromptContextTests(unittest.TestCase):
     def test_prompt_context_separates_notes_from_recent_sessions(self) -> None:
         body = "\n".join(
@@ -213,9 +285,18 @@ def session_entry(index: int, marker: str) -> str:
     return f"### 2026-06-1{index} 00:00 UTC - chat\n\n**Prompt**\n\nquestion {index}\n\n**Response**\n\n{marker}\n"
 
 
-def call_silent(func, *args):
+def call_silent(func, *args, **kwargs):
     with contextlib.redirect_stdout(io.StringIO()):
-        return func(*args)
+        return func(*args, **kwargs)
+
+
+def iter_input(values):
+    iterator = iter(values)
+
+    def read(_prompt=""):
+        return next(iterator)
+
+    return read
 
 
 if __name__ == "__main__":
