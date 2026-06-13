@@ -15,15 +15,22 @@ from openlearn import cli
 class CliStorageTests(unittest.TestCase):
     def setUp(self) -> None:
         self.home = tempfile.TemporaryDirectory()
-        self.previous_home = os.environ.get("OPENLEARN_HOME")
+        self.previous_env = {
+            name: os.environ.get(name)
+            for name in ("OPENLEARN_HOME", "OPENLEARN_MODEL", "OPENLEARN_BASE_URL", "OPENAI_API_KEY")
+        }
         os.environ["OPENLEARN_HOME"] = self.home.name
+        os.environ.pop("OPENLEARN_MODEL", None)
+        os.environ.pop("OPENLEARN_BASE_URL", None)
+        os.environ.pop("OPENAI_API_KEY", None)
         cli._CONFIG_CACHE = None
 
     def tearDown(self) -> None:
-        if self.previous_home is None:
-            os.environ.pop("OPENLEARN_HOME", None)
-        else:
-            os.environ["OPENLEARN_HOME"] = self.previous_home
+        for name, value in self.previous_env.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
         cli._CONFIG_CACHE = None
         self.home.cleanup()
 
@@ -68,6 +75,78 @@ class CliStorageTests(unittest.TestCase):
         self.assertEqual(metadata["last_reviewed"], cli.today())
         self.assertIn("review prompt", body)
         self.assertIn("review answer", body)
+
+    def test_config_uses_saved_values_and_environment_precedence(self) -> None:
+        call_silent(cli.cmd_config_set_model, Namespace(model="saved-model"))
+        call_silent(cli.cmd_config_set_base_url, Namespace(base_url="https://example.test/v1/"))
+        call_silent(cli.cmd_config_set_key, Namespace(api_key="sk-saved"))
+
+        self.assertEqual(cli.configured_model(), "saved-model")
+        self.assertEqual(cli.configured_base_url(), "https://example.test/v1")
+        self.assertEqual(cli.configured_openai_api_key(), "sk-saved")
+
+        os.environ["OPENLEARN_MODEL"] = "env-model"
+        os.environ["OPENLEARN_BASE_URL"] = "https://env.example/v1/"
+        os.environ["OPENAI_API_KEY"] = "sk-env"
+
+        self.assertEqual(cli.configured_model(), "env-model")
+        self.assertEqual(cli.configured_base_url(), "https://env.example/v1")
+        self.assertEqual(cli.configured_openai_api_key(), "sk-env")
+
+    def test_active_topic_resolution_falls_back_to_most_recent_topic(self) -> None:
+        call_silent(cli.cmd_init, Namespace())
+        cli.write_topic(
+            cli.topic_path("older-topic"),
+            {"topic": "Older Topic", "slug": "older-topic"},
+            "# Older Topic\n",
+        )
+        cli.write_topic(
+            cli.topic_path("newer-topic"),
+            {"topic": "Newer Topic", "slug": "newer-topic"},
+            "# Newer Topic\n",
+        )
+        os.utime(cli.topic_path("older-topic"), (100, 100))
+        os.utime(cli.topic_path("newer-topic"), (200, 200))
+
+        self.assertEqual(cli.resolve_topic_slug(None), "newer-topic")
+
+        cli.set_active_topic("older-topic")
+
+        self.assertEqual(cli.resolve_topic_slug(None), "older-topic")
+
+
+class ProviderResponseTests(unittest.TestCase):
+    def test_extract_response_text_supports_chat_completion_shape(self) -> None:
+        text = cli.extract_response_text(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "Practice macros with one repeatable edit.",
+                        }
+                    }
+                ]
+            }
+        )
+
+        self.assertEqual(text, "Practice macros with one repeatable edit.")
+
+    def test_extract_response_text_supports_responses_api_fallback_shape(self) -> None:
+        text = cli.extract_response_text(
+            {
+                "output": [
+                    {
+                        "content": [
+                            {"type": "output_text", "text": "Review registers before macros."},
+                            {"type": "text", "text": "Then record a small macro."},
+                        ]
+                    }
+                ]
+            }
+        )
+
+        self.assertEqual(text, "Review registers before macros.\nThen record a small macro.")
 
 
 class PromptContextTests(unittest.TestCase):

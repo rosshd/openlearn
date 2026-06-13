@@ -41,6 +41,50 @@ python -m openlearn review vim
 
 Commands that need model output require an API key: `chat`, `review`, `resume`, and `next`.
 
+## Demo
+
+Create a local learning workspace and a topic:
+
+```bash
+openlearn init
+openlearn new vim --goal "Use Vim comfortably for real editing"
+```
+
+Check what openLearn knows about the topic:
+
+```bash
+openlearn status vim
+```
+
+Example output:
+
+```text
+Topic: vim
+Goal: Use Vim comfortably for real editing
+Current focus: not set
+Level: beginner
+Model: gpt-4.1-mini
+Known: none
+Weak spots: none
+Review due: none
+```
+
+Resume later without remembering the topic name:
+
+```bash
+openlearn resume
+```
+
+`resume` reads the active or most recent topic, sends only that topic's relevant local state to the configured model provider, prints a short continuation plan, and appends the session back into the topic file.
+
+Review a topic when you want active recall:
+
+```bash
+openlearn review vim
+```
+
+Your topic notes remain normal Markdown files under `learning-topics/`, so you can inspect or edit them directly at any time.
+
 ## Intended Workflow
 
 The daily workflow should be fast enough to use between classes, coding sessions, or focused study blocks.
