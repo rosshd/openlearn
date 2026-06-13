@@ -189,6 +189,11 @@ class ProviderResponseTests(unittest.TestCase):
 
         self.assertEqual(text, "Keep this answer.\nStill useful.")
 
+    def test_sanitize_model_output_normalizes_terminal_markdown(self) -> None:
+        text = cli.sanitize_model_output("**Recap**\n* First item")
+
+        self.assertEqual(text, "Recap\n- First item")
+
     def test_call_openai_sends_completion_limit(self) -> None:
         previous_key = os.environ.get("OPENAI_API_KEY")
         os.environ["OPENAI_API_KEY"] = "sk-test"
@@ -295,6 +300,46 @@ class InteractiveTests(unittest.TestCase):
     def test_repl_reports_malformed_command_quotes_as_openlearn_error(self) -> None:
         with self.assertRaises(cli.OpenLearnError):
             cli.handle_repl_command('new "unfinished')
+
+
+class PromptInstructionTests(unittest.TestCase):
+    def test_resume_prompt_requests_terminal_friendly_output(self) -> None:
+        captured = []
+        original_call_openai = cli.call_openai
+        original_append_session = cli.append_session
+
+        def fake_call_openai(model: str, system: str, user: str) -> str:
+            captured.append(user)
+            return "ok"
+
+        cli.call_openai = fake_call_openai
+        cli.append_session = lambda *_args, **_kwargs: None
+        try:
+            topic = cli.Topic(
+                slug="demo",
+                path=Path("demo.md"),
+                metadata={"topic": "Demo", "model": "test-model"},
+                body="# Demo\n",
+            )
+            original_read_topic = cli.read_topic
+            original_resolve_topic_slug = cli.resolve_topic_slug
+            original_set_active_topic = cli.set_active_topic
+            cli.read_topic = lambda _slug: topic
+            cli.resolve_topic_slug = lambda _value: "demo"
+            cli.set_active_topic = lambda _slug: None
+            try:
+                call_silent(cli.cmd_resume, Namespace(topic=None, model=None))
+            finally:
+                cli.read_topic = original_read_topic
+                cli.resolve_topic_slug = original_resolve_topic_slug
+                cli.set_active_topic = original_set_active_topic
+        finally:
+            cli.call_openai = original_call_openai
+            cli.append_session = original_append_session
+
+        self.assertIn("plain-text labels", captured[0])
+        self.assertIn("Do not use Markdown headings", captured[0])
+        self.assertIn("under 140 words", captured[0])
 
 
 class PromptContextTests(unittest.TestCase):
