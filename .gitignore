@@ -1,0 +1,18 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.env
+dist/
+build/
+*.egg-info/
+
+# Local learning data is user-owned and may contain private notes.
+config.json
+state.json
+learning-topics/*.md
+learning-topics/*/
+
+!.gitkeep
