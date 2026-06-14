@@ -53,6 +53,9 @@ def main(argv: list[str] | None = None) -> int:
     except OpenLearnError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    except KeyboardInterrupt:
+        print("", file=sys.stderr)
+        return 130
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -202,21 +205,31 @@ def run_menu(input_func=input, output_func=print) -> int:
 
     while True:
         output_func("")
-        active = get_active_topic()
+        active = valid_active_topic()
         output_func(f"Active topic: {active or 'none'}")
         unstarted = active_topic_needs_course_start(active)
+        actions = []
+
+        def add_action(label, action):
+            actions.append((label, action))
+
         if unstarted:
-            output_func("1. Start course")
-        else:
-            output_func("1. Resume")
-            output_func("2. Next step")
-            output_func("3. Ask active topic")
-            output_func("4. Review")
-            output_func("5. Status")
-        output_func("6. Recent topics")
-        output_func("7. New topic")
-        output_func("8. Switch active topic")
-        output_func("9. Delete topic")
+            add_action("Start course", lambda: menu_start_course(input_func, output_func))
+        elif active:
+            add_action("Resume", lambda: menu_resume(input_func, output_func))
+            add_action("Next step", lambda: menu_next(input_func, output_func))
+            add_action("Ask active topic", lambda: menu_ask(input_func, output_func))
+            add_action("Review", lambda: menu_review(input_func, output_func))
+            add_action("Status", lambda: cmd_status(argparse.Namespace(topic=active)))
+        if recent_topic_summaries():
+            add_action("Recent topics", lambda: cmd_recent(argparse.Namespace()))
+        add_action("New topic", lambda: menu_new_topic(input_func, output_func))
+        if recent_topic_summaries():
+            add_action("Switch active topic", lambda: menu_switch_topic(input_func, output_func))
+            add_action("Delete topic", lambda: menu_delete_topic(input_func, output_func))
+
+        for index, (label, _action) in enumerate(actions, start=1):
+            output_func(f"{index}. {label}")
         output_func("q. Quit")
         try:
             choice = input_func("Choose: ").strip().lower()
@@ -227,65 +240,81 @@ def run_menu(input_func=input, output_func=print) -> int:
         try:
             if choice in {"q", "quit", "exit"}:
                 return 0
-            if choice == "1" and unstarted:
-                start_course(input_func=input_func, output_func=output_func)
-                if not active_topic_needs_course_start(get_active_topic()):
-                    run_repl(input_func=input_func, output_func=output_func)
-            elif choice == "1":
-                cmd_resume(argparse.Namespace(topic=None, model=None))
-                run_repl(input_func=input_func, output_func=output_func)
-            elif choice == "2":
-                if unstarted:
-                    output_func("Start the course first.")
-                    continue
-                cmd_next(argparse.Namespace(topic=None, model=None))
-                run_repl(input_func=input_func, output_func=output_func)
-            elif choice == "3":
-                if unstarted:
-                    output_func("Start the course first.")
-                    continue
-                prompt = input_func("Ask: ").strip()
-                if prompt:
-                    ask_topic(None, prompt, None)
-                    run_repl(input_func=input_func, output_func=output_func)
-            elif choice == "4":
-                if unstarted:
-                    output_func("Start the course first.")
-                    continue
-                cmd_review(
-                    argparse.Namespace(topic=resolve_topic_slug(None), model=None)
-                )
-                run_repl(input_func=input_func, output_func=output_func)
-            elif choice == "5":
-                if unstarted:
-                    output_func("Start the course first.")
-                    continue
-                cmd_status(argparse.Namespace(topic=resolve_topic_slug(None)))
-            elif choice == "6":
-                cmd_recent(argparse.Namespace())
-            elif choice == "7":
-                name = input_func("Topic name: ").strip()
-                goal = input_func("Goal: ").strip()
-                if name:
-                    cmd_new(argparse.Namespace(topic=name, goal=goal))
-            elif choice == "8":
-                topic = choose_topic(input_func, output_func, "Switch to topic")
-                if topic:
-                    cmd_active(argparse.Namespace(topic=topic))
-            elif choice == "9":
-                topic = choose_topic(input_func, output_func, "Delete topic")
-                if topic:
-                    confirm = input_func(
-                        f"Delete {topic}? This is not reversible. Are you sure? [y/N]: "
-                    ).strip().lower()
-                    if confirm in {"y", "yes"}:
-                        cmd_delete(argparse.Namespace(topic=topic, yes=True))
-                    else:
-                        output_func("Delete cancelled.")
-            else:
+            if not choice.isdigit() or int(choice) < 1 or int(choice) > len(actions):
                 output_func("Choose a number, or q to quit.")
+                continue
+            actions[int(choice) - 1][1]()
         except OpenLearnError as exc:
             output_func(f"error: {exc}")
+
+
+def valid_active_topic() -> str | None:
+    active = get_active_topic()
+    if not active:
+        return None
+    if topic_path(active).exists():
+        return active
+    clear_active_topic()
+    return None
+
+
+def menu_start_course(input_func, output_func) -> None:
+    start_course(input_func=input_func, output_func=output_func)
+    if not active_topic_needs_course_start(get_active_topic()):
+        run_repl(input_func=input_func, output_func=output_func, show_intro=False)
+
+
+def menu_resume(input_func, output_func) -> None:
+    cmd_resume(argparse.Namespace(topic=None, model=None))
+    run_repl(input_func=input_func, output_func=output_func, show_intro=False)
+
+
+def menu_next(input_func, output_func) -> None:
+    cmd_next(argparse.Namespace(topic=None, model=None))
+    run_repl(input_func=input_func, output_func=output_func, show_intro=False)
+
+
+def menu_ask(input_func, output_func) -> None:
+    prompt = input_func("Ask: ").strip()
+    if prompt:
+        ask_topic(None, prompt, None)
+
+
+def menu_review(input_func, output_func) -> None:
+    cmd_review(argparse.Namespace(topic=resolve_topic_slug(None), model=None))
+    run_repl(input_func=input_func, output_func=output_func, show_intro=False)
+
+
+def menu_new_topic(input_func, output_func) -> None:
+    name = input_func("Topic name: ").strip()
+    goal = input_func("Goal: ").strip()
+    if not name:
+        return
+    cmd_new(argparse.Namespace(topic=name, goal=goal))
+    choice = input_func(
+        "Continue to course start or return to menu? [C/m]: "
+    ).strip().lower()
+    if choice in {"", "c", "continue"}:
+        menu_start_course(input_func, output_func)
+
+
+def menu_switch_topic(input_func, output_func) -> None:
+    topic = choose_topic(input_func, output_func, "Switch to topic")
+    if topic:
+        cmd_active(argparse.Namespace(topic=topic))
+
+
+def menu_delete_topic(input_func, output_func) -> None:
+    topic = choose_topic(input_func, output_func, "Delete topic")
+    if not topic:
+        return
+    confirm = input_func(
+        f"Delete {topic}? This is not reversible. Are you sure? [y/N]: "
+    ).strip().lower()
+    if confirm in {"y", "yes"}:
+        cmd_delete(argparse.Namespace(topic=topic, yes=True))
+    else:
+        output_func("Delete cancelled.")
 
 
 def run_repl(
@@ -293,14 +322,16 @@ def run_repl(
     model: str | None = None,
     input_func=input,
     output_func=print,
+    show_intro: bool = True,
 ) -> int:
     topic_slug = resolve_topic_slug(topic_value) if topic_value else None
     if topic_slug:
         set_active_topic(topic_slug)
-    output_func("openLearn REPL")
-    output_func(
-        "Type a question to ask the active topic. Commands: /help, /resume, /next, /review, /status, /active <topic>, /recent, /new <topic>, /delete <topic>, /quit"
-    )
+    if show_intro:
+        output_func("openLearn REPL")
+        output_func(
+            "Type a question to ask the active topic. Commands: /help, /resume, /next, /review, /status, /active <topic>, /recent, /new <topic>, /delete <topic>, /quit"
+        )
 
     while True:
         try:
@@ -514,14 +545,18 @@ def start_course(input_func=input, output_func=print, model: str | None = None) 
     set_active_topic(topic.slug)
     model = model or str(topic.metadata.get("model") or configured_model())
     feedback = ""
+    rejected_outline = ""
 
     while True:
-        outline_prompt = course_outline_prompt(topic, feedback)
-        outline = sanitize_model_output(
-            call_openai(model, system_prompt(topic), outline_prompt)
-        )
+        outline_prompt = course_outline_prompt(topic, feedback, rejected_outline)
         output_func("Course scope")
-        output_func(outline)
+        outline = call_openai_streaming(
+            model,
+            system_prompt(topic),
+            outline_prompt,
+            output_func=output_func,
+        )
+        output_func("")
         answer = input_func("Is this an acceptable course outline? [y/N]: ").strip().lower()
         if answer in {"y", "yes"}:
             break
@@ -529,30 +564,47 @@ def start_course(input_func=input, output_func=print, model: str | None = None) 
         if not feedback:
             output_func("Course start cancelled.")
             return 0
+        rejected_outline = outline
 
     save_course_started(topic, outline_prompt, outline)
     lesson_prompt = first_lesson_prompt(outline)
-    lesson = sanitize_model_output(
-        call_openai(model, system_prompt(read_topic(topic.slug)), lesson_prompt)
+    lesson = call_openai_streaming(
+        model,
+        system_prompt(read_topic(topic.slug)),
+        lesson_prompt,
+        output_func=output_func,
     )
-    output_func(lesson)
+    output_func("")
     append_session(read_topic(topic.slug), "lesson", lesson_prompt, lesson)
     return 0
 
 
-def course_outline_prompt(topic: Topic, feedback: str = "") -> str:
+def course_outline_prompt(
+    topic: Topic, feedback: str = "", rejected_outline: str = ""
+) -> str:
     goal = str(topic.metadata.get("goal") or "")
-    feedback_text = f"\nRequested changes: {feedback}" if feedback else ""
+    revision_text = ""
+    if feedback:
+        revision_text = (
+            "\nThe user rejected the previous outline. Revise it materially. "
+            "Treat the requested changes as the highest priority and do not keep "
+            "the same unit structure unless it directly serves those changes."
+            f"\nRequested changes: {feedback}"
+        )
+        if rejected_outline:
+            revision_text += f"\nRejected outline:\n{rejected_outline}"
     return (
         "Create a concise course plan before teaching. "
         "Do not recap. Do not ask what the learner wants unless required "
         "details are missing. "
+        "If the learner already knows basics, compress basics into assumptions "
+        "or a quick diagnostic instead of making them standalone units. "
         "Use exactly these plain-text labels: Scope:, Excludes:, Assumptions:, Units:. "
         "Create 4-8 ordered units with short titles and one-line outcomes. "
         "Keep it under 250 words.\n"
         f"Course name: {topic.metadata.get('topic', topic.slug)}\n"
         f"Goal: {goal}"
-        f"{feedback_text}"
+        f"{revision_text}"
     )
 
 
@@ -560,8 +612,9 @@ def first_lesson_prompt(outline: str) -> str:
     return (
         "Start teaching unit 1 from this accepted course plan. "
         "Do not repeat the whole plan. Teach the first concept directly, "
-        "give one concrete example, then ask one short check-for-understanding "
-        "question. Keep it under 220 words.\n\n"
+        "give one concrete example, then ask one important check-for-understanding "
+        "question about the core concept. Do not ask a question just to ask one. "
+        "Keep it under 220 words.\n\n"
         f"Accepted course plan:\n{outline}"
     )
 
@@ -670,12 +723,9 @@ def ask_topic(topic_value: str | None, prompt: str, model: str | None = None) ->
     )
     set_active_topic(topic.slug)
     model = model or str(topic.metadata.get("model") or configured_model())
-    answer = call_openai(
-        model=model,
-        system=system_prompt(topic),
-        user=prompt,
-    )
+    answer = call_openai_streaming(model=model, system=system_prompt(topic), user=prompt)
     answer = print_and_append_model_answer(topic, "chat", prompt, answer)
+    update_learning_metadata(topic, prompt, answer, model)
     return answer
 
 
@@ -686,9 +736,10 @@ def cmd_review(args: argparse.Namespace) -> int:
     user = (
         "Create a short active-recall review session for this learner. "
         "Focus on weak spots and review_due items. Include 3-5 questions, "
-        "brief hints, and an answer key at the end."
+        "brief hints, and no answer key. Ask the questions only; wait for the "
+        "learner to answer before revealing or explaining answers."
     )
-    answer = call_openai(model=model, system=system_prompt(topic), user=user)
+    answer = call_openai_streaming(model=model, system=system_prompt(topic), user=user)
     print_and_append_model_answer(topic, "review", user, answer, mark_reviewed=True)
     return 0
 
@@ -698,14 +749,13 @@ def cmd_resume(args: argparse.Namespace) -> int:
     set_active_topic(topic.slug)
     model = args.model or str(topic.metadata.get("model") or configured_model())
     user = (
-        "Resume this learning topic exactly where the learner left off. "
-        "Use exactly these plain-text labels: Recap:, Next action:, Recall question:. "
-        "Do not use Markdown headings, bold text, or asterisks. "
-        "Keep the recap to 3 short hyphen bullets, give one concrete next action, "
-        "and ask one active-recall question. Do not introduce a new lesson. "
-        "Keep the whole response under 140 words."
+        "Pick up naturally where this learner left off. Avoid template labels like "
+        "Recap, Next action, and Recall question unless they genuinely help. "
+        "If the learner recently answered a question, respond to that answer first. "
+        "Be warm, direct, and specific. Keep it concise, then give one useful next "
+        "step or one important question if needed."
     )
-    answer = call_openai(model=model, system=system_prompt(topic), user=user)
+    answer = call_openai_streaming(model=model, system=system_prompt(topic), user=user)
     print_and_append_model_answer(topic, "resume", user, answer)
     return 0
 
@@ -717,10 +767,11 @@ def cmd_next(args: argparse.Namespace) -> int:
     user = (
         "Generate the next 10-15 minute learning step for this topic. "
         "Use the current goal, known concepts, weak spots, and notes. "
-        "Include one explanation, one drill, and a clear stopping point. "
-        "End with one question or exercise for the learner to answer next."
+        "Sound like a human tutor, not a worksheet. Teach one small idea, give a "
+        "practical mini-drill, and stop. Ask a question only if it tests an "
+        "important point or helps diagnose understanding."
     )
-    answer = call_openai(model=model, system=system_prompt(topic), user=user)
+    answer = call_openai_streaming(model=model, system=system_prompt(topic), user=user)
     print_and_append_model_answer(topic, "next", user, answer)
     return 0
 
@@ -733,9 +784,109 @@ def print_and_append_model_answer(
     mark_reviewed: bool = False,
 ) -> str:
     answer = sanitize_model_output(answer)
-    print(answer)
+    if answer:
+        print("")
     append_session(topic, kind, prompt, answer, mark_reviewed=mark_reviewed)
     return answer
+
+
+def update_learning_metadata(
+    topic: Topic, learner_prompt: str, tutor_answer: str, model: str
+) -> None:
+    update_prompt = textwrap.dedent(
+        f"""
+        Update this learner's lightweight topic metadata from the latest exchange.
+        Return only a JSON object with these optional keys:
+        - known_add: short concepts the learner demonstrated understanding of.
+        - weak_spots_add: short concepts the learner missed or confused.
+        - review_due_add: short concepts that should be reviewed later.
+        - current_focus: the current concept if it changed.
+
+        Do not add broad course names. Prefer specific concepts. If there is no
+        clear evidence, return empty arrays.
+
+        Learner message:
+        {learner_prompt}
+
+        Tutor response:
+        {tutor_answer}
+        """
+    ).strip()
+    try:
+        raw_update = call_openai(model, system_prompt(topic), update_prompt)
+        update = parse_metadata_update(raw_update)
+    except (OpenLearnError, ValueError, json.JSONDecodeError):
+        return
+    if not update:
+        return
+
+    with file_lock(topic.path):
+        current_text = topic.path.read_text(encoding="utf-8")
+        metadata, body = parse_topic(current_text)
+        metadata = dict(metadata)
+        merge_metadata_list(metadata, "known", update.get("known_add"))
+        merge_metadata_list(metadata, "weak_spots", update.get("weak_spots_add"))
+        merge_metadata_list(metadata, "review_due", update.get("review_due_add"))
+        remove_known_from_review_lists(metadata)
+        focus = update.get("current_focus")
+        if isinstance(focus, str) and focus.strip():
+            metadata["current_focus"] = focus.strip()
+        write_text_atomic(topic.path, format_topic(metadata, body))
+
+
+def parse_metadata_update(raw_update: str) -> dict[str, object]:
+    raw_update = raw_update.strip()
+    if not raw_update:
+        return {}
+    if raw_update.startswith("```"):
+        raw_update = re.sub(r"^```(?:json)?\s*", "", raw_update)
+        raw_update = re.sub(r"\s*```$", "", raw_update)
+    if not raw_update.startswith("{"):
+        match = re.search(r"\{.*\}", raw_update, flags=re.DOTALL)
+        if not match:
+            return {}
+        raw_update = match.group(0)
+    data = json.loads(raw_update)
+    return data if isinstance(data, dict) else {}
+
+
+def merge_metadata_list(
+    metadata: dict[str, object], key: str, additions: object
+) -> None:
+    if not isinstance(additions, list):
+        return
+    existing = metadata.get(key)
+    values = (
+        [item for item in existing if isinstance(item, str)]
+        if isinstance(existing, list)
+        else []
+    )
+    seen = {item.casefold() for item in values}
+    for item in additions:
+        if not isinstance(item, str):
+            continue
+        item = item.strip()
+        if not item or item.casefold() in seen:
+            continue
+        values.append(item)
+        seen.add(item.casefold())
+    metadata[key] = values
+
+
+def remove_known_from_review_lists(metadata: dict[str, object]) -> None:
+    known = metadata.get("known")
+    if not isinstance(known, list):
+        return
+    known_values = {item.casefold() for item in known if isinstance(item, str)}
+    for key in ("weak_spots", "review_due"):
+        values = metadata.get(key)
+        if not isinstance(values, list):
+            continue
+        metadata[key] = [
+            item
+            for item in values
+            if isinstance(item, str) and item.casefold() not in known_values
+        ]
 
 
 def project_home() -> Path:
@@ -1027,10 +1178,31 @@ def system_prompt(topic: Topic) -> str:
         You are openLearn, a local-first AI learning tutor.
 
         Use the learner's topic state to teach at the right level. Be concise,
-        active-recall oriented, and practical. Prefer small drills, questions,
-        and next actions over long lectures. If the user asks about something
-        outside the topic, answer normally but connect back to the learning goal
-        when useful.
+        personal, active-recall oriented, and practical. Sound like a patient
+        human tutor sitting with the learner, not a report generator. Avoid
+        repeating the same recap format. Prefer a natural reply, one useful
+        correction or example, and one small next move over long lectures. If
+        the user asks about something outside the topic, answer normally but
+        connect back to the learning goal when useful.
+
+        Behave like a paid human tutor. When the previous tutor message asked a
+        question, treat the learner's next message as an answer unless it is
+        clearly a new request. Evaluate it before moving on. If it is wrong or
+        shows confusion, correct the misconception, stay on the same concept,
+        and ask a focused follow-up or give a smaller drill. Do not advance just
+        because the learner says no, seems uncertain, or gives an incorrect
+        answer. Mark a concept as ready to move on only after the learner shows
+        understanding.
+
+        Ask questions only when they test important knowledge, diagnose a likely
+        gap, or help the learner practice. Do not ask filler clarifying questions
+        about unimportant details. If the learner is struggling, slow down and
+        keep the response short, concrete, and confidence-building.
+
+        Do not keep printing full progress summaries after every answer. Mention
+        progress only when it helps the learner feel oriented or encouraged.
+        Vary wording naturally. Do not use the same labels or sentence pattern
+        repeatedly.
 
         If course_started is true and the learner asks to learn, continue, or
         move on, advance through the saved course plan. Do not restart with a
@@ -1137,6 +1309,95 @@ def call_openai(model: str, system: str, user: str) -> str:
             "OpenAI response did not contain output text; the model may have spent its output budget on reasoning. Try a faster non-reasoning model or increase the token limit."
         )
     return text.strip()
+
+
+def call_openai_streaming(
+    model: str, system: str, user: str, output_func=print
+) -> str:
+    if call_openai.__name__ != "call_openai":
+        text = sanitize_model_output(call_openai(model, system, user))
+        if output_func is print:
+            print(text, end="", flush=True)
+        else:
+            output_func(text)
+        return text
+
+    api_key = configured_openai_api_key()
+    if not api_key:
+        raise OpenLearnError(
+            "OpenAI API key is required. Run: openlearn config set-key"
+        )
+
+    payload = {
+        "model": model,
+        "max_tokens": DEFAULT_MAX_TOKENS,
+        "include_reasoning": False,
+        "stream": True,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+    }
+    request = Request(
+        f"{configured_base_url()}/chat/completions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "User-Agent": "openLearn/0.1.0",
+        },
+        method="POST",
+    )
+    chunks: list[str] = []
+    should_stream_to_terminal = output_func is print
+    try:
+        with urlopen(request, timeout=60) as response:
+            for raw_line in response:
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if not line.startswith("data:"):
+                    continue
+                data = line.removeprefix("data:").strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    event = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                text = extract_stream_delta(event)
+                if not text:
+                    continue
+                chunks.append(text)
+                if should_stream_to_terminal:
+                    print(text, end="", flush=True)
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise OpenLearnError(
+            f"OpenAI request failed: HTTP {exc.code}: {detail}"
+        ) from exc
+    except URLError as exc:
+        raise OpenLearnError(f"OpenAI request failed: {exc.reason}") from exc
+
+    text = sanitize_model_output("".join(chunks))
+    if not text:
+        raise OpenLearnError(
+            "OpenAI response did not contain output text; try a faster non-reasoning model or increase the token limit."
+        )
+    if not should_stream_to_terminal:
+        output_func(text)
+    return text.strip()
+
+
+def extract_stream_delta(data: dict[str, object]) -> str:
+    choices = data.get("choices")
+    if isinstance(choices, list) and choices:
+        first = choices[0]
+        if isinstance(first, dict):
+            delta = first.get("delta")
+            if isinstance(delta, dict):
+                content = delta.get("content")
+                if isinstance(content, str):
+                    return content
+    return ""
 
 
 def extract_response_text(data: dict[str, object]) -> str:

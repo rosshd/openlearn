@@ -375,6 +375,51 @@ class ProviderResponseTests(unittest.TestCase):
         self.assertEqual(payload["max_tokens"], cli.DEFAULT_MAX_TOKENS)
         self.assertIs(payload["include_reasoning"], False)
 
+    def test_call_openai_streaming_prints_chunks_and_returns_text(self) -> None:
+        previous_key = os.environ.get("OPENAI_API_KEY")
+        os.environ["OPENAI_API_KEY"] = "sk-test"
+        requests = []
+        original_urlopen = cli.urlopen
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def __iter__(self):
+                events = [
+                    {"choices": [{"delta": {"content": "Hello "}}]},
+                    {"choices": [{"delta": {"content": "there"}}]},
+                ]
+                for event in events:
+                    yield f"data: {json.dumps(event)}\n".encode()
+                yield b"data: [DONE]\n"
+
+        def fake_urlopen(request, timeout=0):
+            requests.append((request, timeout))
+            return FakeResponse()
+
+        cli.urlopen = fake_urlopen
+        try:
+            output = []
+            answer = cli.call_openai_streaming(
+                "test-model", "system", "user", output_func=output.append
+            )
+        finally:
+            cli.urlopen = original_urlopen
+            if previous_key is None:
+                os.environ.pop("OPENAI_API_KEY", None)
+            else:
+                os.environ["OPENAI_API_KEY"] = previous_key
+
+        payload = json.loads(requests[0][0].data.decode("utf-8"))
+
+        self.assertIs(payload["stream"], True)
+        self.assertEqual(answer, "Hello there")
+        self.assertEqual(output, ["Hello there"])
+
 
 class InteractiveTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -399,6 +444,26 @@ class InteractiveTests(unittest.TestCase):
 
         self.assertIs(args.func, cli.cmd_menu)
 
+    def test_main_handles_keyboard_interrupt_without_traceback(self) -> None:
+        original_build_parser = cli.build_parser
+
+        class FakeParser:
+            def parse_args(self, _argv):
+                return Namespace(
+                    func=lambda _args: (_ for _ in ()).throw(KeyboardInterrupt)
+                )
+
+        cli.build_parser = lambda: FakeParser()
+        stderr = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(stderr):
+                exit_code = cli.main([])
+        finally:
+            cli.build_parser = original_build_parser
+
+        self.assertEqual(exit_code, 130)
+        self.assertNotIn("Traceback", stderr.getvalue())
+
     def test_menu_quits_cleanly(self) -> None:
         output = []
 
@@ -407,18 +472,35 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertIn("openLearn", output)
         self.assertTrue(any("Active topic:" in line for line in output))
+        self.assertIn("1. New topic", output)
+        self.assertNotIn("1. Resume", output)
         self.assertNotIn("10. REPL", output)
 
+    def test_menu_clears_missing_active_topic_and_hides_learning_actions(self) -> None:
+        cli.set_active_topic("missing-topic")
+        output = []
+
+        exit_code = cli.run_menu(input_func=iter_input(["q"]), output_func=output.append)
+
+        self.assertEqual(exit_code, 0)
+        self.assertIsNone(cli.get_active_topic())
+        self.assertIn("Active topic: none", output)
+        self.assertIn("1. New topic", output)
+        self.assertNotIn("1. Resume", output)
+        self.assertNotIn("2. Next step", output)
+
     def test_menu_learning_actions_enter_repl_automatically(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Active Topic", goal="active"))
+        mark_course_started("active-topic")
         cases = [
-            ("1", ["1", "q"], [("resume", None, None), ("repl",)]),
-            ("2", ["2", "q"], [("next", None, None), ("repl",)]),
+            ("1", ["1", "q"], [("resume", None, None), ("repl", False)]),
+            ("2", ["2", "q"], [("next", None, None), ("repl", False)]),
             (
                 "3",
                 ["3", "What next?", "q"],
-                [("ask", None, "What next?", None), ("repl",)],
+                [("ask", None, "What next?", None)],
             ),
-            ("4", ["4", "q"], [("review", "active-topic", None), ("repl",)]),
+            ("4", ["4", "q"], [("review", "active-topic", None), ("repl", False)]),
         ]
         original_cmd_resume = cli.cmd_resume
         original_cmd_next = cli.cmd_next
@@ -443,8 +525,8 @@ class InteractiveTests(unittest.TestCase):
             calls.append(("review", args.topic, args.model))
             return 0
 
-        def fake_run_repl(**_kwargs) -> int:
-            calls.append(("repl",))
+        def fake_run_repl(**kwargs) -> int:
+            calls.append(("repl", kwargs.get("show_intro", True)))
             return 0
 
         for choice, inputs, expected in cases:
@@ -475,7 +557,7 @@ class InteractiveTests(unittest.TestCase):
         exit_code = call_silent(
             cli.run_menu,
             input_func=iter_input(
-                ["7", "Menu Topic", "Practice menu flow", "q"]
+                ["1", "Menu Topic", "Practice menu flow", "m", "q"]
             ),
             output_func=lambda _text: None,
         )
@@ -483,6 +565,38 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertTrue(cli.topic_path("menu-topic").exists())
         self.assertEqual(cli.get_active_topic(), "menu-topic")
+
+    def test_menu_create_topic_can_continue_to_course_start(self) -> None:
+        calls = []
+        original_start_course = cli.start_course
+        original_run_repl = cli.run_repl
+
+        def fake_start_course(**_kwargs) -> int:
+            calls.append("start")
+            mark_course_started(cli.get_active_topic())
+            return 0
+
+        def fake_run_repl(**kwargs) -> int:
+            calls.append(("repl", kwargs.get("show_intro", True)))
+            return 0
+
+        cli.start_course = fake_start_course
+        cli.run_repl = fake_run_repl
+        try:
+            exit_code = call_silent(
+                cli.run_menu,
+                input_func=iter_input(
+                    ["1", "Menu Topic", "Practice menu flow", "c", "q"]
+                ),
+                output_func=lambda _text: None,
+            )
+        finally:
+            cli.start_course = original_start_course
+            cli.run_repl = original_run_repl
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(calls, ["start", ("repl", False)])
+        self.assertTrue(cli.topic_path("menu-topic").exists())
 
     def test_menu_can_switch_topic_from_numbered_list(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="First Topic", goal="first"))
@@ -492,7 +606,7 @@ class InteractiveTests(unittest.TestCase):
 
         exit_code = call_silent(
             cli.run_menu,
-            input_func=iter_input(["8", "2", "q"]),
+            input_func=iter_input(["4", "2", "q"]),
             output_func=lambda _text: None,
         )
 
@@ -507,7 +621,7 @@ class InteractiveTests(unittest.TestCase):
 
         exit_code = call_silent(
             cli.run_menu,
-            input_func=iter_input(["9", "2", "y", "q"]),
+            input_func=iter_input(["5", "2", "y", "q"]),
             output_func=lambda _text: None,
         )
 
@@ -521,7 +635,7 @@ class InteractiveTests(unittest.TestCase):
 
         exit_code = call_silent(
             cli.run_menu,
-            input_func=iter_input(["9", "1", "n", "q"]),
+            input_func=iter_input(["5", "1", "n", "q"]),
             output_func=output.append,
         )
 
@@ -631,7 +745,9 @@ class InteractiveTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertIs(metadata["course_started"], True)
+        self.assertIn("Revise it materially", calls[1])
         self.assertIn("Requested changes: More math and search", calls[1])
+        self.assertIn("Rejected outline:\nScope: Too broad", calls[1])
         self.assertIn("Scope: More math and search", body)
 
     def test_repl_plain_text_asks_active_topic_and_appends_session(self) -> None:
@@ -675,7 +791,7 @@ class InteractiveTests(unittest.TestCase):
 
 
 class PromptInstructionTests(unittest.TestCase):
-    def test_resume_prompt_requests_terminal_friendly_output(self) -> None:
+    def test_resume_prompt_requests_natural_tutor_style(self) -> None:
         captured = []
         original_call_openai = cli.call_openai
         original_append_session = cli.append_session
@@ -709,9 +825,9 @@ class PromptInstructionTests(unittest.TestCase):
             cli.call_openai = original_call_openai
             cli.append_session = original_append_session
 
-        self.assertIn("plain-text labels", captured[0])
-        self.assertIn("Do not use Markdown headings", captured[0])
-        self.assertIn("under 140 words", captured[0])
+        self.assertIn("Pick up naturally", captured[0])
+        self.assertIn("Avoid template labels", captured[0])
+        self.assertIn("warm, direct, and specific", captured[0])
 
     def test_next_prompt_asks_for_learner_response(self) -> None:
         captured = []
@@ -745,7 +861,104 @@ class PromptInstructionTests(unittest.TestCase):
             cli.resolve_topic_slug = original_resolve_topic_slug
             cli.set_active_topic = original_set_active_topic
 
-        self.assertIn("answer next", captured[0])
+        self.assertIn("Sound like a human tutor", captured[0])
+        self.assertIn("Teach one small idea", captured[0])
+        self.assertIn("Ask a question only if it tests", captured[0])
+
+    def test_review_prompt_does_not_include_answer_key(self) -> None:
+        captured = []
+        topic = cli.Topic(
+            slug="demo",
+            path=Path("demo.md"),
+            metadata={"topic": "Demo", "model": "test-model"},
+            body="# Demo\n",
+        )
+        original_call_openai = cli.call_openai
+        original_append_session = cli.append_session
+        original_read_topic = cli.read_topic
+        original_set_active_topic = cli.set_active_topic
+
+        def fake_call_openai(model: str, system: str, user: str) -> str:
+            captured.append(user)
+            return "ok"
+
+        cli.call_openai = fake_call_openai
+        cli.append_session = lambda *_args, **_kwargs: None
+        cli.read_topic = lambda _slug: topic
+        cli.set_active_topic = lambda _slug: None
+        try:
+            call_silent(cli.cmd_review, Namespace(topic="demo", model=None))
+        finally:
+            cli.call_openai = original_call_openai
+            cli.append_session = original_append_session
+            cli.read_topic = original_read_topic
+            cli.set_active_topic = original_set_active_topic
+
+        self.assertIn("no answer key", captured[0])
+        self.assertIn("wait for the learner to answer", captured[0])
+        self.assertNotIn("answer key at the end", captured[0])
+
+    def test_learning_metadata_update_merges_known_and_weak_spots(self) -> None:
+        home = tempfile.TemporaryDirectory()
+        previous_home = os.environ.get("OPENLEARN_HOME")
+        os.environ["OPENLEARN_HOME"] = home.name
+        cli._CONFIG_CACHE = None
+        original_call_openai = cli.call_openai
+
+        cli.call_openai = lambda *_args, **_kwargs: json.dumps(
+            {
+                "known_add": ["normal mode", "normal mode"],
+                "weak_spots_add": ["insert mode", "normal mode"],
+                "review_due_add": ["mode switching", "normal mode"],
+                "current_focus": "Vim modes",
+            }
+        )
+        try:
+            call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
+            topic = cli.read_topic("vim")
+            cli.update_learning_metadata(
+                topic,
+                "Normal mode is for commands",
+                "Correct. Insert mode needs more work.",
+                "test-model",
+            )
+            updated = cli.read_topic("vim")
+        finally:
+            cli.call_openai = original_call_openai
+            if previous_home is None:
+                os.environ.pop("OPENLEARN_HOME", None)
+            else:
+                os.environ["OPENLEARN_HOME"] = previous_home
+            cli._CONFIG_CACHE = None
+            home.cleanup()
+
+        self.assertEqual(updated.metadata["known"], ["normal mode"])
+        self.assertEqual(updated.metadata["weak_spots"], ["insert mode"])
+        self.assertEqual(updated.metadata["review_due"], ["mode switching"])
+        self.assertEqual(updated.metadata["current_focus"], "Vim modes")
+
+    def test_system_prompt_requests_answer_evaluation_before_advancing(self) -> None:
+        topic = cli.Topic(
+            slug="demo",
+            path=Path("demo.md"),
+            metadata={"topic": "Demo", "course_started": True},
+            body="# Demo\n",
+        )
+
+        prompt = cli.system_prompt(topic)
+        normalized = " ".join(prompt.split())
+
+        self.assertIn("treat the learner's next message as an answer", normalized)
+        self.assertIn("Evaluate it before moving on", normalized)
+        self.assertIn("stay on the same concept", normalized)
+        self.assertIn("Do not advance just because the learner says no", normalized)
+        self.assertIn("Do not ask filler clarifying questions", normalized)
+
+    def test_first_lesson_prompt_avoids_filler_questions(self) -> None:
+        prompt = cli.first_lesson_prompt("Scope: Demo")
+
+        self.assertIn("one important check-for-understanding", prompt)
+        self.assertIn("Do not ask a question just to ask one", prompt)
 
     def test_resume_sanitizes_answer_before_printing_and_appending(self) -> None:
         appended = []
@@ -866,6 +1079,14 @@ def iter_input(values):
         return next(iterator)
 
     return read
+
+
+def mark_course_started(slug: str) -> None:
+    path = cli.topic_path(slug)
+    metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+    metadata = dict(metadata)
+    metadata["course_started"] = True
+    path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
 
 
 if __name__ == "__main__":
