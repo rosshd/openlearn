@@ -12,6 +12,7 @@ build/
 # Local learning data is user-owned and may contain private notes.
 config.json
 state.json
+*.lock
 learning-topics/*.md
 learning-topics/*/
 

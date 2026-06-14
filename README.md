@@ -21,13 +21,17 @@ The early version is intentionally small: a Python CLI that creates topic files,
 ## Current Commands
 
 ```bash
+python -m openlearn
 python -m openlearn init
+python -m openlearn menu
+python -m openlearn repl
 python -m openlearn config set-key
 python -m openlearn config set-model gpt-4.1-mini
 python -m openlearn config set-base-url https://api.openai.com/v1
 python -m openlearn config show
 python -m openlearn config clear-key
 python -m openlearn new vim --goal "Learn Vim motions and macros"
+python -m openlearn delete vim --yes
 python -m openlearn list
 python -m openlearn recent
 python -m openlearn active vim
@@ -39,7 +43,8 @@ python -m openlearn chat vim "How should I practice macros?"
 python -m openlearn review vim
 ```
 
-Commands that need model output require an API key: `chat`, `review`, `resume`, and `next`.
+Commands and interactive actions that need model output require an API key: `chat`, `review`, `resume`, `next`, REPL questions, and model-backed menu actions.
+Running `openlearn` with no command opens the interactive menu.
 
 ## Demo
 
@@ -49,6 +54,8 @@ Create a local learning workspace and a topic:
 openlearn init
 openlearn new vim --goal "Use Vim comfortably for real editing"
 ```
+
+New topics start as unstarted courses. In the menu, choose `Start course` to have the tutor propose a compact course scope and unit plan. Accept the outline with `y`, or answer `n` to explain what should change and regenerate it. Once accepted, openLearn saves the plan, starts lesson one, and continues in the REPL.
 
 Check what openLearn knows about the topic:
 
@@ -83,6 +90,24 @@ Review a topic when you want active recall:
 openlearn review vim
 ```
 
+For back-and-forth learning, start the REPL directly:
+
+```bash
+openlearn repl
+```
+
+Inside the REPL, type normal questions to ask the active topic without retyping `openlearn chat <topic> ...` every time. The interactive menu also enters the REPL automatically after learning actions that ask for a learner response.
+
+```text
+openlearn> I think the answer is registers. Am I right?
+openlearn> /next
+openlearn> /review
+openlearn> /status
+openlearn> /quit
+```
+
+Useful REPL commands are `/help`, `/resume`, `/next`, `/review`, `/status`, `/active <topic>`, `/recent`, `/new <topic> [goal]`, `/ask <question>`, and `/quit`.
+
 Your topic notes remain normal Markdown files under `learning-topics/`, so you can inspect or edit them directly at any time.
 
 ## Intended Workflow
@@ -109,6 +134,9 @@ Fast commands:
 - `openlearn active`: show the active topic.
 - `openlearn active os`: switch active topic.
 - `openlearn edit`: open the active topic file in `$EDITOR`.
+- `openlearn menu`: open a numbered menu for common actions; learning actions continue into the REPL automatically.
+- `openlearn repl`: start a back-and-forth learning prompt.
+- `openlearn delete vim --yes`: permanently delete a local topic file.
 - `openlearn resume`: recap and continue where you left off.
 - `openlearn next`: generate the next 10-15 minute learning step.
 - `openlearn review vim`: generate a short active-recall review.
@@ -192,6 +220,14 @@ openLearn keeps user data outside Git by default:
 - `config.json`: saved model settings and optional API key.
 
 These files are ignored because they may contain private notes, class material, or credentials.
+
+Delete a topic when you no longer need its local notes:
+
+```bash
+openlearn delete vim --yes
+```
+
+Deletion is permanent. Since topic files are user-owned Markdown files, you can also back up or move them manually before deleting.
 
 ## Pricing Language
 

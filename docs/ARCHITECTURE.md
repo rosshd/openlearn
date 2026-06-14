@@ -4,12 +4,13 @@
 
 openLearn currently has one package, `openlearn`, with a small CLI in `src/openlearn/cli.py`.
 
-The CLI owns five concerns for now:
+The CLI owns six concerns for now:
 
 - Topic file creation and parsing.
 - Local project/home discovery.
 - Prompt construction from topic state.
 - Config and active-topic state.
+- Interactive menu and REPL flow.
 - OpenAI-compatible chat-completion calls.
 
 This is intentionally simple for the MVP. Once behavior is proven, split provider calls, topic storage, and review logic into separate modules.
@@ -38,7 +39,9 @@ JSON was chosen instead of YAML to avoid adding a dependency in the first versio
 
 The topic slug is the stable file identifier. For example, `Operating Systems` becomes `operating-systems`, and the file is stored at `learning-topics/operating-systems.md`.
 
-Topic commands update active-topic state in `state.json` so `resume`, `next`, and `edit` can work without repeating the topic name.
+Topic commands update active-topic state in `state.json` so `resume`, `next`, `edit`, `menu`, and `repl` can work without repeating the topic name.
+
+The interactive REPL is intentionally thin. Plain text is treated like `chat` against the active topic, and slash commands such as `/resume`, `/next`, `/review`, `/status`, and `/active <topic>` call the same command handlers used by the non-interactive CLI.
 
 ## Model Usage
 
