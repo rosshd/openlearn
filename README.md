@@ -36,6 +36,8 @@ python -m openlearn list
 python -m openlearn recent
 python -m openlearn active vim
 python -m openlearn status vim
+python -m openlearn summary vim
+python -m openlearn repair vim
 python -m openlearn edit vim
 python -m openlearn resume
 python -m openlearn next
@@ -103,10 +105,17 @@ openlearn> I think the answer is registers. Am I right?
 openlearn> /next
 openlearn> /review
 openlearn> /status
+openlearn> /summary
+openlearn> /options
+openlearn> /plan
+openlearn> /progress 2 1
+openlearn> /scope add a short search-and-replace chapter
 openlearn> /quit
 ```
 
-Useful REPL commands are `/help`, `/resume`, `/next`, `/review`, `/status`, `/active <topic>`, `/recent`, `/new <topic> [goal]`, `/ask <question>`, and `/quit`.
+Useful REPL commands are `/help`, `/resume`, `/next`, `/review`, `/status`, `/summary`, `/options`, `/plan`, `/progress [unit slide]`, `/scope <change>`, `/active <topic>`, `/recent`, `/new <topic> [goal]`, `/ask <question>`, and `/quit`.
+
+Course options are stored in the topic file. The first options include chapter-end quizzes, progress reminders, weak-spot review before new chapters, and hands-on drills. If chapter-end quizzes are enabled, openLearn records a pending quiz when the learner finishes a chapter and stores quiz results in local metadata after evaluation.
 
 Your topic notes remain normal Markdown files under `learning-topics/`, so you can inspect or edit them directly at any time.
 
