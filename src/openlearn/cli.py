@@ -2674,7 +2674,58 @@ def session_entries(session_log: str) -> list[dict[str, str]]:
     return entries
 
 
+def _mock_openai_response(model: str, system: str, user: str) -> str:
+    """Generate a small, deterministic mock response based on the user prompt.
+
+    Keep outputs realistic enough for the CLI logic: placement questions should
+    return JSON with question/answer_key/concept when asked in JSON form; other
+    prompts return short, teaching-style text. This helper is intentionally
+    simple and deterministic for CI use when OPENLEARN_MOCK=1.
+    """
+    prompt = user.lower()
+    # Placement question JSON response
+    if "create one placement question" in prompt or "placement question" in prompt:
+        return json.dumps(
+            {
+                "question": "What mode lets you run commands like dd or /search?\nA) Insert\nB) Normal\nC) Visual\nD) Command-line",
+                "answer_key": "B",
+                "concept": "vim-modes",
+            }
+        )
+    # Placement evaluation JSON response
+    if "evaluate this placement answer" in prompt or "evaluate this placement" in prompt:
+        # crude heuristic: if the user mentions 'b' treat as correct
+        correct = "b" in prompt
+        return json.dumps(
+            {
+                "correct": True if correct else False,
+                "concept": "vim-modes",
+                "note": "Mock evaluation: matched heuristic.",
+            }
+        )
+    # Summarize context
+    if "summarize this context file" in prompt or "summarize" in prompt and "context" in prompt:
+        return "- Summary: mock summary of provided context.\n- Key points: concise bullets."
+    # Course outline
+    if "create a concise course plan" in prompt or "course plan" in prompt or "create a concise course plan before teaching" in prompt:
+        return (
+            "Scope: Mock scope\nExcludes: None\nAssumptions: Beginner\nUnits:\n1. Modes (2 slides) - Understand insert vs normal.\n2. Movement (2 slides) - h j k l.\n3. Editing (2 slides) - x dd p.\n4. Save and quit (1 slide) - :wq"
+        )
+    # First lesson
+    if "start teaching unit 1" in prompt or "start teaching" in prompt or "first lesson" in prompt:
+        return (
+            "Lesson: Normal vs Insert.\nExample: Press i to enter Insert, Esc to return to Normal.\nCheck: Which mode runs commands like dd or /search? <!-- answer: B -->\nAction: Try switching modes in your editor."
+        )
+    # Default small tutor response
+    return "Lesson: Mock reply. Ask a focused question to continue."
+
+
 def call_openai(model: str, system: str, user: str) -> str:
+    # Mock mode support for CI / offline testing
+    if os.environ.get("OPENLEARN_MOCK") in {"1", "true", "yes"}:
+        raw = _mock_openai_response(model, system, user)
+        return raw.strip()
+
     api_key = configured_openai_api_key()
     if not api_key:
         raise OpenLearnError(
@@ -2725,10 +2776,23 @@ def call_openai_streaming(
 ) -> str:
     global _LAST_RESPONSE_ANSWER_KEY
     _LAST_RESPONSE_ANSWER_KEY = ""
+
+    # If call_openai has been monkeypatched, prefer it (test hook).
     if call_openai.__name__ != "call_openai":
         raw_text = call_openai(model, system, user)
         _LAST_RESPONSE_ANSWER_KEY = extract_answer_key(raw_text)
         text = sanitize_model_output(raw_text)
+        if output_func is print:
+            print(text, end="", flush=True)
+        else:
+            output_func(text)
+        return text
+
+    # Mock mode support: return a canned response without contacting the network.
+    if os.environ.get("OPENLEARN_MOCK") in {"1", "true", "yes"}:
+        raw = _mock_openai_response(model, system, user)
+        _LAST_RESPONSE_ANSWER_KEY = extract_answer_key(raw)
+        text = sanitize_model_output(raw)
         if output_func is print:
             print(text, end="", flush=True)
         else:
@@ -2794,6 +2858,7 @@ def call_openai_streaming(
         raise OpenLearnError(
             "OpenAI response did not contain output text; try a faster non-reasoning model or increase the token limit."
         )
+
     if output_func is print:
         print(text, end="", flush=True)
     else:
