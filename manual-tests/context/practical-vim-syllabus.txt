@@ -1,0 +1,31 @@
+Course: Practical Vim Foundations
+
+Learner profile:
+- Comfortable with basic terminal commands.
+- New to modal editing.
+- Wants practical fluency rather than memorizing every command.
+
+Learning goal:
+Become comfortable using Vim for everyday editing, including navigation, insert/normal mode, saving/quitting, basic edits, search, and small refactors.
+
+Course priorities:
+- Teach modal editing early and repeatedly.
+- Keep lessons short and hands-on.
+- Prefer realistic editing drills over abstract command lists.
+- Do not assume prior Vim knowledge.
+
+Suggested lesson sequence:
+1. Normal mode, insert mode, and command mode.
+2. Movement with h, j, k, l plus word movement.
+3. Editing with x, i, a, o, dd, yy, p.
+4. Saving, quitting, and recovering from common mistakes.
+5. Search with / and n.
+6. Basic changes with cw, ciw, and visual selection.
+
+Known learner weak spots:
+- May confuse insert mode and normal mode.
+- May forget how to quit safely.
+- Benefits from tiny drills with immediate feedback.
+
+Assessment idea:
+By the end, learner should edit a short paragraph, move around without arrow keys, delete/move lines, search for text, and save/quit confidently.
