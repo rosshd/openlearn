@@ -21,46 +21,64 @@ def run_tui(topic: str | None = None, model: str | None = None) -> int:
         from prompt_toolkit import PromptSession
         from prompt_toolkit.completion import Completer, Completion
         from prompt_toolkit.patch_stdout import patch_stdout
+        from prompt_toolkit.history import FileHistory
     except Exception:
         print(
             "prompt-toolkit is required for the TUI. Install with: python -m pip install prompt-toolkit"
         )
         return 2
 
+    # Helper: history file under project_home
+    from pathlib import Path
+    from .cli import project_home, recent_topic_summaries
+
+    history_path = project_home() / "tui_history.txt"
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+
     # Simple completer that suggests /commands and recent topics
     class OpenLearnCompleter(Completer):
+        def __init__(self):
+            self._commands = [
+                "/resume",
+                "/next",
+                "/review",
+                "/status",
+                "/summary",
+                "/options",
+                "/plan",
+                "/progress",
+                "/scope",
+                "/repair",
+                "/active",
+                "/recent",
+                "/new",
+                "/delete",
+                "/ask",
+                "/quit",
+            ]
+
         def get_completions(self, document, complete_event):
             text = document.text_before_cursor
             if text.startswith("/"):
-                commands = [
-                    "/resume",
-                    "/next",
-                    "/review",
-                    "/status",
-                    "/summary",
-                    "/options",
-                    "/plan",
-                    "/progress",
-                    "/scope",
-                    "/repair",
-                    "/active",
-                    "/recent",
-                    "/new",
-                    "/delete",
-                    "/ask",
-                    "/quit",
-                ]
-                for c in commands:
+                for c in self._commands:
                     if c.startswith(text):
                         yield Completion(c, start_position=-len(text))
             else:
-                # no-op: could add topic completion by importing recent_topic_summaries
-                pass
+                # Suggest recent topic slugs and titles
+                try:
+                    topics = recent_topic_summaries()
+                except Exception:
+                    topics = []
+                for t in topics:
+                    label = f"{t.slug} - {t.metadata.get('topic', '')}"
+                    if t.slug.startswith(text) or label.startswith(text):
+                        yield Completion(t.slug, start_position=-len(text), display=label)
 
     session = PromptSession(
         message="You > ",
         completer=OpenLearnCompleter(),
         complete_while_typing=True,
+        history=FileHistory(str(history_path)),
     )
 
     # Use run_repl for core loop via a thin wrapper to integrate prompt-toolkit input
