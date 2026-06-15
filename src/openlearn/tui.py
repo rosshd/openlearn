@@ -112,6 +112,10 @@ def _prompt_toolkit_loop(session: "PromptSession", topic_slug: str | None, model
 
     while True:
         try:
+            # Import patch_stdout here so this module doesn't require prompt-toolkit
+            # at import time unless the TUI is launched.
+            from prompt_toolkit.patch_stdout import patch_stdout
+
             with patch_stdout():
                 text = session.prompt()
         except (KeyboardInterrupt, EOFError):
