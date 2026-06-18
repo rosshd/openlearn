@@ -125,6 +125,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     repl_parser.set_defaults(func=cmd_repl)
 
+    tui_parser = sub.add_parser("tui", help="Start a prompt-toolkit TUI (optional dependency)")
+    tui_parser.add_argument(
+        "topic", nargs="?", help="Topic slug, defaults to active/recent"
+    )
+    tui_parser.add_argument(
+        "--model", default=None, help="Override model for model-backed requests"
+    )
+    tui_parser.set_defaults(func=cmd_tui)
+
     config_parser = sub.add_parser("config", help="Manage local model configuration")
     config_sub = config_parser.add_subparsers(required=True)
 
@@ -294,6 +303,15 @@ def cmd_test(args: argparse.Namespace) -> int:
 
 def cmd_repl(args: argparse.Namespace) -> int:
     return run_repl(topic_value=args.topic, model=args.model)
+
+
+def cmd_tui(args: argparse.Namespace) -> int:
+    try:
+        from .tui import run_tui
+    except Exception:
+        print("TUI requires prompt-toolkit. Install with: python -m pip install prompt-toolkit")
+        return 2
+    return run_tui(topic=args.topic, model=args.model)
 
 
 def run_menu(input_func=input, output_func=print) -> int:
