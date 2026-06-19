@@ -9,8 +9,7 @@ DEFAULT_MAX_TOKENS = 1600
 STATE_FILE = "state.json"
 CONFIG_FILE = "config.json"
 PROMPT_TOPIC_LINE_LIMIT = 120
-PROMPT_RECENT_SESSION_LIMIT = 4
-PROMPT_RECENT_SESSION_LINE_LIMIT = 160
+FIRST_LESSON_WORD_LIMIT = 220
 CONTEXT_SUMMARY_CHAR_LIMIT = 60000
 CONTEXT_SUMMARY_LINE_LIMIT = 120
 MANUAL_TEST_HOME = Path("/tmp/openlearn-manual-vim")
@@ -19,7 +18,7 @@ MANUAL_TEST_COURSE_SLUG = "practical-vim-foundations"
 MANUAL_TEST_COURSE_GOAL = "Learn Vim well enough for everyday file editing."
 MANUAL_TEST_CONTEXT_FILENAME = "practical-vim-syllabus.txt"
 DEFAULT_COURSE_OPTIONS = {
-    "quiz_after_chapter": False,
+    "quiz_after_chapter": True,
     "show_progress": True,
     "review_weak_spots": True,
     "hands_on_drills": True,

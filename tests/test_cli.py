@@ -8,11 +8,49 @@ import tempfile
 import textwrap
 import unittest
 from argparse import Namespace
+from datetime import date, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from openlearn import cli
+from openlearn import cli, ui
+
+
+class UiFormattingTests(unittest.TestCase):
+    def test_format_tutor_output_styles_labels_and_options_without_changing_text(self) -> None:
+        text = ui.format_tutor_output("Lesson: Learn this\nA) One\nB) Two")
+
+        clean = ui.strip_ansi(text)
+
+        self.assertIn("Lesson: Learn this", clean)
+        self.assertIn("A) One", clean)
+        self.assertIn("B) Two", clean)
+
+    def test_wrap_prose_wraps_plain_text_but_not_options_or_code(self) -> None:
+        text = (
+            "This is a fairly long sentence that should wrap cleanly for a narrow terminal width.\n"
+            "A) Keep this option on one line\n"
+            "  indented code stays as-is"
+        )
+
+        wrapped = ui.wrap_prose(text, width=42)
+
+        self.assertIn("\n  wrap cleanly for a narrow terminal", wrapped)
+        self.assertIn("A) Keep this option on one line", wrapped)
+        self.assertIn("  indented code stays as-is", wrapped)
+
+    def test_wrap_prose_wraps_prices_but_not_shell_expansions(self) -> None:
+        price_line = "This line mentions $20 but should still wrap cleanly for a narrow terminal."
+        shell_line = "Run echo $PATH after setup to inspect the environment variable."
+
+        wrapped_price = ui.wrap_prose(price_line, width=35)
+        wrapped_shell = ui.wrap_prose(shell_line, width=42)
+
+        self.assertIn("\n  still wrap cleanly for a narrow", wrapped_price)
+        self.assertEqual(wrapped_shell, shell_line)
+
+    def test_prompt_constant_is_ascii_safe(self) -> None:
+        ui.PROMPT.encode("ascii")
 
 
 class CliStorageTests(unittest.TestCase):
@@ -89,7 +127,7 @@ class CliStorageTests(unittest.TestCase):
         self.assertEqual(
             topic.metadata["course_options"],
             {
-                "quiz_after_chapter": False,
+                "quiz_after_chapter": True,
                 "show_progress": True,
                 "review_weak_spots": True,
                 "hands_on_drills": True,
@@ -116,6 +154,78 @@ class CliStorageTests(unittest.TestCase):
         )
         self.assertIn("- overview.txt", prompt)
         self.assertNotIn("Important course overview", prompt)
+
+    def test_import_command_accepts_markdown_and_summarizes_source(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="AI", goal="learn ai"))
+        source = Path(self.home.name) / "lecture.md"
+        source.write_text("# Lecture\n\nSearch algorithms and heuristics.\n", encoding="utf-8")
+        original_call_openai = cli.call_openai
+        calls = []
+
+        def fake_call_openai(model: str, system: str, user: str) -> str:
+            calls.append((model, system, user))
+            return "Summary: heuristic search."
+
+        cli.call_openai = fake_call_openai
+        try:
+            output = capture_stdout(
+                cli.cmd_import,
+                Namespace(topic="ai", file=str(source), model="test-model"),
+            )
+        finally:
+            cli.call_openai = original_call_openai
+
+        prompt = cli.system_prompt(cli.read_topic("ai"))
+
+        self.assertIn("Saved source: lecture.md", output)
+        self.assertIn("Saved source summary: lecture.summary.txt", output)
+        self.assertTrue((cli.topic_context_dir("ai") / "lecture.md").exists())
+        self.assertIn("- lecture.md", prompt)
+        self.assertIn("Summary: heuristic search.", prompt)
+        self.assertEqual(calls[0][1], cli.SOURCE_SUMMARIZER_SYSTEM)
+
+    def test_import_command_warns_when_source_is_truncated(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="AI", goal="learn ai"))
+        source = Path(self.home.name) / "big-notes.txt"
+        source.write_text("x" * (cli.CONTEXT_SUMMARY_CHAR_LIMIT + 1), encoding="utf-8")
+        original_call_openai = cli.call_openai
+
+        cli.call_openai = lambda *_args, **_kwargs: "Summary: clipped."
+        try:
+            output = capture_stdout(
+                cli.cmd_import,
+                Namespace(topic="ai", file=str(source), model="test-model"),
+            )
+        finally:
+            cli.call_openai = original_call_openai
+
+        self.assertIn("Warning: source exceeds", output)
+        self.assertIn("summarizing the first part only", output)
+
+    def test_paste_command_opens_editor_and_summarizes_source(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="AI", goal="learn ai"))
+        original_run = cli.subprocess.run
+        original_call_openai = cli.call_openai
+
+        def fake_run(args, check=False):
+            Path(args[1]).write_text("Lecture pasted from PDF.\n", encoding="utf-8")
+
+        cli.subprocess.run = fake_run
+        cli.call_openai = lambda *_args, **_kwargs: "Summary: pasted lecture."
+        try:
+            output = capture_stdout(
+                cli.cmd_paste,
+                Namespace(topic="ai", name="lecture.md", model="test-model"),
+            )
+        finally:
+            cli.subprocess.run = original_run
+            cli.call_openai = original_call_openai
+
+        prompt = cli.system_prompt(cli.read_topic("ai"))
+
+        self.assertIn("Saved source: lecture.md", output)
+        self.assertTrue((cli.topic_context_dir("ai") / "lecture.md").exists())
+        self.assertIn("Summary: pasted lecture.", prompt)
 
     def test_context_summary_is_included_in_prompt(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="AI", goal="learn ai"))
@@ -160,6 +270,28 @@ class CliStorageTests(unittest.TestCase):
             ["outline-2.txt", "outline.txt"],
         )
 
+    def test_due_command_lists_due_concepts_across_topics(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="AI", goal="learn ai"))
+        call_silent(cli.cmd_new, Namespace(topic="OS", goal="learn os"))
+        for slug, concept, due in [
+            ("ai", "Bayes rule", cli.today()),
+            ("os", "Page tables", "2999-01-01"),
+        ]:
+            path = cli.topic_path(slug)
+            metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+            metadata = dict(metadata)
+            metadata["review_due"] = [
+                {"concept": concept, "due": due, "difficulty": "hard"}
+            ]
+            path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
+
+        output = capture_stdout(cli.cmd_due, Namespace())
+
+        self.assertIn("Bayes rule", output)
+        self.assertIn("ai", output)
+        self.assertNotIn("\t", output)
+        self.assertNotIn("Page tables", output)
+
     def test_delete_topic_removes_context_folder(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="AI", goal="learn ai"))
         cli.write_context_text("ai", "outline", "context")
@@ -168,7 +300,7 @@ class CliStorageTests(unittest.TestCase):
         self.assertTrue(cli.topic_context_dir("ai").exists())
         self.assertTrue(cli.topic_lock_path("ai").exists())
 
-        call_silent(cli.cmd_delete, Namespace(topic="ai", yes=True))
+        call_silent(cli.cmd_delete, Namespace(topic="ai", yes=True, all=False))
 
         self.assertFalse(cli.topic_path("ai").exists())
         self.assertFalse(cli.topic_lock_path("ai").exists())
@@ -391,11 +523,11 @@ class CliStorageTests(unittest.TestCase):
         call_silent(cli.cmd_new, Namespace(topic="Delete Me", goal="temporary"))
 
         with self.assertRaises(cli.OpenLearnError):
-            cli.cmd_delete(Namespace(topic="delete-me", yes=False))
+            cli.cmd_delete(Namespace(topic="delete-me", yes=False, all=False))
 
         self.assertTrue(cli.topic_path("delete-me").exists())
 
-        call_silent(cli.cmd_delete, Namespace(topic="delete-me", yes=True))
+        call_silent(cli.cmd_delete, Namespace(topic="delete-me", yes=True, all=False))
 
         self.assertFalse(cli.topic_path("delete-me").exists())
         self.assertIsNone(cli.get_active_topic())
@@ -404,7 +536,25 @@ class CliStorageTests(unittest.TestCase):
         call_silent(cli.cmd_init, Namespace())
 
         with self.assertRaises(cli.OpenLearnError):
-            cli.cmd_delete(Namespace(topic="missing", yes=True))
+            cli.cmd_delete(Namespace(topic="missing", yes=True, all=False))
+
+    def test_delete_all_removes_topics_with_single_confirmation(self) -> None:
+        call_silent(cli.cmd_init, Namespace())
+        call_silent(cli.cmd_new, Namespace(topic="AI", goal="temporary"))
+        call_silent(cli.cmd_new, Namespace(topic="OS", goal="temporary"))
+        cli.write_context_text("ai", "notes", "context")
+        cli.set_active_topic("os")
+
+        with self.assertRaises(cli.OpenLearnError):
+            cli.cmd_delete(Namespace(topic=None, yes=False, all=True))
+
+        output = capture_stdout(cli.cmd_delete, Namespace(topic=None, yes=True, all=True))
+
+        self.assertIn("Deleted 2 topic(s).", output)
+        self.assertFalse(cli.topic_path("ai").exists())
+        self.assertFalse(cli.topic_path("os").exists())
+        self.assertFalse(cli.topic_data_dir("ai").exists())
+        self.assertIsNone(cli.get_active_topic())
 
 
 class ProviderResponseTests(unittest.TestCase):
@@ -496,6 +646,14 @@ class ProviderResponseTests(unittest.TestCase):
         self.assertEqual(text, "Check: Choose one.\nA) One\nB) Two")
         self.assertEqual(cli.extract_answer_key("Check\n<!-- answer: B -->"), "B")
 
+    def test_sanitize_model_output_hides_plain_correct_answer_line(self) -> None:
+        text = cli.sanitize_model_output(
+            "Check: Choose one.\nA) One\nB) Two\nCorrect answer: A) One"
+        )
+
+        self.assertEqual(text, "Check: Choose one.\nA) One\nB) Two")
+        self.assertEqual(cli.extract_answer_key("Check\nCorrect answer: A) One"), "A")
+
     def test_call_openai_sends_completion_limit(self) -> None:
         previous_key = os.environ.get("OPENAI_API_KEY")
         os.environ["OPENAI_API_KEY"] = "sk-test"
@@ -574,7 +732,7 @@ class ProviderResponseTests(unittest.TestCase):
 
         self.assertIs(payload["stream"], True)
         self.assertEqual(answer, "Hello there")
-        self.assertEqual(output, ["Hello there"])
+        self.assertEqual(output, ["", "Hello there", ""])
 
     def test_call_openai_streaming_sanitizes_before_terminal_output(self) -> None:
         previous_key = os.environ.get("OPENAI_API_KEY")
@@ -608,7 +766,7 @@ class ProviderResponseTests(unittest.TestCase):
             else:
                 os.environ["OPENAI_API_KEY"] = previous_key
 
-        self.assertEqual(output, "Visible.")
+        self.assertEqual(output.strip(), "Visible.")
         self.assertNotIn("system-reminder", output)
 
 
@@ -661,11 +819,12 @@ class InteractiveTests(unittest.TestCase):
         exit_code = cli.run_menu(input_func=iter_input(["q"]), output_func=output.append)
 
         self.assertEqual(exit_code, 0)
-        self.assertIn("== openLearn ==", output)
-        self.assertTrue(any("[ openLearn ]" in line for line in output))
-        self.assertIn("1. New course", output)
-        self.assertNotIn("1. Resume", output)
-        self.assertNotIn("10. REPL", output)
+        clean = [ui.strip_ansi(line) for line in output]
+        self.assertIn("  openLearn", clean)
+        self.assertTrue(any("openlearn" in line for line in clean))
+        self.assertIn("  1  New course", clean)
+        self.assertNotIn("  1  Resume", clean)
+        self.assertNotIn("  10  REPL", clean)
 
     def test_menu_clears_missing_active_topic_and_hides_learning_actions(self) -> None:
         cli.set_active_topic("missing-topic")
@@ -675,9 +834,10 @@ class InteractiveTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertIsNone(cli.get_active_topic())
-        self.assertIn("[ openLearn ] topic: none | progress: not started | focus: not set", output)
-        self.assertIn("1. New course", output)
-        self.assertNotIn("1. Resume", output)
+        clean = [ui.strip_ansi(line) for line in output]
+        self.assertIn("  openlearn  ·  none  ·  not started  ·  not set", clean)
+        self.assertIn("  1  New course", clean)
+        self.assertNotIn("  1  Resume", clean)
         self.assertNotIn("Next step", output)
 
     def test_menu_learning_actions_enter_repl_automatically(self) -> None:
@@ -917,11 +1077,12 @@ class InteractiveTests(unittest.TestCase):
         exit_code = cli.run_menu(input_func=iter_input(["q"]), output_func=output.append)
 
         self.assertEqual(exit_code, 0)
-        self.assertIn("1. Start course", output)
-        self.assertNotIn("1. Resume", output)
-        self.assertNotIn("2. Next step", output)
-        self.assertNotIn("4. Review", output)
-        self.assertNotIn("5. Status", output)
+        clean = [ui.strip_ansi(line) for line in output]
+        self.assertIn("  1  Start course", clean)
+        self.assertNotIn("  1  Resume", clean)
+        self.assertNotIn("  2  Next step", clean)
+        self.assertNotIn("  4  Review", clean)
+        self.assertNotIn("  5  Status", clean)
 
     def test_menu_can_toggle_course_options(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Intro AI", goal="basics"))
@@ -935,7 +1096,7 @@ class InteractiveTests(unittest.TestCase):
         topic = cli.read_topic("intro-ai")
 
         self.assertEqual(exit_code, 0)
-        self.assertTrue(topic.metadata["course_options"]["quiz_after_chapter"])
+        self.assertFalse(topic.metadata["course_options"]["quiz_after_chapter"])
 
     def test_new_course_setup_can_set_advanced_options_before_creation(self) -> None:
         exit_code = call_silent(
@@ -949,7 +1110,7 @@ class InteractiveTests(unittest.TestCase):
         topic = cli.read_topic("vim")
 
         self.assertEqual(exit_code, 0)
-        self.assertTrue(topic.metadata["course_options"]["quiz_after_chapter"])
+        self.assertFalse(topic.metadata["course_options"]["quiz_after_chapter"])
 
     def test_menu_can_paste_context_file(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Intro AI", goal="basics"))
@@ -1015,8 +1176,8 @@ class InteractiveTests(unittest.TestCase):
         calls = []
         original_call_openai = cli.call_openai
 
-        def fake_call_openai(_model: str, _system: str, user: str) -> str:
-            calls.append(user)
+        def fake_call_openai(_model: str, system: str, user: str) -> str:
+            calls.append((system, user))
             if "Create a concise course plan" in user:
                 return "Scope: AI basics\nUnits:\n1. Definitions (2 slides) - Explain AI."
             return (
@@ -1058,7 +1219,10 @@ class InteractiveTests(unittest.TestCase):
         self.assertIn(" - lesson", body)
         self.assertIn("Scope: AI basics", body)
         self.assertIn("What is AI?", body)
-        self.assertIn("college course basics", calls[0])
+        self.assertIn("college course basics", calls[0][1])
+        self.assertIn("Generate course planning or lesson-start material only", calls[0][0])
+        self.assertIn("Generate course planning or lesson-start material only", calls[1][0])
+        self.assertNotIn("Recent session history", calls[0][0])
 
     def test_start_course_blank_revision_keeps_course_unstarted(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Intro AI", goal="basics"))
@@ -1079,6 +1243,44 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertIs(topic.metadata["course_started"], False)
         self.assertNotIn("course_plan", topic.body)
+
+    def test_start_course_trims_first_lesson_before_output_and_save(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Intro AI", goal="basics"))
+        original_call_openai = cli.call_openai
+        output = []
+        long_lesson = (
+            " ".join(f"word{index}" for index in range(225))
+            + "\nCheck: Which option is correct after the trim point?\n"
+            + "A) Raw option\nB) Display option\nC) Hidden option\nD) Other option\n"
+            + "<!-- answer: C -->"
+        )
+
+        def fake_call_openai(_model: str, _system: str, user: str) -> str:
+            if "Create a concise course plan" in user:
+                return "Scope: AI basics\nUnits:\n1. Definitions (1 slide) - Explain AI."
+            return long_lesson
+
+        cli.call_openai = fake_call_openai
+        try:
+            call_silent(
+                cli.start_course,
+                input_func=iter_input(["n", "y"]),
+                output_func=output.append,
+            )
+        finally:
+            cli.call_openai = original_call_openai
+
+        metadata, body = cli.parse_topic(
+            cli.topic_path("intro-ai").read_text(encoding="utf-8")
+        )
+        displayed_lesson = next(line for line in output if line.startswith("word0"))
+
+        self.assertEqual(len(displayed_lesson.split()), 220)
+        self.assertNotIn("word224", displayed_lesson)
+        self.assertNotIn("word224", body)
+        self.assertEqual(metadata["pending_question"]["answer_key"], "C")
+        self.assertIn("Which option is correct after the trim point?", metadata["pending_question"]["question"])
+        self.assertIn("C) Hidden option", metadata["pending_question"]["question"])
 
     def test_start_course_rejecting_outline_requests_changes_then_regenerates(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Intro AI", goal="basics"))
@@ -1119,6 +1321,8 @@ class InteractiveTests(unittest.TestCase):
         topic = cli.read_topic("vim")
         calls = []
         original_call_openai = cli.call_openai
+        original_choice = cli.random.choice
+        choices = iter(["B", "D", "C"])
 
         def fake_call_openai(_model: str, _system: str, user: str) -> str:
             calls.append(user)
@@ -1135,15 +1339,17 @@ class InteractiveTests(unittest.TestCase):
             )
 
         cli.call_openai = fake_call_openai
+        cli.random.choice = lambda _letters: next(choices)
         try:
             cli.run_placement_quiz(
                 topic,
                 "test-model",
-                input_func=iter_input(["A", "A", "A"]),
+                input_func=iter_input(["B", "A", "A"]),
                 output_func=lambda _text: None,
             )
         finally:
             cli.call_openai = original_call_openai
+            cli.random.choice = original_choice
 
         updated = cli.read_topic("vim")
         context = (cli.topic_context_dir("vim") / cli.PLACEMENT_CONTEXT_FILENAME).read_text(
@@ -1160,6 +1366,178 @@ class InteractiveTests(unittest.TestCase):
         self.assertIn("operators", updated.metadata["weak_spots"])
         self.assertIn("Placement quiz result", context)
         self.assertIn("Weak spots: operators, insert mode", context)
+
+    def test_placement_question_retries_when_answer_key_is_missing(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Mac Workflow", goal="learn mac shortcuts"))
+        topic = cli.read_topic("mac-workflow")
+        calls = []
+        original_call_openai = cli.call_openai
+
+        def fake_call_openai(_model: str, _system: str, user: str) -> str:
+            calls.append(user)
+            if len(calls) == 1:
+                return json.dumps(
+                    {
+                        "question": "What does Cmd+C do?",
+                        "concept": "copy shortcut",
+                    }
+                )
+            return json.dumps(
+                {
+                    "question": "What does Cmd+C do?\nA) Paste\nB) Copy\nC) Cut\nD) Undo",
+                    "answer_key": "B",
+                    "concept": "copy shortcut",
+                }
+            )
+
+        cli.call_openai = fake_call_openai
+        original_choice = cli.random.choice
+        cli.random.choice = lambda _letters: "A"
+        try:
+            question = cli.placement_question(topic, "test-model", 1, [])
+        finally:
+            cli.call_openai = original_call_openai
+            cli.random.choice = original_choice
+
+        self.assertEqual(question["answer_key"], "A")
+        self.assertIn("A) Copy", question["question"])
+        self.assertIn("previous response was invalid", calls[1])
+
+    def test_placement_question_retries_when_options_are_single_line(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Mac Workflow", goal="learn mac shortcuts"))
+        topic = cli.read_topic("mac-workflow")
+        calls = []
+        original_call_openai = cli.call_openai
+
+        def fake_call_openai(_model: str, _system: str, user: str) -> str:
+            calls.append(user)
+            if len(calls) == 1:
+                return json.dumps(
+                    {
+                        "question": "What does Cmd+C do? A) Copy B) Paste C) Cut D) Undo",
+                        "answer_key": "A",
+                        "concept": "copy shortcut",
+                    }
+                )
+            return json.dumps(
+                {
+                    "question": "What does Cmd+C do?\nA) Paste\nB) Copy\nC) Cut\nD) Undo",
+                    "answer_key": "B",
+                    "concept": "copy shortcut",
+                }
+            )
+
+        cli.call_openai = fake_call_openai
+        original_choice = cli.random.choice
+        cli.random.choice = lambda _letters: "A"
+        try:
+            question = cli.placement_question(topic, "test-model", 1, [])
+        finally:
+            cli.call_openai = original_call_openai
+            cli.random.choice = original_choice
+
+        self.assertEqual(question["answer_key"], "A")
+        self.assertIn("\nB) Paste", question["question"])
+        self.assertIn("previous response was invalid", calls[1])
+
+    def test_placement_question_rejects_missing_answer_key_after_retry(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Mac Workflow", goal="learn mac shortcuts"))
+        topic = cli.read_topic("mac-workflow")
+        original_call_openai = cli.call_openai
+
+        cli.call_openai = lambda *_args, **_kwargs: json.dumps(
+            {"question": "Which key combination copies text?", "concept": "copy shortcut"}
+        )
+        try:
+            with self.assertRaises(cli.OpenLearnError):
+                cli.placement_question(topic, "test-model", 1, [])
+        finally:
+            cli.call_openai = original_call_openai
+
+    def test_placement_question_rotates_correct_answer_position(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Mac Workflow", goal="learn mac shortcuts"))
+        topic = cli.read_topic("mac-workflow")
+        original_call_openai = cli.call_openai
+        original_choice = cli.random.choice
+
+        cli.call_openai = lambda *_args, **_kwargs: json.dumps(
+            {
+                "question": "What does Cmd+C do?\nA) Copy\nB) Paste\nC) Cut\nD) Undo",
+                "answer_key": "A",
+                "concept": "copy shortcut",
+            }
+        )
+        cli.random.choice = lambda letters: "D"
+        try:
+            question = cli.placement_question(
+                topic,
+                "test-model",
+                3,
+                [{"concept": "window switching"}],
+            )
+        finally:
+            cli.call_openai = original_call_openai
+            cli.random.choice = original_choice
+
+        self.assertEqual(question["answer_key"], "D")
+        self.assertIn("D) Copy", question["question"])
+        self.assertIn("A) Undo", question["question"])
+
+    def test_placement_evaluation_fallback_includes_expected_answer(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Mac Workflow", goal="learn mac shortcuts"))
+        topic = cli.read_topic("mac-workflow")
+        captured = []
+        original_call_openai = cli.call_openai
+
+        def fake_call_openai(_model: str, _system: str, user: str) -> str:
+            captured.append(user)
+            return json.dumps(
+                {
+                    "correct": True,
+                    "concept": "copy shortcut",
+                    "note": "Matched copy.",
+                }
+            )
+
+        cli.call_openai = fake_call_openai
+        try:
+            result = cli.placement_evaluation(
+                topic,
+                "test-model",
+                1,
+                "What does Cmd+C do?\nA) Copy\nB) Paste\nC) Cut\nD) Undo",
+                "It copies the selected text",
+                [],
+                "A",
+                "copy shortcut",
+            )
+        finally:
+            cli.call_openai = original_call_openai
+
+        self.assertIs(result["correct"], True)
+        self.assertIn("Correct choice letter: A", captured[0])
+        self.assertIn("Correct choice text: Copy", captured[0])
+        self.assertIn("free-text answers", captured[0])
+
+    def test_placement_question_prompt_lists_prior_concepts_readably(self) -> None:
+        topic = cli.Topic(
+            slug="mac-workflow",
+            path=Path("mac-workflow.md"),
+            metadata={"topic": "Mac Workflow", "goal": "learn mac shortcuts"},
+            body="# Mac Workflow\n",
+        )
+
+        prompt = cli.placement_question_prompt(
+            topic,
+            2,
+            [
+                {"concept": "Cmd+C copy"},
+                {"concept": "mode switching"},
+            ],
+        )
+
+        self.assertIn("concepts already covered: Cmd+C copy, mode switching", prompt)
+        self.assertNotIn("['Cmd+C copy'", prompt)
 
     def test_course_outline_prompt_includes_placement_context(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
@@ -1196,10 +1574,29 @@ class InteractiveTests(unittest.TestCase):
 
         output = capture_stdout(cli.cmd_status, Namespace(topic="vim"))
 
+        self.assertIn("Unit 2/2 · Slide 1/2", output)
         self.assertIn("Progress: 1.2 Insert mode in Vim (1/2)", output)
         self.assertIn("Known: 0", output)
         self.assertIn("Weak spots: 0", output)
         self.assertIn("Details: use /summary", output)
+
+    def test_status_bar_uses_course_title_not_slug(self) -> None:
+        topic = cli.Topic(
+            slug="mac-workflow",
+            path=Path("mac-workflow.md"),
+            metadata={
+                "topic": "Mac Workflow",
+                "current_focus": "Copy and paste",
+            },
+            body="# Mac Workflow\n",
+        )
+        output = []
+
+        cli.print_status_bar(topic, output.append)
+
+        clean = ui.strip_ansi(output[0])
+        self.assertIn("Mac Workflow", clean)
+        self.assertNotIn("mac-workflow", clean)
 
     def test_repl_plain_text_asks_active_topic_and_appends_session(self) -> None:
         call_silent(cli.cmd_init, Namespace())
@@ -1226,6 +1623,31 @@ class InteractiveTests(unittest.TestCase):
         topic = cli.read_topic("vim")
         self.assertIn("How do I move?", topic.body)
         self.assertIn("Use h j k l for movement.", topic.body)
+
+    def test_repl_prints_status_before_ai_response(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
+        original_ask_topic = cli.ask_topic
+        output = []
+
+        def fake_ask_topic(*_args, **_kwargs) -> str:
+            output.append("ASK_TOPIC_CALLED")
+            return "Tutor answer"
+
+        cli.ask_topic = fake_ask_topic
+        try:
+            exit_code = call_silent(
+                cli.run_repl,
+                input_func=iter_input(["question", "/quit"]),
+                output_func=output.append,
+            )
+        finally:
+            cli.ask_topic = original_ask_topic
+
+        self.assertEqual(exit_code, 0)
+        clean = [ui.strip_ansi(line) for line in output]
+        status_index = next(index for index, line in enumerate(clean) if "openlearn" in line and "Vim" in line)
+        ask_index = output.index("ASK_TOPIC_CALLED")
+        self.assertLess(status_index, ask_index)
 
     def test_model_answer_saves_pending_multiple_choice_key(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
@@ -1258,15 +1680,83 @@ class InteractiveTests(unittest.TestCase):
 
         cli.handle_repl_command("help", output_func=output.append)
 
-        self.assertTrue(any("/resume" in line for line in output))
-        self.assertTrue(any("/options" in line for line in output))
-        self.assertTrue(any("/scope" in line for line in output))
+        help_text = "\n".join(output)
+        self.assertIn("/n", help_text)
+        self.assertIn("get the next lesson", help_text)
+        self.assertIn("/r", help_text)
+        self.assertIn("/done", help_text)
+        self.assertIn("confirm your answer and advance", help_text)
+        self.assertIn("/status", help_text)
+        self.assertIn("/q", help_text)
+        self.assertNotIn("/scope", help_text)
+        output.clear()
+        cli.handle_repl_command("help --all", output_func=output.append)
+        full_help = "\n".join(output)
+        self.assertIn("/options", full_help)
+        self.assertIn("/scope", full_help)
         with self.assertRaises(cli.OpenLearnError):
             cli.handle_repl_command("missing")
+
+    def test_repl_prompt_switches_to_answer_when_question_is_pending(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
+        path = cli.topic_path("vim")
+        metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+        metadata = dict(metadata)
+        metadata["pending_question"] = {
+            "question": "Check: Which key moves down?\nA) h\nB) j\nC) k\nD) l",
+            "answer_key": "B",
+        }
+        path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
+        prompts = []
+
+        def input_func(prompt: str = "") -> str:
+            prompts.append(prompt)
+            return "/q"
+
+        exit_code = call_silent(
+            cli.run_repl,
+            input_func=input_func,
+            output_func=lambda _text: None,
+        )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(prompts[0], "Answer> ")
+
+    def test_repl_prompt_uses_openlearn_when_no_question_is_pending(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
+        prompts = []
+
+        def input_func(prompt: str = "") -> str:
+            prompts.append(prompt)
+            return "/q"
+
+        exit_code = call_silent(
+            cli.run_repl,
+            input_func=input_func,
+            output_func=lambda _text: None,
+        )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(prompts[0], "openlearn> ")
 
     def test_repl_reports_malformed_command_quotes_as_openlearn_error(self) -> None:
         with self.assertRaises(cli.OpenLearnError):
             cli.handle_repl_command('new "unfinished')
+
+    def test_repl_prints_status_bar_after_command_error(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
+        output = []
+
+        exit_code = call_silent(
+            cli.run_repl,
+            input_func=iter_input(["/done", "/q"]),
+            output_func=output.append,
+        )
+
+        self.assertEqual(exit_code, 0)
+        clean = [ui.strip_ansi(line) for line in output]
+        self.assertTrue(any("✗ no saved course plan" in line for line in clean))
+        self.assertTrue(any("openlearn" in line and "Vim" in line for line in clean))
 
     def test_repl_progress_command_sets_position(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
@@ -1288,6 +1778,186 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(topic.metadata["current_focus"], "Insert mode")
         self.assertIn("Progress: 1.2 Insert mode (1/2)", output)
 
+    def test_repl_done_advances_slide_and_rolls_to_next_unit(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
+        path = cli.topic_path("vim")
+        metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+        metadata = dict(metadata)
+        metadata["current_unit"] = 1
+        metadata["current_slide"] = 2
+        metadata["course_units"] = [
+            {"unit": 1, "chapter": "1.1", "title": "Modes", "slide_count": 2},
+            {"unit": 2, "chapter": "1.2", "title": "Search", "slide_count": 3},
+        ]
+        path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
+        output = []
+        calls = []
+        original_cmd_next = cli.cmd_next
+
+        original_cmd_chapter_quiz = cli.cmd_chapter_quiz
+
+        def fake_cmd_next(args):
+            calls.append(("next", args))
+            output.append("NEXT_CALLED")
+            return 0
+
+        def fake_cmd_chapter_quiz(args):
+            calls.append(("quiz", args))
+            output.append("QUIZ_CALLED")
+            return 0
+
+        cli.cmd_next = fake_cmd_next
+        cli.cmd_chapter_quiz = fake_cmd_chapter_quiz
+        try:
+            cli.handle_repl_command("done", output_func=output.append)
+        finally:
+            cli.cmd_next = original_cmd_next
+            cli.cmd_chapter_quiz = original_cmd_chapter_quiz
+
+        topic = cli.read_topic("vim")
+        self.assertEqual(topic.metadata["current_unit"], 2)
+        self.assertEqual(topic.metadata["current_slide"], 1)
+        self.assertEqual(topic.metadata["current_focus"], "Search")
+        self.assertIn("Advanced to Unit 2/2 · Slide 1/3", output)
+        self.assertIn("Progress: 1.2 Search (1/3)", output)
+        self.assertIn(calls[0][0], {"next", "quiz"})
+        self.assertEqual(calls[0][1].topic, "vim")
+        advanced_index = output.index("Advanced to Unit 2/2 · Slide 1/3")
+        loading_index = output.index("Loading chapter quiz...")
+        quiz_index = output.index("QUIZ_CALLED")
+        self.assertLess(advanced_index, loading_index)
+        self.assertLess(loading_index, quiz_index)
+
+    def test_repl_done_persists_completed_slide_content(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
+        path = cli.topic_path("vim")
+        metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+        metadata = dict(metadata)
+        metadata["current_unit"] = 1
+        metadata["current_slide"] = 1
+        metadata["course_units"] = [
+            {"unit": 1, "chapter": "1.1", "title": "Modes", "slide_count": 2},
+        ]
+        metadata["slide_contents"] = {
+            "9:9": {
+                "unit": 9,
+                "slide": 9,
+                "saved": cli.today(),
+                "content": "Stale lesson from old scope.",
+            }
+        }
+        path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
+        topic = cli.read_topic("vim")
+        cli.append_session(
+            topic,
+            "next",
+            "Teach slide 1",
+            "Lesson: Normal mode runs commands.\nExample: Press j to move down.\nCheck: What does j do?",
+        )
+        output = []
+        original_cmd_next = cli.cmd_next
+
+        cli.cmd_next = lambda _args: 0
+        try:
+            cli.handle_repl_command("done", output_func=output.append)
+        finally:
+            cli.cmd_next = original_cmd_next
+
+        updated = cli.read_topic("vim")
+        saved = updated.metadata["slide_contents"]["1:1"]
+        self.assertEqual(updated.metadata["current_slide"], 2)
+        self.assertNotIn("9:9", updated.metadata["slide_contents"])
+        self.assertIn("Normal mode runs commands", saved["content"])
+        self.assertIn("Previous completed slide content Unit 1 Slide 1", cli.current_lesson_prompt(updated))
+
+    def test_repl_done_blocks_needs_work_without_force(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
+        path = cli.topic_path("vim")
+        metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+        metadata = dict(metadata)
+        metadata["current_unit"] = 1
+        metadata["current_slide"] = 1
+        metadata["last_answer_status"] = "needs_work"
+        metadata["review_session_active"] = True
+        metadata["course_units"] = [
+            {"unit": 1, "chapter": "1.1", "title": "Modes", "slide_count": 2},
+        ]
+        path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
+        output = []
+        original_cmd_next = cli.cmd_next
+
+        cli.cmd_next = lambda _args: 0
+        try:
+            cli.handle_repl_command("done", output_func=output.append)
+        finally:
+            cli.cmd_next = original_cmd_next
+
+        topic = cli.read_topic("vim")
+        self.assertEqual(topic.metadata["current_slide"], 1)
+        self.assertIs(topic.metadata["review_session_active"], False)
+        self.assertIn("Last answer is not fully clear", output[0])
+
+        original_cmd_next = cli.cmd_next
+        cli.cmd_next = lambda _args: 0
+        try:
+            cli.handle_repl_command("done --force", output_func=output.append)
+        finally:
+            cli.cmd_next = original_cmd_next
+        topic = cli.read_topic("vim")
+        self.assertEqual(topic.metadata["current_slide"], 2)
+
+    def test_repl_done_blocks_partial_without_force(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
+        path = cli.topic_path("vim")
+        metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+        metadata = dict(metadata)
+        metadata["current_unit"] = 1
+        metadata["current_slide"] = 1
+        metadata["last_answer_status"] = "partial"
+        metadata["course_units"] = [
+            {"unit": 1, "chapter": "1.1", "title": "Modes", "slide_count": 2},
+        ]
+        path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
+        output = []
+        original_cmd_next = cli.cmd_next
+
+        cli.cmd_next = lambda _args: 0
+        try:
+            cli.handle_repl_command("done", output_func=output.append)
+        finally:
+            cli.cmd_next = original_cmd_next
+
+        topic = cli.read_topic("vim")
+        self.assertEqual(topic.metadata["current_slide"], 1)
+        self.assertIn("Last answer is not fully clear", output[0])
+
+    def test_repl_done_advances_after_correct_answer(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
+        path = cli.topic_path("vim")
+        metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+        metadata = dict(metadata)
+        metadata["current_unit"] = 1
+        metadata["current_slide"] = 1
+        metadata["last_answer_status"] = "correct"
+        metadata["review_session_active"] = True
+        metadata["course_units"] = [
+            {"unit": 1, "chapter": "1.1", "title": "Modes", "slide_count": 2},
+        ]
+        path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
+        output = []
+        original_cmd_next = cli.cmd_next
+
+        cli.cmd_next = lambda _args: 0
+        try:
+            cli.handle_repl_command("done", output_func=output.append)
+        finally:
+            cli.cmd_next = original_cmd_next
+
+        topic = cli.read_topic("vim")
+        self.assertEqual(topic.metadata["current_slide"], 2)
+        self.assertIs(topic.metadata["review_session_active"], False)
+        self.assertIn("Course complete: Unit 1/1 · Slide 2/2", output)
+
     def test_repl_plan_command_prints_course_units(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
         path = cli.topic_path("vim")
@@ -1301,7 +1971,8 @@ class InteractiveTests(unittest.TestCase):
 
         cli.handle_repl_command("plan", output_func=output.append)
 
-        self.assertIn("== Course plan ==", output)
+        clean = [ui.strip_ansi(line) for line in output]
+        self.assertIn("  Course plan", clean)
         self.assertIn("1. 1.1 Modes (2 slide(s))", output)
 
     def test_summary_command_prints_learning_state(self) -> None:
@@ -1324,7 +1995,8 @@ class InteractiveTests(unittest.TestCase):
 
         output = capture_stdout(cli.cmd_summary, Namespace(topic="vim"))
 
-        self.assertIn("== Course summary ==", output)
+        output = ui.strip_ansi(output)
+        self.assertIn("  Course summary", output)
         self.assertIn("Course: Vim", output)
         self.assertIn("Chapters completed: 1/1", output)
         self.assertIn("Last answer: partial", output)
@@ -1334,10 +2006,15 @@ class InteractiveTests(unittest.TestCase):
     def test_scope_change_confirms_and_updates_course_units(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
         original_call_openai = cli.call_openai
+        calls = []
 
-        cli.call_openai = lambda *_args, **_kwargs: (
-            "Scope: Practical Vim\nUnits:\n1.1 Modes (2 slides) - Learn modes.\n1.2 Search (1 slide) - Use slash search."
-        )
+        def fake_call_openai(_model: str, system: str, user: str) -> str:
+            calls.append((system, user))
+            return (
+                "Scope: Practical Vim\nUnits:\n1.1 Modes (2 slides) - Learn modes.\n1.2 Search (1 slide) - Use slash search."
+            )
+
+        cli.call_openai = fake_call_openai
         try:
             cli.handle_repl_command(
                 "scope add search",
@@ -1350,9 +2027,32 @@ class InteractiveTests(unittest.TestCase):
         topic = cli.read_topic("vim")
         self.assertEqual(topic.metadata["course_units"][1]["title"], "Search")
         self.assertIn(" - scope_change", topic.body)
+        self.assertIn("Generate course planning or lesson-start material only", calls[0][0])
+        self.assertIn("Current plan:", calls[0][0])
 
 
 class PromptInstructionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.home = tempfile.TemporaryDirectory()
+        self.previous_env = {
+            name: os.environ.get(name)
+            for name in ("OPENLEARN_HOME", "OPENLEARN_MODEL", "OPENLEARN_BASE_URL", "OPENAI_API_KEY")
+        }
+        os.environ["OPENLEARN_HOME"] = self.home.name
+        os.environ.pop("OPENLEARN_MODEL", None)
+        os.environ.pop("OPENLEARN_BASE_URL", None)
+        os.environ.pop("OPENAI_API_KEY", None)
+        cli._CONFIG_CACHE = None
+
+    def tearDown(self) -> None:
+        for name, value in self.previous_env.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+        cli._CONFIG_CACHE = None
+        self.home.cleanup()
+
     def test_resume_prompt_requests_natural_tutor_style(self) -> None:
         captured = []
         original_call_openai = cli.call_openai
@@ -1374,15 +2074,18 @@ class PromptInstructionTests(unittest.TestCase):
             original_read_topic = cli.read_topic
             original_resolve_topic_slug = cli.resolve_topic_slug
             original_set_active_topic = cli.set_active_topic
+            original_set_review_session_active = cli.set_review_session_active
             cli.read_topic = lambda _slug: topic
             cli.resolve_topic_slug = lambda _value: "demo"
             cli.set_active_topic = lambda _slug: None
+            cli.set_review_session_active = lambda *_args, **_kwargs: None
             try:
                 call_silent(cli.cmd_resume, Namespace(topic=None, model=None))
             finally:
                 cli.read_topic = original_read_topic
                 cli.resolve_topic_slug = original_resolve_topic_slug
                 cli.set_active_topic = original_set_active_topic
+                cli.set_review_session_active = original_set_review_session_active
         finally:
             cli.call_openai = original_call_openai
             cli.append_session = original_append_session
@@ -1396,7 +2099,25 @@ class PromptInstructionTests(unittest.TestCase):
         topic = cli.Topic(
             slug="demo",
             path=Path("demo.md"),
-            metadata={"topic": "Demo", "model": "test-model"},
+            metadata={
+                "topic": "Demo",
+                "goal": "Learn Vim workflows",
+                "model": "test-model",
+                "current_unit": 2,
+                "current_slide": 1,
+                "course_units": [
+                    {"unit": 1, "chapter": "1.1", "title": "Modes", "slide_count": 2},
+                    {"unit": 2, "chapter": "1.2", "title": "Search with fzf", "slide_count": 3},
+                ],
+                "slide_contents": {
+                    "1:2": {
+                        "unit": 1,
+                        "slide": 2,
+                        "saved": cli.today(),
+                        "content": "Lesson: mode switching lets you leave insert mode.",
+                    }
+                },
+            },
             body="# Demo\n",
         )
         original_call_openai = cli.call_openai
@@ -1404,6 +2125,7 @@ class PromptInstructionTests(unittest.TestCase):
         original_read_topic = cli.read_topic
         original_resolve_topic_slug = cli.resolve_topic_slug
         original_set_active_topic = cli.set_active_topic
+        original_set_review_session_active = cli.set_review_session_active
 
         def fake_call_openai(model: str, system: str, user: str) -> str:
             captured.append(user)
@@ -1414,6 +2136,7 @@ class PromptInstructionTests(unittest.TestCase):
         cli.read_topic = lambda _slug: topic
         cli.resolve_topic_slug = lambda _value: "demo"
         cli.set_active_topic = lambda _slug: None
+        cli.set_review_session_active = lambda *_args, **_kwargs: None
         try:
             call_silent(cli.cmd_next, Namespace(topic=None, model=None))
         finally:
@@ -1422,23 +2145,178 @@ class PromptInstructionTests(unittest.TestCase):
             cli.read_topic = original_read_topic
             cli.resolve_topic_slug = original_resolve_topic_slug
             cli.set_active_topic = original_set_active_topic
+            cli.set_review_session_active = original_set_review_session_active
 
-        self.assertIn("Sound like a human tutor", captured[0])
+        self.assertIn("Use exactly this structure: Lesson, Example, Check", captured[0])
         self.assertIn("Teach one small idea", captured[0])
-        self.assertIn("Ask a question only if it tests", captured[0])
+        self.assertIn("one concrete example or mini-drill", captured[0])
+        self.assertIn("type /done", captured[0])
+        self.assertIn("Structured lesson:", captured[0])
+        self.assertIn("Unit 2/2 · Slide 1/3", captured[0])
+        self.assertIn("Unit: 1.2 Search with fzf", captured[0])
+        self.assertIn("Course goal: Learn Vim workflows", captured[0])
+        self.assertIn("Previous completed slide content Unit 1 Slide 2", captured[0])
+        self.assertIn("mode switching", captured[0])
+
+    def test_resume_updates_metadata_for_unresolved_answer_but_next_does_not(self) -> None:
+        calls = []
+        topic = cli.Topic(
+            slug="demo",
+            path=Path("demo.md"),
+            metadata={"topic": "Demo", "model": "test-model", "last_answer_status": "partial"},
+            body=textwrap.dedent(
+                """
+                # Demo
+
+                ## Session Log
+
+                ### 2026-01-01 10:00 UTC - chat
+
+                **Prompt**
+
+                I think normal mode inserts text.
+
+                **Response**
+
+                Not quite. Normal mode runs commands.
+                """
+            ),
+        )
+        original_call_openai = cli.call_openai
+        original_append_session = cli.append_session
+        original_update_learning_metadata = cli.update_learning_metadata
+        original_read_topic = cli.read_topic
+        original_resolve_topic_slug = cli.resolve_topic_slug
+        original_set_active_topic = cli.set_active_topic
+        original_set_review_session_active = cli.set_review_session_active
+
+        cli.call_openai = lambda *_args, **_kwargs: "Tutor answer"
+        cli.append_session = lambda *_args, **_kwargs: None
+        cli.update_learning_metadata = lambda *args, **kwargs: calls.append((args, kwargs))
+        cli.read_topic = lambda _slug: topic
+        cli.resolve_topic_slug = lambda _value: "demo"
+        cli.set_active_topic = lambda _slug: None
+        cli.set_review_session_active = lambda *_args, **_kwargs: None
+        try:
+            call_silent(cli.cmd_resume, Namespace(topic=None, model=None))
+            call_silent(cli.cmd_next, Namespace(topic=None, model=None))
+        finally:
+            cli.call_openai = original_call_openai
+            cli.append_session = original_append_session
+            cli.update_learning_metadata = original_update_learning_metadata
+            cli.read_topic = original_read_topic
+            cli.resolve_topic_slug = original_resolve_topic_slug
+            cli.set_active_topic = original_set_active_topic
+            cli.set_review_session_active = original_set_review_session_active
+
+        self.assertEqual(len(calls), 1)
+        self.assertIs(calls[0][0][0], topic)
+        self.assertEqual(calls[0][0][1], "I think normal mode inserts text.")
+        self.assertEqual(calls[0][0][2], "Tutor answer")
+        self.assertEqual(calls[0][0][3], "test-model")
+
+    def test_resume_skips_metadata_update_when_last_answer_is_not_unresolved(self) -> None:
+        calls = []
+        topic = cli.Topic(
+            slug="demo",
+            path=Path("demo.md"),
+            metadata={"topic": "Demo", "model": "test-model", "last_answer_status": "correct"},
+            body=textwrap.dedent(
+                """
+                # Demo
+
+                ## Session Log
+
+                ### 2026-01-01 10:00 UTC - chat
+
+                **Prompt**
+
+                I know normal mode runs commands.
+
+                **Response**
+
+                Correct.
+                """
+            ),
+        )
+        original_call_openai = cli.call_openai
+        original_append_session = cli.append_session
+        original_update_learning_metadata = cli.update_learning_metadata
+        original_read_topic = cli.read_topic
+        original_resolve_topic_slug = cli.resolve_topic_slug
+        original_set_active_topic = cli.set_active_topic
+        original_set_review_session_active = cli.set_review_session_active
+
+        cli.call_openai = lambda *_args, **_kwargs: "Fresh lesson content"
+        cli.append_session = lambda *_args, **_kwargs: None
+        cli.update_learning_metadata = lambda *args, **kwargs: calls.append((args, kwargs))
+        cli.read_topic = lambda _slug: topic
+        cli.resolve_topic_slug = lambda _value: "demo"
+        cli.set_active_topic = lambda _slug: None
+        cli.set_review_session_active = lambda *_args, **_kwargs: None
+        try:
+            call_silent(cli.cmd_resume, Namespace(topic=None, model=None))
+        finally:
+            cli.call_openai = original_call_openai
+            cli.append_session = original_append_session
+            cli.update_learning_metadata = original_update_learning_metadata
+            cli.read_topic = original_read_topic
+            cli.resolve_topic_slug = original_resolve_topic_slug
+            cli.set_active_topic = original_set_active_topic
+            cli.set_review_session_active = original_set_review_session_active
+
+        self.assertEqual(calls, [])
+
+    def test_chat_answer_after_review_marks_metadata_update_as_review_session(self) -> None:
+        calls = []
+        original_call_openai = cli.call_openai
+        original_update_learning_metadata = cli.update_learning_metadata
+
+        cli.call_openai = lambda *_args, **_kwargs: "Correct."
+
+        def fake_update(*args, **kwargs):
+            calls.append((args, kwargs))
+
+        cli.update_learning_metadata = fake_update
+        try:
+            call_silent(cli.cmd_new, Namespace(topic="AI", goal="learn ai"))
+            call_silent(cli.cmd_review, Namespace(topic="ai", model=None))
+            call_silent(
+                cli.cmd_chat,
+                Namespace(topic="ai", prompt="Bayes rule updates priors.", model=None),
+            )
+            call_silent(
+                cli.cmd_chat,
+                Namespace(topic="ai", prompt="The denominator normalizes it.", model=None),
+            )
+        finally:
+            cli.call_openai = original_call_openai
+            cli.update_learning_metadata = original_update_learning_metadata
+
+        self.assertEqual(len(calls), 2)
+        self.assertIs(calls[0][1]["is_review_session"], True)
+        self.assertIs(calls[1][1]["is_review_session"], True)
 
     def test_review_prompt_does_not_include_answer_key(self) -> None:
         captured = []
         topic = cli.Topic(
             slug="demo",
             path=Path("demo.md"),
-            metadata={"topic": "Demo", "model": "test-model"},
+            metadata={
+                "topic": "Demo",
+                "model": "test-model",
+                "review_due": [
+                    {"concept": "due concept", "due": cli.today(), "difficulty": "hard"},
+                    {"concept": "future concept", "due": "2999-01-01", "difficulty": "easy"},
+                ],
+            },
             body="# Demo\n",
         )
         original_call_openai = cli.call_openai
         original_append_session = cli.append_session
         original_read_topic = cli.read_topic
         original_set_active_topic = cli.set_active_topic
+        original_set_review_session_active = cli.set_review_session_active
 
         def fake_call_openai(model: str, system: str, user: str) -> str:
             captured.append(user)
@@ -1448,6 +2326,7 @@ class PromptInstructionTests(unittest.TestCase):
         cli.append_session = lambda *_args, **_kwargs: None
         cli.read_topic = lambda _slug: topic
         cli.set_active_topic = lambda _slug: None
+        cli.set_review_session_active = lambda *_args, **_kwargs: None
         try:
             call_silent(cli.cmd_review, Namespace(topic="demo", model=None))
         finally:
@@ -1455,9 +2334,12 @@ class PromptInstructionTests(unittest.TestCase):
             cli.append_session = original_append_session
             cli.read_topic = original_read_topic
             cli.set_active_topic = original_set_active_topic
+            cli.set_review_session_active = original_set_review_session_active
 
         self.assertIn("no answer key", captured[0])
         self.assertIn("wait for the learner to answer", captured[0])
+        self.assertIn("due concept", captured[0])
+        self.assertNotIn("future concept", captured[0])
         self.assertNotIn("answer key at the end", captured[0])
 
     def test_learning_metadata_update_merges_known_and_weak_spots(self) -> None:
@@ -1466,15 +2348,20 @@ class PromptInstructionTests(unittest.TestCase):
         os.environ["OPENLEARN_HOME"] = home.name
         cli._CONFIG_CACHE = None
         original_call_openai = cli.call_openai
+        calls = []
 
-        cli.call_openai = lambda *_args, **_kwargs: json.dumps(
-            {
-                "known_add": ["normal mode", "normal mode"],
-                "weak_spots_add": ["insert mode", "normal mode"],
-                "review_due_add": ["mode switching", "normal mode"],
-                "current_focus": "Vim modes",
-            }
-        )
+        def fake_call_openai(model: str, system: str, user: str) -> str:
+            calls.append((model, system, user))
+            return json.dumps(
+                {
+                    "known_add": ["normal mode", "normal mode"],
+                    "weak_spots_add": ["insert mode", "normal mode"],
+                    "review_due_add": ["mode switching", "normal mode"],
+                    "current_focus": "Vim modes",
+                }
+            )
+
+        cli.call_openai = fake_call_openai
         try:
             call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
             topic = cli.read_topic("vim")
@@ -1496,9 +2383,95 @@ class PromptInstructionTests(unittest.TestCase):
 
         self.assertEqual(updated.metadata["known"], ["normal mode"])
         self.assertEqual(updated.metadata["weak_spots"], ["insert mode"])
-        self.assertEqual(updated.metadata["review_due"], ["mode switching"])
+        self.assertEqual(
+            updated.metadata["review_due"],
+            [{"concept": "mode switching", "due": cli.today(), "difficulty": "hard"}],
+        )
         self.assertEqual(updated.metadata["current_focus"], "Vim modes")
         self.assertEqual(updated.metadata["last_answer_status"], "")
+        self.assertEqual(calls[0][1], cli.METADATA_EXTRACTOR_SYSTEM)
+        self.assertIn("Current metadata JSON:", calls[0][2])
+        self.assertNotIn("- current_unit:", calls[0][2])
+        self.assertNotIn("- current_slide:", calls[0][2])
+        self.assertNotIn("Teaching style:", calls[0][1])
+
+    def test_learning_metadata_reschedules_review_by_difficulty(self) -> None:
+        home = tempfile.TemporaryDirectory()
+        previous_home = os.environ.get("OPENLEARN_HOME")
+        os.environ["OPENLEARN_HOME"] = home.name
+        cli._CONFIG_CACHE = None
+        original_call_openai = cli.call_openai
+        hard_due = (date.fromisoformat(cli.today()) + timedelta(days=2)).isoformat()
+
+        cli.call_openai = lambda *_args, **_kwargs: json.dumps(
+            {
+                "reviewed_concepts": ["A* admissibility"],
+                "review_difficulty": "hard",
+                "last_answer_status": "partial",
+            }
+        )
+        try:
+            call_silent(cli.cmd_new, Namespace(topic="AI", goal="learn ai"))
+            path = cli.topic_path("ai")
+            metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+            metadata = dict(metadata)
+            metadata["review_due"] = [
+                {"concept": "A* admissibility", "due": cli.today(), "difficulty": "missed"}
+            ]
+            path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
+
+            cli.update_learning_metadata(
+                cli.read_topic("ai"),
+                "I mixed up admissible and consistent",
+                "Close, but not quite.",
+                "test-model",
+                is_review_session=True,
+            )
+            updated = cli.read_topic("ai")
+        finally:
+            cli.call_openai = original_call_openai
+            if previous_home is None:
+                os.environ.pop("OPENLEARN_HOME", None)
+            else:
+                os.environ["OPENLEARN_HOME"] = previous_home
+            cli._CONFIG_CACHE = None
+            home.cleanup()
+
+        self.assertEqual(
+            updated.metadata["review_due"],
+            [{"concept": "A* admissibility", "due": hard_due, "difficulty": "hard"}],
+        )
+
+    def test_learning_metadata_does_not_schedule_lesson_answer_by_status(self) -> None:
+        home = tempfile.TemporaryDirectory()
+        previous_home = os.environ.get("OPENLEARN_HOME")
+        os.environ["OPENLEARN_HOME"] = home.name
+        cli._CONFIG_CACHE = None
+        original_call_openai = cli.call_openai
+
+        cli.call_openai = lambda *_args, **_kwargs: json.dumps(
+            {"last_answer_status": "correct", "known_add": ["fork exec"]}
+        )
+        try:
+            call_silent(cli.cmd_new, Namespace(topic="OS", goal="learn os"))
+            cli.update_learning_metadata(
+                cli.read_topic("os"),
+                "fork makes a child process",
+                "Correct.",
+                "test-model",
+            )
+            updated = cli.read_topic("os")
+        finally:
+            cli.call_openai = original_call_openai
+            if previous_home is None:
+                os.environ.pop("OPENLEARN_HOME", None)
+            else:
+                os.environ["OPENLEARN_HOME"] = previous_home
+            cli._CONFIG_CACHE = None
+            home.cleanup()
+
+        self.assertEqual(updated.metadata["known"], ["fork exec"])
+        self.assertEqual(updated.metadata["review_due"], [])
 
     def test_learning_metadata_update_stores_answer_status(self) -> None:
         home = tempfile.TemporaryDirectory()
@@ -1602,19 +2575,64 @@ class PromptInstructionTests(unittest.TestCase):
         self.assertEqual(updated.metadata["last_answer_status"], "correct")
         self.assertNotIn("pending_question", updated.metadata)
 
+    def test_pending_question_stays_until_answer_is_correct(self) -> None:
+        home = tempfile.TemporaryDirectory()
+        previous_home = os.environ.get("OPENLEARN_HOME")
+        os.environ["OPENLEARN_HOME"] = home.name
+        cli._CONFIG_CACHE = None
+        original_call_openai = cli.call_openai
+
+        cli.call_openai = lambda *_args, **_kwargs: json.dumps(
+            {"last_answer_status": "needs_work", "weak_spots_add": ["motions"]}
+        )
+        try:
+            call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
+            path = cli.topic_path("vim")
+            metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+            metadata = dict(metadata)
+            metadata["pending_question"] = {
+                "kind": "multiple_choice",
+                "answer_key": "C",
+                "question": "Which key moves down?\nA) h\nB) k\nC) j\nD) l",
+                "created": cli.today(),
+            }
+            path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
+
+            cli.update_learning_metadata(cli.read_topic("vim"), "a", "Not quite", "test-model")
+            updated = cli.read_topic("vim")
+        finally:
+            cli.call_openai = original_call_openai
+            if previous_home is None:
+                os.environ.pop("OPENLEARN_HOME", None)
+            else:
+                os.environ["OPENLEARN_HOME"] = previous_home
+            cli._CONFIG_CACHE = None
+            home.cleanup()
+
+        self.assertEqual(updated.metadata["last_answer_status"], "needs_work")
+        self.assertIn("pending_question", updated.metadata)
+        self.assertIn("Which key moves down?", updated.metadata["pending_question"]["question"])
+
     def test_known_and_weak_spots_are_deduped_by_normalized_concept(self) -> None:
         metadata = {
             "known": ["Mode switching"],
             "weak_spots": ["mode-switching", "insert mode"],
-            "review_due": ["Mode switching"],
+            "review_due": [
+                "Mode switching",
+                {"concept": "Mode switching", "due": cli.today(), "difficulty": "easy"},
+                {"concept": "insert mode", "due": cli.today(), "difficulty": "hard"},
+            ],
         }
 
         cli.remove_known_from_review_lists(metadata)
 
         self.assertEqual(metadata["weak_spots"], ["insert mode"])
-        self.assertEqual(metadata["review_due"], [])
+        self.assertEqual(
+            metadata["review_due"],
+            [{"concept": "insert mode", "due": cli.today(), "difficulty": "hard"}],
+        )
 
-    def test_learning_metadata_update_advances_course_position(self) -> None:
+    def test_learning_metadata_update_does_not_advance_course_position(self) -> None:
         home = tempfile.TemporaryDirectory()
         previous_home = os.environ.get("OPENLEARN_HOME")
         os.environ["OPENLEARN_HOME"] = home.name
@@ -1658,10 +2676,52 @@ class PromptInstructionTests(unittest.TestCase):
             cli._CONFIG_CACHE = None
             home.cleanup()
 
-        self.assertEqual(updated.metadata["current_unit"], 2)
-        self.assertEqual(updated.metadata["current_slide"], 1)
+        self.assertEqual(updated.metadata["current_unit"], 1)
+        self.assertEqual(updated.metadata["current_slide"], 2)
         self.assertEqual(updated.metadata["current_focus"], "Saving files")
-        self.assertEqual(cli.topic_progress_line(updated), "Progress: 1.2 Saving files (1/1)")
+        self.assertEqual(cli.topic_progress_line(updated), "Progress: 1.1 Insert mode (2/2)")
+
+    def test_learning_metadata_ignores_model_course_position(self) -> None:
+        home = tempfile.TemporaryDirectory()
+        previous_home = os.environ.get("OPENLEARN_HOME")
+        os.environ["OPENLEARN_HOME"] = home.name
+        cli._CONFIG_CACHE = None
+        original_call_openai = cli.call_openai
+
+        cli.call_openai = lambda *_args, **_kwargs: json.dumps(
+            {"last_answer_status": "correct", "current_unit": 6, "current_slide": 1}
+        )
+        try:
+            call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
+            path = cli.topic_path("vim")
+            metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+            metadata = dict(metadata)
+            metadata["course_units"] = [
+                {"unit": 1, "chapter": "1.1", "title": "Modes", "slide_count": 2},
+                {"unit": 2, "chapter": "1.2", "title": "Saving files", "slide_count": 1},
+            ]
+            metadata["current_unit"] = 1
+            metadata["current_slide"] = 1
+            path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
+
+            cli.update_learning_metadata(
+                cli.read_topic("vim"),
+                "I understand this one",
+                "Correct.",
+                "test-model",
+            )
+            updated = cli.read_topic("vim")
+        finally:
+            cli.call_openai = original_call_openai
+            if previous_home is None:
+                os.environ.pop("OPENLEARN_HOME", None)
+            else:
+                os.environ["OPENLEARN_HOME"] = previous_home
+            cli._CONFIG_CACHE = None
+            home.cleanup()
+
+        self.assertEqual(updated.metadata["current_unit"], 1)
+        self.assertEqual(updated.metadata["current_slide"], 1)
 
     def test_learning_metadata_sets_pending_quiz_after_completed_chapter(self) -> None:
         home = tempfile.TemporaryDirectory()
@@ -1775,6 +2835,33 @@ class PromptInstructionTests(unittest.TestCase):
         self.assertIn("Do not ask filler clarifying questions", normalized)
         self.assertIn("make it multiple choice", normalized)
         self.assertIn("exactly one best answer", normalized)
+        self.assertIn("prefer a hands-on check", normalized)
+        self.assertIn("keybindings and workflow steps", normalized)
+        self.assertIn(cli.TUTOR_FORMAT_RULES.splitlines()[0], prompt)
+
+    def test_system_prompt_includes_exact_pending_question_to_grade(self) -> None:
+        topic = cli.Topic(
+            slug="demo",
+            path=Path("demo.md"),
+            metadata={
+                "topic": "Demo",
+                "pending_question": {
+                    "kind": "multiple_choice",
+                    "answer_key": "A",
+                    "question": "When you press Caps+Shift+3, what happens?\nA) Screenshot\nB) Copy\nC) Paste\nD) Undo",
+                },
+            },
+            body="# Demo\n",
+        )
+
+        prompt = cli.system_prompt(topic)
+
+        self.assertIn("Pending question to grade:", prompt)
+        self.assertIn("Stored question: When you press Caps+Shift+3, what happens?", prompt)
+        self.assertIn("A) Screenshot", prompt)
+        self.assertIn("D) Undo", prompt)
+        self.assertIn("Stored correct answer key: A", prompt)
+        self.assertIn("Do not substitute a different question", prompt)
 
     def test_system_prompt_includes_course_options_guidance(self) -> None:
         topic = cli.Topic(
@@ -1816,6 +2903,16 @@ class PromptInstructionTests(unittest.TestCase):
         self.assertIn("one important check-for-understanding", prompt)
         self.assertIn("multiple choice", prompt)
         self.assertIn("Do not ask a question just to ask one", prompt)
+        self.assertIn("Use exactly this structure", prompt)
+        self.assertIn(f"Hard limit: {cli.FIRST_LESSON_WORD_LIMIT} words", prompt)
+
+    def test_trim_words_enforces_first_lesson_limit(self) -> None:
+        text = " ".join(f"word{index}" for index in range(225))
+
+        trimmed = cli.trim_words(text, 220)
+
+        self.assertEqual(len(trimmed.split()), 220)
+        self.assertTrue(trimmed.endswith("..."))
 
     def test_resume_sanitizes_answer_before_printing_and_appending(self) -> None:
         appended = []
@@ -1830,6 +2927,7 @@ class PromptInstructionTests(unittest.TestCase):
         original_read_topic = cli.read_topic
         original_resolve_topic_slug = cli.resolve_topic_slug
         original_set_active_topic = cli.set_active_topic
+        original_set_review_session_active = cli.set_review_session_active
 
         cli.call_openai = lambda *_args, **_kwargs: (
             "Recall question? <system-reminder>\n"
@@ -1840,6 +2938,7 @@ class PromptInstructionTests(unittest.TestCase):
         cli.read_topic = lambda _slug: topic
         cli.resolve_topic_slug = lambda _value: "demo"
         cli.set_active_topic = lambda _slug: None
+        cli.set_review_session_active = lambda *_args, **_kwargs: None
         try:
             output = capture_stdout(cli.cmd_resume, Namespace(topic=None, model=None))
         finally:
@@ -1848,6 +2947,7 @@ class PromptInstructionTests(unittest.TestCase):
             cli.read_topic = original_read_topic
             cli.resolve_topic_slug = original_resolve_topic_slug
             cli.set_active_topic = original_set_active_topic
+            cli.set_review_session_active = original_set_review_session_active
 
         self.assertIn("Where you left off", output)
         self.assertTrue(output.strip().endswith("Recall question?"))
@@ -1872,12 +2972,34 @@ class PromptInstructionTests(unittest.TestCase):
         topic = cli.Topic(
             slug="demo",
             path=Path("demo.md"),
-            metadata={"topic": "Demo", "current_focus": "Vim modes"},
+            metadata={
+                "topic": "Demo",
+                "goal": "Learn modal editing",
+                "current_focus": "Vim modes",
+                "current_unit": 1,
+                "current_slide": 2,
+                "course_units": [
+                    {"unit": 1, "chapter": "1.1", "title": "Vim modes", "slide_count": 3},
+                ],
+                "slide_contents": {
+                    "1:1": {
+                        "unit": 1,
+                        "slide": 1,
+                        "saved": cli.today(),
+                        "content": "Lesson: insert mode enters text; normal mode runs commands.",
+                    }
+                },
+            },
             body=textwrap.dedent(body),
         )
 
         context = cli.resume_context_prompt(topic)
 
+        self.assertIn("Current structured lesson: Unit 1/1 · Slide 2/3", context)
+        self.assertIn("Unit: 1.1 Vim modes", context)
+        self.assertIn("Course goal: Learn modal editing", context)
+        self.assertIn("Previous completed slide content Unit 1 Slide 1", context)
+        self.assertIn("insert mode enters text", context)
         self.assertIn("Current focus: Vim modes", context)
         self.assertIn("Last learner message: I think insert mode", context)
         self.assertIn("Question they may be answering: Which mode lets you type text?", context)
@@ -1885,6 +3007,27 @@ class PromptInstructionTests(unittest.TestCase):
 
 
 class PromptContextTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.home = tempfile.TemporaryDirectory()
+        self.previous_env = {
+            name: os.environ.get(name)
+            for name in ("OPENLEARN_HOME", "OPENLEARN_MODEL", "OPENLEARN_BASE_URL", "OPENAI_API_KEY")
+        }
+        os.environ["OPENLEARN_HOME"] = self.home.name
+        os.environ.pop("OPENLEARN_MODEL", None)
+        os.environ.pop("OPENLEARN_BASE_URL", None)
+        os.environ.pop("OPENAI_API_KEY", None)
+        cli._CONFIG_CACHE = None
+
+    def tearDown(self) -> None:
+        for name, value in self.previous_env.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+        cli._CONFIG_CACHE = None
+        self.home.cleanup()
+
     def test_prompt_context_separates_notes_from_recent_sessions(self) -> None:
         body = "\n".join(
             [
@@ -1911,7 +3054,7 @@ class PromptContextTests(unittest.TestCase):
         self.assertIn("Important durable note", topic_context)
         self.assertNotIn("Session Log", topic_context)
         self.assertIn("latest marker", recent_sessions)
-        self.assertIn("second marker", recent_sessions)
+        self.assertNotIn("second marker", recent_sessions)
         self.assertNotIn("old marker", recent_sessions)
 
     def test_system_prompt_includes_recent_sessions_after_large_notes_section(self) -> None:
@@ -1932,7 +3075,18 @@ class PromptContextTests(unittest.TestCase):
         topic = cli.Topic(
             slug="algorithms",
             path=cli.topic_path("algorithms"),
-            metadata={"topic": "Algorithms", "goal": "Learn algorithms"},
+            metadata={
+                "topic": "Algorithms",
+                "goal": "Learn algorithms",
+                "last_answer_status": "partial",
+                "current_focus": "heaps",
+                "current_unit": 2,
+                "current_slide": 1,
+                "course_units": [
+                    {"unit": 1, "chapter": "1.1", "title": "Search", "slide_count": 2},
+                    {"unit": 2, "chapter": "1.2", "title": "Heaps", "slide_count": 3},
+                ],
+            },
             body=body,
         )
 
@@ -1940,8 +3094,202 @@ class PromptContextTests(unittest.TestCase):
 
         self.assertIn("note 0", prompt)
         self.assertNotIn("note 249", prompt)
-        self.assertIn("binary search confusion", prompt)
         self.assertIn("latest heap insight", prompt)
+        self.assertIn("Current lesson position: Unit 2/2 · Slide 1/3", prompt)
+        self.assertIn("Last answer status: partial", prompt)
+        self.assertIn("Current focus: heaps", prompt)
+        self.assertNotIn("binary search confusion", prompt)
+
+    def test_generation_system_prompt_omits_notes_and_session_history(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Algorithms", goal="Learn algorithms"))
+        cli.write_context_text(
+            "algorithms",
+            cli.PLACEMENT_CONTEXT_FILENAME,
+            "Level: intermediate\nKnown: graphs",
+        )
+        summary = cli.topic_context_dir("algorithms") / "lecture.summary.txt"
+        summary.parent.mkdir(parents=True, exist_ok=True)
+        summary.write_text("Summary: shortest paths and heaps.\n", encoding="utf-8")
+        path = cli.topic_path("algorithms")
+        metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+        body += "\nPrivate raw note that should not enter generation.\n\n## Session Log\n\n"
+        body += session_entry(1, "old learner confusion")
+        path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
+
+        prompt = cli.generation_system_prompt(
+            cli.read_topic("algorithms"), current_plan="Current saved plan"
+        )
+
+        self.assertIn("Generate course planning or lesson-start material only", prompt)
+        self.assertIn("Learn algorithms", prompt)
+        self.assertIn("Level: intermediate", prompt)
+        self.assertIn("Summary: shortest paths and heaps.", prompt)
+        self.assertIn("Current saved plan", prompt)
+        self.assertIn("Output only the requested material", prompt)
+        self.assertNotIn("Terminal response style", prompt)
+        self.assertNotIn("Private raw note", prompt)
+        self.assertNotIn("old learner confusion", prompt)
+        self.assertNotIn("Recent session history", prompt)
+
+    def test_compact_session_context_includes_progress_status_and_last_exchange(self) -> None:
+        session_log = textwrap.dedent(
+            """\
+            ### 2026-01-01 10:00 UTC - chat
+
+            **Prompt**
+
+            What is Bayes rule?
+
+            **Response**
+
+            It updates a prior belief using new evidence.
+            """
+        )
+        topic = cli.Topic(
+            slug="demo",
+            path=Path("demo.md"),
+            metadata={
+                "topic": "Demo",
+                "current_unit": 1,
+                "current_slide": 2,
+                "last_answer_status": "correct",
+                "current_focus": "probability basics",
+                "course_units": [
+                    {"unit": 1, "chapter": "1.1", "title": "Probability", "slide_count": 3},
+                ],
+            },
+            body="# Demo\n",
+        )
+
+        result = cli.compact_session_context(topic, session_log)
+
+        self.assertIn("Current lesson position:", result)
+        self.assertIn("Last answer status: correct", result)
+        self.assertIn("Current focus: probability basics", result)
+        self.assertIn("Last exchange kind: chat", result)
+        self.assertIn("Last learner/tutor prompt:", result)
+        self.assertIn("Last tutor response:", result)
+
+    def test_compact_session_context_empty_session_returns_metadata_only(self) -> None:
+        topic = cli.Topic(
+            slug="demo",
+            path=Path("demo.md"),
+            metadata={
+                "topic": "Demo",
+                "last_answer_status": "correct",
+                "current_focus": "basics",
+            },
+            body="# Demo\n",
+        )
+
+        result = cli.compact_session_context(topic, "")
+
+        self.assertIn("Last answer status: correct", result)
+        self.assertIn("Current focus: basics", result)
+        self.assertNotIn("Last exchange kind", result)
+        self.assertNotIn("None", result)
+        self.assertTrue(result.strip())
+
+    def test_compact_session_context_single_turn_session(self) -> None:
+        session_log = textwrap.dedent(
+            """\
+            ### 2026-01-01 10:00 UTC - chat
+
+            **Prompt**
+
+            What is a process?
+
+            **Response**
+
+            A process is a running instance of a program.
+            """
+        )
+        topic = cli.Topic(
+            slug="demo",
+            path=Path("demo.md"),
+            metadata={"topic": "Demo", "last_answer_status": ""},
+            body="# Demo\n",
+        )
+
+        result = cli.compact_session_context(topic, session_log)
+
+        self.assertIn("Last exchange kind: chat", result)
+        self.assertIn("What is a process?", result)
+        self.assertIn("running instance", result)
+        self.assertTrue(result.strip())
+
+    def test_compact_session_context_system_only_turns_do_not_crash(self) -> None:
+        session_log = textwrap.dedent(
+            """\
+            ### 2026-01-01 10:00 UTC - lesson
+
+            **Prompt**
+
+            system generated lesson prompt
+
+            **Response**
+
+            Lesson: Here is the first lesson content.
+            """
+        )
+        topic = cli.Topic(
+            slug="demo",
+            path=Path("demo.md"),
+            metadata={"topic": "Demo", "last_answer_status": ""},
+            body="# Demo\n",
+        )
+
+        result = cli.compact_session_context(topic, session_log)
+
+        self.assertTrue(result.strip())
+        self.assertNotIn("None", result)
+
+    def test_last_actual_learner_message_accepts_next_and_review_entries(self) -> None:
+        body = textwrap.dedent(
+            """\
+            # Demo
+
+            ## Session Log
+
+            ### 2026-01-01 10:00 UTC - next
+
+            **Prompt**
+
+            learner answer from next
+
+            **Response**
+
+            tutor response
+
+            ### 2026-01-01 10:01 UTC - review
+
+            **Prompt**
+
+            learner answer from review
+
+            **Response**
+
+            tutor response
+            """
+        )
+        topic = cli.Topic(
+            slug="demo",
+            path=Path("demo.md"),
+            metadata={"topic": "Demo"},
+            body=body,
+        )
+
+        self.assertEqual(cli.last_actual_learner_message(topic), "learner answer from review")
+
+    def test_emit_tutor_output_adds_trailing_blank_line(self) -> None:
+        output = []
+
+        cli.emit_tutor_output("Lesson: Short answer.", output.append)
+
+        clean = [ui.strip_ansi(line) for line in output]
+        self.assertEqual(clean[0], "")
+        self.assertEqual(clean[-1], "")
+        self.assertIn("Lesson: Short answer.", clean[1])
 
 
 def session_entry(index: int, marker: str) -> str:
