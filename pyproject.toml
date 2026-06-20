@@ -4,13 +4,20 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "openlearn"
-version = "0.1.0"
+version = "0.5.0"
 description = "Local-first AI tutoring that keeps learning state in files you own"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "AGPL-3.0-or-later" }
 authors = [{ name = "Ross" }]
-dependencies = []
+dependencies = [
+    "pdfplumber>=0.11",
+    "platformdirs>=4.0",
+    "python-docx>=1.1",
+    "requests>=2.31",
+    "rich>=13.7",
+    "trafilatura>=1.9",
+]
 keywords = ["ai", "learning", "tutor", "local-first", "cli"]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -22,11 +29,23 @@ classifiers = [
     "Topic :: Education",
 ]
 
+[project.optional-dependencies]
+# Math-based forgetting-curve SRS. Opt in via `pip install openlearn[ebisu]` and
+# `openlearn config` srs=ebisu; the fixed-interval schedule is the default.
+ebisu = ["ebisu>=2.2,<3"]
+dev = [
+    "pexpect>=4.9",
+    "pytest>=8.0",
+]
+
 [project.scripts]
 openlearn = "openlearn.cli:main"
 
 [tool.setuptools]
 package-dir = { "" = "src" }
+
+[tool.setuptools.package-data]
+openlearn = ["drills.json"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

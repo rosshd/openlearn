@@ -53,6 +53,8 @@ def sanitize_model_output(text: str) -> str:
     text = re.sub(r"(?is)<system-reminder>.*?</system-reminder>", "", text)
     text = re.sub(r"(?is)<!--\s*answer\s*:\s*[A-D]\s*-->", "", text)
     text = re.sub(r"(?im)^\s*answer\s*key\s*:\s*[A-D]\s*$", "", text)
+    text = re.sub(r"(?im)^\s*correct\s+answer\s*:\s*[A-D]\s*[\).:-]?.*$", "", text)
+    text = re.sub(r"(?im)^\s*\(?answer\s*:\s*[A-D]\)?.*$", "", text)
     blocked = re.compile(
         r"\b(system reminder|operational mode|read-only mode)\b", re.IGNORECASE
     )
@@ -82,4 +84,10 @@ def extract_answer_key(text: str) -> str:
     if match:
         return match.group(1).upper()
     match = re.search(r"(?im)^\s*answer\s*key\s*:\s*([A-D])\s*$", text)
+    if match:
+        return match.group(1).upper()
+    match = re.search(r"(?im)^\s*correct\s+answer\s*:\s*([A-D])\s*[\).:-]?", text)
+    if match:
+        return match.group(1).upper()
+    match = re.search(r"(?im)^\s*\(?answer\s*:\s*([A-D])\)?", text)
     return match.group(1).upper() if match else ""
