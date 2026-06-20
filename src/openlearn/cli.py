@@ -128,14 +128,15 @@ SOURCE_SUMMARIZER_SYSTEM = (
 )
 TUTOR_FORMAT_RULES = """
 Terminal response style:
-- Start with a short label such as Lesson:, Check:, Feedback:, Quiz:, or Next:.
-- Use **bold** only for semantic labels at the start of a section
-  (e.g. **Lesson:**, **Example:**, **Check:**, **Hint:**). Do not bold
-  random words inside prose. Avoid tables and long headings.
+ALWAYS open every response with exactly one bold label on its own line, chosen
+from: **Lesson:**, **Feedback:**, **Example:**, **Check:**, **Hint:**, **Next:**.
+Use **Feedback:** when responding to a learner answer. Use **Lesson:** when
+teaching new material. Use **Check:** when asking a question. Use **Hint:** for
+a Socratic nudge. Use **Example:** for a worked example. Use **Next:** to affirm
+and transition. Do not skip the label — it is required on every response.
+- Bold labels only at section starts (e.g. **Example:**, **Action:**).
+  Do not bold random words inside prose. Avoid tables and long headings.
 - Keep paragraphs short; prefer 1-3 compact bullets when listing ideas.
-- Use a **Label:** prefix at the start of each major section so the
-  learner immediately knows whether they are reading new material, an
-  example, a question, or feedback.
 - Use numbered lists for sequential steps and bullet lists for sets of
   parallel ideas. Avoid nesting more than one level deep.
 - For multiple choice, use exactly A), B), C), D) on separate lines.
@@ -5309,15 +5310,43 @@ def resume_context_prompt(topic: Topic) -> str:
 
 def print_resume_context(topic: Topic, context: str, output_func=print) -> None:
     print_section("Where you left off", output_func)
-    if context:
-        for line in context.splitlines():
-            output_func(format_resume_line(line))
+    metadata = topic.metadata
+
+    progress = structured_progress_line(topic)
+    if progress:
+        unit_data = course_unit_at(metadata, metadata.get("current_unit"))
+        unit_title = unit_data.get("title", "") if isinstance(unit_data, dict) else ""
+        line = f"Position: {progress}"
+        if unit_title:
+            line += f" — {unit_title}"
+        output_func(format_resume_line(line))
     else:
-        goal = topic.metadata.get("goal")
-        if isinstance(goal, str) and goal.strip():
-            output_func(format_resume_line(f"Goal: {one_line(goal)}"))
-        else:
-            output_func(format_resume_line("No previous session context yet."))
+        focus = metadata.get("current_focus")
+        if isinstance(focus, str) and focus.strip():
+            output_func(format_resume_line(f"Focus: {one_line(focus)}"))
+        elif context:
+            goal = metadata.get("goal")
+            if isinstance(goal, str) and goal.strip():
+                output_func(format_resume_line(f"Goal: {one_line(goal)}"))
+
+    _body, session_log = split_session_log(topic.body)
+    entries = session_entries(session_log)
+    if entries:
+        last_interaction = next(
+            (e for e in reversed(entries) if e["kind"] in {"chat", "review"}),
+            None,
+        )
+        if last_interaction:
+            question = last_question(last_interaction["response"])
+            if question:
+                output_func(format_resume_line(f"Last question: {snippet(question, 160)}"))
+        last_entry = entries[-1]
+        if last_entry["response"].strip():
+            label = "Last response"
+            output_func(format_resume_line(f"{label}: {snippet(last_entry['response'], 200)}"))
+    elif not progress:
+        output_func(format_resume_line("No previous session yet."))
+
     output_func("")
 
 
