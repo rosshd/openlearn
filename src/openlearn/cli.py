@@ -5340,11 +5340,13 @@ def print_resume_context(topic: Topic, context: str, output_func=print) -> None:
         if last_interaction:
             question = last_question(last_interaction["response"])
             if question:
-                output_func(format_resume_line(f"Last question: {snippet(question, 160)}"))
+                snip = snippet(question, 160).replace("**", "")
+                output_func(format_resume_line(f"Last question: {snip}"))
         last_entry = entries[-1]
         if last_entry["response"].strip():
             label = "Last response"
-            output_func(format_resume_line(f"{label}: {snippet(last_entry['response'], 200)}"))
+            snip = snippet(last_entry["response"], 200).replace("**", "")
+            output_func(format_resume_line(f"{label}: {snip}"))
     elif not progress:
         output_func(format_resume_line("No previous session yet."))
 
