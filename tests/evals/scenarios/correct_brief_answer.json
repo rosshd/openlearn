@@ -1,0 +1,16 @@
+{
+  "name": "correct_brief_answer",
+  "description": "Guards against treating a brief metaphor as complete understanding.",
+  "topic": "variables",
+  "goal": "Understand Python variables and types",
+  "turns": [
+    {"role": "assistant", "content": "Quick check: what is a variable in Python?"},
+    {"role": "user", "content": "a box"},
+    {"role": "assistant", "content": null}
+  ],
+  "rubric": [
+    "tutor acknowledges the partial answer positively",
+    "tutor probes for more detail or gives a brief elaboration",
+    "tutor does not treat one word as a complete explanation"
+  ]
+}

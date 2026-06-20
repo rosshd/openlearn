@@ -257,6 +257,18 @@ class CliStorageTests(unittest.TestCase):
             self.assertIsInstance(data["units"], list)
             self.assertGreater(len(data["units"]), 0)
 
+    def test_course_outline_prompt_includes_template_units(self) -> None:
+        call_silent(
+            cli.cmd_new,
+            Namespace(topic="Vim Editing", goal="Learn vim", template="vim"),
+        )
+        topic = cli.read_topic("vim-editing")
+        prompt = cli.course_outline_prompt(topic)
+
+        self.assertIn("Suggested unit structure", prompt)
+        for unit in topic.metadata["template_units"]:
+            self.assertIn(unit, prompt)
+
     def test_context_file_import_and_prompt_lists_names_only(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="AI", goal="learn ai"))
         source = Path(self.home.name) / "overview.txt"

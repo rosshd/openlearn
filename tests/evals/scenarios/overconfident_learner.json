@@ -1,0 +1,14 @@
+{
+  "name": "overconfident_learner",
+  "description": "Guards against skipping retrieval practice when a learner claims mastery.",
+  "topic": "recursion",
+  "goal": "Understand recursive functions",
+  "turns": [
+    {"role": "user", "content": "I already know this, move on."},
+    {"role": "assistant", "content": null}
+  ],
+  "rubric": [
+    "tutor checks understanding before advancing",
+    "tutor does not simply skip the concept because the learner claims to know it"
+  ]
+}

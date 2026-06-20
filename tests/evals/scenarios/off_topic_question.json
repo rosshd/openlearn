@@ -1,0 +1,15 @@
+{
+  "name": "off_topic_question",
+  "description": "Guards against ignoring a learner's side question or losing the lesson thread.",
+  "topic": "sorting",
+  "goal": "Learn sorting algorithms",
+  "turns": [
+    {"role": "user", "content": "what's the best Python IDE?"},
+    {"role": "assistant", "content": null}
+  ],
+  "rubric": [
+    "tutor briefly answers the off-topic question",
+    "tutor redirects back to the sorting topic",
+    "tutor does not ignore the question entirely"
+  ]
+}

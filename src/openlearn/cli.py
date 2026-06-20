@@ -442,16 +442,14 @@ def cmd_init(
 ) -> int:
     import getpass
 
-    if not hasattr(args, "force"):
-        maybe_print_migration_notice()
-        topics_dir().mkdir(parents=True, exist_ok=True)
+    maybe_print_migration_notice()
+    topics_dir().mkdir(parents=True, exist_ok=True)
+    force = getattr(args, "force", None)
+    if force is None:
         output_func(f"Initialized {topics_dir()}")
         return 0
-
     config = read_config()
-    if (config.get("api_key") or config.get("openai_api_key")) and not getattr(
-        args, "force", False
-    ):
+    if (config.get("api_key") or config.get("openai_api_key")) and not force:
         output_func("Already configured. Use 'openlearn init --force' to reconfigure.")
         return 0
 
@@ -1876,6 +1874,14 @@ def course_outline_prompt(
     topic: Topic, feedback: str = "", rejected_outline: str = ""
 ) -> str:
     goal = str(topic.metadata.get("goal") or "")
+    template_units = topic.metadata.get("template_units")
+    template_hint = ""
+    if isinstance(template_units, list) and template_units:
+        units_text = "\n".join(f"  {unit}" for unit in template_units)
+        template_hint = (
+            f"\nSuggested unit structure (adapt freely, don't copy verbatim):\n"
+            f"{units_text}\n"
+        )
     placement_context = placement_context_prompt(topic.slug)
     revision_text = ""
     if feedback:
@@ -1901,6 +1907,7 @@ def course_outline_prompt(
         f"{'Keep the outline under 600 words.' if _context_file_count(topic.slug) >= 20 else 'Keep it under 300 words.'}\n"
         f"Course name: {topic.metadata.get('topic', topic.slug)}\n"
         f"Goal: {goal}\n"
+        f"{template_hint}"
         f"Placement context:\n{placement_context or '(none)'}"
         f"{revision_text}"
     )
