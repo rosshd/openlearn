@@ -162,73 +162,128 @@ Goal: make forgetting and review first-class without building a heavy spaced-rep
 - Add tests for review item creation, due filtering, answer result updates, and no-review states.
 - UX additions: show `Reviews due: 3` in menu/status and make the next due review one key away.
 
-### v0.6.0 Source Import And Course Grounding
+*Note: v0.6.0–v0.5.0 scope in PLAN.md was written before v0.5.0 shipped. Everything
+through the original v0.7.0 (source import, provider controls) was completed in v0.5.0.
+The roadmap below reflects the revised plan from v0.6.0 onward.*
 
-Goal: support real class material while staying local-first and optional.
+---
 
-- Add import for pasted text and Markdown files.
-- Add optional `sources/` folder per topic without requiring a new project layout.
-- Summarize imported sources into concise local notes before course planning.
-- Let `Start course` use source summaries when present.
-- Keep file upload/import optional and never required for a course.
-- Add source list and remove-source actions through numbered menus.
-- Avoid PDF complexity unless a small, reliable dependency is acceptable; otherwise document Markdown/text first.
-- Add tests for text import, source summary storage, source-grounded outline prompts, and source deletion.
-- UX additions: `i` import, `ls` list sources, source selection by number, clear privacy messaging before model-backed summarization.
+### v0.6.0 Smart Feedback & Progress
 
-### v0.7.0 Provider And Cost Controls
+Goal: make the tutor noticeably smarter and give learners visible evidence of progress.
+See `docs/V0.6.0.md` for full phase breakdown.
 
-Goal: make model use predictable and provider-neutral without bloating the core.
+- **Structured evaluation pipeline**: tutor returns a JSON verdict (`correct/partial/wrong`,
+  score 0–1, explanation, gap, hint) instead of relying on substring matching. Wrong answers
+  always produce an explanation and a guiding hint before the answer is revealed.
+- **Progress tracking**: session stats (study time, streak, per-concept accuracy), streak
+  counter in the status bar, `openlearn stats [topic]` with terminal charts via `plotext`.
+- **Adaptive difficulty**: three tiers (struggling / on track / mastering) based on a
+  rolling accuracy window. Struggling tier gets worked examples; mastering tier gets
+  harder free-response and "why?" questions. Grounded in ZPD + expertise reversal research.
+- **First-run wizard**: `openlearn init` walks through API key, base URL, model selection,
+  and connection test. Finishes in under 60 seconds.
+- **Course templates**: ~8 curated outlines shipped with openlearn (Python, Git, Linux CLI,
+  Algorithms, SQL, HTTP, Networking, Vim). `openlearn new <topic> --template <name>` skips
+  AI outline generation for common topics.
+- **DeepEval conversation quality tests**: 6 AI-simulated student scenarios (stuck learner,
+  overconfident learner, off-topic question, prerequisite gap, etc.) catch tutor regressions
+  that smoke tests miss.
 
-- Add a small provider abstraction for OpenAI-compatible APIs first.
-- Keep OpenAI/OpenRouter-style config lightweight: base URL, model, API key.
-- Add per-command model override only where useful, not everywhere.
-- Show estimated request size or simple cost warning before large imports/summarizations.
-- Add `config` menu shortcuts for common setup and status.
-- Keep secrets local and masked in all output.
-- Add dry-run prompt preview for debugging and power users.
-- Add tests for provider selection, config precedence, masked secrets, and prompt preview.
-- UX additions: one-screen config status, clear missing-key messages, and no stack traces for provider failures.
+---
 
-### v0.8.0 Extensibility Without Weight
+### v0.7.0 Multi-Provider & Distribution
 
-Goal: let users add behavior without making the default app complicated.
+Goal: work with any model — including fully local ones — and be easy to install.
 
-- Define a tiny course template format using Markdown plus JSON metadata.
-- Support local template discovery from a user folder.
-- Add optional prompt snippets for teaching style, pacing, or quiz style.
-- Add export/import of a topic as portable Markdown plus sources.
-- Add hooks only where stable: before course start, after lesson, after review.
-- Keep plugins/config opt-in and file-based; no plugin marketplace in core.
-- Add tests for template loading, invalid template handling, export/import round trips, and prompt snippet inclusion.
-- UX additions: `templates` list by number, `style` selection by number, and safe defaults when templates fail.
+- **LiteLLM integration**: replace the current OpenRouter-only call with a provider-agnostic
+  layer. Users can point openlearn at Ollama (local, free, private), Anthropic native,
+  Groq (fast + cheap), OpenAI, or any OpenAI-compatible API by changing one config value.
+- **`openlearn init` provider presets**: during init, offer provider quick-picks
+  (OpenRouter, Ollama, Anthropic, OpenAI) with model suggestions per provider.
+- **Dry-run prompt preview**: `--dry-run` flag on any model-backed command prints the full
+  system + user prompt without calling the API — essential for debugging and power users.
+- **Export / portable course format**: `openlearn export <topic>` produces a self-contained
+  `.zip` (Markdown + context files + metadata) that can be shared, version-controlled, or
+  imported on another machine. `openlearn import-course <file>` is the inverse.
+- **Homebrew tap**: `brew install rosshd/tap/openlearn` as the primary Mac install path.
+  Removes the Python/pip requirement for non-developer users.
+- **Cost estimation**: before large import/summarization calls, show estimated token count
+  and approximate cost for the configured provider.
 
-### v0.9.0 1.0 Stabilization
+---
 
-Goal: harden the core study loop and remove rough edges before 1.0.
+### v0.8.0 Interface & Ecosystem
 
-- Audit all menu paths for one or two keystroke access to common actions.
-- Improve error messages for missing topics, missing API key, malformed topic files, and failed model calls.
-- Add topic backup before destructive metadata rewrites.
-- Add migration checks for older topic files.
-- Add accessibility pass for prompt wording, screen-reader friendliness, non-color status markers, and keyboard-only operation.
-- Add command aliases only when they reduce friction without increasing confusion.
-- Expand smoke tests for the full path: create topic, start course, answer, continue, review, switch, import, delete.
-- Freeze the topic file format expected for 1.0.
-- Document the minimal core and optional extension points clearly.
-- UX additions: concise first-run help, `?` help available everywhere, and a no-surprises delete/cancel pattern.
+Goal: make openlearn visually impressive and give the community a way to build on it.
 
-### 1.0 Readiness Bar
+- **Textual TUI mode** (`openlearn tui`): optional full-screen dashboard with course list,
+  progress heatmap calendar, per-concept accuracy charts, and lesson view. Built on
+  `textual` (MIT). The existing CLI remains the default; TUI is opt-in.
+- **Community course library**: a public GitHub repo (`openlearn-courses`) with a simple
+  JSON index. `openlearn courses` lists available community courses; `openlearn courses
+  install algorithms` downloads and imports one. No server required — raw GitHub CDN.
+- **Prompt style presets**: `openlearn style set <socratic|direct|coach>` configures the
+  tutor's teaching style without editing config files. Each preset adjusts a small set of
+  `TUTOR_FORMAT_RULES` toggles.
+- **`openlearn repair` improvements**: detect and fix corrupt JSON frontmatter, merge
+  duplicate session entries, and report what was changed.
+- **Web companion** (stretch): `openlearn serve` starts a minimal local web server
+  (FastAPI + htmx) for users who prefer a browser interface. Same local files, no cloud.
 
-The 1.0 release should feel like a small, dependable study tool, not a general AI chat wrapper.
+---
 
-- A learner can create a topic, accept a course plan, study lesson by lesson, answer questions, get feedback, and review weak spots.
-- Progress survives across sessions and is visible at a glance.
+### v0.9.0 Stabilization & Polish
+
+Goal: harden everything before 1.0. No new features — quality and distribution only.
+
+- Full accessibility pass: non-color status markers, screen-reader-friendly prompts,
+  keyboard-only navigation, clear contrast ratios in Rich output.
+- Freeze the topic file format. Write a migration script for pre-v0.9.0 files.
+- Error message quality: every user-facing error has a plain-English explanation and a
+  suggested fix. No stack traces in normal operation.
+- Expand pexpect smoke tests to cover the complete happy path end-to-end.
+- Documentation site (MkDocs + Material theme): quick-start guide, command reference,
+  topic file format spec, provider setup guides for OpenRouter/Ollama/Anthropic.
+- PyPI package polish: README, classifiers, `openlearn[all]` extras meta-package.
+
+---
+
+### v1.0.0 Readiness Bar
+
+The 1.0 release should feel like a small, dependable study tool that someone would
+recommend to a friend without caveats.
+
+- A learner can go from `brew install openlearn` to first lesson in under 2 minutes.
+- The tutor adapts visibly to the learner's performance — easier when struggling, harder
+  when mastering.
+- Progress survives across sessions and is visible at a glance in `openlearn stats`.
 - The tutor does not repeatedly ask for goals or recap empty context.
 - Common actions are one or two keystrokes away in the menu or REPL.
 - Topic files remain readable, editable, portable, and local by default.
-- Optional imports, templates, providers, and hooks do not complicate the default workflow.
-- Tests cover storage, state transitions, model prompt contracts, menu paths, and failure cases.
+- Fully local operation is possible via Ollama with zero cloud dependency.
+- Tests cover storage, state transitions, model prompt contracts, menu paths,
+  failure cases, and AI conversation quality.
+- A 90-second demo recording shows the complete first-session flow without any rough edges.
+
+---
+
+### Marketing Differentiators (v1.0.0 pitch)
+
+These are the things that make openlearn worth using over "just ask ChatGPT":
+
+1. **Persistent learning state** — it knows where you are, what you've struggled with,
+   and what's due for review. ChatGPT forgets everything between sessions.
+2. **Adaptive tutor** — questions get harder as you improve, and easier when you're
+   stuck. The difficulty adjusts automatically.
+3. **Spaced repetition built in** — review scheduling based on your actual forgetting
+   curve, not arbitrary intervals.
+4. **Local-first, bring your own key** — your notes never leave your machine unless you
+   want them to. Works fully offline with Ollama.
+5. **Import your class materials** — paste a syllabus, import a PDF, or scan a folder.
+   The tutor grounds the course in your actual material.
+6. **Open source, no subscription** — AGPLv3. You own your data. No monthly fee for the
+   core tool.
 
 ## Learning From User Experience
 
