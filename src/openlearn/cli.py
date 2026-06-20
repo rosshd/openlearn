@@ -3413,8 +3413,9 @@ def cmd_resume(args: argparse.Namespace, output_func=print) -> int:
     should_update_metadata = topic.metadata.get("last_answer_status") in {"needs_work", "partial"}
     print_resume_context(topic, resume_context, output_func)
     user = (
-        "Pick up naturally where this learner left off. Avoid template labels like "
-        "Recap, Next action, and Recall question unless they genuinely help. "
+        "Pick up naturally where this learner left off. Do not robotically repeat "
+        "the same recap structure every session, but DO follow the bold-label format "
+        "from the system rules (open with **Feedback:**, **Lesson:**, **Check:**, etc.). "
         "If the learner recently answered a question, respond to that answer first. "
         "Be warm, direct, and specific. Continue the lesson by giving the next useful "
         "step or one important question if needed. Do not merely repeat the last tutor "

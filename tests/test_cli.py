@@ -3369,7 +3369,7 @@ class PromptInstructionTests(unittest.TestCase):
             cli.append_session = original_append_session
 
         self.assertIn("Pick up naturally", captured[0])
-        self.assertIn("Avoid template labels", captured[0])
+        self.assertIn("bold-label format", captured[0])
         self.assertIn("warm, direct, and specific", captured[0])
 
     def test_next_prompt_asks_for_learner_response(self) -> None:
