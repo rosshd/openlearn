@@ -46,7 +46,7 @@ openlearn = "openlearn.cli:main"
 package-dir = { "" = "src" }
 
 [tool.setuptools.package-data]
-openlearn = ["drills.json"]
+openlearn = ["templates/*.json", "drills.json"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

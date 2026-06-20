@@ -1,0 +1,16 @@
+{
+  "name": "Vim",
+  "slug": "vim",
+  "goal": "Edit text efficiently using Vim for real daily work",
+  "tags": ["tools", "beginner"],
+  "units": [
+    "Unit 1: Modal Editing - normal, insert, visual, command modes",
+    "Unit 2: Moving Around - h/j/k/l, w/b/e, 0/$/gg/G, f/t",
+    "Unit 3: Editing Operations - d, c, y, p, u, Ctrl-R, dot repeat",
+    "Unit 4: Text Objects - iw, aw, i(/a(, i\"/a\", ci/di/yi patterns",
+    "Unit 5: Visual Mode - v, V, Ctrl-V, selecting and operating",
+    "Unit 6: Search and Replace - /, ?, n/N, :%s/old/new/g, flags",
+    "Unit 7: Files and Buffers - :w, :q, :e, :bn/:bp, splits",
+    "Unit 8: Configuration - vimrc basics, key remaps, plugins intro"
+  ]
+}

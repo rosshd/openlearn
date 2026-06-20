@@ -203,11 +203,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.set_defaults(func=cmd_menu)
     sub = parser.add_subparsers()
 
-    init_parser = sub.add_parser("init", help="Create the local learning-topics folder")
+    init_parser = sub.add_parser("init", help="Set up API key and provider")
+    init_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Reconfigure even if already set up",
+    )
     init_parser.set_defaults(func=cmd_init)
 
     menu_parser = sub.add_parser("menu", help="Open a simple interactive menu")
     menu_parser.set_defaults(func=cmd_menu)
+
+    templates_parser = sub.add_parser(
+        "templates", help="List starter course templates"
+    )
+    templates_parser.set_defaults(func=cmd_templates)
 
     test_parser = sub.add_parser(
         "test", help="Seed and open the built-in manual test course"
@@ -297,6 +307,11 @@ def build_parser() -> argparse.ArgumentParser:
     new_parser = sub.add_parser("new", help="Create a new learning topic")
     new_parser.add_argument("topic", help="Topic name or slug")
     new_parser.add_argument("--goal", default="", help="Learning goal for this topic")
+    new_parser.add_argument(
+        "--template",
+        metavar="SLUG",
+        help="Start from a course template (see 'openlearn templates')",
+    )
     new_parser.set_defaults(func=cmd_new)
 
     delete_parser = sub.add_parser("delete", help="Delete a local learning topic")
@@ -422,10 +437,112 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def cmd_init(_args: argparse.Namespace) -> int:
-    maybe_print_migration_notice()
-    topics_dir().mkdir(parents=True, exist_ok=True)
-    print(f"Initialized {topics_dir()}")
+def cmd_init(
+    args: argparse.Namespace, output_func=print, input_func=input
+) -> int:
+    import getpass
+
+    if not hasattr(args, "force"):
+        maybe_print_migration_notice()
+        topics_dir().mkdir(parents=True, exist_ok=True)
+        output_func(f"Initialized {topics_dir()}")
+        return 0
+
+    config = read_config()
+    if (config.get("api_key") or config.get("openai_api_key")) and not getattr(
+        args, "force", False
+    ):
+        output_func("Already configured. Use 'openlearn init --force' to reconfigure.")
+        return 0
+
+    output_func("openlearn setup")
+    output_func("")
+    output_func("Provider:")
+    output_func("  1. OpenRouter  (default - one key, many models)")
+    output_func("  2. Anthropic   (api.anthropic.com)")
+    output_func("  3. OpenAI      (api.openai.com)")
+    output_func("  4. Ollama      (local, no key needed)")
+    output_func("  5. Other       (enter custom base URL)")
+    choice = input_func("Choice [1]: ").strip() or "1"
+
+    presets = {
+        "1": ("https://openrouter.ai/api/v1", "anthropic/claude-sonnet-4-5"),
+        "2": ("https://api.anthropic.com/v1", "claude-sonnet-4-5-20251022"),
+        "3": ("https://api.openai.com/v1", "gpt-4o-mini"),
+        "4": ("http://localhost:11434/v1", "ollama/llama3.2"),
+    }
+
+    if choice in presets:
+        base_url, default_model = presets[choice]
+    else:
+        base_url = input_func("Base URL: ").strip()
+        if not base_url:
+            output_func("No base URL entered. Aborting.")
+            return 1
+        default_model = "gpt-4o-mini"
+
+    api_key = ""
+    if choice != "4":
+        api_key = getpass.getpass("API key (hidden): ").strip()
+        if not api_key:
+            output_func("No API key entered. Aborting.")
+            return 1
+
+    model_input = input_func(f"Model [{default_model}]: ").strip()
+    model = model_input or default_model
+
+    new_config = dict(config)
+    if api_key:
+        new_config["api_key"] = api_key
+        new_config["openai_api_key"] = api_key
+    new_config["base_url"] = base_url
+    new_config["model"] = model
+    path = config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_text_atomic(path, json.dumps(new_config, indent=2))
+    global _CONFIG_CACHE
+    _CONFIG_CACHE = None
+    output_func("")
+    output_func("Testing connection...")
+    try:
+        result = call_openai(model, "You are a test assistant.", "Reply with exactly: ok")
+        if "ok" in result.lower():
+            output_func("Connection successful.")
+        else:
+            output_func(f"Connected (response: {result[:80].strip()})")
+    except Exception as exc:
+        output_func(f"Connection failed: {exc}")
+        output_func("Config saved - check key and URL with 'openlearn config show'.")
+        return 1
+    output_func("")
+    output_func("Done. Run 'openlearn new <topic>' to start learning.")
+    output_func("      Run 'openlearn templates' to browse starter courses.")
+    return 0
+
+
+def cmd_templates(_args: argparse.Namespace, output_func=print) -> int:
+    template_dir = Path(__file__).parent / "templates"
+    if not template_dir.exists():
+        output_func("No templates found.")
+        return 0
+    files = sorted(template_dir.glob("*.json"))
+    if not files:
+        output_func("No templates found.")
+        return 0
+    output_func("Available course templates:")
+    output_func("")
+    for file in files:
+        try:
+            data = json.loads(file.read_text(encoding="utf-8"))
+            tags = ", ".join(data.get("tags") or [])
+            unit_count = len(data.get("units") or [])
+            output_func(
+                f"  {data['slug']:<22} {data['name']:<30} [{tags}]  {unit_count} units"
+            )
+        except Exception:
+            pass
+    output_func("")
+    output_func("Use: openlearn new <topic> --template <slug>")
     return 0
 
 
@@ -1212,7 +1329,7 @@ def handle_repl_command(
 def cmd_config_show(_args: argparse.Namespace) -> int:
     config = read_config()
     env_key = os.environ.get("OPENAI_API_KEY")
-    saved_key = config.get("openai_api_key")
+    saved_key = config.get("openai_api_key") or config.get("api_key")
     model = configured_model(config)
     base_url = configured_base_url(config)
     print("Provider: openai")
@@ -1234,6 +1351,7 @@ def cmd_config_set_key(args: argparse.Namespace) -> int:
         raise OpenLearnError("API key cannot be empty")
     config = read_config()
     config["openai_api_key"] = api_key
+    config["api_key"] = api_key
     write_config(config)
     print(f"Saved API key to {config_path()}")
     print("OPENAI_API_KEY still takes precedence when set in the shell.")
@@ -1265,12 +1383,13 @@ def cmd_config_set_base_url(args: argparse.Namespace) -> int:
 def cmd_config_clear_key(_args: argparse.Namespace) -> int:
     config = read_config()
     config.pop("openai_api_key", None)
+    config.pop("api_key", None)
     write_config(config)
     print("Removed saved API key")
     return 0
 
 
-def cmd_new(args: argparse.Namespace) -> int:
+def cmd_new(args: argparse.Namespace, output_func=print) -> int:
     topics_dir().mkdir(parents=True, exist_ok=True)
     slug = slugify(args.topic)
     path = topic_path(slug)
@@ -1315,7 +1434,26 @@ def cmd_new(args: argparse.Namespace) -> int:
 """
     write_topic(path, metadata, body)
     set_active_topic(slug)
-    print(f"Created {path}")
+    output_func(f"Created {path}")
+    template_slug = getattr(args, "template", None)
+    if template_slug:
+        template_dir = Path(__file__).parent / "templates"
+        template_path = template_dir / f"{template_slug}.json"
+        if not template_path.exists():
+            output_func(
+                f"Template '{template_slug}' not found. "
+                f"Run 'openlearn templates' to list available."
+            )
+            return 1
+        template_data = json.loads(template_path.read_text(encoding="utf-8"))
+        topic = read_topic(slugify(args.topic))
+        meta = dict(topic.metadata)
+        if template_data.get("goal") and not meta.get("goal"):
+            meta["goal"] = template_data["goal"]
+        meta["template_units"] = template_data.get("units") or []
+        write_topic(topic.path, meta, topic.body)
+        unit_count = len(meta["template_units"])
+        output_func(f"Template '{template_data['name']}' loaded ({unit_count} units).")
     return 0
 
 
@@ -3952,7 +4090,8 @@ def configured_openai_api_key() -> str | None:
     env_key = os.environ.get("OPENAI_API_KEY")
     if env_key:
         return env_key
-    key = read_config().get("openai_api_key")
+    config = read_config()
+    key = config.get("openai_api_key") or config.get("api_key")
     return key if isinstance(key, str) and key else None
 
 

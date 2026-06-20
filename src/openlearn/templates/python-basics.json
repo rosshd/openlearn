@@ -1,0 +1,16 @@
+{
+  "name": "Python Basics",
+  "slug": "python-basics",
+  "goal": "Write and understand fundamental Python programs",
+  "tags": ["programming", "beginner"],
+  "units": [
+    "Unit 1: Variables and Data Types - integers, floats, strings, booleans",
+    "Unit 2: Control Flow - if/elif/else, comparison operators",
+    "Unit 3: Loops - for loops, while loops, range, break, continue",
+    "Unit 4: Functions - def, parameters, return values, scope",
+    "Unit 5: Lists and Tuples - indexing, slicing, mutation, iteration",
+    "Unit 6: Dictionaries and Sets - key-value pairs, common methods",
+    "Unit 7: File I/O - open, read, write, context managers",
+    "Unit 8: Modules and Imports - stdlib basics, pip packages"
+  ]
+}

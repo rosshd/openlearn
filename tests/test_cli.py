@@ -144,6 +144,23 @@ class CliStorageTests(unittest.TestCase):
         self.assertIn(str(new_home), first)
         self.assertNotIn("Existing data found", second)
 
+    def test_cmd_init_already_configured_skips_without_force(self) -> None:
+        cli.config_path().write_text(
+            json.dumps({"api_key": "sk-test", "model": "test-model"}),
+            encoding="utf-8",
+        )
+        cli._CONFIG_CACHE = None
+        output = []
+
+        result = cli.cmd_init(
+            Namespace(force=False),
+            output_func=output.append,
+            input_func=lambda _prompt="": self.fail("should not prompt"),
+        )
+
+        self.assertEqual(result, 0)
+        self.assertTrue(any("Already configured" in line for line in output))
+
     def test_repair_topic_metadata_persists_missing_defaults(self) -> None:
         call_silent(cli.cmd_init, Namespace())
         cli.topic_path("legacy").write_text(
@@ -192,6 +209,53 @@ class CliStorageTests(unittest.TestCase):
         self.assertNotIn("description", topic.metadata)
         self.assertNotIn("## Description", topic.body)
         self.assertIn("Understand AI fundamentals", topic.body)
+
+    def test_cmd_templates_lists_all_templates(self) -> None:
+        output = []
+
+        result = cli.cmd_templates(Namespace(), output_func=output.append)
+
+        self.assertEqual(result, 0)
+        template_lines = [line for line in output if line.startswith("  ")]
+        self.assertGreaterEqual(len(template_lines), 8)
+        self.assertTrue(any("vim" in line for line in output))
+        self.assertTrue(any("algorithms" in line for line in output))
+
+    def test_template_flag_loads_units_into_metadata(self) -> None:
+        output = []
+
+        result = cli.cmd_new(
+            Namespace(topic="Template Vim", goal="", template="vim"),
+            output_func=output.append,
+        )
+        topic = cli.read_topic("template-vim")
+
+        self.assertEqual(result, 0)
+        self.assertIsInstance(topic.metadata["template_units"], list)
+        self.assertGreater(len(topic.metadata["template_units"]), 0)
+        self.assertIn("Template 'Vim' loaded", "\n".join(output))
+
+    def test_template_flag_unknown_slug_returns_nonzero(self) -> None:
+        output = []
+
+        result = cli.cmd_new(
+            Namespace(topic="Missing Template", goal="", template="nonexistent-slug"),
+            output_func=output.append,
+        )
+
+        self.assertEqual(result, 1)
+        self.assertTrue(any("not found" in line for line in output))
+
+    def test_template_json_files_are_all_valid(self) -> None:
+        template_dir = Path(cli.__file__).parent / "templates"
+        files = sorted(template_dir.glob("*.json"))
+
+        self.assertGreaterEqual(len(files), 8)
+        for path in files:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(set(data), {"name", "slug", "goal", "tags", "units"})
+            self.assertIsInstance(data["units"], list)
+            self.assertGreater(len(data["units"]), 0)
 
     def test_context_file_import_and_prompt_lists_names_only(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="AI", goal="learn ai"))
