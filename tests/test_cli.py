@@ -4129,6 +4129,50 @@ class PromptInstructionTests(unittest.TestCase):
         self.assertIn("Topic: empty", output)
         self.assertIn("No concept accuracy data yet.", output)
 
+    def test_difficulty_tier_struggling_on_misses(self) -> None:
+        self.assertEqual(
+            cli.difficulty_tier({"consecutive_misses": 2}),
+            "struggling",
+        )
+
+    def test_difficulty_tier_mastering_on_correct_streak(self) -> None:
+        self.assertEqual(
+            cli.difficulty_tier({"consecutive_correct": 3, "last_answer_score": 0.9}),
+            "mastering",
+        )
+
+    def test_difficulty_tier_defaults_on_track(self) -> None:
+        self.assertEqual(cli.difficulty_tier({}), "on_track")
+
+    def test_difficulty_tier_score_overrides_streak(self) -> None:
+        self.assertEqual(
+            cli.difficulty_tier({"consecutive_correct": 3, "last_answer_score": 0.2}),
+            "struggling",
+        )
+
+    def test_difficulty_tier_persisted_after_metadata_update(self) -> None:
+        original_call_openai = cli.call_openai
+        original_parse_metadata_update = cli.parse_metadata_update
+        cli.call_openai = lambda *_args, **_kwargs: "{}"
+        cli.parse_metadata_update = lambda _raw: {
+            "last_answer_status": "needs_work",
+            "answer_score": 0.2,
+        }
+        try:
+            call_silent(cli.cmd_new, Namespace(topic="Adaptive", goal="learn adaptively"))
+            cli.update_learning_metadata(
+                cli.read_topic("adaptive"),
+                "I do not know",
+                "Let's try a smaller example.",
+                "test-model",
+            )
+            updated = cli.read_topic("adaptive")
+        finally:
+            cli.call_openai = original_call_openai
+            cli.parse_metadata_update = original_parse_metadata_update
+
+        self.assertEqual(updated.metadata["difficulty_tier"], "struggling")
+
     def test_known_and_weak_spots_are_deduped_by_normalized_concept(self) -> None:
         metadata = {
             "known": ["Mode switching"],
@@ -4406,6 +4450,15 @@ class PromptInstructionTests(unittest.TestCase):
 
         self.assertIn("What does X mean?", prompt)
         self.assertIn("guiding question", prompt)
+
+    def test_tier_prompt_struggling_contains_worked_example(self) -> None:
+        self.assertIn("worked example", cli._difficulty_tier_prompt("struggling").lower())
+
+    def test_tier_prompt_mastering_contains_free_response(self) -> None:
+        self.assertIn("free-response", cli._difficulty_tier_prompt("mastering").lower())
+
+    def test_tier_prompt_on_track_empty(self) -> None:
+        self.assertEqual(cli._difficulty_tier_prompt("on_track"), "")
 
     def test_system_prompt_includes_course_options_guidance(self) -> None:
         topic = cli.Topic(

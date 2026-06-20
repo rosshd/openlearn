@@ -2443,6 +2443,32 @@ def update_momentum_counters(metadata: dict[str, object]) -> None:
         metadata["consecutive_misses"] = misses + 1
 
 
+def difficulty_tier(metadata: dict[str, object]) -> str:
+    """Returns 'struggling', 'on_track', or 'mastering'."""
+    try:
+        consecutive_correct = int(metadata.get("consecutive_correct") or 0)
+    except (TypeError, ValueError):
+        consecutive_correct = 0
+    try:
+        consecutive_misses = int(metadata.get("consecutive_misses") or 0)
+    except (TypeError, ValueError):
+        consecutive_misses = 0
+    last_score = metadata.get("last_answer_score")
+
+    if isinstance(last_score, (int, float)):
+        score = float(last_score)
+        if consecutive_misses >= 2 or score < 0.35:
+            return "struggling"
+        if consecutive_correct >= 3 and score >= 0.8:
+            return "mastering"
+
+    if consecutive_misses >= 2:
+        return "struggling"
+    if consecutive_correct >= 3:
+        return "mastering"
+    return "on_track"
+
+
 def learner_answer_is_actionable(learner_prompt: str, metadata: dict[str, object]) -> bool:
     value = learner_prompt.strip().lower()
     if not value:
@@ -3421,6 +3447,7 @@ def update_learning_metadata(
         else:
             metadata.pop("pending_hint", None)
         update_momentum_counters(metadata)
+        metadata["difficulty_tier"] = difficulty_tier(metadata)
         if actionable:
             update_pending_chapter_quiz(metadata, previous_metadata, update)
         update_quiz_history(metadata, previous_metadata, update)
@@ -4712,6 +4739,7 @@ def system_prompt(topic: Topic) -> str:
     options_prompt = course_options_prompt(topic.metadata)
     pending_prompt = pending_question_prompt(topic.metadata)
     hint_prompt = pending_hint_prompt(topic.metadata)
+    tier_prompt = _difficulty_tier_prompt(difficulty_tier(topic.metadata))
     return textwrap.dedent(
         f"""
         You are openLearn, a local-first AI learning tutor.
@@ -4769,6 +4797,8 @@ def system_prompt(topic: Topic) -> str:
 
         Format and question rules:
         {TUTOR_FORMAT_RULES}
+
+        {tier_prompt}
 
         Do not keep printing full progress summaries after every answer. Mention
         progress only when it helps the learner feel oriented or encouraged.
@@ -4840,6 +4870,32 @@ def pending_hint_prompt(metadata: dict[str, object]) -> str:
         f"try leading with this guiding question: {hint.strip()}\n"
         f"If the learner still cannot answer after the hint, explain clearly."
     )
+
+
+def _difficulty_tier_prompt(tier: str) -> str:
+    if tier == "struggling":
+        return textwrap.dedent(
+            """
+            Learner difficulty signal: STRUGGLING
+            - Give a worked example BEFORE asking a check question.
+            - Limit each response to ONE concept and ONE follow-up.
+            - Use plain vocabulary; define any jargon inline.
+            - Do not advance until the learner shows a clear correct response.
+            - Frame corrections positively: "Good direction — here is what to adjust:"
+            """
+        ).strip()
+    if tier == "mastering":
+        return textwrap.dedent(
+            """
+            Learner difficulty signal: MASTERING
+            - Prefer free-response over multiple choice.
+            - Ask "why does this work?" and "what breaks if you change X?" questions.
+            - Suggest an adjacent or more advanced concept after a correct answer.
+            - Skip worked examples unless the learner asks for one.
+            - Keep the pace brisk — do not over-explain concepts already demonstrated.
+            """
+        ).strip()
+    return ""
 
 
 def generation_system_prompt(topic: Topic, current_plan: str = "") -> str:
@@ -5327,20 +5383,27 @@ def print_status_bar(topic: Topic, output_func=print) -> None:
     focus = str(metadata.get("current_focus") or "not set")
     label = str(metadata.get("topic") or topic.slug)
     reviews_due = len(due_review_items(metadata))
-    emit(status_bar(label + _streak_suffix(), progress, focus, reviews_due), output_func)
+    emit(status_bar(label + _status_suffix(metadata), progress, focus, reviews_due), output_func)
 
 
-def _streak_suffix() -> str:
+def _status_suffix(metadata: dict[str, object] | None = None) -> str:
+    suffix = ""
     try:
         data = json.loads(state_path().read_text(encoding="utf-8"))
         n = int(data.get("study_streak") or 0)
         if n >= 2:
             enc = (sys.stdout.encoding or "").lower()
             icon = "🔥" if "utf" in enc else ">"
-            return f" {icon}{n}"
+            suffix += f" {icon}{n}"
     except Exception:
         pass
-    return ""
+    if metadata is not None:
+        tier = metadata.get("difficulty_tier") or difficulty_tier(metadata)
+        if tier == "struggling":
+            suffix += " (adapting)"
+        elif tier == "mastering":
+            suffix += " (advancing)"
+    return suffix
 
 
 def print_course_options(metadata: dict[str, object]) -> None:
