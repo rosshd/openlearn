@@ -4805,6 +4805,32 @@ def normalize_topic_metadata(metadata: dict[str, object], slug: str) -> dict[str
     if not isinstance(normalized.get("review_session_active"), bool):
         normalized["review_session_active"] = False
     remove_known_from_review_lists(normalized)
+    # Clean course_units titles that still contain "(N slides) – description" from pre-fix storage
+    _strip_pat = re.compile(r"\s+\(\d+\s+slides?\)\s*[-–—].*$", re.IGNORECASE)
+    _count_pat = re.compile(r"\((\d+)\s+slides?\)", re.IGNORECASE)
+    units = normalized.get("course_units")
+    if isinstance(units, list):
+        cleaned: list[dict[str, object]] = []
+        for unit in units:
+            if not isinstance(unit, dict):
+                cleaned.append(unit)
+                continue
+            title = unit.get("title", "")
+            slide_count = unit.get("slide_count", 1)
+            if isinstance(title, str) and "slides" in title.lower():
+                if not isinstance(slide_count, int) or slide_count == 1:
+                    m = _count_pat.search(title)
+                    if m:
+                        slide_count = int(m.group(1))
+                title = _strip_pat.sub("", title).strip()
+                title = re.sub(r"\s+\(\d+\s+slides?\)\s*$", "", title, flags=re.IGNORECASE).strip()
+            cleaned.append({**unit, "title": title, "slide_count": max(1, slide_count)})
+        normalized["course_units"] = cleaned
+    focus = normalized.get("current_focus", "")
+    if isinstance(focus, str) and "slides" in focus.lower():
+        focus = _strip_pat.sub("", focus).strip()
+        focus = re.sub(r"\s+\(\d+\s+slides?\)\s*$", "", focus, flags=re.IGNORECASE).strip()
+        normalized["current_focus"] = focus
     return normalized
 
 
