@@ -1,0 +1,18 @@
+{
+  "name": "Algorithms & Data Structures",
+  "slug": "algorithms",
+  "goal": "Understand and implement core CS algorithms and data structures",
+  "tags": ["cs", "intermediate"],
+  "units": [
+    "Unit 1: Complexity Analysis - Big O, time vs space, best/worst/average",
+    "Unit 2: Arrays and Strings - two-pointer, sliding window, in-place ops",
+    "Unit 3: Linked Lists - singly, doubly, reversal, cycle detection",
+    "Unit 4: Stacks and Queues - implementation, monotonic stack, BFS/DFS",
+    "Unit 5: Hash Tables - hashing, collision handling, common patterns",
+    "Unit 6: Trees - BST, traversals, height, LCA, balanced trees",
+    "Unit 7: Sorting - bubble, merge, quick, heap sort; stability",
+    "Unit 8: Recursion and Backtracking - base case, call stack, pruning",
+    "Unit 9: Dynamic Programming - memoization, tabulation, common patterns",
+    "Unit 10: Graphs - adjacency list/matrix, BFS, DFS, Dijkstra"
+  ]
+}

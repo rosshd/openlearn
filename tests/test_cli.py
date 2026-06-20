@@ -9,7 +9,7 @@ import textwrap
 import types
 import unittest
 from argparse import Namespace
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -82,12 +82,12 @@ class CliStorageTests(unittest.TestCase):
     def test_version_flag_reports_package_version(self) -> None:
         from openlearn import __version__
 
-        self.assertEqual(__version__, "0.5.0")
+        self.assertEqual(__version__, "0.6.0")
         with contextlib.redirect_stdout(io.StringIO()) as out:
             with self.assertRaises(SystemExit) as ctx:
                 cli.main(["--version"])
         self.assertEqual(ctx.exception.code, 0)
-        self.assertIn("0.5.0", out.getvalue())
+        self.assertIn("0.6.0", out.getvalue())
 
     def test_topic_round_trip_and_summary_metadata(self) -> None:
         call_silent(cli.cmd_init, Namespace())
@@ -144,6 +144,23 @@ class CliStorageTests(unittest.TestCase):
         self.assertIn(str(new_home), first)
         self.assertNotIn("Existing data found", second)
 
+    def test_cmd_init_already_configured_skips_without_force(self) -> None:
+        cli.config_path().write_text(
+            json.dumps({"api_key": "sk-test", "model": "test-model"}),
+            encoding="utf-8",
+        )
+        cli._CONFIG_CACHE = None
+        output = []
+
+        result = cli.cmd_init(
+            Namespace(force=False),
+            output_func=output.append,
+            input_func=lambda _prompt="": self.fail("should not prompt"),
+        )
+
+        self.assertEqual(result, 0)
+        self.assertTrue(any("Already configured" in line for line in output))
+
     def test_repair_topic_metadata_persists_missing_defaults(self) -> None:
         call_silent(cli.cmd_init, Namespace())
         cli.topic_path("legacy").write_text(
@@ -192,6 +209,129 @@ class CliStorageTests(unittest.TestCase):
         self.assertNotIn("description", topic.metadata)
         self.assertNotIn("## Description", topic.body)
         self.assertIn("Understand AI fundamentals", topic.body)
+
+    def test_cmd_templates_lists_all_templates(self) -> None:
+        output = []
+
+        result = cli.cmd_templates(Namespace(), output_func=output.append)
+
+        self.assertEqual(result, 0)
+        template_lines = [line for line in output if line.startswith("  ")]
+        self.assertGreaterEqual(len(template_lines), 8)
+        self.assertTrue(any("vim" in line for line in output))
+        self.assertTrue(any("algorithms" in line for line in output))
+
+    def test_template_flag_loads_units_into_metadata(self) -> None:
+        output = []
+
+        result = cli.cmd_new(
+            Namespace(topic="Template Vim", goal="", template="vim"),
+            output_func=output.append,
+        )
+        topic = cli.read_topic("template-vim")
+
+        self.assertEqual(result, 0)
+        self.assertIsInstance(topic.metadata["template_units"], list)
+        self.assertGreater(len(topic.metadata["template_units"]), 0)
+        self.assertIn("Template 'Vim' loaded", "\n".join(output))
+
+    def test_template_flag_unknown_slug_returns_nonzero(self) -> None:
+        output = []
+
+        result = cli.cmd_new(
+            Namespace(topic="Missing Template", goal="", template="nonexistent-slug"),
+            output_func=output.append,
+        )
+
+        self.assertEqual(result, 1)
+        self.assertTrue(any("not found" in line for line in output))
+
+    def test_template_json_files_are_all_valid(self) -> None:
+        template_dir = Path(cli.__file__).parent / "templates"
+        files = sorted(template_dir.glob("*.json"))
+
+        self.assertGreaterEqual(len(files), 8)
+        for path in files:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(set(data), {"name", "slug", "goal", "tags", "units"})
+            self.assertIsInstance(data["units"], list)
+            self.assertGreater(len(data["units"]), 0)
+
+    def test_course_outline_prompt_includes_template_units(self) -> None:
+        call_silent(
+            cli.cmd_new,
+            Namespace(topic="Vim Editing", goal="Learn vim", template="vim"),
+        )
+        topic = cli.read_topic("vim-editing")
+        prompt = cli.course_outline_prompt(topic)
+
+        self.assertIn("Suggested unit structure", prompt)
+        for unit in topic.metadata["template_units"]:
+            self.assertIn(unit, prompt)
+
+    def test_chapter_select_direct_jumps_to_unit(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Algorithms", goal="learn algos", template=None))
+        slug = "algorithms"
+        cli.set_course_progress(slug, "1", "1")
+        # plant a 3-unit course plan
+        path = cli.topic_path(slug)
+        metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+        metadata = dict(metadata)
+        metadata["course_units"] = [
+            {"unit": 1, "chapter": "1", "title": "Sorting", "slide_count": 3},
+            {"unit": 2, "chapter": "2", "title": "Searching", "slide_count": 3},
+            {"unit": 3, "chapter": "3", "title": "Graphs", "slide_count": 3},
+        ]
+        metadata["current_unit"] = 1
+        metadata["current_slide"] = 1
+        cli.write_text_atomic(path, cli.format_topic(metadata, body))
+
+        result = cli.cmd_chapter_select(
+            Namespace(topic=slug, unit=3, model=None),
+            input_func=lambda _="": self.fail("should not prompt"),
+            output_func=lambda _: None,
+        )
+
+        topic = cli.read_topic(slug)
+        self.assertEqual(result, 0)
+        self.assertEqual(topic.metadata["current_unit"], 3)
+        self.assertEqual(topic.metadata["current_slide"], 1)
+
+    def test_chapter_select_rejects_out_of_range_unit(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Algorithms2", goal="learn algos", template=None))
+        slug = "algorithms2"
+        path = cli.topic_path(slug)
+        metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+        metadata = dict(metadata)
+        metadata["course_units"] = [
+            {"unit": 1, "chapter": "1", "title": "Sorting", "slide_count": 3},
+        ]
+        metadata["current_unit"] = 1
+        metadata["current_slide"] = 1
+        cli.write_text_atomic(path, cli.format_topic(metadata, body))
+
+        output = []
+        result = cli.cmd_chapter_select(
+            Namespace(topic=slug, unit=99, model=None),
+            input_func=lambda _="": self.fail("should not prompt"),
+            output_func=output.append,
+        )
+
+        self.assertEqual(result, 1)
+        self.assertTrue(any("not found" in line for line in output))
+
+    def test_chapter_select_no_plan_returns_nonzero(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Bare Topic", goal="", template=None))
+        output = []
+
+        result = cli.cmd_chapter_select(
+            Namespace(topic="bare-topic", unit=1, model=None),
+            input_func=lambda _="": self.fail("should not prompt"),
+            output_func=output.append,
+        )
+
+        self.assertEqual(result, 1)
+        self.assertTrue(any("No course plan" in line for line in output))
 
     def test_context_file_import_and_prompt_lists_names_only(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="AI", goal="learn ai"))
@@ -448,7 +588,7 @@ class CliStorageTests(unittest.TestCase):
         self.assertTrue(saved.exists())
         self.assertIn("Readable lecture text", saved.read_text(encoding="utf-8"))
         self.assertIn("Summary: web lecture.", cli.system_prompt(cli.read_topic("ai")))
-        self.assertEqual(calls[0][2], {"User-Agent": "openlearn/0.5.0"})
+        self.assertEqual(calls[0][2], {"User-Agent": "openlearn/0.6.0"})
         self.assertEqual(len(cli.read_topic("ai").metadata["imported_checksums"]), 1)
 
     def test_url_import_skips_known_checksum(self) -> None:
@@ -1220,10 +1360,12 @@ class ProviderResponseTests(unittest.TestCase):
 
         self.assertEqual(text, "Keep this answer.\nStill useful.")
 
-    def test_sanitize_model_output_normalizes_terminal_markdown(self) -> None:
-        text = cli.sanitize_model_output("**Recap**\n* First item")
+    def test_sanitize_model_output_preserves_bold_labels(self) -> None:
+        # Bold labels must survive sanitization so Rich can render them as
+        # the visual hierarchy the tutor format rules require.
+        text = cli.sanitize_model_output("**Feedback:** Good.\n* First item")
 
-        self.assertEqual(text, "Recap\n- First item")
+        self.assertEqual(text, "**Feedback:** Good.\n- First item")
 
     def test_sanitize_model_output_removes_tutor_instruction_action_spam(self) -> None:
         text = cli.sanitize_model_output(
@@ -3227,7 +3369,7 @@ class PromptInstructionTests(unittest.TestCase):
             cli.append_session = original_append_session
 
         self.assertIn("Pick up naturally", captured[0])
-        self.assertIn("Avoid template labels", captured[0])
+        self.assertIn("bold-label format", captured[0])
         self.assertIn("warm, direct, and specific", captured[0])
 
     def test_next_prompt_asks_for_learner_response(self) -> None:
@@ -3942,6 +4084,237 @@ class PromptInstructionTests(unittest.TestCase):
         self.assertIn("pending_question", updated.metadata)
         self.assertIn("Which key moves down?", updated.metadata["pending_question"]["question"])
 
+    def test_answer_score_persisted_to_metadata(self) -> None:
+        previous_mock = os.environ.get("OPENLEARN_MOCK")
+        os.environ["OPENLEARN_MOCK"] = "1"
+        original_call_openai = cli.call_openai
+        original_parse_metadata_update = cli.parse_metadata_update
+        cli.call_openai = lambda *_args, **_kwargs: "{}"
+        cli.parse_metadata_update = lambda _raw: {
+            "last_answer_status": "needs_work",
+            "answer_score": 0.3,
+            "answer_gap": "pointers",
+            "answer_hint": "What does & mean?",
+        }
+        try:
+            call_silent(cli.cmd_new, Namespace(topic="C", goal="learn c"))
+            cli.update_learning_metadata(
+                cli.read_topic("c"),
+                "I am not sure",
+                "Let's reason through it.",
+                "test-model",
+            )
+            updated = cli.read_topic("c")
+        finally:
+            cli.call_openai = original_call_openai
+            cli.parse_metadata_update = original_parse_metadata_update
+            if previous_mock is None:
+                os.environ.pop("OPENLEARN_MOCK", None)
+            else:
+                os.environ["OPENLEARN_MOCK"] = previous_mock
+
+        self.assertEqual(updated.metadata["last_answer_score"], 0.3)
+
+    def test_answer_gap_added_to_weak_spots(self) -> None:
+        original_call_openai = cli.call_openai
+        original_parse_metadata_update = cli.parse_metadata_update
+        cli.call_openai = lambda *_args, **_kwargs: "{}"
+        cli.parse_metadata_update = lambda _raw: {
+            "last_answer_status": "partial",
+            "answer_score": 0.5,
+            "answer_gap": "pointers",
+        }
+        try:
+            call_silent(cli.cmd_new, Namespace(topic="Pointers", goal="learn c pointers"))
+            cli.update_learning_metadata(
+                cli.read_topic("pointers"),
+                "Pointers are variables maybe",
+                "Close, but not quite.",
+                "test-model",
+            )
+            updated = cli.read_topic("pointers")
+        finally:
+            cli.call_openai = original_call_openai
+            cli.parse_metadata_update = original_parse_metadata_update
+
+        self.assertIn("pointers", updated.metadata["weak_spots"])
+        self.assertEqual(updated.metadata["last_answer_gap"], "pointers")
+
+    def test_pending_hint_cleared_on_correct_answer(self) -> None:
+        original_call_openai = cli.call_openai
+        original_parse_metadata_update = cli.parse_metadata_update
+        cli.call_openai = lambda *_args, **_kwargs: "{}"
+        cli.parse_metadata_update = lambda _raw: {
+            "last_answer_status": "correct",
+            "answer_score": 1.0,
+        }
+        try:
+            call_silent(cli.cmd_new, Namespace(topic="Python", goal="learn python"))
+            path = cli.topic_path("python")
+            metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+            metadata = dict(metadata)
+            metadata["pending_hint"] = "What does assignment do?"
+            metadata["last_answer_gap"] = "assignment"
+            path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
+
+            cli.update_learning_metadata(
+                cli.read_topic("python"),
+                "It binds a name to a value",
+                "Correct.",
+                "test-model",
+            )
+            updated = cli.read_topic("python")
+        finally:
+            cli.call_openai = original_call_openai
+            cli.parse_metadata_update = original_parse_metadata_update
+
+        self.assertNotIn("pending_hint", updated.metadata)
+        self.assertNotIn("last_answer_gap", updated.metadata)
+
+    def test_concept_attempts_accumulate(self) -> None:
+        original_call_openai = cli.call_openai
+        original_parse_metadata_update = cli.parse_metadata_update
+        cli.call_openai = lambda *_args, **_kwargs: "{}"
+        cli.parse_metadata_update = lambda _raw: {
+            "last_answer_status": "correct",
+            "answer_score": 1.0,
+        }
+        try:
+            call_silent(cli.cmd_new, Namespace(topic="Variables", goal="learn variables"))
+            path = cli.topic_path("variables")
+            metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+            metadata = dict(metadata)
+            metadata["current_focus"] = "variables"
+            path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
+
+            cli.update_learning_metadata(
+                cli.read_topic("variables"), "first answer", "Correct.", "test-model"
+            )
+            cli.update_learning_metadata(
+                cli.read_topic("variables"), "second answer", "Correct.", "test-model"
+            )
+            updated = cli.read_topic("variables")
+        finally:
+            cli.call_openai = original_call_openai
+            cli.parse_metadata_update = original_parse_metadata_update
+
+        self.assertEqual(updated.metadata["concept_attempts"]["variables"]["attempts"], 2)
+        self.assertEqual(updated.metadata["concept_attempts"]["variables"]["correct_sum"], 2.0)
+
+    def test_streak_increments_on_new_day(self) -> None:
+        yesterday = (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()
+        cli.state_path().write_text(
+            json.dumps(
+                {
+                    "active_topic": "old",
+                    "last_study_date": yesterday,
+                    "study_streak": 1,
+                    "longest_streak": 1,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        cli.set_active_topic("vim")
+        data = json.loads(cli.state_path().read_text(encoding="utf-8"))
+
+        self.assertEqual(data["study_streak"], 2)
+        self.assertEqual(data["longest_streak"], 2)
+
+    def test_streak_resets_after_gap(self) -> None:
+        old_date = (datetime.now(timezone.utc).date() - timedelta(days=3)).isoformat()
+        cli.state_path().write_text(
+            json.dumps(
+                {
+                    "active_topic": "old",
+                    "last_study_date": old_date,
+                    "study_streak": 5,
+                    "longest_streak": 5,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        cli.set_active_topic("vim")
+        data = json.loads(cli.state_path().read_text(encoding="utf-8"))
+
+        self.assertEqual(data["study_streak"], 1)
+        self.assertEqual(data["longest_streak"], 5)
+
+    def test_streak_no_double_increment_same_day(self) -> None:
+        cli.set_active_topic("vim")
+        first = json.loads(cli.state_path().read_text(encoding="utf-8"))["study_streak"]
+        cli.set_active_topic("vim")
+        second = json.loads(cli.state_path().read_text(encoding="utf-8"))["study_streak"]
+
+        self.assertEqual(first, 1)
+        self.assertEqual(second, 1)
+
+    def test_cmd_stats_no_crash_empty_topic(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Empty", goal="learn"))
+        output = []
+        previous_plotext = sys.modules.get("plotext")
+        sys.modules["plotext"] = types.SimpleNamespace(
+            clf=lambda: None,
+            simple_bar=lambda *_args, **_kwargs: None,
+            show=lambda: None,
+        )
+        try:
+            code = cli.cmd_stats(Namespace(topic="empty"), output_func=output.append)
+        finally:
+            if previous_plotext is None:
+                sys.modules.pop("plotext", None)
+            else:
+                sys.modules["plotext"] = previous_plotext
+
+        self.assertEqual(code, 0)
+        self.assertIn("Topic: empty", output)
+        self.assertIn("No concept accuracy data yet.", output)
+
+    def test_difficulty_tier_struggling_on_misses(self) -> None:
+        self.assertEqual(
+            cli.difficulty_tier({"consecutive_misses": 2}),
+            "struggling",
+        )
+
+    def test_difficulty_tier_mastering_on_correct_streak(self) -> None:
+        self.assertEqual(
+            cli.difficulty_tier({"consecutive_correct": 3, "last_answer_score": 0.9}),
+            "mastering",
+        )
+
+    def test_difficulty_tier_defaults_on_track(self) -> None:
+        self.assertEqual(cli.difficulty_tier({}), "on_track")
+
+    def test_difficulty_tier_score_overrides_streak(self) -> None:
+        self.assertEqual(
+            cli.difficulty_tier({"consecutive_correct": 3, "last_answer_score": 0.2}),
+            "struggling",
+        )
+
+    def test_difficulty_tier_persisted_after_metadata_update(self) -> None:
+        original_call_openai = cli.call_openai
+        original_parse_metadata_update = cli.parse_metadata_update
+        cli.call_openai = lambda *_args, **_kwargs: "{}"
+        cli.parse_metadata_update = lambda _raw: {
+            "last_answer_status": "needs_work",
+            "answer_score": 0.2,
+        }
+        try:
+            call_silent(cli.cmd_new, Namespace(topic="Adaptive", goal="learn adaptively"))
+            cli.update_learning_metadata(
+                cli.read_topic("adaptive"),
+                "I do not know",
+                "Let's try a smaller example.",
+                "test-model",
+            )
+            updated = cli.read_topic("adaptive")
+        finally:
+            cli.call_openai = original_call_openai
+            cli.parse_metadata_update = original_parse_metadata_update
+
+        self.assertEqual(updated.metadata["difficulty_tier"], "struggling")
+
     def test_known_and_weak_spots_are_deduped_by_normalized_concept(self) -> None:
         metadata = {
             "known": ["Mode switching"],
@@ -4210,6 +4583,24 @@ class PromptInstructionTests(unittest.TestCase):
         self.assertIn("D) Undo", prompt)
         self.assertIn("Stored correct answer key: A", prompt)
         self.assertIn("Do not substitute a different question", prompt)
+
+    def test_pending_hint_prompt_empty_when_no_hint(self) -> None:
+        self.assertEqual(cli.pending_hint_prompt({}), "")
+
+    def test_pending_hint_prompt_returns_hint_text(self) -> None:
+        prompt = cli.pending_hint_prompt({"pending_hint": "What does X mean?"})
+
+        self.assertIn("What does X mean?", prompt)
+        self.assertIn("guiding question", prompt)
+
+    def test_tier_prompt_struggling_contains_worked_example(self) -> None:
+        self.assertIn("worked example", cli._difficulty_tier_prompt("struggling").lower())
+
+    def test_tier_prompt_mastering_contains_free_response(self) -> None:
+        self.assertIn("free-response", cli._difficulty_tier_prompt("mastering").lower())
+
+    def test_tier_prompt_on_track_empty(self) -> None:
+        self.assertEqual(cli._difficulty_tier_prompt("on_track"), "")
 
     def test_system_prompt_includes_course_options_guidance(self) -> None:
         topic = cli.Topic(
@@ -4520,6 +4911,24 @@ class PromptContextTests(unittest.TestCase):
         self.assertIn("Last exchange kind: chat", result)
         self.assertIn("Last learner/tutor prompt:", result)
         self.assertIn("Last tutor response:", result)
+
+    def test_compact_session_context_includes_answer_gap(self) -> None:
+        topic = cli.Topic(
+            slug="demo",
+            path=Path("demo.md"),
+            metadata={
+                "topic": "Demo",
+                "last_answer_status": "needs_work",
+                "last_answer_score": 0.3,
+                "last_answer_gap": "pointers",
+            },
+            body="# Demo\n",
+        )
+
+        result = cli.compact_session_context(topic, "")
+
+        self.assertIn("Last answer score: 0.30", result)
+        self.assertIn("Identified knowledge gap: pointers", result)
 
     def test_compact_session_context_empty_session_returns_metadata_only(self) -> None:
         topic = cli.Topic(

@@ -1,0 +1,19 @@
+{
+  "name": "stuck_learner",
+  "description": "Guards against repeating the same question when a learner is stuck on while loop syntax.",
+  "topic": "loops",
+  "goal": "Learn Python loops",
+  "turns": [
+    {"role": "user", "content": "I think a while loop is written like while x < 5 then print(x)."},
+    {"role": "assistant", "content": "Not quite. What punctuation does Python use after a while condition?"},
+    {"role": "user", "content": "Maybe it uses parentheses like while (x < 5) print(x)?"},
+    {"role": "assistant", "content": "Still not quite. What punctuation goes at the end of the while line?"},
+    {"role": "user", "content": "I don't know. I keep forgetting the syntax."},
+    {"role": "assistant", "content": null}
+  ],
+  "rubric": [
+    "tutor offers a worked example or alternative explanation",
+    "tutor does not repeat the same question verbatim",
+    "tutor does not advance past the concept without understanding"
+  ]
+}

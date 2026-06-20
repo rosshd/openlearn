@@ -1,0 +1,16 @@
+{
+  "name": "Computer Networking",
+  "slug": "networking",
+  "goal": "Understand how computer networks function from physical to application layer",
+  "tags": ["cs", "intermediate"],
+  "units": [
+    "Unit 1: OSI and TCP/IP Models - layers, encapsulation, what each handles",
+    "Unit 2: Physical and Data Link - bits, frames, MAC addresses, switches",
+    "Unit 3: IP and Routing - IPv4/IPv6, subnets, CIDR, routing tables",
+    "Unit 4: TCP and UDP - connection setup, reliability, flow control",
+    "Unit 5: DNS - hierarchy, resolution, record types, caching",
+    "Unit 6: HTTP and TLS - application layer, HTTPS handshake",
+    "Unit 7: NAT and Firewalls - address translation, packet filtering",
+    "Unit 8: Diagnostics - ping, traceroute, netstat, Wireshark basics"
+  ]
+}

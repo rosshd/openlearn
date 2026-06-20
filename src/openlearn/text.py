@@ -75,7 +75,6 @@ def sanitize_model_output(text: str) -> str:
         cleaned_lines.append(line)
     text = "\n".join(cleaned_lines)
     text = re.sub(r"(?m)^(\s*)\*\s+", r"\1- ", text)
-    text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
     return text.strip()
 
 

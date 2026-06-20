@@ -1,0 +1,16 @@
+{
+  "name": "SQL Fundamentals",
+  "slug": "sql",
+  "goal": "Query and manage relational databases with SQL",
+  "tags": ["databases", "beginner"],
+  "units": [
+    "Unit 1: Relational Model - tables, rows, columns, keys, relations",
+    "Unit 2: Basic Queries - SELECT, FROM, WHERE, ORDER BY, LIMIT",
+    "Unit 3: Filtering - AND/OR/NOT, IN, BETWEEN, LIKE, NULL handling",
+    "Unit 4: Aggregation - COUNT, SUM, AVG, MIN, MAX, GROUP BY, HAVING",
+    "Unit 5: Joins - INNER, LEFT, RIGHT, FULL OUTER, self-join",
+    "Unit 6: Subqueries and CTEs - correlated subqueries, WITH clause",
+    "Unit 7: Data Modification - INSERT, UPDATE, DELETE, transactions",
+    "Unit 8: Schema Design - normalization, indexes, foreign keys"
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "name": "Linux CLI",
+  "slug": "linux-cli",
+  "goal": "Navigate and automate tasks in a Linux/Unix terminal",
+  "tags": ["tools", "beginner"],
+  "units": [
+    "Unit 1: Filesystem Navigation - pwd, ls, cd, paths, hidden files",
+    "Unit 2: File Operations - cp, mv, rm, mkdir, touch, find",
+    "Unit 3: Viewing and Editing - cat, less, head, tail, nano, vim basics",
+    "Unit 4: Permissions - chmod, chown, ls -l, execute bit",
+    "Unit 5: Processes - ps, top, kill, bg, fg, jobs",
+    "Unit 6: Pipes and Redirection - |, >, >>, 2>&1, tee",
+    "Unit 7: Shell Scripting - variables, loops, conditionals, shebang",
+    "Unit 8: Package Management - apt/brew, install, update, search"
+  ]
+}

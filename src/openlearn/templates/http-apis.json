@@ -1,0 +1,16 @@
+{
+  "name": "HTTP & APIs",
+  "slug": "http-apis",
+  "goal": "Understand how the web works and build and consume REST APIs",
+  "tags": ["web", "beginner"],
+  "units": [
+    "Unit 1: HTTP Basics - request/response, methods, status codes, headers",
+    "Unit 2: URLs and DNS - anatomy of a URL, how DNS resolution works",
+    "Unit 3: REST Principles - resources, statelessness, CRUD mapping",
+    "Unit 4: JSON and Serialization - structure, parsing, common patterns",
+    "Unit 5: Authentication - API keys, Basic auth, Bearer tokens, OAuth2",
+    "Unit 6: Making Requests - curl, fetch, requests library, error handling",
+    "Unit 7: Building APIs - routing, handlers, middleware, status codes",
+    "Unit 8: HTTPS and Security - TLS, certificates, CORS, common threats"
+  ]
+}

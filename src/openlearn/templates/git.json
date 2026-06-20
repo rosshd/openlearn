@@ -1,0 +1,15 @@
+{
+  "name": "Git & GitHub",
+  "slug": "git",
+  "goal": "Use Git confidently for daily development work",
+  "tags": ["tools", "beginner"],
+  "units": [
+    "Unit 1: Core Concepts - repo, commit, working tree, staging area",
+    "Unit 2: Essential Commands - init, add, commit, status, log",
+    "Unit 3: Branching - branch, checkout/switch, merge, conflicts",
+    "Unit 4: Remote Workflows - clone, push, pull, fetch, origin",
+    "Unit 5: GitHub - pull requests, forks, issues, code review",
+    "Unit 6: Undoing Changes - revert, reset, restore, stash",
+    "Unit 7: History and Inspection - diff, blame, bisect, reflog"
+  ]
+}

@@ -128,6 +128,23 @@ def format_resume_line(line: str) -> str:
     return render_plain(text)
 
 
+def emit_resume_line(line: str, output_func=print) -> None:
+    """Emit a resume-panel line with a bold label prefix.
+
+    Unlike format_resume_line (which flattens to plain text), this routes a
+    styled Text through emit() so the label renders bold on a real terminal
+    while still degrading to plain text for piped/test output.
+    """
+    match = re.match(r"^([^:]+):(.*)", line)
+    if not match:
+        emit(Text(line, style="bold cyan"), output_func)
+        return
+    text = Text()
+    text.append(match.group(1) + ":", style="bold cyan")
+    text.append(match.group(2))
+    emit(text, output_func)
+
+
 def tutor_markdown(text: str) -> Markdown:
     return Markdown(text)
 
