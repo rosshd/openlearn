@@ -1360,10 +1360,12 @@ class ProviderResponseTests(unittest.TestCase):
 
         self.assertEqual(text, "Keep this answer.\nStill useful.")
 
-    def test_sanitize_model_output_normalizes_terminal_markdown(self) -> None:
-        text = cli.sanitize_model_output("**Recap**\n* First item")
+    def test_sanitize_model_output_preserves_bold_labels(self) -> None:
+        # Bold labels must survive sanitization so Rich can render them as
+        # the visual hierarchy the tutor format rules require.
+        text = cli.sanitize_model_output("**Feedback:** Good.\n* First item")
 
-        self.assertEqual(text, "Recap\n- First item")
+        self.assertEqual(text, "**Feedback:** Good.\n- First item")
 
     def test_sanitize_model_output_removes_tutor_instruction_action_spam(self) -> None:
         text = cli.sanitize_model_output(
