@@ -269,6 +269,70 @@ class CliStorageTests(unittest.TestCase):
         for unit in topic.metadata["template_units"]:
             self.assertIn(unit, prompt)
 
+    def test_chapter_select_direct_jumps_to_unit(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Algorithms", goal="learn algos", template=None))
+        slug = "algorithms"
+        cli.set_course_progress(slug, "1", "1")
+        # plant a 3-unit course plan
+        path = cli.topic_path(slug)
+        metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+        metadata = dict(metadata)
+        metadata["course_units"] = [
+            {"unit": 1, "chapter": "1", "title": "Sorting", "slide_count": 3},
+            {"unit": 2, "chapter": "2", "title": "Searching", "slide_count": 3},
+            {"unit": 3, "chapter": "3", "title": "Graphs", "slide_count": 3},
+        ]
+        metadata["current_unit"] = 1
+        metadata["current_slide"] = 1
+        cli.write_text_atomic(path, cli.format_topic(metadata, body))
+
+        result = cli.cmd_chapter_select(
+            Namespace(topic=slug, unit=3, model=None),
+            input_func=lambda _="": self.fail("should not prompt"),
+            output_func=lambda _: None,
+        )
+
+        topic = cli.read_topic(slug)
+        self.assertEqual(result, 0)
+        self.assertEqual(topic.metadata["current_unit"], 3)
+        self.assertEqual(topic.metadata["current_slide"], 1)
+
+    def test_chapter_select_rejects_out_of_range_unit(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Algorithms2", goal="learn algos", template=None))
+        slug = "algorithms2"
+        path = cli.topic_path(slug)
+        metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+        metadata = dict(metadata)
+        metadata["course_units"] = [
+            {"unit": 1, "chapter": "1", "title": "Sorting", "slide_count": 3},
+        ]
+        metadata["current_unit"] = 1
+        metadata["current_slide"] = 1
+        cli.write_text_atomic(path, cli.format_topic(metadata, body))
+
+        output = []
+        result = cli.cmd_chapter_select(
+            Namespace(topic=slug, unit=99, model=None),
+            input_func=lambda _="": self.fail("should not prompt"),
+            output_func=output.append,
+        )
+
+        self.assertEqual(result, 1)
+        self.assertTrue(any("not found" in line for line in output))
+
+    def test_chapter_select_no_plan_returns_nonzero(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Bare Topic", goal="", template=None))
+        output = []
+
+        result = cli.cmd_chapter_select(
+            Namespace(topic="bare-topic", unit=1, model=None),
+            input_func=lambda _="": self.fail("should not prompt"),
+            output_func=output.append,
+        )
+
+        self.assertEqual(result, 1)
+        self.assertTrue(any("No course plan" in line for line in output))
+
     def test_context_file_import_and_prompt_lists_names_only(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="AI", goal="learn ai"))
         source = Path(self.home.name) / "overview.txt"

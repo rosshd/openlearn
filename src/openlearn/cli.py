@@ -115,7 +115,7 @@ REPL_HELP_LINES = [
 ]
 REPL_HELP_ALL = (
     "Commands: /resume (/r), /next (/n), /done, /review, /status, /summary, "
-    "/options, /plan, /progress [unit slide], /scope <change>, /repair, "
+    "/options, /plan, /progress [unit slide], /chapter [N], /scope <change>, /repair, "
     "/drill [--leetcode], /check, /videos [--n N] [query], /active [topic], /recent, "
     "/new <topic> [goal], /delete <topic>, /ask <question>, /quit (/q)"
 )
@@ -433,6 +433,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--model", default=None, help="Override model for this request"
     )
     next_parser.set_defaults(func=cmd_next)
+
+    chapter_parser = sub.add_parser("chapter", help="Jump to a specific course chapter")
+    chapter_parser.add_argument(
+        "unit", nargs="?", type=int, help="Unit number to jump to (interactive if omitted)"
+    )
+    chapter_parser.add_argument(
+        "topic", nargs="?", help="Topic slug, defaults to active/recent"
+    )
+    chapter_parser.add_argument(
+        "--model", default=None, help="Override model for this request"
+    )
+    chapter_parser.set_defaults(func=cmd_chapter_select)
 
     return parser
 
@@ -1295,6 +1307,18 @@ def handle_repl_command(
             output_func(topic_progress_line(read_topic(slug)) or "Progress updated.")
         else:
             raise OpenLearnError("usage: /progress [unit slide]")
+    elif name == "chapter":
+        unit_arg = args[0] if args else None
+        cmd_chapter_select(
+            argparse.Namespace(topic=None, unit=int(unit_arg) if unit_arg else None, model=model),
+            input_func=input_func,
+            output_func=output_func,
+        )
+        slug = resolve_topic_slug(None)
+        updated = read_topic(slug)
+        if not updated.metadata.get("pending_chapter_quiz"):
+            output_func("Loading next slide...")
+            cmd_next(argparse.Namespace(topic=slug, model=model), output_func=output_func)
     elif name == "scope":
         request = " ".join(args).strip()
         if not request:
@@ -2327,6 +2351,45 @@ def set_review_session_active(slug: str, active: bool) -> None:
         metadata = dict(metadata)
         metadata["review_session_active"] = active
         write_text_atomic(path, format_topic(metadata, body))
+
+
+def cmd_chapter_select(
+    args: argparse.Namespace,
+    input_func=input,
+    output_func=print,
+) -> int:
+    slug = resolve_topic_slug(getattr(args, "topic", None))
+    topic = read_topic(slug)
+    units = topic.metadata.get("course_units")
+    if not isinstance(units, list) or not units:
+        output_func("No course plan found. Generate a course with /next first.")
+        return 1
+
+    unit_arg = getattr(args, "unit", None)
+    if unit_arg is not None:
+        unit_num = unit_arg
+    else:
+        print_course_plan(topic, output_func)
+        current_unit = topic.metadata.get("current_unit")
+        if isinstance(current_unit, int):
+            output_func(f"(currently on Unit {current_unit})")
+        raw = input_func("Jump to unit number (or Enter to cancel): ").strip()
+        if not raw:
+            return 0
+        try:
+            unit_num = int(raw)
+        except ValueError:
+            output_func("Please enter a valid unit number.")
+            return 1
+
+    if not course_unit_at(topic.metadata, unit_num):
+        output_func(f"Unit {unit_num} not found. Course has {len(units)} unit(s).")
+        return 1
+
+    set_course_progress(slug, str(unit_num), "1")
+    updated = read_topic(slug)
+    output_func(structured_progress_line(updated) or topic_progress_line(updated) or f"Jumped to Unit {unit_num}.")
+    return 0
 
 
 def print_course_plan(topic: Topic, output_func=print) -> None:
