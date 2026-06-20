@@ -466,6 +466,56 @@ anti-gaming above.
 
 ---
 
+## Test-Enhanced Learning: Quiz Frequency, Placement & Stakes
+
+**Source:** McDaniel, Agarwal, Huelser, McDermott & Roediger (2011), *Test-Enhanced Learning
+in a Middle School Science Classroom: The Effects of Quiz Frequency and Placement*, Journal of
+Educational Psychology 103(2). Roediger, Agarwal, McDaniel & McDermott (2011), *Test-Enhanced
+Learning in the Classroom: Long-Term Improvements From Quizzing*, JEP: Applied 17(4). Transfer:
+McDaniel, Thomas, Agarwal, McDermott & Roediger (2013), *Quizzing in Middle-School Science:
+Successful Transfer Performance on Classroom Exams*, Applied Cognitive Psychology 27. Stakes/
+anxiety: Khanna (2015), *Ungraded Pop Quizzes*, Teaching of Psychology 42(2); Roediger, Putnam
+& Smith (2011), *Ten Benefits of Testing*, Psychology of Learning and Motivation 55.
+
+**Finding:** Frequent **low-stakes quizzing with feedback** during a course produces durable
+gains on later summative exams — and the benefit *persists to cumulative semester and
+end-of-year exams*, not just immediate retests. Crucially, McDaniel et al. (2013) found the
+gains include **transfer** to new questions, not only verbatim repeats. On the design
+variables the question "pop quiz?" raises:
+- **Stakes:** ungraded/low-stakes quizzes match or beat graded ones for learning, and
+  ungraded quizzes produce markedly less anxiety. Students *like* having them when ungraded.
+- **Surprise (announced vs. unannounced):** the learning benefit comes from the **retrieval
+  practice**, not the surprise. Unannounced ("pop") quizzes add panic, stress, and anxiety;
+  announced/expected assessments yield less anxiety, more enjoyment, and equal-or-better
+  performance. Surprise is a cost, not a mechanism.
+- **Placement/frequency:** distributing quizzes through learning (and making later quizzes
+  **cumulative**) leverages spacing and interleaving; cumulative quizzing beats one-shot
+  end-of-chapter testing.
+- **Indirect benefit:** quizzing improves the learner's *metacognitive calibration* — it
+  reveals what they don't know, redirecting study (ties to Metacognition & Calibration).
+
+**Implication for openlearn:** Do **not** build surprise/high-stakes "pop" quizzes — for a
+self-directed learner there is no grade anyway, so the only thing "surprise" adds is anxiety
+with no learning upside. Instead: keep all checks low-stakes/ungraded by framing (which the
+growth-mindset feedback rules already support), and add **frequent, cumulative, spaced
+retrieval quizzes interspersed through learning** rather than only an end-of-chapter quiz. The
+quiz trigger should be driven by *accumulated material and spacing* (and SRS due-density), not
+solely by a chapter boundary. Cumulative quizzes should pull interleaved items across recently
+studied units (see Interleaving) and include transfer questions (see Generation Effect), which
+also makes them the natural mechanism for the unit-level mastery check and the delayed-
+retrieval north-star metric.
+
+**Profile fit (Mastery Profiles, V0.7.0 Contract 4):**
+- `efficient` → shorter, mostly recent-material checks in test-like format; light cumulative.
+- `proficient` → cumulative spaced quizzes with transfer questions.
+- `deep` → more frequent, heavily interleaved cumulative quizzes with explain-back.
+
+**Where to apply:** A "cumulative check" mechanic distinct from the chapter quiz, triggered by
+material volume + spacing; the unit-level mastery check (Contract 3); the eval loop's delayed-
+retrieval outcome signal (Phase 4).
+
+---
+
 ## Application Summary
 
 | Feature | Research basis |
@@ -489,6 +539,7 @@ anti-gaming above.
 | Attempt-gated help; distrust fast verbatim "correct" answers | Gaming the system / help abuse |
 | Step help up/down by one rung, fade scaffolds on success | Contingent tutoring / scaffolding |
 | Mastery gate before advancing a unit | Bloom 2 sigma / mastery learning |
+| Frequent low-stakes cumulative quizzes, not surprise/graded pop quizzes | Test-enhanced learning |
 
 ---
 
