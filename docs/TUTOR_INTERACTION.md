@@ -50,6 +50,11 @@ adds beyond what v0.6.0 tracks.
 - **Per answer (transient, drives gaming detection):** **response latency**, **verbatim
   overlap with recently shown text**, whether help was used before the attempt.
 - **Calibration:** stated confidence vs. actual outcome (when collected).
+- **Goal/rigor:** `mastery_profile` (`efficient` / `proficient` / `deep`) derived from the
+  learner's goal — sets the *depth bar*, not the anti-gaming floor. The same material is held
+  to a different standard for an exam-cramming student vs. a researcher. Parameterizes the
+  mastery gate, advancement speed, and how hard the mastering-tier policy pushes. See
+  V0.7.0.md Contract 4.
 
 The learner model is the asset. It is also the eventual training-data asset (§8).
 
