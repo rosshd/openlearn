@@ -82,12 +82,12 @@ class CliStorageTests(unittest.TestCase):
     def test_version_flag_reports_package_version(self) -> None:
         from openlearn import __version__
 
-        self.assertEqual(__version__, "0.5.0")
+        self.assertEqual(__version__, "0.6.0")
         with contextlib.redirect_stdout(io.StringIO()) as out:
             with self.assertRaises(SystemExit) as ctx:
                 cli.main(["--version"])
         self.assertEqual(ctx.exception.code, 0)
-        self.assertIn("0.5.0", out.getvalue())
+        self.assertIn("0.6.0", out.getvalue())
 
     def test_topic_round_trip_and_summary_metadata(self) -> None:
         call_silent(cli.cmd_init, Namespace())
@@ -588,7 +588,7 @@ class CliStorageTests(unittest.TestCase):
         self.assertTrue(saved.exists())
         self.assertIn("Readable lecture text", saved.read_text(encoding="utf-8"))
         self.assertIn("Summary: web lecture.", cli.system_prompt(cli.read_topic("ai")))
-        self.assertEqual(calls[0][2], {"User-Agent": "openlearn/0.5.0"})
+        self.assertEqual(calls[0][2], {"User-Agent": "openlearn/0.6.0"})
         self.assertEqual(len(cli.read_topic("ai").metadata["imported_checksums"]), 1)
 
     def test_url_import_skips_known_checksum(self) -> None:
