@@ -208,6 +208,7 @@ Goal: work with any model — including fully local ones — and be easy to inst
   imported on another machine. `openlearn import-course <file>` is the inverse.
 - **Homebrew tap**: `brew install rosshd/tap/openlearn` as the primary Mac install path.
   Removes the Python/pip requirement for non-developer users.
+- **Reset Course** use homebrew tap to temporarily store files, then delete course and reinitialize it with all of the context(optional to save context of learned topics or not)
 - **Cost estimation**: before large import/summarization calls, show estimated token count
   and approximate cost for the configured provider.
 

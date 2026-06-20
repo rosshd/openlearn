@@ -9,7 +9,7 @@ import textwrap
 import types
 import unittest
 from argparse import Namespace
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -3942,6 +3942,193 @@ class PromptInstructionTests(unittest.TestCase):
         self.assertIn("pending_question", updated.metadata)
         self.assertIn("Which key moves down?", updated.metadata["pending_question"]["question"])
 
+    def test_answer_score_persisted_to_metadata(self) -> None:
+        previous_mock = os.environ.get("OPENLEARN_MOCK")
+        os.environ["OPENLEARN_MOCK"] = "1"
+        original_call_openai = cli.call_openai
+        original_parse_metadata_update = cli.parse_metadata_update
+        cli.call_openai = lambda *_args, **_kwargs: "{}"
+        cli.parse_metadata_update = lambda _raw: {
+            "last_answer_status": "needs_work",
+            "answer_score": 0.3,
+            "answer_gap": "pointers",
+            "answer_hint": "What does & mean?",
+        }
+        try:
+            call_silent(cli.cmd_new, Namespace(topic="C", goal="learn c"))
+            cli.update_learning_metadata(
+                cli.read_topic("c"),
+                "I am not sure",
+                "Let's reason through it.",
+                "test-model",
+            )
+            updated = cli.read_topic("c")
+        finally:
+            cli.call_openai = original_call_openai
+            cli.parse_metadata_update = original_parse_metadata_update
+            if previous_mock is None:
+                os.environ.pop("OPENLEARN_MOCK", None)
+            else:
+                os.environ["OPENLEARN_MOCK"] = previous_mock
+
+        self.assertEqual(updated.metadata["last_answer_score"], 0.3)
+
+    def test_answer_gap_added_to_weak_spots(self) -> None:
+        original_call_openai = cli.call_openai
+        original_parse_metadata_update = cli.parse_metadata_update
+        cli.call_openai = lambda *_args, **_kwargs: "{}"
+        cli.parse_metadata_update = lambda _raw: {
+            "last_answer_status": "partial",
+            "answer_score": 0.5,
+            "answer_gap": "pointers",
+        }
+        try:
+            call_silent(cli.cmd_new, Namespace(topic="Pointers", goal="learn c pointers"))
+            cli.update_learning_metadata(
+                cli.read_topic("pointers"),
+                "Pointers are variables maybe",
+                "Close, but not quite.",
+                "test-model",
+            )
+            updated = cli.read_topic("pointers")
+        finally:
+            cli.call_openai = original_call_openai
+            cli.parse_metadata_update = original_parse_metadata_update
+
+        self.assertIn("pointers", updated.metadata["weak_spots"])
+        self.assertEqual(updated.metadata["last_answer_gap"], "pointers")
+
+    def test_pending_hint_cleared_on_correct_answer(self) -> None:
+        original_call_openai = cli.call_openai
+        original_parse_metadata_update = cli.parse_metadata_update
+        cli.call_openai = lambda *_args, **_kwargs: "{}"
+        cli.parse_metadata_update = lambda _raw: {
+            "last_answer_status": "correct",
+            "answer_score": 1.0,
+        }
+        try:
+            call_silent(cli.cmd_new, Namespace(topic="Python", goal="learn python"))
+            path = cli.topic_path("python")
+            metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+            metadata = dict(metadata)
+            metadata["pending_hint"] = "What does assignment do?"
+            metadata["last_answer_gap"] = "assignment"
+            path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
+
+            cli.update_learning_metadata(
+                cli.read_topic("python"),
+                "It binds a name to a value",
+                "Correct.",
+                "test-model",
+            )
+            updated = cli.read_topic("python")
+        finally:
+            cli.call_openai = original_call_openai
+            cli.parse_metadata_update = original_parse_metadata_update
+
+        self.assertNotIn("pending_hint", updated.metadata)
+        self.assertNotIn("last_answer_gap", updated.metadata)
+
+    def test_concept_attempts_accumulate(self) -> None:
+        original_call_openai = cli.call_openai
+        original_parse_metadata_update = cli.parse_metadata_update
+        cli.call_openai = lambda *_args, **_kwargs: "{}"
+        cli.parse_metadata_update = lambda _raw: {
+            "last_answer_status": "correct",
+            "answer_score": 1.0,
+        }
+        try:
+            call_silent(cli.cmd_new, Namespace(topic="Variables", goal="learn variables"))
+            path = cli.topic_path("variables")
+            metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+            metadata = dict(metadata)
+            metadata["current_focus"] = "variables"
+            path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
+
+            cli.update_learning_metadata(
+                cli.read_topic("variables"), "first answer", "Correct.", "test-model"
+            )
+            cli.update_learning_metadata(
+                cli.read_topic("variables"), "second answer", "Correct.", "test-model"
+            )
+            updated = cli.read_topic("variables")
+        finally:
+            cli.call_openai = original_call_openai
+            cli.parse_metadata_update = original_parse_metadata_update
+
+        self.assertEqual(updated.metadata["concept_attempts"]["variables"]["attempts"], 2)
+        self.assertEqual(updated.metadata["concept_attempts"]["variables"]["correct_sum"], 2.0)
+
+    def test_streak_increments_on_new_day(self) -> None:
+        yesterday = (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()
+        cli.state_path().write_text(
+            json.dumps(
+                {
+                    "active_topic": "old",
+                    "last_study_date": yesterday,
+                    "study_streak": 1,
+                    "longest_streak": 1,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        cli.set_active_topic("vim")
+        data = json.loads(cli.state_path().read_text(encoding="utf-8"))
+
+        self.assertEqual(data["study_streak"], 2)
+        self.assertEqual(data["longest_streak"], 2)
+
+    def test_streak_resets_after_gap(self) -> None:
+        old_date = (datetime.now(timezone.utc).date() - timedelta(days=3)).isoformat()
+        cli.state_path().write_text(
+            json.dumps(
+                {
+                    "active_topic": "old",
+                    "last_study_date": old_date,
+                    "study_streak": 5,
+                    "longest_streak": 5,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        cli.set_active_topic("vim")
+        data = json.loads(cli.state_path().read_text(encoding="utf-8"))
+
+        self.assertEqual(data["study_streak"], 1)
+        self.assertEqual(data["longest_streak"], 5)
+
+    def test_streak_no_double_increment_same_day(self) -> None:
+        cli.set_active_topic("vim")
+        first = json.loads(cli.state_path().read_text(encoding="utf-8"))["study_streak"]
+        cli.set_active_topic("vim")
+        second = json.loads(cli.state_path().read_text(encoding="utf-8"))["study_streak"]
+
+        self.assertEqual(first, 1)
+        self.assertEqual(second, 1)
+
+    def test_cmd_stats_no_crash_empty_topic(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Empty", goal="learn"))
+        output = []
+        previous_plotext = sys.modules.get("plotext")
+        sys.modules["plotext"] = types.SimpleNamespace(
+            clf=lambda: None,
+            simple_bar=lambda *_args, **_kwargs: None,
+            show=lambda: None,
+        )
+        try:
+            code = cli.cmd_stats(Namespace(topic="empty"), output_func=output.append)
+        finally:
+            if previous_plotext is None:
+                sys.modules.pop("plotext", None)
+            else:
+                sys.modules["plotext"] = previous_plotext
+
+        self.assertEqual(code, 0)
+        self.assertIn("Topic: empty", output)
+        self.assertIn("No concept accuracy data yet.", output)
+
     def test_known_and_weak_spots_are_deduped_by_normalized_concept(self) -> None:
         metadata = {
             "known": ["Mode switching"],
@@ -4210,6 +4397,15 @@ class PromptInstructionTests(unittest.TestCase):
         self.assertIn("D) Undo", prompt)
         self.assertIn("Stored correct answer key: A", prompt)
         self.assertIn("Do not substitute a different question", prompt)
+
+    def test_pending_hint_prompt_empty_when_no_hint(self) -> None:
+        self.assertEqual(cli.pending_hint_prompt({}), "")
+
+    def test_pending_hint_prompt_returns_hint_text(self) -> None:
+        prompt = cli.pending_hint_prompt({"pending_hint": "What does X mean?"})
+
+        self.assertIn("What does X mean?", prompt)
+        self.assertIn("guiding question", prompt)
 
     def test_system_prompt_includes_course_options_guidance(self) -> None:
         topic = cli.Topic(
@@ -4520,6 +4716,24 @@ class PromptContextTests(unittest.TestCase):
         self.assertIn("Last exchange kind: chat", result)
         self.assertIn("Last learner/tutor prompt:", result)
         self.assertIn("Last tutor response:", result)
+
+    def test_compact_session_context_includes_answer_gap(self) -> None:
+        topic = cli.Topic(
+            slug="demo",
+            path=Path("demo.md"),
+            metadata={
+                "topic": "Demo",
+                "last_answer_status": "needs_work",
+                "last_answer_score": 0.3,
+                "last_answer_gap": "pointers",
+            },
+            body="# Demo\n",
+        )
+
+        result = cli.compact_session_context(topic, "")
+
+        self.assertIn("Last answer score: 0.30", result)
+        self.assertIn("Identified knowledge gap: pointers", result)
 
     def test_compact_session_context_empty_session_returns_metadata_only(self) -> None:
         topic = cli.Topic(

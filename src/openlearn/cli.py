@@ -315,6 +315,12 @@ def build_parser() -> argparse.ArgumentParser:
     status_parser.add_argument("topic", help="Topic slug")
     status_parser.set_defaults(func=cmd_status)
 
+    stats_parser = sub.add_parser("stats", help="Show study progress")
+    stats_parser.add_argument(
+        "topic", nargs="?", help="Topic slug (default: active topic)"
+    )
+    stats_parser.set_defaults(func=cmd_stats)
+
     summary_parser = sub.add_parser("summary", help="Show a course progress summary")
     summary_parser.add_argument(
         "topic", nargs="?", help="Topic slug, defaults to active/recent"
@@ -1011,6 +1017,7 @@ def run_repl(
     output_func=print,
     show_intro: bool = True,
 ) -> int:
+    _session_start = datetime.now(timezone.utc)
     topic_slug = resolve_topic_slug(topic_value) if topic_value else None
     if topic_slug:
         set_active_topic(topic_slug)
@@ -1036,12 +1043,12 @@ def run_repl(
             prompt = input_func(repl_prompt()).strip()
         except EOFError:
             output_func("")
-            return 0
+            break
 
         if not prompt:
             continue
         if prompt.lower() in {"/q", "/quit", "/exit", "quit", "exit", "q"}:
-            return 0
+            break
 
         try:
             if prompt.startswith("/"):
@@ -1054,6 +1061,24 @@ def run_repl(
             print_error(str(exc), output_func)
         finally:
             print_active_status_bar()
+
+    try:
+        _session_minutes = round(
+            (datetime.now(timezone.utc) - _session_start).total_seconds() / 60, 1
+        )
+        if _session_minutes >= 0.5:
+            _slug = resolve_topic_slug(None)
+            if _slug:
+                _t = read_topic(_slug)
+                _meta = dict(_t.metadata)
+                _meta["session_count"] = int(_meta.get("session_count") or 0) + 1
+                _meta["total_study_minutes"] = round(
+                    float(_meta.get("total_study_minutes") or 0) + _session_minutes, 1
+                )
+                write_topic(_t.path, _meta, _t.body)
+    except Exception:
+        pass
+    return 0
 
 
 def handle_repl_command(
@@ -2604,6 +2629,75 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_stats(args: argparse.Namespace, output_func=print) -> int:
+    import plotext as plt
+
+    topic_arg = getattr(args, "topic", None)
+    if topic_arg:
+        slug = slugify(topic_arg)
+    else:
+        try:
+            slug = resolve_topic_slug(None)
+        except OpenLearnError:
+            slug = None
+
+    try:
+        state = json.loads(state_path().read_text(encoding="utf-8"))
+        streak = int(state.get("study_streak") or 0)
+        longest = int(state.get("longest_streak") or 0)
+    except Exception:
+        streak = longest = 0
+
+    if slug:
+        try:
+            topic = read_topic(slug)
+        except OpenLearnError as exc:
+            output_func(str(exc))
+            return 1
+        meta = topic.metadata
+        session_count = int(meta.get("session_count") or 0)
+        total_mins = float(meta.get("total_study_minutes") or 0)
+        attempts: dict = meta.get("concept_attempts") or {}
+
+        output_func(f"Topic: {slug}")
+        output_func(f"Sessions: {session_count}  |  Study time: {total_mins:.0f} min")
+        output_func(f"Streak: {streak} day(s)  |  Longest: {longest}")
+
+        if isinstance(attempts, dict) and attempts:
+            items = sorted(
+                attempts.items(),
+                key=lambda kv: int(kv[1].get("attempts") or 0),
+                reverse=True,
+            )[:10]
+            concepts = [k for k, _ in items]
+            accuracies = []
+            for _, rec in items:
+                a = max(int(rec.get("attempts") or 1), 1)
+                s = float(rec.get("correct_sum") or 0)
+                accuracies.append(round(s / a * 100))
+
+            plt.clf()
+            plt.simple_bar(
+                concepts, accuracies, width=50, title="Concept accuracy (%)"
+            )
+            plt.show()
+        else:
+            output_func("No concept accuracy data yet.")
+    else:
+        output_func(f"Streak: {streak} day(s)  |  Longest: {longest}")
+        output_func("")
+        for t in list_topics():
+            try:
+                m = read_topic(t.slug).metadata
+                sc = int(m.get("session_count") or 0)
+                tm = float(m.get("total_study_minutes") or 0)
+                if sc:
+                    output_func(f"  {t.slug:<24} {sc} session(s), {tm:.0f} min")
+            except Exception:
+                pass
+    return 0
+
+
 def cmd_summary(args: argparse.Namespace) -> int:
     topic = read_topic(resolve_topic_slug(args.topic))
     set_active_topic(topic.slug)
@@ -3223,6 +3317,12 @@ def update_learning_metadata(
         - review_difficulty: one of easy, hard, or missed for reviewed_concepts.
         - current_focus: the current concept if it changed.
         - last_answer_status: one of correct, partial, or needs_work when the learner answered a tutor question.
+        - answer_score: float 0.0-1.0 for how correct the answer was. Only when
+          last_answer_status is set. 1.0=correct, 0.5=partial, 0.0=wrong.
+        - answer_gap: short prerequisite concept or misunderstood term, or null.
+          Only when last_answer_status is needs_work or partial.
+        - answer_hint: one Socratic guiding question to help without giving the answer,
+          or null. Only when last_answer_status is needs_work.
         - chapter_complete: true only when the learner demonstrated enough understanding to finish the current chapter.
         - quiz_score: short quiz score such as 3/4, only after evaluating a chapter quiz.
         - quiz_summary: one-sentence quiz result summary, only after evaluating a chapter quiz.
@@ -3276,6 +3376,50 @@ def update_learning_metadata(
         apply_pending_question_answer_key(metadata, learner_prompt)
         update_review_schedule(metadata, update, is_review_session=is_review_session)
         actionable = learner_answer_is_actionable(learner_prompt, metadata)
+        if metadata.get("last_answer_status") == "correct":
+            metadata.pop("pending_hint", None)
+            metadata.pop("last_answer_gap", None)
+        score = update.get("answer_score")
+        if isinstance(score, (int, float)) and 0.0 <= float(score) <= 1.0:
+            metadata["last_answer_score"] = round(float(score), 3)
+        focus = metadata.get("current_focus")
+        score_val = metadata.get("last_answer_score")
+        if (
+            isinstance(focus, str)
+            and focus.strip()
+            and isinstance(score_val, (int, float))
+        ):
+            attempts = metadata.get("concept_attempts")
+            if not isinstance(attempts, dict):
+                attempts = {}
+            rec = attempts.setdefault(focus.strip(), {"attempts": 0, "correct_sum": 0.0})
+            rec["attempts"] = int(rec.get("attempts") or 0) + 1
+            rec["correct_sum"] = round(
+                float(rec.get("correct_sum") or 0) + float(score_val), 3
+            )
+            metadata["concept_attempts"] = attempts
+
+        gap = update.get("answer_gap")
+        if (
+            isinstance(gap, str)
+            and gap.strip()
+            and metadata.get("last_answer_status") != "correct"
+        ):
+            gap = gap.strip()
+            merge_metadata_list(metadata, "weak_spots", [gap])
+            metadata["last_answer_gap"] = gap
+        else:
+            metadata.pop("last_answer_gap", None)
+
+        hint = update.get("answer_hint")
+        if (
+            isinstance(hint, str)
+            and hint.strip()
+            and metadata.get("last_answer_status") == "needs_work"
+        ):
+            metadata["pending_hint"] = hint.strip()
+        else:
+            metadata.pop("pending_hint", None)
         update_momentum_counters(metadata)
         if actionable:
             update_pending_chapter_quiz(metadata, previous_metadata, update)
@@ -4297,6 +4441,12 @@ def recent_topic_summaries() -> list[TopicSummary]:
     return [read_topic_summary(path) for path in recent_topic_paths()]
 
 
+def list_topics() -> list[TopicSummary]:
+    if not topics_dir().exists():
+        return []
+    return [read_topic_summary(path) for path in sorted(topics_dir().glob("*.md"))]
+
+
 def recent_topic_paths() -> list[Path]:
     if not topics_dir().exists():
         return []
@@ -4337,13 +4487,34 @@ def get_active_topic() -> str | None:
 def set_active_topic(slug: str) -> None:
     project_home().mkdir(parents=True, exist_ok=True)
     path = state_path()
+    today = datetime.now(timezone.utc).date().isoformat()
+    yesterday = (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()
     with file_lock(path):
+        existing: dict[str, object] = {}
+        if path.exists():
+            try:
+                existing = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        last_date = existing.get("last_study_date")
+        streak = int(existing.get("study_streak") or 0)
+        longest = int(existing.get("longest_streak") or 0)
+        if last_date == today:
+            pass
+        elif last_date == yesterday:
+            streak += 1
+        else:
+            streak = 1
+        longest = max(longest, streak)
         write_text_atomic(
             path,
             json.dumps(
                 {
                     "active_topic": slug,
                     "updated": datetime.now(timezone.utc).isoformat(),
+                    "last_study_date": today,
+                    "study_streak": streak,
+                    "longest_streak": longest,
                 },
                 indent=2,
             ),
@@ -4540,6 +4711,7 @@ def system_prompt(topic: Topic) -> str:
     context_summaries = context_summary_prompt(topic.slug)
     options_prompt = course_options_prompt(topic.metadata)
     pending_prompt = pending_question_prompt(topic.metadata)
+    hint_prompt = pending_hint_prompt(topic.metadata)
     return textwrap.dedent(
         f"""
         You are openLearn, a local-first AI learning tutor.
@@ -4622,6 +4794,7 @@ def system_prompt(topic: Topic) -> str:
 
         Pending question to grade:
         {pending_prompt or "(none)"}
+        {hint_prompt}
 
         Topic notes and current state excerpt:
         {topic_context or "(none)"}
@@ -4656,6 +4829,17 @@ def pending_question_prompt(metadata: dict[str, object]) -> str:
         Do not substitute a different question from recent history or context.
         """
     ).strip()
+
+
+def pending_hint_prompt(metadata: dict[str, object]) -> str:
+    hint = metadata.get("pending_hint")
+    if not isinstance(hint, str) or not hint.strip():
+        return ""
+    return (
+        f"\n\nThe learner's last answer was incorrect. Before giving the answer, "
+        f"try leading with this guiding question: {hint.strip()}\n"
+        f"If the learner still cannot answer after the hint, explain clearly."
+    )
 
 
 def generation_system_prompt(topic: Topic, current_plan: str = "") -> str:
@@ -4757,6 +4941,12 @@ def compact_session_context(topic: Topic, session_log: str) -> str:
         lines.append(f"Current lesson position: {progress}")
     status = topic.metadata.get("last_answer_status")
     lines.append(f"Last answer status: {status if isinstance(status, str) and status else 'not evaluated'}")
+    score = topic.metadata.get("last_answer_score")
+    if isinstance(score, float):
+        lines.append(f"Last answer score: {score:.2f}")
+    gap = topic.metadata.get("last_answer_gap")
+    if isinstance(gap, str) and gap.strip():
+        lines.append(f"Identified knowledge gap: {gap}")
     correct = topic.metadata.get("consecutive_correct")
     misses = topic.metadata.get("consecutive_misses")
     lines.append(
@@ -5137,7 +5327,20 @@ def print_status_bar(topic: Topic, output_func=print) -> None:
     focus = str(metadata.get("current_focus") or "not set")
     label = str(metadata.get("topic") or topic.slug)
     reviews_due = len(due_review_items(metadata))
-    emit(status_bar(label, progress, focus, reviews_due), output_func)
+    emit(status_bar(label + _streak_suffix(), progress, focus, reviews_due), output_func)
+
+
+def _streak_suffix() -> str:
+    try:
+        data = json.loads(state_path().read_text(encoding="utf-8"))
+        n = int(data.get("study_streak") or 0)
+        if n >= 2:
+            enc = (sys.stdout.encoding or "").lower()
+            icon = "🔥" if "utf" in enc else ">"
+            return f" {icon}{n}"
+    except Exception:
+        pass
+    return ""
 
 
 def print_course_options(metadata: dict[str, object]) -> None:
