@@ -1928,7 +1928,9 @@ def course_outline_prompt(
         "Use exactly these plain-text labels: Scope:, Excludes:, Assumptions:, Units:. "
         "Create 4-8 ordered units with short titles and one-line outcomes. "
         "For each unit, include a planned slide count in parentheses, for example "
-        "1.2 Insert mode in Vim (3 slides) - Outcome. "
+        "1.2 Insert mode in Vim (3 slides, difficulty 4/10) - Outcome. "
+        "Assign each unit an initial difficulty from 1-10 where 1 is very easy "
+        "and 10 is very hard. "
         f"{_slide_count_guidance(topic.slug)}"
         f"{'Keep the outline under 600 words.' if _context_file_count(topic.slug) >= 20 else 'Keep it under 300 words.'}\n"
         f"Course name: {topic.metadata.get('topic', topic.slug)}\n"
@@ -1970,27 +1972,60 @@ def parse_course_units(outline: str) -> list[dict[str, object]]:
     units: list[dict[str, object]] = []
     for line in outline.splitlines():
         match = re.match(
-            r"^\s*(\d+)(?:\.(\d+))?[.)]?\s+(.+?)(?:\s+\((\d+)\s+slides?\))?(?:\s+[-–—]\s+.*)?$",
+            r"^\s*(\d+)(?:\.(\d+))?[.)]?\s+(.+?)(?:\s+[-–—]\s+.*)?$",
             line.strip(),
             flags=re.IGNORECASE,
         )
         if not match:
             continue
         raw_title = match.group(3).strip()
+        difficulty = extract_unit_difficulty(raw_title)
         title = re.sub(r"\s+\(\d+\s+slides?\)\s*$", "", raw_title, flags=re.IGNORECASE)
-        slide_count = int(match.group(4) or 1)
+        title = re.sub(
+            r"\s+\((?=[^)]*(?:slide|difficulty|diff))[^)]*\)\s*$",
+            "",
+            title,
+            flags=re.IGNORECASE,
+        )
+        title = re.sub(
+            r"\s+(?:difficulty|diff)\s*:?\s*\d+\s*(?:/10)?\s*$",
+            "",
+            title,
+            flags=re.IGNORECASE,
+        )
+        count_match = re.search(r"\((\d+)\s+slides?\b", raw_title, flags=re.IGNORECASE)
+        slide_count = int(count_match.group(1)) if count_match else 1
         chapter = match.group(1)
         if match.group(2):
             chapter = f"{chapter}.{match.group(2)}"
-        units.append(
-            {
-                "unit": len(units) + 1,
-                "chapter": chapter,
-                "title": title.rstrip("."),
-                "slide_count": max(1, slide_count),
-            }
-        )
+        unit_data = {
+            "unit": len(units) + 1,
+            "chapter": chapter,
+            "title": title.rstrip("."),
+            "slide_count": max(1, slide_count),
+        }
+        if difficulty is not None:
+            unit_data["difficulty"] = difficulty
+        units.append(unit_data)
     return units
+
+
+def extract_unit_difficulty(text: str) -> int | None:
+    match = re.search(
+        r"\b(?:difficulty|diff)\s*:?\s*(\d+)\s*(?:/10)?\b",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+    return clamp_unit_difficulty(match.group(1))
+
+
+def clamp_unit_difficulty(value: object) -> int:
+    try:
+        return max(1, min(10, int(value)))
+    except (TypeError, ValueError):
+        return 5
 
 
 def topic_progress_line(topic: Topic) -> str:
@@ -2677,6 +2712,55 @@ def difficulty_tier(metadata: dict[str, object]) -> str:
     if consecutive_correct >= 3:
         return "mastering"
     return "on_track"
+
+
+def adjust_unit_difficulty(
+    current: int, score: float, consecutive_misses: int, consecutive_correct: int
+) -> int:
+    current = clamp_unit_difficulty(current)
+    if consecutive_misses >= 2 or score < 0.5:
+        return min(10, current + 1)
+    if 0.5 <= score <= 0.7:
+        return current
+    if consecutive_correct >= 3 and score >= 0.85:
+        return max(1, current - 1)
+    if score > 0.9:
+        return max(1, current - 1)
+    return current
+
+
+def select_check_mode(unit_difficulty: int, tier: str) -> str:
+    difficulty = clamp_unit_difficulty(unit_difficulty)
+    # Matrix: low difficulty (1-3) gets cheaper checks, high difficulty (8-10)
+    # gets production-heavy checks. Struggling learners receive more support,
+    # while mastering learners avoid worked examples unless difficulty is high.
+    if difficulty <= 3:
+        if tier == "mastering":
+            return "acknowledge"
+        # Easy material: a struggling learner needs retrieval, not a worked
+        # example (intrinsic load is already low). Same as on_track here.
+        return "recall"
+    if difficulty <= 7:
+        # Struggling on non-trivial material gets the scaffold (attempt ->
+        # worked example -> check), per LEARNING_SCIENCE.md worked-examples guidance.
+        if tier == "struggling":
+            return "deep"
+        if tier == "mastering":
+            return "recall"
+        return "recall"
+    if tier == "struggling":
+        return "deep"
+    return "application"
+
+
+def current_unit_difficulty(metadata: dict[str, object]) -> int:
+    unit = metadata.get("current_unit")
+    if not isinstance(unit, int):
+        return 5
+    current = course_unit_at(metadata, unit)
+    if not current:
+        return 5
+    return clamp_unit_difficulty(current.get("difficulty"))
 
 
 def learner_answer_is_actionable(learner_prompt: str, metadata: dict[str, object]) -> bool:
@@ -3617,7 +3701,8 @@ def update_learning_metadata(
             metadata.pop("pending_hint", None)
             metadata.pop("last_answer_gap", None)
         score = update.get("answer_score")
-        if isinstance(score, (int, float)) and 0.0 <= float(score) <= 1.0:
+        fresh_score = isinstance(score, (int, float)) and 0.0 <= float(score) <= 1.0
+        if fresh_score:
             metadata["last_answer_score"] = round(float(score), 3)
         focus = metadata.get("current_focus")
         score_val = metadata.get("last_answer_score")
@@ -3658,6 +3743,29 @@ def update_learning_metadata(
         else:
             metadata.pop("pending_hint", None)
         update_momentum_counters(metadata)
+        score_val = metadata.get("last_answer_score")
+        current_unit = metadata.get("current_unit")
+        units = metadata.get("course_units")
+        # Only recalibrate unit difficulty on a freshly graded answer this turn.
+        # last_answer_score persists across turns, so guarding on its mere presence
+        # would ratchet difficulty on every non-graded update until it saturates.
+        if (
+            fresh_score
+            and isinstance(score_val, (int, float))
+            and isinstance(current_unit, int)
+            and isinstance(units, list)
+        ):
+            correct = metadata.get("consecutive_correct")
+            misses = metadata.get("consecutive_misses")
+            for unit in units:
+                if isinstance(unit, dict) and unit.get("unit") == current_unit:
+                    unit["difficulty"] = adjust_unit_difficulty(
+                        clamp_unit_difficulty(unit.get("difficulty")),
+                        float(score_val),
+                        misses if isinstance(misses, int) else 0,
+                        correct if isinstance(correct, int) else 0,
+                    )
+                    break
         metadata["difficulty_tier"] = difficulty_tier(metadata)
         if actionable:
             update_pending_chapter_quiz(metadata, previous_metadata, update)
@@ -4827,7 +4935,14 @@ def normalize_topic_metadata(metadata: dict[str, object], slug: str) -> dict[str
                         slide_count = int(m.group(1))
                 title = _strip_pat.sub("", title).strip()
                 title = re.sub(r"\s+\(\d+\s+slides?\)\s*$", "", title, flags=re.IGNORECASE).strip()
-            cleaned.append({**unit, "title": title, "slide_count": max(1, slide_count)})
+            cleaned.append(
+                {
+                    **unit,
+                    "title": title,
+                    "slide_count": max(1, slide_count),
+                    "difficulty": clamp_unit_difficulty(unit.get("difficulty")),
+                }
+            )
         normalized["course_units"] = cleaned
     focus = normalized.get("current_focus", "")
     if isinstance(focus, str) and "slides" in focus.lower():
@@ -4977,7 +5092,11 @@ def system_prompt(topic: Topic) -> str:
     options_prompt = course_options_prompt(topic.metadata)
     pending_prompt = pending_question_prompt(topic.metadata)
     hint_prompt = pending_hint_prompt(topic.metadata)
-    tier_prompt = _difficulty_tier_prompt(difficulty_tier(topic.metadata))
+    tier = difficulty_tier(topic.metadata)
+    tier_prompt = _difficulty_tier_prompt(tier)
+    check_prompt = check_mode_prompt(
+        select_check_mode(current_unit_difficulty(topic.metadata), tier)
+    )
     return textwrap.dedent(
         f"""
         You are openLearn, a local-first AI learning tutor.
@@ -5037,6 +5156,8 @@ def system_prompt(topic: Topic) -> str:
         {TUTOR_FORMAT_RULES}
 
         {tier_prompt}
+
+        {check_prompt}
 
         Do not keep printing full progress summaries after every answer. Mention
         progress only when it helps the learner feel oriented or encouraged.
@@ -5131,6 +5252,46 @@ def _difficulty_tier_prompt(tier: str) -> str:
             - Suggest an adjacent or more advanced concept after a correct answer.
             - Skip worked examples unless the learner asks for one.
             - Keep the pace brisk — do not over-explain concepts already demonstrated.
+            """
+        ).strip()
+    return ""
+
+
+def check_mode_prompt(mode: str) -> str:
+    if mode == "acknowledge":
+        return textwrap.dedent(
+            """
+            Check mode: ACKNOWLEDGE
+            - Use one sentence to confirm whether the concept makes sense.
+            - Keep cognitive load low; do not add a graded question here.
+            - If the learner asks for practice, offer one small recall prompt.
+            """
+        ).strip()
+    if mode == "recall":
+        return textwrap.dedent(
+            """
+            Check mode: RECALL
+            - Ask one active-recall question about the concept just taught.
+            - Prefer production over recognition for concepts the learner has seen.
+            - Keep the question small enough to answer in one or two sentences.
+            """
+        ).strip()
+    if mode == "application":
+        return textwrap.dedent(
+            """
+            Check mode: APPLICATION
+            - Ask the learner to apply the concept to a new example or explain why it works.
+            - Prefer free-response over multiple choice unless recognition is the actual skill.
+            - Do not use a worked example first for mastering learners.
+            """
+        ).strip()
+    if mode == "deep":
+        return textwrap.dedent(
+            """
+            Check mode: DEEP
+            - Ask for one genuine attempt before giving a worked example.
+            - After the attempt, give a short worked example that reduces cognitive load.
+            - Then ask one free-response check before advancing.
             """
         ).strip()
     return ""

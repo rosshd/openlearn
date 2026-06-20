@@ -4315,6 +4315,82 @@ class PromptInstructionTests(unittest.TestCase):
 
         self.assertEqual(updated.metadata["difficulty_tier"], "struggling")
 
+    def test_adjust_unit_difficulty_bounds_direction_and_zpd_band(self) -> None:
+        self.assertEqual(cli.adjust_unit_difficulty(10, 0.1, 2, 0), 10)
+        self.assertEqual(cli.adjust_unit_difficulty(1, 0.95, 0, 3), 1)
+        self.assertEqual(cli.adjust_unit_difficulty(5, 0.2, 0, 0), 6)
+        self.assertEqual(cli.adjust_unit_difficulty(5, 0.9, 0, 3), 4)
+        self.assertEqual(cli.adjust_unit_difficulty(5, 0.6, 0, 0), 5)
+
+    def test_select_check_mode_matrix_corners_and_mid(self) -> None:
+        self.assertEqual(cli.select_check_mode(1, "struggling"), "recall")
+        self.assertEqual(cli.select_check_mode(10, "struggling"), "deep")
+        self.assertEqual(cli.select_check_mode(1, "mastering"), "acknowledge")
+        self.assertEqual(cli.select_check_mode(10, "mastering"), "application")
+        self.assertEqual(cli.select_check_mode(5, "on_track"), "recall")
+        # Struggling on mid-difficulty material gets the worked-example scaffold
+        # (LEARNING_SCIENCE.md), not a harder unscaffolded application task.
+        self.assertEqual(cli.select_check_mode(5, "struggling"), "deep")
+
+    def test_normalize_course_unit_difficulty_default_and_clamp(self) -> None:
+        normalized = cli.normalize_topic_metadata(
+            {
+                "topic": "Demo",
+                "slug": "demo",
+                "course_units": [
+                    {"unit": 1, "chapter": "1", "title": "Missing", "slide_count": 2},
+                    {"unit": 2, "chapter": "2", "title": "Low", "difficulty": -1},
+                    {"unit": 3, "chapter": "3", "title": "High", "difficulty": 99},
+                ],
+            },
+            "demo",
+        )
+
+        units = normalized["course_units"]
+        self.assertEqual(units[0]["difficulty"], 5)
+        self.assertEqual(units[1]["difficulty"], 1)
+        self.assertEqual(units[2]["difficulty"], 10)
+
+    def test_parse_course_units_captures_difficulty_when_present(self) -> None:
+        units = cli.parse_course_units(
+            "Units:\n1.1 Loops (4 slides, difficulty 7/10) - Trace while loops.\n"
+            "1.2 Lists (3 slides) - Indexing."
+        )
+
+        self.assertEqual(units[0]["difficulty"], 7)
+        self.assertNotIn("difficulty", units[1])
+
+    def test_unit_difficulty_only_adjusts_on_freshly_graded_turn(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
+        path = cli.topic_path("vim")
+        metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+        metadata = dict(metadata)
+        metadata["current_unit"] = 1
+        metadata["course_units"] = [
+            {"unit": 1, "chapter": "1", "title": "Modes", "slide_count": 2, "difficulty": 5}
+        ]
+        path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
+
+        original_call_openai = cli.call_openai
+        try:
+            # Turn 1: a graded answer below the ZPD band raises difficulty 5 -> 6.
+            cli.call_openai = lambda *_a, **_k: json.dumps(
+                {"last_answer_status": "needs_work", "answer_score": 0.2}
+            )
+            cli.update_learning_metadata(cli.read_topic("vim"), "idk", "Not quite", "m")
+            after_graded = cli.read_topic("vim").metadata["course_units"][0]["difficulty"]
+
+            # Turn 2: a non-graded update (no answer_score) must NOT move difficulty,
+            # even though last_answer_score still persists in metadata.
+            cli.call_openai = lambda *_a, **_k: json.dumps({"current_focus": "Modes"})
+            cli.update_learning_metadata(cli.read_topic("vim"), "tell me more", "Sure", "m")
+            after_nongraded = cli.read_topic("vim").metadata["course_units"][0]["difficulty"]
+        finally:
+            cli.call_openai = original_call_openai
+
+        self.assertEqual(after_graded, 6)
+        self.assertEqual(after_nongraded, 6)
+
     def test_known_and_weak_spots_are_deduped_by_normalized_concept(self) -> None:
         metadata = {
             "known": ["Mode switching"],
@@ -4601,6 +4677,40 @@ class PromptInstructionTests(unittest.TestCase):
 
     def test_tier_prompt_on_track_empty(self) -> None:
         self.assertEqual(cli._difficulty_tier_prompt("on_track"), "")
+
+    def test_check_mode_prompt_fragments(self) -> None:
+        self.assertIn("one sentence", cli.check_mode_prompt("acknowledge"))
+        self.assertIn("active-recall", cli.check_mode_prompt("recall"))
+        self.assertIn("free-response", cli.check_mode_prompt("application"))
+        self.assertIn("genuine attempt", cli.check_mode_prompt("deep"))
+
+    def test_system_prompt_contains_selected_check_mode_fragment(self) -> None:
+        topic = cli.Topic(
+            slug="demo",
+            path=Path("demo.md"),
+            metadata={
+                "topic": "Demo",
+                "course_started": True,
+                "current_unit": 1,
+                "course_units": [
+                    {
+                        "unit": 1,
+                        "chapter": "1",
+                        "title": "Hard concept",
+                        "slide_count": 2,
+                        "difficulty": 10,
+                    }
+                ],
+                "last_answer_score": 0.2,
+                "consecutive_misses": 2,
+            },
+            body="# Demo\n",
+        )
+
+        prompt = cli.system_prompt(topic)
+
+        self.assertIn("Check mode: DEEP", prompt)
+        self.assertIn("genuine attempt", prompt)
 
     def test_system_prompt_includes_course_options_guidance(self) -> None:
         topic = cli.Topic(

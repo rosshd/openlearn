@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import json
 import sys
+import unittest
 from argparse import Namespace
 from pathlib import Path
 
-import pytest
+try:
+    import pytest
+except ImportError:  # pytest is a dev/slow-lane dep; skip under plain `unittest`
+    raise unittest.SkipTest("pytest not installed (slow eval lane only)")
 
 SCENARIOS_DIR = Path(__file__).parent / "scenarios"
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
