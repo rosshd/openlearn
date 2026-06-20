@@ -217,12 +217,21 @@ Phase 1 (done): per-unit difficulty + `select_check_mode` skeleton.
   (consume gaming/impasse/pass-rate) and tutor-prompt fragments: ungameable question rules,
   elicit-before-tell, impasse probes for mastering, attempt-gated help, mastery-gated
   advancement.
-- **Phase 4 — Eval loop.** Move-evals + judge-calibration evals in the deepeval slow lane;
-  instrument delayed-retrieval pass-rate as the north-star outcome.
-- **Phase 5 (later) — `/difficulty` visibility & override** (the earlier Phase-2 draft,
-  deprioritized below the pedagogy core).
-- **Future (gated on Phase 4 + usage data):** distill the judge onto a small fine-tuned model
-  trained on outcome-labeled data.
+- **Phase 4 — Cumulative quiz / retrieval mechanic.** Low-stakes, spacing-and-volume-triggered
+  (not chapter-boundary), interleaved across recently studied units, with transfer questions.
+  Replaces chapter-complete quizzing and serves the unit mastery check + the delayed-retrieval
+  signal (see LEARNING_SCIENCE.md "Test-Enhanced Learning"). Profile-tuned.
+- **Phase 5 — Eval loop.** Move-evals + judge-calibration evals in the deepeval slow lane;
+  instrument delayed-retrieval pass-rate as the north-star outcome. (Judge-calibration eval is
+  pulled forward to accompany the Phase-2 judge.)
+- **Phase 6 (later) — `/difficulty` visibility & override** (deprioritized below the pedagogy
+  core).
+- **Future (gated on the eval loop + usage data):** distill the judge onto a small fine-tuned
+  model trained on outcome-labeled data.
+
+**Foundations to settle in/around Phase 2** (architectural, not research — detailed in
+V0.7.0.md): canonical concept identity, splitting human-owned content from the machine
+learner-model, an append-only event log started now, and pulling judge-calibration eval forward.
 
 ---
 
