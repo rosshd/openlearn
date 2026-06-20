@@ -64,6 +64,7 @@ from openlearn.ui import (
     PROMPT,
     count_list,
     emit,
+    emit_resume_line,
     emit_tutor_markdown,
     format_action,
     format_resume_line,
@@ -5320,15 +5321,15 @@ def print_resume_context(topic: Topic, context: str, output_func=print) -> None:
         line = f"Position: {progress}"
         if unit_title:
             line += f" — {unit_title}"
-        output_func(format_resume_line(line))
+        emit_resume_line(line, output_func)
     else:
         focus = metadata.get("current_focus")
         if isinstance(focus, str) and focus.strip():
-            output_func(format_resume_line(f"Focus: {one_line(focus)}"))
+            emit_resume_line(f"Focus: {one_line(focus)}", output_func)
         elif context:
             goal = metadata.get("goal")
             if isinstance(goal, str) and goal.strip():
-                output_func(format_resume_line(f"Goal: {one_line(goal)}"))
+                emit_resume_line(f"Goal: {one_line(goal)}", output_func)
 
     _body, session_log = split_session_log(topic.body)
     entries = session_entries(session_log)
@@ -5341,14 +5342,14 @@ def print_resume_context(topic: Topic, context: str, output_func=print) -> None:
             question = last_question(last_interaction["response"])
             if question:
                 snip = snippet(question, 160).replace("**", "")
-                output_func(format_resume_line(f"Last question: {snip}"))
+                emit_resume_line(f"Last question: {snip}", output_func)
         last_entry = entries[-1]
         if last_entry["response"].strip():
             label = "Last response"
             snip = snippet(last_entry["response"], 200).replace("**", "")
-            output_func(format_resume_line(f"{label}: {snip}"))
+            emit_resume_line(f"{label}: {snip}", output_func)
     elif not progress:
-        output_func(format_resume_line("No previous session yet."))
+        emit_resume_line("No previous session yet.", output_func)
 
     output_func("")
 
