@@ -1,0 +1,24 @@
+[
+  {
+    "title": "Two Sum Indices",
+    "description": "Return the indices of two numbers in nums that add up to target. You may assume exactly one solution and may not use the same element twice.",
+    "function_stub": "def two_sum(nums, target):\n    pass",
+    "test_cases": [
+      {"input": [[2, 7, 11, 15], 9], "expected": [0, 1]},
+      {"input": [[3, 2, 4], 6], "expected": [1, 2]},
+      {"input": [[3, 3], 6], "expected": [0, 1]}
+    ],
+    "tags": ["array", "hash map", "leetcode"]
+  },
+  {
+    "title": "Count Vowels",
+    "description": "Return the number of vowels in a string. Treat a, e, i, o, and u as vowels, case-insensitively.",
+    "function_stub": "def count_vowels(text):\n    pass",
+    "test_cases": [
+      {"input": "hello", "expected": 2},
+      {"input": "AEIOU", "expected": 5},
+      {"input": "rhythm", "expected": 0}
+    ],
+    "tags": ["strings", "loops", "beginner"]
+  }
+]

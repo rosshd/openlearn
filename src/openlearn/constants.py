@@ -22,6 +22,7 @@ DEFAULT_COURSE_OPTIONS = {
     "show_progress": True,
     "review_weak_spots": True,
     "hands_on_drills": True,
+    "suggest_videos": False,
 }
 PLACEMENT_CONTEXT_FILENAME = "placement-quiz.txt"
 COURSE_OPTION_LABELS = {
@@ -29,6 +30,7 @@ COURSE_OPTION_LABELS = {
     "show_progress": "Show progress reminders",
     "review_weak_spots": "Review weak spots before new chapters",
     "hands_on_drills": "Prefer hands-on drills",
+    "suggest_videos": "Suggest YouTube videos after hard answers",
 }
 MANUAL_TEST_CONTEXT = """Course: Practical Vim Foundations
 

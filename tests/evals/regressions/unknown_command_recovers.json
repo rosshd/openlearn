@@ -1,0 +1,14 @@
+{
+  "name": "unknown_command_recovers",
+  "description": "An unknown REPL command should produce an error and leave the session ready for another prompt.",
+  "topic": "unknown-command",
+  "goal": "Practice resilient command handling.",
+  "turns": [
+    {"role": "user", "content": "/badcommand"},
+    {"role": "assistant", "content": null}
+  ],
+  "requirements": [
+    "tutor response must contain unknown",
+    "tutor response must contain openlearn>"
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "name": "status_bar_after_response",
+  "description": "A normal chat turn should update current_focus after status output.",
+  "topic": "status-bar",
+  "goal": "Learn the basics of terminal workflows.",
+  "turns": [
+    {"role": "user", "content": "explain normal mode"},
+    {"role": "assistant", "content": null}
+  ],
+  "requirements": [
+    "tutor response must contain Lesson",
+    "tutor response must contain openlearn"
+  ],
+  "state_assertions": {
+    "current_focus": "Vim modes"
+  }
+}

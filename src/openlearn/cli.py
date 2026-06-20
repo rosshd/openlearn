@@ -4,6 +4,9 @@ import argparse
 import contextlib
 import fcntl
 import getpass
+import hashlib
+import importlib
+import importlib.resources
 import json
 import os
 import random
@@ -14,11 +17,18 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import urlencode, urlparse
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from platformdirs import user_data_dir
+
+from openlearn import __version__
 from openlearn.constants import (
     CONFIG_FILE,
     CONTEXT_SUMMARY_CHAR_LIMIT,
@@ -53,20 +63,46 @@ from openlearn.text import (
 from openlearn.ui import (
     PROMPT,
     count_list,
+    emit,
+    emit_tutor_markdown,
     format_action,
-    format_error,
-    format_menu_item,
     format_resume_line,
-    format_tutor_output,
-    menu_separator,
+    print_error,
     print_list,
+    print_menu,
     print_section,
+    review_due_table,
     status_bar,
+    thinking_progress,
 )
+
+
+try:
+    import readline as _readline
+except ImportError:  # pragma: no cover - readline is unavailable on some platforms
+    _readline = None
+
+
+def configure_readline() -> None:
+    if _readline is None:
+        return
+    try:
+        if "libedit" in (_readline.__doc__ or ""):
+            _readline.parse_and_bind("bind \x1b[D ed-prev-char")
+            _readline.parse_and_bind("bind \x1b[C ed-next-char")
+        else:
+            _readline.parse_and_bind(r'"\e[D": backward-char')
+            _readline.parse_and_bind(r'"\e[C": forward-char')
+    except Exception:
+        pass
+
+
+configure_readline()
 
 
 _CONFIG_CACHE: dict[str, object] | None = None
 _LAST_RESPONSE_ANSWER_KEY = ""
+IMPORT_SCAN_MAX_WORKERS = 4
 REPL_HELP_LINES = [
     "Common commands:",
     "  /n       get the next lesson",
@@ -80,8 +116,8 @@ REPL_HELP_LINES = [
 REPL_HELP_ALL = (
     "Commands: /resume (/r), /next (/n), /done, /review, /status, /summary, "
     "/options, /plan, /progress [unit slide], /scope <change>, /repair, "
-    "/active [topic], /recent, /new <topic> [goal], /delete <topic>, "
-    "/ask <question>, /quit (/q)"
+    "/drill [--leetcode], /check, /videos [--n N] [query], /active [topic], /recent, "
+    "/new <topic> [goal], /delete <topic>, /ask <question>, /quit (/q)"
 )
 METADATA_EXTRACTOR_SYSTEM = (
     "You are a JSON metadata extractor. Return only one valid JSON object."
@@ -93,21 +129,39 @@ SOURCE_SUMMARIZER_SYSTEM = (
 TUTOR_FORMAT_RULES = """
 Terminal response style:
 - Start with a short label such as Lesson:, Check:, Feedback:, Quiz:, or Next:.
+- Use **bold** only for semantic labels at the start of a section
+  (e.g. **Lesson:**, **Example:**, **Check:**, **Hint:**). Do not bold
+  random words inside prose. Avoid tables and long headings.
 - Keep paragraphs short; prefer 1-3 compact bullets when listing ideas.
+- Use a **Label:** prefix at the start of each major section so the
+  learner immediately knows whether they are reading new material, an
+  example, a question, or feedback.
+- Use numbered lists for sequential steps and bullet lists for sets of
+  parallel ideas. Avoid nesting more than one level deep.
 - For multiple choice, use exactly A), B), C), D) on separate lines.
 - When asking multiple choice, put the correct choice in a hidden HTML comment
   at the end, like <!-- answer: C -->. The CLI removes this before showing the
   learner and stores it for reliable grading.
 - Separate teaching from the learner action with Action: when there is a next step.
-- Avoid decorative Markdown, tables, excessive bold, and long headings.
 - Do not repeat the status bar; the CLI prints it separately.
 
 Question mechanics:
-- Use a mix of multiple-choice and open-ended checks.
-- Use open-ended questions when the expected correct answer is narrow and unambiguous.
-- If a check depends on imagined cursor position, hidden assumptions, wording nuance,
-  or any scenario with multiple reasonable answers, make it multiple choice with
-  exactly one best answer.
+- Use the question type that fits the learning job; do not default to a quiz
+  just because the slide exists.
+- Use multiple choice when testing recognition of a specific term, algorithm,
+  command, or concept; disambiguating common confusions; or when there are four
+  plausible options with exactly one best answer.
+- Use free response when the learner needs to explain reasoning, trace an
+  algorithm, compare ideas, or synthesize multiple concepts. Avoid multiple
+  choice for "why" questions because guessing can hide weak understanding.
+- Use hands-on checks when the concept is a keybinding, workflow step,
+  algorithm trace, command, or small coding move the learner can try directly.
+- Skip the check when the slide is only orientation or a definitional fact the
+  learner just read, or when the learner has shown strong momentum with several
+  correct answers in a row. Briefly affirm and cue the next step instead.
+- If a check depends on imagined cursor position, hidden assumptions, wording
+  nuance, or any scenario with multiple reasonable answers, make the scenario
+  explicit or choose a different check.
 - If Topic metadata contains pending_question with an answer_key, evaluate the
   learner's selected letter against that key before giving feedback. Never mark
   the stored correct letter as wrong.
@@ -125,9 +179,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        if args.func is cmd_review:
+            return cmd_review(args, input_func=input if sys.stdin.isatty() else None)
         return args.func(args)
     except OpenLearnError as exc:
-        print(format_error(str(exc)), file=sys.stderr)
+        print_error(str(exc), output_func=lambda text: print(text, file=sys.stderr))
         return 1
     except KeyboardInterrupt:
         print("", file=sys.stderr)
@@ -138,6 +194,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="openlearn",
         description="Local-first AI learning workspace",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"openlearn {__version__}",
     )
     parser.set_defaults(func=cmd_menu)
     sub = parser.add_subparsers()
@@ -276,9 +337,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     edit_parser.set_defaults(func=cmd_edit)
 
-    import_parser = sub.add_parser("import", help="Import .txt or .md source material")
+    import_parser = sub.add_parser("import", help="Import source material")
     import_parser.add_argument("topic", help="Topic slug")
-    import_parser.add_argument("file", help="Path to .txt or .md source material")
+    import_parser.add_argument("file", nargs="?", help="Path to source material")
+    import_parser.add_argument("--url", help="Import readable text from a URL")
+    import_parser.add_argument("--scan", help="Import supported files under a directory")
     import_parser.add_argument(
         "--model", default=None, help="Override model for source summarization"
     )
@@ -307,10 +370,30 @@ def build_parser() -> argparse.ArgumentParser:
     review_parser.add_argument(
         "--model", default=None, help="Override model for this request"
     )
+    review_parser.add_argument(
+        "--due",
+        action="store_true",
+        dest="due_only",
+        help="Review only concepts currently due",
+    )
     review_parser.set_defaults(func=cmd_review)
 
     due_parser = sub.add_parser("due", help="List review concepts due today")
     due_parser.set_defaults(func=cmd_due)
+
+    videos_parser = sub.add_parser(
+        "videos", help="Suggest YouTube videos for a topic concept"
+    )
+    videos_parser.add_argument(
+        "topic", nargs="?", help="Topic slug, defaults to active/recent"
+    )
+    videos_parser.add_argument(
+        "--query", default=None, help="Concept to search for (defaults to current focus)"
+    )
+    videos_parser.add_argument(
+        "--n", type=int, default=3, dest="count", help="Number of videos (1-10)"
+    )
+    videos_parser.set_defaults(func=cmd_videos)
 
     resume_parser = sub.add_parser("resume", help="Resume the active or selected topic")
     resume_parser.add_argument(
@@ -334,6 +417,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def cmd_init(_args: argparse.Namespace) -> int:
+    maybe_print_migration_notice()
     topics_dir().mkdir(parents=True, exist_ok=True)
     print(f"Initialized {topics_dir()}")
     return 0
@@ -408,10 +492,14 @@ def run_menu(input_func=input, output_func=print) -> int:
     while True:
         output_func("")
         active = valid_active_topic()
+        quick_actions = {}
         if active:
-            print_status_bar(read_topic(active), output_func)
+            active_topic = read_topic(active)
+            print_status_bar(active_topic, output_func)
+            active_due_count = len(due_review_items(active_topic.metadata))
         else:
-            output_func(status_bar("none", "not started", "not set"))
+            emit(status_bar("none", "not started", "not set"), output_func)
+            active_due_count = 0
         unstarted = active_topic_needs_course_start(active)
         actions = []
 
@@ -423,23 +511,24 @@ def run_menu(input_func=input, output_func=print) -> int:
             add_action("Context files", lambda: menu_context_files(input_func, output_func))
             add_action("Advanced options", lambda: menu_advanced_options(input_func, output_func))
         elif active:
+            if active_due_count:
+                quick_actions["r"] = (
+                    f"Review due ({active_due_count})",
+                    lambda: menu_review(input_func, output_func, due_only=True),
+                )
             add_action("Resume", lambda: menu_resume(input_func, output_func))
-            add_action("Ask about topic", lambda: menu_ask(input_func, output_func))
+            add_action("Chat", lambda: menu_ask(input_func, output_func))
             add_action("Review", lambda: menu_review(input_func, output_func))
-            add_action("Topic status", lambda: cmd_summary(argparse.Namespace(topic=active)))
-            add_action("View course plan", lambda: print_course_plan(read_topic(active), output_func))
-            add_action("Correct progress", lambda: menu_set_progress(input_func, output_func))
-            add_action("Change scope", lambda: menu_change_scope(input_func, output_func))
+            add_action("Course options", lambda: menu_course_options(input_func, output_func))
             add_action("Context files", lambda: menu_context_files(input_func, output_func))
-            add_action("Advanced options", lambda: menu_advanced_options(input_func, output_func))
         if recent_topic_summaries():
             add_action("Topics", lambda: menu_topics(input_func, output_func))
         add_action("New course", lambda: menu_new_course(input_func, output_func))
 
-        for index, (label, _action) in enumerate(actions, start=1):
-            output_func(format_menu_item(str(index), label))
-        output_func(menu_separator())
-        output_func(format_menu_item("q", "Quit"))
+        rows = [(key, label) for key, (label, _action) in quick_actions.items()]
+        rows.extend((str(index), label) for index, (label, _action) in enumerate(actions, start=1))
+        rows.append(("q", "Quit"))
+        print_menu(rows, output_func)
         try:
             choice = input_func(PROMPT).strip().lower()
         except EOFError:
@@ -449,12 +538,15 @@ def run_menu(input_func=input, output_func=print) -> int:
         try:
             if choice in {"q", "quit", "exit"}:
                 return 0
+            if choice in quick_actions:
+                quick_actions[choice][1]()
+                continue
             if not choice.isdigit() or int(choice) < 1 or int(choice) > len(actions):
                 output_func("Choose a number, or q to quit.")
                 continue
             actions[int(choice) - 1][1]()
         except OpenLearnError as exc:
-            output_func(format_error(str(exc)))
+            print_error(str(exc), output_func)
 
 
 def valid_active_topic() -> str | None:
@@ -474,23 +566,28 @@ def menu_start_course(input_func, output_func) -> None:
 
 
 def menu_resume(input_func, output_func) -> None:
-    cmd_resume(argparse.Namespace(topic=None, model=None))
+    cmd_resume(argparse.Namespace(topic=None, model=None), output_func=output_func)
     run_repl(input_func=input_func, output_func=output_func, show_intro=False)
 
 
 def menu_next(input_func, output_func) -> None:
-    cmd_next(argparse.Namespace(topic=None, model=None))
+    cmd_next(argparse.Namespace(topic=None, model=None), output_func=output_func)
     run_repl(input_func=input_func, output_func=output_func, show_intro=False)
 
 
 def menu_ask(input_func, output_func) -> None:
     prompt = input_func("Ask: ").strip()
     if prompt:
-        ask_topic(None, prompt, None)
+        ask_topic(None, prompt, None, output_func=output_func)
+        run_repl(input_func=input_func, output_func=output_func, show_intro=False)
 
 
-def menu_review(input_func, output_func) -> None:
-    cmd_review(argparse.Namespace(topic=resolve_topic_slug(None), model=None))
+def menu_review(input_func, output_func, due_only: bool = False) -> None:
+    cmd_review(
+        argparse.Namespace(topic=resolve_topic_slug(None), model=None, due_only=due_only),
+        input_func=input_func,
+        output_func=output_func,
+    )
     run_repl(input_func=input_func, output_func=output_func, show_intro=False)
 
 
@@ -503,10 +600,12 @@ def menu_new_course(input_func, output_func) -> None:
         output_func("New course")
         output_func(f"1. Name *: {name or 'required'}")
         output_func(f"2. Goal *: {goal or 'required'}")
-        output_func(f"3. Import .txt context: {len(pending_contexts)} file(s)")
-        output_func("4. Paste info")
-        output_func("5. Advanced course options")
-        output_func("6. Start course")
+        output_func(f"3. Add source file (txt, md, pdf, docx): {len(pending_contexts)} added")
+        output_func("4. Add source from URL")
+        output_func("5. Add source folder (scan)")
+        output_func("6. Paste info")
+        output_func("7. Advanced course options")
+        output_func("8. Start course")
         output_func("b. Back to menu")
         choice = input_func("Choose: ").strip().lower()
         output_func("")
@@ -517,12 +616,25 @@ def menu_new_course(input_func, output_func) -> None:
             goal = input_func("Goal: ").strip()
             output_func("")
         elif choice in {"3", "i", "import"}:
-            source = input_func("Path to .txt file: ").strip()
+            source = input_func("Path to file (txt, md, pdf, docx): ").strip()
             output_func("")
             if source:
-                pending_contexts.append(read_pending_context(Path(source)))
-                output_func(f"Added context: {pending_contexts[-1].filename}")
-        elif choice in {"4", "p", "paste"}:
+                pending_contexts.append(read_pending_context(Path(source), output_func))
+                output_func(f"Added source: {pending_contexts[-1].filename}")
+        elif choice in {"4", "u", "url"}:
+            url = input_func("Source URL: ").strip()
+            output_func("")
+            if url:
+                pending_contexts.append(pending_context_from_url(url))
+                output_func(f"Added source: {pending_contexts[-1].filename}")
+        elif choice in {"5", "f", "folder", "scan"}:
+            folder = input_func("Folder to scan: ").strip()
+            output_func("")
+            if folder:
+                pending_contexts.extend(
+                    pending_contexts_from_dir(Path(folder), output_func)
+                )
+        elif choice in {"6", "p", "paste"}:
             filename = input_func("Context file name: ").strip() or "pasted-info.txt"
             output_func("")
             output_func("Paste text. End with a line containing only a period.")
@@ -535,10 +647,10 @@ def menu_new_course(input_func, output_func) -> None:
             text = "\n".join(lines).strip()
             if text:
                 pending_contexts.append(PendingContext(filename, text + "\n"))
-                output_func(f"Added context: {safe_context_filename(filename)}")
-        elif choice in {"5", "a", "advanced"}:
+                output_func(f"Added source: {safe_context_filename(filename)}")
+        elif choice in {"7", "a", "advanced"}:
             menu_course_options_dict(pending_options, input_func, output_func)
-        elif choice in {"6", "s", "start"}:
+        elif choice in {"8", "s", "start"}:
             if not name or not goal:
                 output_func("Name and goal are required before starting.")
                 continue
@@ -583,23 +695,70 @@ def summarize_pending_contexts(
 ) -> None:
     if not active or not context_paths:
         return
-    for path in context_paths:
-        summary_path = topic_context_dir(active) / f"{path.stem}.summary.txt"
-        if summary_path.exists():
-            continue
-        output_func(f"Summarizing {path.name}")
-        saved = summarize_context_file(active, path, output_func=output_func)
-        output_func("")
-        output_func(f"Saved summary: {saved.name}")
+    pending = [
+        path for path in context_paths
+        if not (topic_context_dir(active) / f"{path.stem}.summary.txt").exists()
+    ]
+    if not pending:
+        return
+
+    def summarize_one(path: Path):
+        try:
+            saved = summarize_context_file(active, path, output_func=lambda _: None)
+            return "ok", path.name, saved.name
+        except Exception as exc:
+            return "failed", path.name, str(exc)
+
+    with ThreadPoolExecutor(max_workers=IMPORT_SCAN_MAX_WORKERS) as executor:
+        futures = {executor.submit(summarize_one, p): p for p in pending}
+        for future in as_completed(futures):
+            status, name, detail = future.result()
+            if status == "failed":
+                output_func(f"Failed to summarize {name}: {detail}")
+            else:
+                output_func(f"Summarized {name} -> {detail}")
 
 
-def read_pending_context(source: Path) -> PendingContext:
+def read_pending_context(source: Path, output_func=print) -> PendingContext:
     source = source.expanduser().resolve()
     if not source.exists() or not source.is_file():
         raise OpenLearnError(f"context file not found: {source}")
-    if source.suffix.lower() not in {".txt", ".md"}:
-        raise OpenLearnError("only .txt and .md context files are supported right now")
+    suffix = source.suffix.lower()
+    if suffix not in {".txt", ".md", ".pdf", ".docx"}:
+        raise OpenLearnError("only .txt, .md, .pdf, and .docx context files are supported right now")
+    if suffix == ".pdf":
+        return PendingContext(source.with_suffix(".txt").name, _extract_pdf_text(source, output_func))
+    if suffix == ".docx":
+        return PendingContext(source.with_suffix(".txt").name, _extract_docx_text(source))
     return PendingContext(source.name, source.read_text(encoding="utf-8"))
+
+
+def pending_context_from_url(url: str) -> PendingContext:
+    return PendingContext(url_context_filename(url), _fetch_url_text(url))
+
+
+def pending_contexts_from_dir(directory: Path, output_func=print) -> list[PendingContext]:
+    directory = directory.expanduser().resolve()
+    if not directory.exists() or not directory.is_dir():
+        raise OpenLearnError(f"scan directory not found: {directory}")
+    contexts: list[PendingContext] = []
+    failed = 0
+    for source in scan_source_files(directory):
+        try:
+            contexts.append(read_pending_context(source, output_func))
+        except OpenLearnError as exc:
+            failed += 1
+            output_func(f"Failed {source.name}: {exc}")
+    output_func(f"{len(contexts)} added, {failed} failed from {directory.name}")
+    return contexts
+
+
+def scan_source_files(directory: Path) -> list[Path]:
+    patterns = ("*.pdf", "*.md", "*.txt", "*.docx")
+    return sorted(
+        {path for pattern in patterns for path in directory.glob(f"**/{pattern}")},
+        key=lambda path: str(path).lower(),
+    )
 
 
 def seed_manual_test_course(started: bool = False, with_session: bool = False) -> None:
@@ -696,21 +855,31 @@ def menu_context_files(input_func, output_func) -> None:
                 output_func(f"- {path.name}")
         else:
             output_func("No context files yet.")
-        output_func("1. Import .txt file (i)")
-        output_func("2. Paste new .txt (p)")
-        output_func("3. Summarize for tutor (s)")
-        output_func("4. Open file (o)")
-        output_func("5. Delete file (d)")
+        output_func("1. Import file (txt, md, pdf, docx)")
+        output_func("2. Import from URL")
+        output_func("3. Import folder (scan)")
+        output_func("4. Paste new text")
+        output_func("5. Summarize for tutor")
+        output_func("6. Open file")
+        output_func("7. Delete file")
+        output_func("8. Delete all")
         output_func("b. Back")
         choice = input_func("Choose: ").strip().lower()
         if choice in {"b", "back", "q", "quit"}:
             return
         if choice in {"1", "i", "import"}:
-            source = input_func("Path to .txt file: ").strip()
+            source = input_func("Path to file (txt, md, pdf, docx): ").strip()
             if source:
-                saved = import_context_file(slug, Path(source))
-                output_func(f"Saved context: {saved.name}")
-        elif choice in {"2", "p", "paste"}:
+                import_file_source(slug, Path(source), output_func=output_func)
+        elif choice in {"2", "u", "url"}:
+            url = input_func("Source URL: ").strip()
+            if url:
+                import_url_source(slug, url, output_func=output_func)
+        elif choice in {"3", "f", "folder", "scan"}:
+            folder = input_func("Folder to scan: ").strip()
+            if folder:
+                cmd_import_scan(slug, Path(folder), output_func=output_func)
+        elif choice in {"4", "p", "paste"}:
             name = input_func("Context file name: ").strip()
             output_func("Paste text. End with a line containing only a period.")
             lines = []
@@ -720,19 +889,20 @@ def menu_context_files(input_func, output_func) -> None:
                     break
                 lines.append(line)
             saved = write_context_text(slug, name, "\n".join(lines).strip() + "\n")
-            output_func(f"Saved context: {saved.name}")
-        elif choice in {"3", "s", "summary", "summarize"}:
+            output_func(f"Saved source: {saved.name}")
+            output_func("Use 'Summarize for tutor' when you want a tutor-ready summary.")
+        elif choice in {"5", "s", "summary", "summarize"}:
             path = choose_context_file(input_func, output_func, slug, "Summarize file")
             if path:
                 output_func("Summary")
                 saved = summarize_context_file(slug, path, output_func=output_func)
                 output_func("")
                 output_func(f"Saved summary: {saved.name}")
-        elif choice in {"4", "o", "open"}:
+        elif choice in {"6", "o", "open"}:
             path = choose_context_file(input_func, output_func, slug, "Open context file")
             if path:
                 open_context_file(path)
-        elif choice in {"5", "d", "delete"}:
+        elif choice in {"7", "d", "delete"}:
             path = choose_context_file(input_func, output_func, slug, "Delete context file")
             if path:
                 confirm = input_func(f"Delete {path.name}? [y/N]: ").strip().lower()
@@ -741,6 +911,20 @@ def menu_context_files(input_func, output_func) -> None:
                     output_func(f"Deleted context: {path.name}")
                 else:
                     output_func("Delete cancelled.")
+        elif choice in {"8", "delete-all", "all"}:
+            files = context_files(slug)
+            if not files:
+                output_func("No context files to delete.")
+                continue
+            confirm = input_func(
+                f"Delete all {len(files)} context file(s)? This is not reversible. [y/N]: "
+            ).strip().lower()
+            if confirm in {"y", "yes"}:
+                for path in files:
+                    path.unlink()
+                output_func(f"Deleted {len(files)} context file(s).")
+            else:
+                output_func("Delete cancelled.")
         else:
             output_func("Choose a number, or b to go back.")
 
@@ -865,9 +1049,9 @@ def run_repl(
                     prompt[1:], model=model, input_func=input_func, output_func=output_func
                 )
             else:
-                ask_topic(None, prompt, model)
+                ask_topic(None, prompt, model, output_func=output_func)
         except OpenLearnError as exc:
-            output_func(format_error(str(exc)))
+            print_error(str(exc), output_func)
         finally:
             print_active_status_bar()
 
@@ -888,9 +1072,15 @@ def handle_repl_command(
         help_text = REPL_HELP_ALL if args and args[0] == "--all" else "\n".join(REPL_HELP_LINES)
         output_func(help_text)
     elif name in {"resume", "r"}:
-        cmd_resume(argparse.Namespace(topic=args[0] if args else None, model=model))
+        cmd_resume(
+            argparse.Namespace(topic=args[0] if args else None, model=model),
+            output_func=output_func,
+        )
     elif name in {"next", "n"}:
-        cmd_next(argparse.Namespace(topic=args[0] if args else None, model=model))
+        cmd_next(
+            argparse.Namespace(topic=args[0] if args else None, model=model),
+            output_func=output_func,
+        )
     elif name in {"done", "next-slide"}:
         force = any(arg in {"--force", "force", "yes"} for arg in args)
         topic_args = [arg for arg in args if arg not in {"--force", "force", "yes"}]
@@ -901,15 +1091,50 @@ def handle_repl_command(
             output_func("")
             if updated.metadata.get("pending_chapter_quiz") is True:
                 output_func("Loading chapter quiz...")
-                cmd_chapter_quiz(argparse.Namespace(topic=slug, model=model))
+                cmd_chapter_quiz(
+                    argparse.Namespace(topic=slug, model=model),
+                    output_func=output_func,
+                )
             else:
                 output_func("Loading next slide...")
-                cmd_next(argparse.Namespace(topic=slug, model=model))
+                cmd_next(argparse.Namespace(topic=slug, model=model), output_func=output_func)
     elif name == "review":
+        due_only = "--due" in args
+        topic_args = [arg for arg in args if arg != "--due"]
         cmd_review(
             argparse.Namespace(
-                topic=args[0] if args else resolve_topic_slug(None), model=model
-            )
+                topic=topic_args[0] if topic_args else resolve_topic_slug(None),
+                model=model,
+                due_only=due_only,
+            ),
+            input_func=input_func,
+            output_func=output_func,
+        )
+    elif name == "drill":
+        leetcode = "--leetcode" in args
+        topic_args = [arg for arg in args if arg != "--leetcode"]
+        cmd_drill(
+            argparse.Namespace(
+                topic=topic_args[0] if topic_args else resolve_topic_slug(None),
+                model=model,
+                leetcode=leetcode,
+            ),
+            output_func=output_func,
+        )
+    elif name == "check":
+        cmd_check(
+            argparse.Namespace(topic=args[0] if args else resolve_topic_slug(None), model=model),
+            output_func=output_func,
+        )
+    elif name == "videos":
+        count, rest = parse_videos_count(args)
+        cmd_videos(
+            argparse.Namespace(
+                topic=resolve_topic_slug(None),
+                query=" ".join(rest),
+                count=count,
+            ),
+            output_func=output_func,
         )
     elif name == "status":
         cmd_status(
@@ -954,7 +1179,7 @@ def handle_repl_command(
     elif name == "ask":
         if not args:
             raise OpenLearnError("usage: /ask <question>")
-        ask_topic(None, " ".join(args), model)
+        ask_topic(None, " ".join(args), model, output_func=output_func)
     else:
         raise OpenLearnError(f"unknown REPL command: /{name}")
 
@@ -1043,6 +1268,9 @@ def cmd_new(args: argparse.Namespace) -> int:
         "review_due": [],
         "course_options": default_course_options(),
         "last_answer_status": "",
+        "consecutive_correct": 0,
+        "consecutive_misses": 0,
+        "last_video_focus": None,
         "quiz_history": [],
         "placement_result": {},
         "review_session_active": False,
@@ -1451,6 +1679,36 @@ def placement_context_text(
     return "\n".join(lines).rstrip() + "\n"
 
 
+def _context_file_count(slug: str) -> int:
+    directory = topic_context_dir(slug)
+    if not directory.exists():
+        return 0
+    return sum(
+        1 for f in directory.iterdir()
+        if f.is_file() and not f.name.endswith(".summary.txt")
+    )
+
+
+def _slide_count_guidance(slug: str) -> str:
+    n = _context_file_count(slug)
+    if n >= 20:
+        return (
+            "This course has rich source material. "
+            "Use 8-12 slides per unit so each concept gets proper depth — "
+            "one slide per distinct idea, algorithm, or worked example. "
+        )
+    if n >= 8:
+        return (
+            "Use 5-8 slides per unit, covering each major concept and at least "
+            "one concrete example or worked problem per unit. "
+        )
+    return (
+        "Use 3-5 slides per unit for conceptual topics. "
+        "For dense practical topics (keybindings, shortcuts, CLI commands), use 4-6 slides "
+        "so each slide covers 1-2 concrete skills rather than one vague idea. "
+    )
+
+
 def course_outline_prompt(
     topic: Topic, feedback: str = "", rejected_outline: str = ""
 ) -> str:
@@ -1476,10 +1734,8 @@ def course_outline_prompt(
         "Create 4-8 ordered units with short titles and one-line outcomes. "
         "For each unit, include a planned slide count in parentheses, for example "
         "1.2 Insert mode in Vim (3 slides) - Outcome. "
-        "Use 3-5 slides per unit for conceptual topics. "
-        "For dense practical topics (keybindings, shortcuts, CLI commands), use 4-6 slides "
-        "so each slide covers 1-2 concrete skills rather than one vague idea. "
-        "Keep it under 300 words.\n"
+        f"{_slide_count_guidance(topic.slug)}"
+        f"{'Keep the outline under 600 words.' if _context_file_count(topic.slug) >= 20 else 'Keep it under 300 words.'}\n"
         f"Course name: {topic.metadata.get('topic', topic.slug)}\n"
         f"Goal: {goal}\n"
         f"Placement context:\n{placement_context or '(none)'}"
@@ -1497,13 +1753,16 @@ def placement_context_prompt(slug: str) -> str:
 def first_lesson_prompt(outline: str) -> str:
     return (
         "Start teaching unit 1 from this accepted course plan. "
-        "Do not repeat the whole plan. Use exactly this structure and nothing else:\n"
+        "Do not repeat the whole plan. Use this compact structure:\n"
         "Lesson: teach one concept in 2-4 sentences.\n"
         "Example: give one concrete example.\n"
-        "Check: ask one important check-for-understanding question.\n"
+        "Check: ask one important check-for-understanding question only if the "
+        "first concept is testable now. You may omit Check for pure orientation "
+        "or foundational context.\n"
         "If there is any ambiguity or multiple reasonable interpretations, make "
-        "the check multiple choice with one definite best answer. Do not ask a "
-        f"question just to ask one. Hard limit: {FIRST_LESSON_WORD_LIMIT} words.\n"
+        "the check multiple choice with one definite best answer. Use free "
+        "response for reasoning or algorithm tracing. Do not ask a question just "
+        f"to ask one. Hard limit: {FIRST_LESSON_WORD_LIMIT} words.\n"
         "If the Check is multiple choice, append exactly this on its own line at the end: "
         "<!-- answer: X --> where X is the correct letter. The CLI strips it before display "
         "and uses it for grading — do not omit it.\n\n"
@@ -1768,7 +2027,7 @@ def advance_slide(slug: str, output_func=print, force: bool = False) -> bool:
         metadata, body = parse_topic(path.read_text(encoding="utf-8"))
         metadata = dict(metadata)
         answer_status = metadata.get("last_answer_status")
-        tutor_accepted = isinstance(last_lesson_response, str) and "type /done" in last_lesson_response.lower()
+        tutor_accepted = tutor_response_has_advance_cue(last_lesson_response)
         if answer_status in {"needs_work", "partial"} and not force and not tutor_accepted:
             metadata["review_session_active"] = False
             write_text_atomic(path, format_topic(metadata, body))
@@ -1848,6 +2107,20 @@ def advance_slide(slug: str, output_func=print, force: bool = False) -> bool:
     return True
 
 
+def tutor_response_has_advance_cue(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    tail = value.lower()[-600:]
+    if "/done" not in tail:
+        return False
+    cue_patterns = (
+        r"\b(type|use|press|enter|run)\s+/done\b",
+        r"(?<!\w)/\s*done\s+(when|to|if)\b",
+        r"\bwhen\s+.+\s+/done\b",
+    )
+    return any(re.search(pattern, tail, flags=re.DOTALL) for pattern in cue_patterns)
+
+
 def set_course_progress(slug: str, unit_value: str, slide_value: str) -> None:
     try:
         unit = int(unit_value)
@@ -1871,6 +2144,7 @@ def set_course_progress(slug: str, unit_value: str, slide_value: str) -> None:
                 metadata["current_focus"] = title.strip()
         metadata["current_unit"] = unit
         metadata["current_slide"] = slide
+        metadata["last_video_focus"] = None
         metadata.pop("pending_chapter_quiz", None)
         metadata.pop("pending_quiz_chapter", None)
         write_text_atomic(path, format_topic(metadata, body))
@@ -2130,6 +2404,20 @@ def update_answer_status(metadata: dict[str, object], update: dict[str, object])
         metadata["last_answer_status"] = status
 
 
+def update_momentum_counters(metadata: dict[str, object]) -> None:
+    status = metadata.get("last_answer_status")
+    raw_correct = metadata.get("consecutive_correct")
+    raw_misses = metadata.get("consecutive_misses")
+    correct = raw_correct if isinstance(raw_correct, int) and raw_correct >= 0 else 0
+    misses = raw_misses if isinstance(raw_misses, int) and raw_misses >= 0 else 0
+    if status == "correct":
+        metadata["consecutive_correct"] = correct + 1
+        metadata["consecutive_misses"] = 0
+    elif status in {"partial", "needs_work"}:
+        metadata["consecutive_correct"] = 0
+        metadata["consecutive_misses"] = misses + 1
+
+
 def learner_answer_is_actionable(learner_prompt: str, metadata: dict[str, object]) -> bool:
     value = learner_prompt.strip().lower()
     if not value:
@@ -2353,16 +2641,58 @@ def cmd_edit(args: argparse.Namespace) -> int:
 def cmd_import(args: argparse.Namespace) -> int:
     topic = read_topic(slugify(args.topic))
     set_active_topic(topic.slug)
-    saved = import_context_file(topic.slug, Path(args.file))
-    print(f"Saved source: {saved.name}")
+    if args.scan:
+        return cmd_import_scan(topic.slug, Path(args.scan), model=args.model)
+    if args.url:
+        import_url_source(topic.slug, args.url, model=args.model)
+        return 0
+    if not args.file:
+        raise OpenLearnError("usage: openlearn import <topic> <file> | --url <url> | --scan <dir>")
+    import_file_source(topic.slug, Path(args.file), model=args.model)
+    return 0
+
+
+def import_file_source(
+    slug: str, source: Path, model: str | None = None, output_func=print
+) -> Path | None:
+    """Import one file into a live topic: dedupe, write, summarize, record checksum."""
+    source = source.expanduser().resolve()
+    if not source.exists() or not source.is_file():
+        raise OpenLearnError(f"context file not found: {source}")
+    checksum = _file_checksum(source)
+    if checksum in imported_checksums(read_topic(slug).metadata):
+        output_func(f"Skipped source: {source.name} (already imported)")
+        return None
+    saved = import_context_file(slug, source, output_func=output_func)
+    return _finish_source_import(slug, saved, checksum, model, output_func)
+
+
+def import_url_source(
+    slug: str, url: str, model: str | None = None, output_func=print
+) -> Path | None:
+    """Import readable text from a URL into a live topic with the same pipeline."""
+    text = _fetch_url_text(url)
+    checksum = _text_checksum(f"{url}\n{text}")
+    if checksum in imported_checksums(read_topic(slug).metadata):
+        output_func(f"Skipped source: {url_context_filename(url)} (already imported)")
+        return None
+    saved = write_context_text(slug, url_context_filename(url), text)
+    return _finish_source_import(slug, saved, checksum, model, output_func)
+
+
+def _finish_source_import(
+    slug: str, saved: Path, checksum: str, model: str | None, output_func=print
+) -> Path:
+    output_func(f"Saved source: {saved.name}")
     if len(saved.read_text(encoding="utf-8")) > CONTEXT_SUMMARY_CHAR_LIMIT:
-        print(
+        output_func(
             f"Warning: source exceeds {CONTEXT_SUMMARY_CHAR_LIMIT} characters; "
             "summarizing the first part only."
         )
-    summary = summarize_context_file(topic.slug, saved, model=args.model)
-    print(f"Saved source summary: {summary.name}")
-    return 0
+    summary = summarize_context_file(slug, saved, model=model, output_func=output_func)
+    save_imported_checksum(slug, checksum)
+    output_func(f"Saved source summary: {summary.name}")
+    return saved
 
 
 def cmd_paste(args: argparse.Namespace) -> int:
@@ -2394,41 +2724,337 @@ def cmd_chat(args: argparse.Namespace) -> int:
     return 0
 
 
-def ask_topic(topic_value: str | None, prompt: str, model: str | None = None) -> str:
+def ask_topic(
+    topic_value: str | None, prompt: str, model: str | None = None, output_func=print
+) -> str:
     topic = read_topic(
         resolve_topic_slug(topic_value) if topic_value is None else slugify(topic_value)
     )
     set_active_topic(topic.slug)
     model = model or str(topic.metadata.get("model") or configured_model())
     is_review_session = topic.metadata.get("review_session_active") is True
-    answer = call_openai_streaming(model=model, system=system_prompt(topic), user=prompt)
-    answer = print_and_append_model_answer(topic, "chat", prompt, answer)
+    answer = call_openai_streaming(
+        model=model, system=system_prompt(topic), user=prompt, output_func=output_func
+    )
+    answer = print_and_append_model_answer(topic, "chat", prompt, answer, output_func=output_func)
     update_learning_metadata(
         topic, prompt, answer, model, is_review_session=is_review_session
     )
+    maybe_suggest_videos(topic.slug, output_func)
     return answer
 
 
-def cmd_review(args: argparse.Namespace) -> int:
+def cmd_drill(args: argparse.Namespace, output_func=print) -> int:
+    topic = read_topic(resolve_topic_slug(args.topic))
+    set_active_topic(topic.slug)
+    if getattr(args, "leetcode", False):
+        drill = curated_drill(topic)
+    else:
+        model = args.model or str(topic.metadata.get("model") or configured_model())
+        user = drill_generation_prompt(topic)
+        raw = call_openai(model, system_prompt(topic), user)
+        drill = parse_drill_json(raw)
+    path = write_drill_file(topic.slug, drill)
+    save_active_drill(topic.slug, path)
+    open_drill_in_editor(path)
+    output_func(f"Drill saved: {path}")
+    output_func("Open it in VS Code, solve the function, then type /check.")
+    return 0
+
+
+def cmd_check(args: argparse.Namespace, output_func=print) -> int:
+    topic = read_topic(resolve_topic_slug(args.topic))
+    drill_path = active_drill_path(topic)
+    enable_drill_tests(drill_path)
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", str(drill_path), "-v", "--tb=short"],
+        capture_output=True,
+        text=True,
+    )
+    output = "\n".join(
+        part for part in [result.stdout.strip(), result.stderr.strip()] if part
+    )
+    user = (
+        "The learner attempted this drill. "
+        f"Pytest return code: {result.returncode}\n\n"
+        f"Here is the pytest output:\n{output or '(no output)'}\n\n"
+        "Give specific feedback on what failed and why. If tests passed, briefly "
+        "reinforce the key idea and suggest one small next practice step."
+    )
+    model = args.model or str(topic.metadata.get("model") or configured_model())
+    answer = call_openai_streaming(model=model, system=system_prompt(topic), user=user, output_func=output_func)
+    print_and_append_model_answer(topic, "check", user, answer, output_func=output_func)
+    return result.returncode
+
+
+def drill_generation_prompt(topic: Topic) -> str:
+    known = topic.metadata.get("known")
+    weak_spots = topic.metadata.get("weak_spots")
+    known_text = ", ".join(item for item in known if isinstance(item, str)) if isinstance(known, list) else ""
+    weak_text = ", ".join(item for item in weak_spots if isinstance(item, str)) if isinstance(weak_spots, list) else ""
+    return textwrap.dedent(
+        f"""
+        Generate one Python coding drill for this learner.
+        Return only JSON with this exact shape:
+        {{
+          "title": "short title",
+          "description": "learner-facing problem statement",
+          "function_stub": "def function_name(...):\\n    pass",
+          "test_cases": [
+            {{"input": [1, 2], "expected": 3}}
+          ]
+        }}
+
+        Requirements:
+        - Make the drill small enough to solve in 10-15 minutes.
+        - Use plain Python with no third-party packages.
+        - Include 2-4 concrete test cases.
+        - The function_stub must contain exactly one top-level function.
+
+        Topic: {topic.metadata.get('topic', topic.slug)}
+        Goal: {topic.metadata.get('goal', '')}
+        Current focus: {topic.metadata.get('current_focus', '')}
+        Known: {known_text}
+        Weak spots: {weak_text}
+        """
+    ).strip()
+
+
+def parse_drill_json(raw: str) -> dict[str, object]:
+    try:
+        data = parse_metadata_update(raw)
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise OpenLearnError(f"invalid drill JSON: {exc}") from exc
+    return validate_drill_data(data)
+
+
+def validate_drill_data(data: dict[str, object]) -> dict[str, object]:
+    title = data.get("title")
+    description = data.get("description")
+    function_stub = data.get("function_stub")
+    test_cases = data.get("test_cases")
+    if not isinstance(title, str) or not title.strip():
+        raise OpenLearnError("drill JSON missing title")
+    if not isinstance(description, str) or not description.strip():
+        raise OpenLearnError("drill JSON missing description")
+    if not isinstance(function_stub, str) or not function_stub.strip():
+        raise OpenLearnError("drill JSON missing function_stub")
+    if not function_name_from_stub(function_stub):
+        raise OpenLearnError("drill function_stub must define one function")
+    if not isinstance(test_cases, list) or not test_cases:
+        raise OpenLearnError("drill JSON missing test_cases")
+    normalized_cases = []
+    for item in test_cases:
+        if not isinstance(item, dict) or "input" not in item or "expected" not in item:
+            raise OpenLearnError("each drill test case needs input and expected")
+        normalized_cases.append({"input": item["input"], "expected": item["expected"]})
+    return {
+        "title": title.strip(),
+        "description": description.strip(),
+        "function_stub": function_stub.rstrip(),
+        "test_cases": normalized_cases,
+    }
+
+
+def function_name_from_stub(function_stub: str) -> str:
+    match = re.search(r"(?m)^\s*def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(", function_stub)
+    return match.group(1) if match else ""
+
+
+def drill_filename(title: str) -> str:
+    return f"{slugify(title)}.py"
+
+
+def topic_drill_dir(slug: str) -> Path:
+    path = topics_dir() / "drills" / slug
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def write_drill_file(slug: str, drill: dict[str, object]) -> Path:
+    path = unique_drill_path(slug, str(drill["title"]))
+    write_text_atomic(path, render_drill_file(drill))
+    return path
+
+
+def unique_drill_path(slug: str, title: str) -> Path:
+    directory = topic_drill_dir(slug)
+    path = directory / drill_filename(title)
+    if not path.exists():
+        return path
+    for index in range(2, 1000):
+        candidate = directory / f"{path.stem}-{index}{path.suffix}"
+        if not candidate.exists():
+            return candidate
+    raise OpenLearnError("too many drills with similar names")
+
+
+def render_drill_file(drill: dict[str, object]) -> str:
+    function_stub = str(drill["function_stub"]).rstrip()
+    function_name = function_name_from_stub(function_stub)
+    cases = drill["test_cases"]
+    lines = [
+        '"""',
+        str(drill["title"]),
+        "",
+        str(drill["description"]),
+        "",
+        "Run openlearn /check when you are ready to test your solution.",
+        '"""',
+        "",
+        function_stub,
+        "",
+        "",
+        "if False:",
+    ]
+    for index, case in enumerate(cases, start=1):
+        call = drill_call_expression(function_name, case["input"])
+        expected = repr(case["expected"])
+        lines.extend(
+            [
+                f"    def test_case_{index}():",
+                f"        assert {call} == {expected}",
+                "",
+            ]
+        )
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def drill_call_expression(function_name: str, input_value: object) -> str:
+    if isinstance(input_value, list):
+        return f"{function_name}(*{repr(input_value)})"
+    if isinstance(input_value, dict):
+        return f"{function_name}(**{repr(input_value)})"
+    return f"{function_name}({repr(input_value)})"
+
+
+def save_active_drill(slug: str, path: Path) -> None:
+    topic_file = topic_path(slug)
+    with file_lock(topic_file):
+        metadata, body = parse_topic(topic_file.read_text(encoding="utf-8"))
+        metadata = dict(metadata)
+        metadata["active_drill"] = str(path)
+        write_text_atomic(topic_file, format_topic(metadata, body))
+
+
+def active_drill_path(topic: Topic) -> Path:
+    value = topic.metadata.get("active_drill")
+    if not isinstance(value, str) or not value.strip():
+        raise OpenLearnError("no active drill; start one with /drill")
+    path = Path(value).expanduser().resolve()
+    if not path.exists() or not path.is_file():
+        raise OpenLearnError(f"active drill file not found: {path}")
+    return path
+
+
+def enable_drill_tests(path: Path) -> None:
+    text = path.read_text(encoding="utf-8")
+    updated = re.sub(r"(?m)^if False:\s*$", "if True:", text, count=1)
+    if updated == text:
+        return
+    write_text_atomic(path, updated)
+
+
+def open_drill_in_editor(path: Path) -> None:
+    with contextlib.suppress(OSError):
+        subprocess.Popen(["code", str(path)])
+
+
+def curated_drill(topic: Topic) -> dict[str, object]:
+    drills = load_curated_drills()
+    focus = f"{topic.metadata.get('current_focus', '')} {topic.metadata.get('goal', '')}".casefold()
+    for drill in drills:
+        tags = drill.get("tags")
+        if isinstance(tags, list) and any(isinstance(tag, str) and tag.casefold() in focus for tag in tags):
+            return validate_drill_data(drill)
+    if not drills:
+        raise OpenLearnError("no curated drills are available")
+    return validate_drill_data(drills[0])
+
+
+def load_curated_drills() -> list[dict[str, object]]:
+    try:
+        text = importlib.resources.files("openlearn").joinpath("drills.json").read_text(encoding="utf-8")
+    except (FileNotFoundError, ModuleNotFoundError) as exc:
+        raise OpenLearnError("curated drills file is missing") from exc
+    data = json.loads(text)
+    if not isinstance(data, list):
+        raise OpenLearnError("curated drills file must contain a list")
+    return [item for item in data if isinstance(item, dict)]
+
+
+def cmd_review(
+    args: argparse.Namespace, input_func=None, output_func=print
+) -> int:
     topic = read_topic(slugify(args.topic))
     set_active_topic(topic.slug)
     model = args.model or str(topic.metadata.get("model") or configured_model())
     due_items = due_review_items(topic.metadata)
     due_lines = "\n".join(f"- {item['concept']}" for item in due_items)
-    user = (
-        "Create a short active-recall review session for this learner. "
-        "Focus on review concepts due today and weak spots. Include 3-5 questions, "
-        "brief hints, and no answer key. Ask the questions only; wait for the "
-        "learner to answer before revealing or explaining answers."
-        f"\n\nDue today:\n{due_lines or '(no scheduled concepts due today)'}"
+    if getattr(args, "due_only", False):
+        user = (
+            "Create a short active-recall review session for this learner. "
+            "Use only the overdue concepts listed below. Do not add general weak spots "
+            "or unrelated topics. Include 3-5 questions, brief hints, and no answer key. "
+            "Ask the questions only; wait for the learner to answer before revealing or "
+            "explaining answers."
+            f"\n\nOverdue concepts only:\n{due_lines or '(no scheduled concepts due today)'}"
+        )
+    else:
+        user = (
+            "Create a short active-recall review session for this learner. "
+            "Focus on review concepts due today and weak spots. Include 3-5 questions, "
+            "brief hints, and no answer key. Ask the questions only; wait for the "
+            "learner to answer before revealing or explaining answers."
+            f"\n\nDue today:\n{due_lines or '(no scheduled concepts due today)'}"
+        )
+    answer = call_openai_streaming(
+        model=model, system=system_prompt(topic), user=user, output_func=output_func
     )
-    answer = call_openai_streaming(model=model, system=system_prompt(topic), user=user)
-    print_and_append_model_answer(topic, "review", user, answer, mark_reviewed=True)
+    print_and_append_model_answer(
+        topic, "review", user, answer, mark_reviewed=True, output_func=output_func
+    )
+    maybe_prompt_review_result(topic.slug, due_items, input_func, output_func)
     set_review_session_active(topic.slug, True)
     return 0
 
 
-def cmd_due(_args: argparse.Namespace) -> int:
+def maybe_prompt_review_result(
+    slug: str,
+    due_items: list[dict[str, str]],
+    input_func=None,
+    output_func=print,
+) -> None:
+    if input_func is None or not due_items:
+        return
+    result = input_func("How did that go? [easy / hard / missed]: ").strip().lower()
+    if result not in {"easy", "hard", "missed"}:
+        output_func("Review result not saved.")
+        return
+    schedule_review_results(slug, due_items, result)
+    output_func(f"Scheduled {len(due_items)} review item(s) as {result}.")
+
+
+def schedule_review_results(slug: str, due_items: list[dict[str, str]], difficulty: str) -> None:
+    path = topic_path(slug)
+    with file_lock(path):
+        metadata, body = parse_topic(path.read_text(encoding="utf-8"))
+        metadata = dict(metadata)
+        for item in due_items:
+            concept = item.get("concept")
+            if isinstance(concept, str):
+                ebisu_model = item.get("ebisu_model")
+                schedule_review_item(
+                    metadata,
+                    concept,
+                    difficulty,
+                    ebisu_model=ebisu_model if isinstance(ebisu_model, list) else None,
+                    update_ebisu=True,
+                )
+        write_text_atomic(path, format_topic(metadata, body))
+
+
+def cmd_due(_args: argparse.Namespace, output_func=print) -> int:
     rows = []
     if topics_dir().exists():
         for path in sorted(topics_dir().glob("*.md")):
@@ -2437,17 +3063,18 @@ def cmd_due(_args: argparse.Namespace) -> int:
                 rows.append((topic.slug, topic.metadata.get("topic", topic.slug), item))
 
     if not rows:
-        print("No review concepts due today.")
+        output_func("No review concepts due today.")
         return 0
 
-    print_section("Review due today")
-    for slug, title, item in rows:
+    table_rows = []
+    for _slug, title, item in rows:
         difficulty = item.get("difficulty") or "hard"
-        print(f"  {slug}  {item['concept']}  due {item['due']}  {difficulty}  {title}")
+        table_rows.append((str(title), str(item["concept"]), str(item["due"]), str(difficulty)))
+    emit(review_due_table(table_rows), output_func)
     return 0
 
 
-def cmd_resume(args: argparse.Namespace) -> int:
+def cmd_resume(args: argparse.Namespace, output_func=print) -> int:
     topic = read_topic(resolve_topic_slug(args.topic))
     set_active_topic(topic.slug)
     set_review_session_active(topic.slug, False)
@@ -2455,7 +3082,7 @@ def cmd_resume(args: argparse.Namespace) -> int:
     resume_context = resume_context_prompt(topic)
     last_learner_message = last_actual_learner_message(topic)
     should_update_metadata = topic.metadata.get("last_answer_status") in {"needs_work", "partial"}
-    print_resume_context(topic, resume_context)
+    print_resume_context(topic, resume_context, output_func)
     user = (
         "Pick up naturally where this learner left off. Avoid template labels like "
         "Recap, Next action, and Recall question unless they genuinely help. "
@@ -2465,14 +3092,16 @@ def cmd_resume(args: argparse.Namespace) -> int:
         "message."
         f"\n\nWhere the learner left off:\n{resume_context or '(no prior session context)'}"
     )
-    answer = call_openai_streaming(model=model, system=system_prompt(topic), user=user)
-    print_and_append_model_answer(topic, "resume", user, answer)
+    answer = call_openai_streaming(
+        model=model, system=system_prompt(topic), user=user, output_func=output_func
+    )
+    print_and_append_model_answer(topic, "resume", user, answer, output_func=output_func)
     if should_update_metadata and last_learner_message:
         update_learning_metadata(topic, last_learner_message, answer, model)
     return 0
 
 
-def cmd_next(args: argparse.Namespace) -> int:
+def cmd_next(args: argparse.Namespace, output_func=print) -> int:
     topic = read_topic(resolve_topic_slug(args.topic))
     set_active_topic(topic.slug)
     set_review_session_active(topic.slug, False)
@@ -2489,12 +3118,14 @@ def cmd_next(args: argparse.Namespace) -> int:
         "and feel ready to move on."
         f"\n\nStructured lesson:\n{lesson_context}"
     )
-    answer = call_openai_streaming(model=model, system=system_prompt(topic), user=user)
-    print_and_append_model_answer(topic, "next", user, answer)
+    answer = call_openai_streaming(
+        model=model, system=system_prompt(topic), user=user, output_func=output_func
+    )
+    print_and_append_model_answer(topic, "next", user, answer, output_func=output_func)
     return 0
 
 
-def cmd_chapter_quiz(args: argparse.Namespace) -> int:
+def cmd_chapter_quiz(args: argparse.Namespace, output_func=print) -> int:
     topic = read_topic(resolve_topic_slug(args.topic))
     set_active_topic(topic.slug)
     model = args.model or str(topic.metadata.get("model") or configured_model())
@@ -2505,8 +3136,10 @@ def cmd_chapter_quiz(args: argparse.Namespace) -> int:
         "Use a mix of multiple-choice and short open-ended questions. "
         "After the learner answers all questions, give brief feedback and tell them to type /done to start the next chapter."
     )
-    answer = call_openai_streaming(model=model, system=system_prompt(topic), user=user)
-    print_and_append_model_answer(topic, "quiz", user, answer)
+    answer = call_openai_streaming(
+        model=model, system=system_prompt(topic), user=user, output_func=output_func
+    )
+    print_and_append_model_answer(topic, "quiz", user, answer, output_func=output_func)
     return 0
 
 
@@ -2516,11 +3149,12 @@ def print_and_append_model_answer(
     prompt: str,
     answer: str,
     mark_reviewed: bool = False,
+    output_func=print,
 ) -> str:
     global _LAST_RESPONSE_ANSWER_KEY
     answer = sanitize_model_output(answer)
     if answer:
-        print("")
+        output_func("")
     append_session(topic, kind, prompt, answer, mark_reviewed=mark_reviewed)
     if kind in {"chat", "resume", "next", "lesson", "review"}:
         save_pending_question(topic, answer, _LAST_RESPONSE_ANSWER_KEY)
@@ -2632,17 +3266,23 @@ def update_learning_metadata(
         normalize_review_due_metadata(metadata)
         schedule_review_additions(metadata, update.get("review_due_add"))
         remove_known_from_review_lists(metadata)
+        previous_focus = metadata.get("current_focus")
         focus = update.get("current_focus")
         if isinstance(focus, str) and focus.strip():
             metadata["current_focus"] = focus.strip()
+            if previous_focus != metadata["current_focus"]:
+                metadata["last_video_focus"] = None
         update_answer_status(metadata, update)
         apply_pending_question_answer_key(metadata, learner_prompt)
         update_review_schedule(metadata, update, is_review_session=is_review_session)
-        if learner_answer_is_actionable(learner_prompt, metadata):
+        actionable = learner_answer_is_actionable(learner_prompt, metadata)
+        update_momentum_counters(metadata)
+        if actionable:
             update_pending_chapter_quiz(metadata, previous_metadata, update)
         update_quiz_history(metadata, previous_metadata, update)
         if metadata.get("last_answer_status") == "correct":
             metadata.pop("pending_question", None)
+        write_topic_backup(topic.path, current_text)
         write_text_atomic(topic.path, format_topic(metadata, body))
 
 
@@ -2699,12 +3339,26 @@ def normalize_review_due_metadata(metadata: dict[str, object]) -> None:
                 and difficulty_value in {"easy", "hard", "missed"}
                 else "hard"
             )
+            ebisu_model = normalized_ebisu_model(item.get("ebisu_model"))
+            last_reviewed_value = item.get("last_reviewed")
+            last_reviewed = (
+                last_reviewed_value
+                if isinstance(last_reviewed_value, str)
+                and valid_due_date(last_reviewed_value)
+                else None
+            )
         else:
+            last_reviewed = None
             continue
         key = concept_key(concept)
         if not concept or key in seen:
             continue
-        normalized.append({"concept": concept, "due": due, "difficulty": difficulty})
+        normalized_item = {"concept": concept, "due": due, "difficulty": difficulty}
+        if isinstance(item, dict) and ebisu_model is not None:
+            normalized_item["ebisu_model"] = ebisu_model
+        if last_reviewed is not None:
+            normalized_item["last_reviewed"] = last_reviewed
+        normalized.append(normalized_item)
         seen.add(key)
     metadata["review_due"] = normalized
 
@@ -2766,7 +3420,7 @@ def update_review_schedule(
     if isinstance(reviewed, list):
         for item in reviewed:
             if isinstance(item, str) and difficulty:
-                schedule_review_item(metadata, item, difficulty)
+                schedule_review_item(metadata, item, difficulty, update_ebisu=True)
         return
 
     if difficulty == "easy":
@@ -2778,18 +3432,30 @@ def update_review_schedule(
     if isinstance(concepts, list):
         for item in concepts:
             if isinstance(item, str):
-                schedule_review_item(metadata, item, difficulty)
+                schedule_review_item(metadata, item, difficulty, update_ebisu=True)
 
 
 def schedule_review_item(
-    metadata: dict[str, object], concept: str, difficulty: str, due: str | None = None
+    metadata: dict[str, object],
+    concept: str,
+    difficulty: str,
+    due: str | None = None,
+    ebisu_model: object = None,
+    update_ebisu: bool = False,
 ) -> None:
     concept = concept.strip()
     if not concept:
         return
     if difficulty not in {"easy", "hard", "missed"}:
         difficulty = "hard"
-    due = due if due and valid_due_date(due) else next_review_due(difficulty)
+    model_state = normalized_ebisu_model(ebisu_model)
+    if model_state is None:
+        model_state = existing_review_ebisu_model(metadata, concept)
+    if update_ebisu:
+        model_state = update_ebisu_model(
+            model_state, difficulty, elapsed_days=review_elapsed_days(metadata, concept)
+        )
+    due = due if due and valid_due_date(due) else next_review_due(difficulty, model_state)
     items = metadata.get("review_due")
     if not isinstance(items, list):
         items = []
@@ -2802,15 +3468,151 @@ def schedule_review_item(
             item["concept"] = concept
             item["due"] = due
             item["difficulty"] = difficulty
+            if model_state is not None:
+                item["ebisu_model"] = model_state
+            else:
+                item.pop("ebisu_model", None)
+            if update_ebisu:
+                item["last_reviewed"] = today()
             metadata["review_due"] = items
             return
-    items.append({"concept": concept, "due": due, "difficulty": difficulty})
+    new_item = {"concept": concept, "due": due, "difficulty": difficulty}
+    if model_state is not None:
+        new_item["ebisu_model"] = model_state
+    if update_ebisu:
+        new_item["last_reviewed"] = today()
+    items.append(new_item)
     metadata["review_due"] = items
 
 
-def next_review_due(difficulty: str) -> str:
+def next_review_due(difficulty: str, ebisu_model: object = None) -> str:
+    if read_config().get("srs") == "ebisu":
+        ebisu_due = next_review_due_ebisu(difficulty, ebisu_model)
+        if ebisu_due:
+            return ebisu_due
+    return next_review_due_fixed(difficulty)
+
+
+def next_review_due_fixed(difficulty: str) -> str:
     days = {"easy": 7, "hard": 2, "missed": 1}.get(difficulty, 2)
     return (date.fromisoformat(today()) + timedelta(days=days)).isoformat()
+
+
+# Ebisu 2.x integration. Models are stored as [alpha, beta, t] lists where t is
+# the half-life in days. A new concept starts with a half-life seeded from its
+# first difficulty; updateRecall then grows or shrinks it from review evidence.
+EBISU_INITIAL_HALFLIFE_DAYS = {"easy": 7.0, "hard": 2.0, "missed": 1.0}
+EBISU_REVIEW_OUTCOME = {"easy": (1, 1), "hard": (1, 2), "missed": (0, 1)}
+EBISU_DEFAULT_THRESHOLD = 0.5
+
+
+def _load_ebisu():
+    ebisu = importlib.import_module("ebisu")
+    if ebisu is None:  # tests mark ebisu unavailable via sys.modules["ebisu"] = None
+        raise ImportError("ebisu is unavailable")
+    return ebisu
+
+
+def ebisu_initial_halflife(difficulty: str) -> float:
+    return EBISU_INITIAL_HALFLIFE_DAYS.get(difficulty, 2.0)
+
+
+def configured_ebisu_threshold() -> float:
+    value = read_config().get("ebisu_recall_threshold")
+    if isinstance(value, (int, float)) and 0 < float(value) < 1:
+        return float(value)
+    return EBISU_DEFAULT_THRESHOLD
+
+
+def next_review_due_ebisu(difficulty: str, ebisu_model: object = None) -> str | None:
+    try:
+        ebisu = _load_ebisu()
+        model = normalized_ebisu_model(ebisu_model)
+        if model is None:
+            model = normalized_ebisu_model(
+                ebisu.defaultModel(ebisu_initial_halflife(difficulty))
+            )
+        if model is None:
+            return None
+        days = float(ebisu.modelToPercentileDecay(model, configured_ebisu_threshold()))
+    except Exception:
+        return None
+    if days != days:  # NaN guard
+        return None
+    interval = max(1, round(days))
+    return (date.fromisoformat(today()) + timedelta(days=interval)).isoformat()
+
+
+def normalized_ebisu_model(value: object) -> list[float] | None:
+    if not isinstance(value, (list, tuple)) or not value:
+        return None
+    model: list[float] = []
+    for item in value:
+        if not isinstance(item, (int, float)):
+            return None
+        model.append(float(item))
+    return model
+
+
+def update_ebisu_model(
+    model: object, difficulty: str, elapsed_days: int | float | None = None
+) -> list[float] | None:
+    if read_config().get("srs") != "ebisu":
+        return normalized_ebisu_model(model)
+    try:
+        ebisu = _load_ebisu()
+        base = normalized_ebisu_model(model)
+        if base is None:
+            base = normalized_ebisu_model(
+                ebisu.defaultModel(ebisu_initial_halflife(difficulty))
+            )
+        if base is None:
+            return None
+        successes, total = EBISU_REVIEW_OUTCOME.get(difficulty, (1, 2))
+        elapsed = (
+            float(elapsed_days)
+            if isinstance(elapsed_days, (int, float)) and elapsed_days > 0
+            else 1.0
+        )
+        updated = ebisu.updateRecall(base, successes, total, elapsed)
+    except Exception:
+        return normalized_ebisu_model(model)
+    return normalized_ebisu_model(updated)
+
+
+def existing_review_ebisu_model(
+    metadata: dict[str, object], concept: str
+) -> list[float] | None:
+    items = metadata.get("review_due")
+    if not isinstance(items, list):
+        return None
+    key = concept_key(concept)
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        existing = item.get("concept")
+        if isinstance(existing, str) and concept_key(existing) == key:
+            return normalized_ebisu_model(item.get("ebisu_model"))
+    return None
+
+
+def review_elapsed_days(metadata: dict[str, object], concept: str) -> int:
+    items = metadata.get("review_due")
+    key = concept_key(concept)
+    if isinstance(items, list):
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            existing = item.get("concept")
+            if not isinstance(existing, str) or concept_key(existing) != key:
+                continue
+            reviewed = item.get("last_reviewed")
+            if isinstance(reviewed, str) and valid_due_date(reviewed):
+                return max(1, (date.fromisoformat(today()) - date.fromisoformat(reviewed)).days)
+    reviewed = metadata.get("last_reviewed")
+    if isinstance(reviewed, str) and valid_due_date(reviewed):
+        return max(1, (date.fromisoformat(today()) - date.fromisoformat(reviewed)).days)
+    return 1
 
 
 def valid_due_date(value: str) -> bool:
@@ -2842,6 +3644,16 @@ def due_review_items(
                     "concept": concept,
                     "due": due,
                     "difficulty": difficulty if isinstance(difficulty, str) else "hard",
+                    **(
+                        {"ebisu_model": item["ebisu_model"]}
+                        if isinstance(item.get("ebisu_model"), list)
+                        else {}
+                    ),
+                    **(
+                        {"last_reviewed": item["last_reviewed"]}
+                        if isinstance(item.get("last_reviewed"), str)
+                        else {}
+                    ),
                 }
             )
     return due_items
@@ -2882,7 +3694,21 @@ def project_home() -> Path:
     cwd = Path.cwd().resolve()
     if (cwd / "learning-topics").exists():
         return cwd
+    return Path(user_data_dir("openlearn", appauthor=False)).expanduser().resolve()
+
+
+def legacy_project_home() -> Path:
     return Path.home() / ".openlearn"
+
+
+def maybe_print_migration_notice() -> None:
+    if os.environ.get("OPENLEARN_HOME"):
+        return
+    old_home = legacy_project_home()
+    new_home = Path(user_data_dir("openlearn", appauthor=False)).expanduser().resolve()
+    if old_home.exists() and not new_home.exists():
+        print(f"Existing data found at {old_home}. New default location is {new_home}.")
+        print("Set OPENLEARN_HOME to keep using the old location, or move the directory when ready.")
 
 
 def topics_dir() -> Path:
@@ -3007,25 +3833,349 @@ def unique_context_path(slug: str, filename: str) -> Path:
     directory = topic_context_dir(slug)
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / safe_context_filename(filename)
-    if not path.exists():
-        return path
     stem = path.stem
     suffix = path.suffix
-    for index in range(2, 1000):
-        candidate = directory / f"{stem}-{index}{suffix}"
-        if not candidate.exists():
+    for index in [None, *range(2, 1000)]:
+        candidate = path if index is None else directory / f"{stem}-{index}{suffix}"
+        try:
+            candidate.touch(exist_ok=False)  # atomic claim — fails if another thread won
             return candidate
+        except FileExistsError:
+            continue
     raise OpenLearnError("too many context files with similar names")
 
 
-def import_context_file(slug: str, source: Path) -> Path:
+def context_text_from_file(source: Path, output_func=print) -> tuple[str, str]:
+    suffix = source.suffix.lower()
+    if suffix in {".txt", ".md"}:
+        return source.read_text(encoding="utf-8"), source.name
+    if suffix == ".pdf":
+        return _extract_pdf_text(source, output_func), source.with_suffix(".txt").name
+    if suffix == ".docx":
+        return _extract_docx_text(source), source.with_suffix(".txt").name
+    raise OpenLearnError("only .txt, .md, .pdf, and .docx context files are supported right now")
+
+
+def import_context_file(slug: str, source: Path, output_func=print) -> Path:
     source = source.expanduser().resolve()
     if not source.exists() or not source.is_file():
         raise OpenLearnError(f"context file not found: {source}")
-    if source.suffix.lower() not in {".txt", ".md"}:
-        raise OpenLearnError("only .txt and .md context files are supported right now")
-    text = source.read_text(encoding="utf-8")
-    return write_context_text(slug, source.name, text)
+    text, filename = context_text_from_file(source, output_func=output_func)
+    return write_context_text(slug, filename, text)
+
+
+def _extract_pdf_text(path: Path, output_func=print) -> str:
+    try:
+        import pdfplumber
+    except ImportError as exc:
+        raise OpenLearnError("PDF import requires pdfplumber") from exc
+    try:
+        with pdfplumber.open(path) as pdf:
+            pages = pdf.pages
+            text = "\n\n".join(page.extract_text() or "" for page in pages)
+            output_func(f"Extracted {len(pages)} pages from {path.name}")
+    except Exception as exc:
+        raise OpenLearnError(f"could not extract PDF text from {path.name}: {exc}") from exc
+    if not text.strip():
+        raise OpenLearnError(f"could not extract readable text from PDF: {path.name}")
+    return text
+
+
+def _extract_docx_text(path: Path) -> str:
+    try:
+        from docx import Document
+    except ImportError as exc:
+        raise OpenLearnError("DOCX import requires python-docx") from exc
+    try:
+        document = Document(path)
+        text = "\n".join(paragraph.text for paragraph in document.paragraphs)
+    except Exception as exc:
+        raise OpenLearnError(f"could not extract DOCX text from {path.name}: {exc}") from exc
+    if not text.strip():
+        raise OpenLearnError(f"could not extract readable text from DOCX: {path.name}")
+    return text
+
+
+def _fetch_url_text(url: str) -> str:
+    try:
+        import requests
+        import trafilatura
+    except ImportError as exc:
+        raise OpenLearnError("URL import requires requests and trafilatura") from exc
+    try:
+        response = requests.get(
+            url,
+            timeout=15,
+            headers={"User-Agent": f"openlearn/{__version__}"},
+        )
+        response.raise_for_status()
+    except Exception as exc:
+        raise OpenLearnError(f"could not fetch URL: {exc}") from exc
+    text = trafilatura.extract(response.text)
+    if not text:
+        raise OpenLearnError("could not extract readable text — try copying the page manually")
+    return text
+
+
+def url_context_filename(url: str) -> str:
+    parsed = urlparse(url)
+    base = " ".join(part for part in [parsed.netloc, parsed.path] if part).strip()
+    return f"{slugify(base or 'web-source')}.txt"
+
+
+def _file_checksum(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+
+
+def _text_checksum(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+# YouTube suggestions use our existing requests dependency to parse the public
+# results page; no extra library and no API key. Best-effort only — any failure
+# degrades to an empty list so the study loop is never interrupted.
+YOUTUBE_RESULTS_URL = "https://www.youtube.com/results"
+# sp=EgIQAQ%3D%3D filters results to videos only (no channels/playlists).
+YOUTUBE_VIDEO_FILTER = "EgIQAQ%3D%3D"
+
+
+def fetch_video_suggestions(query: str, limit: int = 3) -> list[dict[str, str]]:
+    query = query.strip()
+    if not query:
+        return []
+    if os.environ.get("OPENLEARN_MOCK") in {"1", "true", "yes"}:
+        return [
+            {
+                "title": "Mock study video",
+                "url": "https://www.youtube.com/watch?v=mock-openlearn",
+                "duration": "3:21",
+            }
+        ][:limit]
+    try:
+        import requests
+    except ImportError:
+        return []
+    try:
+        response = requests.get(
+            f"{YOUTUBE_RESULTS_URL}?{urlencode({'search_query': query, 'sp': YOUTUBE_VIDEO_FILTER})}",
+            timeout=15,
+            headers={
+                "User-Agent": f"Mozilla/5.0 (compatible; openlearn/{__version__})",
+                "Accept-Language": "en-US,en;q=0.9",
+            },
+        )
+        response.raise_for_status()
+        return parse_video_results(response.text, limit)
+    except Exception:
+        return []
+
+
+def parse_video_results(html: str, limit: int = 3) -> list[dict[str, str]]:
+    marker = "ytInitialData"
+    start = html.find(marker)
+    if start < 0:
+        return []
+    equals = html.find("=", start + len(marker))
+    if equals < 0:
+        return []
+    json_start = equals + 1
+    while json_start < len(html) and html[json_start].isspace():
+        json_start += 1
+    try:
+        data, _end = json.JSONDecoder().raw_decode(html, idx=json_start)
+        sections = (
+            data["contents"]["twoColumnSearchResultsRenderer"]["primaryContents"][
+                "sectionListRenderer"
+            ]["contents"]
+        )
+    except (json.JSONDecodeError, KeyError, TypeError):
+        return []
+    results: list[dict[str, str]] = []
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        items = section.get("itemSectionRenderer", {}).get("contents", [])
+        for item in items:
+            video = item.get("videoRenderer") if isinstance(item, dict) else None
+            if not isinstance(video, dict):
+                continue
+            video_id = video.get("videoId")
+            title_runs = video.get("title", {}).get("runs", [])
+            if not isinstance(video_id, str) or not title_runs:
+                continue
+            title = "".join(
+                run.get("text", "") for run in title_runs if isinstance(run, dict)
+            ).strip()
+            if not title:
+                continue
+            duration = video.get("lengthText", {}).get("simpleText", "")
+            results.append(
+                {
+                    "title": title,
+                    "url": f"https://www.youtube.com/watch?v={video_id}",
+                    "duration": duration if isinstance(duration, str) else "",
+                }
+            )
+            if len(results) >= limit:
+                return results
+    return results
+
+
+def format_video_suggestions(videos: list[dict[str, str]]) -> str:
+    lines = ["**Suggested videos:**", ""]
+    for video in videos:
+        duration = f" ({video['duration']})" if video.get("duration") else ""
+        lines.append(f"- {video['title']}{duration}")
+        lines.append(f"  {video['url']}")
+    return "\n".join(lines)
+
+
+def maybe_suggest_videos(slug: str, output_func=print) -> None:
+    """After a missed/partial answer, offer videos for the current concept (opt-in)."""
+    topic = read_topic(slug)
+    metadata = topic.metadata
+    if not course_options(metadata).get("suggest_videos"):
+        return
+    if metadata.get("last_answer_status") not in {"needs_work", "partial"}:
+        return
+    focus = str(metadata.get("current_focus") or "").strip()
+    if not focus:
+        return
+    # Avoid re-suggesting for the same concept on every following turn.
+    if metadata.get("last_video_focus") == focus:
+        return
+    query = f"{metadata.get('topic') or slug} {focus}".strip()
+    videos = fetch_video_suggestions(query, limit=3)
+    if not videos:
+        return
+    save_last_video_focus(slug, focus)
+    emit_tutor_markdown(format_video_suggestions(videos), output_func)
+
+
+def save_last_video_focus(slug: str, focus: str) -> None:
+    path = topic_path(slug)
+    with file_lock(path):
+        metadata, body = parse_topic(path.read_text(encoding="utf-8"))
+        metadata = dict(metadata)
+        metadata["last_video_focus"] = focus
+        write_text_atomic(path, format_topic(metadata, body))
+
+
+def clear_last_video_focus(slug: str) -> None:
+    path = topic_path(slug)
+    with file_lock(path):
+        metadata, body = parse_topic(path.read_text(encoding="utf-8"))
+        metadata = dict(metadata)
+        metadata["last_video_focus"] = None
+        write_text_atomic(path, format_topic(metadata, body))
+
+
+def parse_videos_count(args: list[str]) -> tuple[int, list[str]]:
+    count = 3
+    rest: list[str] = []
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg in {"--n", "-n"} and index + 1 < len(args) and args[index + 1].isdigit():
+            count = max(1, min(10, int(args[index + 1])))
+            index += 2
+            continue
+        rest.append(arg)
+        index += 1
+    return count, rest
+
+
+def cmd_videos(args: argparse.Namespace, output_func=print) -> int:
+    topic = read_topic(resolve_topic_slug(args.topic))
+    set_active_topic(topic.slug)
+    query = str(getattr(args, "query", "") or "").strip()
+    if not query:
+        query = str(topic.metadata.get("current_focus") or "").strip()
+    if not query:
+        query = str(topic.metadata.get("topic") or topic.slug)
+    limit = max(1, min(10, getattr(args, "count", 3) or 3))
+    videos = fetch_video_suggestions(
+        f"{topic.metadata.get('topic') or topic.slug} {query}".strip(), limit=limit
+    )
+    if not videos:
+        output_func("No videos found right now. Try again later.")
+        return 0
+    emit_tutor_markdown(format_video_suggestions(videos), output_func)
+    clear_last_video_focus(topic.slug)
+    return 0
+
+
+def imported_checksums(metadata: dict[str, object]) -> set[str]:
+    values = metadata.get("imported_checksums")
+    if not isinstance(values, list):
+        return set()
+    return {value for value in values if isinstance(value, str)}
+
+
+def save_imported_checksum(slug: str, checksum: str) -> None:
+    path = topic_path(slug)
+    with file_lock(path):
+        metadata, body = parse_topic(path.read_text(encoding="utf-8"))
+        metadata = dict(metadata)
+        values = metadata.get("imported_checksums")
+        checksums = [value for value in values if isinstance(value, str)] if isinstance(values, list) else []
+        if checksum not in checksums:
+            checksums.append(checksum)
+        metadata["imported_checksums"] = checksums
+        write_text_atomic(path, format_topic(metadata, body))
+
+
+def cmd_import_scan(
+    slug: str, directory: Path, model: str | None = None, output_func=print
+) -> int:
+    directory = directory.expanduser().resolve()
+    if not directory.exists() or not directory.is_dir():
+        raise OpenLearnError(f"scan directory not found: {directory}")
+    files = scan_source_files(directory)
+    metadata = read_topic(slug).metadata
+    seen = imported_checksums(metadata)
+    seen_lock = threading.Lock()
+    imported = skipped = failed = 0
+
+    def process_one(source: Path):
+        checksum = _file_checksum(source)
+        with seen_lock:
+            if checksum in seen:
+                return "skipped", source.name, None, None
+            seen.add(checksum)  # claim immediately to prevent duplicate processing
+        lines: list[str] = []
+        try:
+            saved = import_context_file(slug, source, output_func=lines.append)
+            summarize_context_file(slug, saved, model=model, output_func=lines.append)
+        except OpenLearnError as exc:
+            with seen_lock:
+                seen.discard(checksum)  # unclaim so future runs can retry
+            return "failed", source.name, None, str(exc)
+        save_imported_checksum(slug, checksum)
+        return "imported", source.name, saved.name, "\n".join(lines)
+
+    with ThreadPoolExecutor(max_workers=IMPORT_SCAN_MAX_WORKERS) as executor:
+        futures = {executor.submit(process_one, s): s for s in files}
+        for future in as_completed(futures):
+            try:
+                status, name, saved_name, detail = future.result()
+            except Exception as exc:
+                failed += 1
+                output_func(f"Failed {futures[future].name}: unexpected error: {exc}")
+                continue
+            if status == "skipped":
+                skipped += 1
+            elif status == "failed":
+                failed += 1
+                output_func(f"Failed {name}: {detail}")
+            else:
+                imported += 1
+                output_func(f"Imported {name} -> {saved_name}")
+                if detail:
+                    output_func(detail)
+
+    output_func(f"{imported} imported, {skipped} skipped (already imported), {failed} failed")
+    return 0
 
 
 def summarize_context_file(
@@ -3061,7 +4211,20 @@ def summarize_context_file(
         {clipped}{truncation_note}
         """
     ).strip()
-    summary = call_openai_streaming(model, SOURCE_SUMMARIZER_SYSTEM, prompt, output_func)
+    for attempt in range(3):
+        try:
+            summary = call_openai_streaming(
+                model,
+                SOURCE_SUMMARIZER_SYSTEM,
+                prompt,
+                output_func,
+                capture_answer_key=False,
+            )
+            break
+        except ConnectionResetError:
+            if attempt == 2:
+                raise OpenLearnError(f"connection reset after 3 attempts: {source.name}")
+            time.sleep(2 ** attempt)
     summary_path = topic_context_dir(slug) / f"{source.stem}.summary.txt"
     write_text_atomic(summary_path, summary.rstrip() + "\n")
     return summary_path
@@ -3080,7 +4243,11 @@ def write_context_text(slug: str, filename: str, text: str) -> Path:
     if not text.strip():
         raise OpenLearnError("context text cannot be empty")
     path = unique_context_path(slug, filename or "context.txt")
-    write_text_atomic(path, text.rstrip() + "\n")
+    try:
+        write_text_atomic(path, text.rstrip() + "\n")
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
     return path
 
 
@@ -3205,20 +4372,29 @@ def normalize_topic_metadata(metadata: dict[str, object], slug: str) -> dict[str
     normalized.setdefault("model", configured_model())
     normalized.setdefault("created", today())
     normalized.setdefault("last_reviewed", "")
+    normalized.setdefault("last_video_focus", None)
     normalized.setdefault("goal", "")
-    for key in ("known", "weak_spots", "review_due", "quiz_history"):
+    for key in ("known", "weak_spots", "review_due", "quiz_history", "imported_checksums"):
         if not isinstance(normalized.get(key), list):
             normalized[key] = []
     if not isinstance(normalized.get("placement_result"), dict):
         normalized["placement_result"] = {}
     if "pending_question" in normalized and not isinstance(normalized.get("pending_question"), dict):
         normalized.pop("pending_question", None)
+    if "active_drill" in normalized and not isinstance(normalized.get("active_drill"), str):
+        normalized.pop("active_drill", None)
     if not isinstance(normalized.get("slide_contents"), dict):
         normalized["slide_contents"] = {}
     normalized["course_options"] = course_options(normalized)
     status = normalized.get("last_answer_status")
     if not isinstance(status, str) or status not in {"", "correct", "partial", "needs_work"}:
         normalized["last_answer_status"] = ""
+    for key in ("consecutive_correct", "consecutive_misses"):
+        value = normalized.get(key)
+        if not isinstance(value, int) or value < 0:
+            normalized[key] = 0
+    if not isinstance(normalized.get("last_video_focus"), (str, type(None))):
+        normalized["last_video_focus"] = None
     if not isinstance(normalized.get("review_session_active"), bool):
         normalized["review_session_active"] = False
     remove_known_from_review_lists(normalized)
@@ -3228,10 +4404,12 @@ def normalize_topic_metadata(metadata: dict[str, object], slug: str) -> dict[str
 def repair_topic_metadata(slug: str) -> bool:
     path = topic_path(slug)
     with file_lock(path):
-        metadata, body = parse_topic(path.read_text(encoding="utf-8"))
+        current_text = path.read_text(encoding="utf-8")
+        metadata, body = parse_topic(current_text)
         normalized = normalize_topic_metadata(metadata, slug)
         if normalized == metadata:
             return False
+        write_topic_backup(path, current_text)
         write_text_atomic(path, format_topic(normalized, body))
         return True
 
@@ -3244,6 +4422,14 @@ def format_topic(metadata: dict[str, object], body: str) -> str:
         + body.rstrip()
         + "\n"
     )
+
+
+def topic_backup_path(path: Path) -> Path:
+    return path.with_suffix(path.suffix + ".bak")
+
+
+def write_topic_backup(path: Path, text: str) -> None:
+    write_text_atomic(topic_backup_path(path), text)
 
 
 @contextlib.contextmanager
@@ -3381,21 +4567,33 @@ def system_prompt(topic: Topic) -> str:
         about unimportant details. If the learner is struggling, slow down and
         keep the response short, concrete, and confidence-building.
 
-        Slide flow — follow this strictly for each slide:
-        1. Lesson: teach the concept in 2-4 sentences. Be concrete and specific
-           to this learner's actual setup (use context files, not generic defaults).
-        2. Example: give one concrete real-world example tied to their workflow.
-        3. Check: ask exactly one check-for-understanding question or hands-on action.
-           For keybindings and workflow steps, prefer a hands-on check such as
-           "try pressing Caps+/ now and tell me what happened" over a
-           comprehension question.
-        4. After the learner gives a correct answer OR confirms the action worked,
-           respond with one short affirming sentence, then end with exactly:
-           "Type /done when you're ready, or ask a follow-up question first."
-           STOP there. Do NOT use Action: for another drill. Do NOT introduce new
-           content. Do NOT add another question. Wait for /done or a follow-up.
-        5. If the answer needs work, correct it and ask a tighter follow-up.
-           Do not move on until the concept is clear.
+        Slide flow — use tutor judgment instead of a fixed checklist:
+        1. Lesson: teach one small concept in 2-4 sentences. Be concrete and
+           specific to this learner's actual setup (use context files, not
+           generic defaults).
+        2. Example: give one concrete example, mini-trace, command, or workflow
+           move tied to the learner's goal.
+        3. Decide whether to check now:
+           - Skip the check for first-slide orientation, a simple definition the
+             learner just read, or when consecutive_correct >= 3 shows strong momentum.
+             Affirm briefly and give a natural next-step cue.
+           - Use multiple choice for recognition, common misconceptions, and
+             quick disambiguation with one best answer.
+           - Use free response for reasoning chains, "explain why", tracing an
+             algorithm, or synthesizing across concepts.
+           - Use hands-on action for keybindings, commands, workflow steps,
+             coding moves, or algorithm traces the learner can try directly.
+        4. Momentum rule: if consecutive_misses >= 2, try one different explanation angle or a
+           smaller worked example, then mark it for review and keep the course
+           moving. Do not spiral into endless drilling on one slide.
+        5. Advance cues should fit the moment. Vary the wording naturally:
+           "want to keep moving? type /done when ready", "take a moment — use /done when this feels
+           solid", or "ask a follow-up, or use /done to continue." Do not repeat
+           one exact phrase every time.
+        6. For visually complex CS/AI processes (search trees, probability
+           graphs, neural architectures, TD backups, MCTS expansion), mention a
+           relevant video or visual resource proactively when suggest_videos is
+           enabled, especially before the learner gets stuck.
 
         Format and question rules:
         {TUTOR_FORMAT_RULES}
@@ -3559,6 +4757,13 @@ def compact_session_context(topic: Topic, session_log: str) -> str:
         lines.append(f"Current lesson position: {progress}")
     status = topic.metadata.get("last_answer_status")
     lines.append(f"Last answer status: {status if isinstance(status, str) and status else 'not evaluated'}")
+    correct = topic.metadata.get("consecutive_correct")
+    misses = topic.metadata.get("consecutive_misses")
+    lines.append(
+        "Momentum facts: "
+        f"{correct if isinstance(correct, int) and correct >= 0 else 0} correct in a row; "
+        f"{misses if isinstance(misses, int) and misses >= 0 else 0} misses/partials in a row"
+    )
     focus = topic.metadata.get("current_focus")
     if isinstance(focus, str) and focus.strip():
         lines.append(f"Current focus: {one_line(focus)}")
@@ -3606,8 +4811,12 @@ def resume_context_prompt(topic: Topic) -> str:
         (entry for entry in reversed(entries) if entry["kind"] in {"chat", "review"}),
         None,
     )
-    if last_interaction:
+    if last_interaction and last_interaction["kind"] == "chat":
         lines.append(f"Last learner message: {snippet(last_interaction['prompt'], 180)}")
+        question = last_question(last_interaction["response"])
+        if question:
+            lines.append(f"Question they may be answering: {snippet(question, 180)}")
+    elif last_interaction and last_interaction["kind"] == "review":
         question = last_question(last_interaction["response"])
         if question:
             lines.append(f"Question they may be answering: {snippet(question, 180)}")
@@ -3617,18 +4826,18 @@ def resume_context_prompt(topic: Topic) -> str:
     return "\n".join(lines)
 
 
-def print_resume_context(topic: Topic, context: str) -> None:
-    print_section("Where you left off")
+def print_resume_context(topic: Topic, context: str, output_func=print) -> None:
+    print_section("Where you left off", output_func)
     if context:
         for line in context.splitlines():
-            print(format_resume_line(line))
+            output_func(format_resume_line(line))
     else:
         goal = topic.metadata.get("goal")
         if isinstance(goal, str) and goal.strip():
-            print(format_resume_line(f"Goal: {one_line(goal)}"))
+            output_func(format_resume_line(f"Goal: {one_line(goal)}"))
         else:
-            print(format_resume_line("No previous session context yet."))
-    print("")
+            output_func(format_resume_line("No previous session context yet."))
+    output_func("")
 
 
 def session_entries(session_log: str) -> list[dict[str, str]]:
@@ -3661,6 +4870,9 @@ def _mock_openai_response(model: str, system: str, user: str) -> str:
     simple and deterministic for CI use when OPENLEARN_MOCK=1.
     """
     prompt = user.lower()
+    # Metadata extraction
+    if "update this learner's lightweight topic metadata" in prompt:
+        return json.dumps({"current_focus": "Vim modes"})
     # Placement question JSON response
     if "create one placement question" in prompt or "placement question" in prompt:
         return json.dumps(
@@ -3695,7 +4907,7 @@ def _mock_openai_response(model: str, system: str, user: str) -> str:
             "Lesson: Normal vs Insert.\nExample: Press i to enter Insert, Esc to return to Normal.\nCheck: Which mode runs commands like dd or /search? <!-- answer: B -->\nAction: Try switching modes in your editor."
         )
     # Default small tutor response
-    return "Lesson: Mock reply. Ask a focused question to continue."
+    return "**Lesson:** Mock reply. Ask a focused question to continue."
 
 
 def call_openai(model: str, system: str, user: str) -> str:
@@ -3725,7 +4937,7 @@ def call_openai(model: str, system: str, user: str) -> str:
         headers={
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
-            "User-Agent": "openLearn/0.1.0",
+            "User-Agent": f"openLearn/{__version__}",
         },
         method="POST",
     )
@@ -3750,26 +4962,42 @@ def call_openai(model: str, system: str, user: str) -> str:
 
 
 def call_openai_streaming(
-    model: str, system: str, user: str, output_func=print
+    model: str,
+    system: str,
+    user: str,
+    output_func=print,
+    *,
+    capture_answer_key: bool = True,
 ) -> str:
     global _LAST_RESPONSE_ANSWER_KEY
-    _LAST_RESPONSE_ANSWER_KEY = ""
+    if capture_answer_key:
+        _LAST_RESPONSE_ANSWER_KEY = ""
 
     # If call_openai has been monkeypatched, prefer it (test hook).
     if call_openai.__name__ != "call_openai":
         raw_text = call_openai(model, system, user)
-        _LAST_RESPONSE_ANSWER_KEY = extract_answer_key(raw_text)
+        if capture_answer_key:
+            _LAST_RESPONSE_ANSWER_KEY = extract_answer_key(raw_text)
         text = sanitize_model_output(raw_text)
+        if not text:
+            raise OpenLearnError(
+                "OpenAI response did not contain output text; try a faster non-reasoning model or increase the token limit."
+            )
         emit_tutor_output(text, output_func)
-        return text
+        return text.strip()
 
     # Mock mode support: return a canned response without contacting the network.
     if os.environ.get("OPENLEARN_MOCK") in {"1", "true", "yes"}:
         raw = _mock_openai_response(model, system, user)
-        _LAST_RESPONSE_ANSWER_KEY = extract_answer_key(raw)
+        if capture_answer_key:
+            _LAST_RESPONSE_ANSWER_KEY = extract_answer_key(raw)
         text = sanitize_model_output(raw)
+        if not text:
+            raise OpenLearnError(
+                "OpenAI response did not contain output text; try a faster non-reasoning model or increase the token limit."
+            )
         emit_tutor_output(text, output_func)
-        return text
+        return text.strip()
 
     api_key = configured_openai_api_key()
     if not api_key:
@@ -3793,13 +5021,15 @@ def call_openai_streaming(
         headers={
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
-            "User-Agent": "openLearn/0.1.0",
+            "User-Agent": f"openLearn/{__version__}",
         },
         method="POST",
     )
     chunks: list[str] = []
-    line_buffer = ""
-    emitted = False
+    spinner_context = thinking_progress(output_func)
+    spinner = spinner_context.__enter__()
+    if spinner is not None:
+        spinner.add_task("waiting", total=None)
     try:
         with urlopen(request, timeout=60) as response:
             for raw_line in response:
@@ -3817,10 +5047,6 @@ def call_openai_streaming(
                 if not text:
                     continue
                 chunks.append(text)
-                line_buffer += text
-                while "\n" in line_buffer:
-                    line, line_buffer = line_buffer.split("\n", 1)
-                    emitted = emit_tutor_line(line, output_func, emitted)
     except HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
         raise OpenLearnError(
@@ -3828,45 +5054,27 @@ def call_openai_streaming(
         ) from exc
     except URLError as exc:
         raise OpenLearnError(f"OpenAI request failed: {exc.reason}") from exc
+    finally:
+        spinner_context.__exit__(None, None, None)
 
     raw_text = "".join(chunks)
-    _LAST_RESPONSE_ANSWER_KEY = extract_answer_key(raw_text)
+    if capture_answer_key:
+        _LAST_RESPONSE_ANSWER_KEY = extract_answer_key(raw_text)
     text = sanitize_model_output(raw_text)
     if not text:
         raise OpenLearnError(
             "OpenAI response did not contain output text; try a faster non-reasoning model or increase the token limit."
         )
 
-    if line_buffer.strip():
-        emitted = emit_tutor_line(line_buffer, output_func, emitted)
-    if emitted:
-        output_func("")
+    emit_tutor_output(text, output_func)
     return text.strip()
 
 
 def emit_tutor_output(text: str, output_func=print) -> None:
-    emitted = False
-    for line in text.splitlines() or [text]:
-        emitted = emit_tutor_line(line, output_func, emitted)
-    if emitted:
+    if text:
         output_func("")
-
-
-def emit_tutor_line(line: str, output_func=print, emitted: bool = False) -> bool:
-    cleaned = sanitize_model_output(line)
-    if not cleaned and line.strip():
-        return emitted
-    if not emitted:
-        if output_func is print:
-            print("")
-        else:
-            output_func("")
-    formatted = format_tutor_output(cleaned)
-    if output_func is print:
-        print(formatted, flush=True)
-    else:
-        output_func(formatted)
-    return True
+        emit_tutor_markdown(text, output_func)
+        output_func("")
 
 
 def extract_stream_delta(data: dict[str, object]) -> str:
@@ -3923,10 +5131,13 @@ def extract_response_text(data: dict[str, object]) -> str:
 
 def print_status_bar(topic: Topic, output_func=print) -> None:
     metadata = topic.metadata
-    progress = structured_progress_line(topic) or topic_progress_line(topic).removeprefix("Progress: ") or "not set"
+    progress = structured_progress_line(topic) or topic_progress_line(topic).removeprefix("Progress: ")
+    if not progress:
+        progress = "Unit 1" if metadata.get("course_started") is True else "not set"
     focus = str(metadata.get("current_focus") or "not set")
     label = str(metadata.get("topic") or topic.slug)
-    output_func(status_bar(label, progress, focus))
+    reviews_due = len(due_review_items(metadata))
+    emit(status_bar(label, progress, focus, reviews_due), output_func)
 
 
 def print_course_options(metadata: dict[str, object]) -> None:
@@ -3939,7 +5150,7 @@ def print_course_options(metadata: dict[str, object]) -> None:
 def mask_key(value: str) -> str:
     if len(value) <= 8:
         return "****"
-    return f"{value[:4]}...{value[-4:]}"
+    return f"{value[:3]}...{value[-4:]}"
 
 
 def slugify(value: str) -> str:

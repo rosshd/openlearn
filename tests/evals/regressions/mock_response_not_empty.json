@@ -1,0 +1,15 @@
+{
+  "name": "mock_response_not_empty",
+  "description": "Mock tutor responses should be usable prose, not empty placeholders.",
+  "topic": "mock-response",
+  "goal": "Learn with deterministic mock tutor output.",
+  "turns": [
+    {"role": "user", "content": "teach me one thing"},
+    {"role": "assistant", "content": null}
+  ],
+  "requirements": [
+    "tutor response must contain Lesson",
+    "tutor response must not contain TODO",
+    "tutor response must not contain [MODEL]"
+  ]
+}

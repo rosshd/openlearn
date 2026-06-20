@@ -1,0 +1,13 @@
+{
+  "name": "blank_input_no_crash",
+  "description": "Blank learner input should not crash the conversation runner.",
+  "topic": "blank-input",
+  "goal": "Practice resilient REPL behavior.",
+  "turns": [
+    {"role": "user", "content": ""},
+    {"role": "assistant", "content": null}
+  ],
+  "requirements": [
+    "tutor response must contain openlearn>"
+  ]
+}
