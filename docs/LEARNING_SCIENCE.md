@@ -273,6 +273,199 @@ range, not just pass/fail.
 
 ---
 
+## The Optimal Challenge Point — the 85% Rule
+
+**Source:** Wilson, Shenhav, Straccia & Cohen (2019), *The Eighty Five Percent Rule for
+Optimal Learning*, Nature Communications 10:4646. https://doi.org/10.1038/s41467-019-12552-4
+
+**Finding:** For a broad class of gradient-descent learners, the *rate* of learning is
+maximized when training accuracy sits at ~85% (error rate ~15.87%) — neither too easy nor
+too hard. Below this, items are too hard and gradients are noisy; above it, items are too
+easy and carry little new information. This is a computational derivation, but it converges
+with the human "desirable difficulty" and ZPD literature on the same conclusion: the fastest
+progress per unit time happens at a measurable, intermediate success rate, not at 100%.
+
+**Implication:** Make **success rate the primary control signal** for the difficulty engine,
+targeting roughly 80–85% of checks passed over a rolling window. This is distinct from, and
+complementary to, the existing ZPD `score` band (0.5–0.7) which rates the *quality of a single
+answer*: success rate controls per-session difficulty; score rates per-item effort. If the
+learner is passing >~90% of checks, the material is too easy — raise unit difficulty / shift
+to application or impasse-style questions. If passing <~70%, reduce intrinsic load and add
+scaffolding. A learner cruising at 100% correct is the clearest signal they are *not* in the
+productive zone — and often the signal that they are pattern-matching the text rather than
+understanding (see Gaming the System).
+
+**Where to apply:** `adjust_unit_difficulty()` and `select_check_mode()`. Add a rolling
+pass-rate signal alongside the per-answer `score`; drive difficulty toward the ~80–85% band.
+
+---
+
+## Desirable Difficulties
+
+**Source:** Bjork & Bjork (2011), *Making Things Hard on Yourself, but in a Good Way:
+Creating Desirable Difficulties to Enhance Learning*, in Gernsbacher et al. (eds.),
+*Psychology and the Real World*, Worth Publishers, pp. 56–64. Foundational: Bjork (1994).
+
+**Finding:** Conditions that *slow* acquisition and *feel* harder (spacing, interleaving,
+retrieval, variation, reduced feedback) produce stronger long-term retention and transfer.
+Conversely, conditions that make performance feel fluent and fast during study (re-reading,
+massed practice, immediate answers) create an **illusion of competence** that collapses on
+delayed tests. Performance-during-learning is a poor and often inverse proxy for learning.
+
+**Implication:** This is the umbrella principle behind retrieval, spacing, interleaving, and
+the generation effect (all below/above). For the tutor it means: do not optimize for the
+learner *feeling* smooth. A learner who answers instantly by copying from what was just shown
+is exhibiting the fluency illusion, not mastery. Introduce difficulty deliberately — delay
+the worked example, vary the surface form of questions, and require production.
+
+**Where to apply:** Cross-cutting design principle. Specifically gate the worked example
+(`deep` check mode) and bias toward production-format questions in `check_mode_prompt()`.
+
+---
+
+## Impasse-Driven Learning
+
+**Source:** VanLehn, Siler, Murray, Yamauchi & Baggett (2003), *Why Do Only Some Events
+Cause Learning During Human Tutoring?*, Cognition and Instruction 21(3):209–249.
+
+**Finding:** Across ~125 hours of expert human tutoring, learning events were overwhelmingly
+tied to the student reaching an **impasse** — getting stuck, hitting a contradiction, or
+recognizing a gap. When students were *not* at an impasse, tutorial explanations rarely
+produced learning, no matter how good the explanation. Once at an impasse, explanations
+(and the student's own resolution attempts) frequently did.
+
+**Implication:** Explanations are wasted before the learner is stuck. The tutor should let
+the learner attempt and *surface* an impasse before teaching — and for a learner who is not
+confused, it should manufacture productive friction (a leading question, an edge case, a
+"what would happen if…") rather than just confirming and moving on. This directly answers the
+"leading questions for a non-confused learner" question: yes — for a learner who is *not*
+struggling, a leading/probing question that exposes an unconsidered case is high-value because
+it creates the impasse that makes the next explanation stick.
+
+**Where to apply:** Wrong-answer flow (attempt before explanation, already partly done via
+Productive Failure) AND the `mastering`/`on_track` path of `select_check_mode()` — these
+learners should get application/transfer and edge-case probes, not acknowledgement.
+
+---
+
+## What Makes Tutoring Work: Student Construction over Telling
+
+**Source:** Chi, Siler, Jeong, Yamauchi & Hausmann (2001), *Learning from Human Tutoring*,
+Cognitive Science 25:471–533. Effect-size context: VanLehn (2011), *The Relative
+Effectiveness of Human Tutoring, Intelligent Tutoring Systems, and Other Tutoring Systems*,
+Educational Psychologist 46(4):197–221.
+
+**Finding:** Chi et al. tested whether tutoring works because of what the *tutor* does
+(explaining well) or what the *student* does (constructing understanding). When tutors were
+**suppressed from giving explanations and feedback** — restricted to prompting — students
+learned *just as much*. The gains came from student construction, not tutor exposition.
+VanLehn's later meta-analysis tempers the famous numbers: human tutoring is ~d=0.79 over no
+tutoring (and step-based ITS ~d=0.76), not the ~2 sigma once assumed (see Bloom below) — but
+the mechanism is consistent: interaction that forces the student to generate.
+
+**Implication:** The tutor's default move should be to *elicit*, not *tell*. Prefer "what do
+you think happens next, and why?" over a polished explanation. Telling is a fallback for a
+genuine impasse the learner cannot resolve with prompting — not the opening move. This is the
+single strongest argument for a Socratic-leaning question policy.
+
+**Where to apply:** `TUTOR_FORMAT_RULES` default stance; `check_mode_prompt()` should favor
+elicitation; reserve direct exposition for the `deep` mode's post-attempt worked example.
+
+---
+
+## Generation Effect
+
+**Source:** Slamecka & Graf (1978), *The Generation Effect: Delineation of a Phenomenon*,
+Journal of Experimental Psychology: Human Learning and Memory 4(6):592–604. Meta-analysis:
+Bertsch, Pesta, Wiscott & McDaniel (2007), Memory & Cognition 35(2).
+
+**Finding:** Information the learner *generates* (completes, derives, produces) is remembered
+substantially better than the identical information merely *read* — robust across recognition,
+free recall, and cued recall. Producing the answer, even partially, beats being shown it.
+
+**Implication:** This is the precise counter to the failure mode of concern — a learner who
+"sees the material and pulls the answer from the text and moves on." Require the learner to
+*produce* before the answer is ever visible: close the source, ask for the answer in their own
+words, ask them to predict before revealing. A check that can be passed by copying from
+on-screen text provides near-zero learning; questions should demand transformation
+(paraphrase, apply to a new case, derive) rather than location-and-copy.
+
+**Where to apply:** Question mechanics in `TUTOR_FORMAT_RULES` and `check_mode_prompt()`:
+prefer questions that cannot be answered by quoting the just-shown text; require the learner
+to produce/transform.
+
+---
+
+## Gaming the System & Help Abuse
+
+**Source:** Baker, Corbett & Koedinger (2004), *Detecting Student Misuse of Intelligent
+Tutoring Systems*, Proc. ITS 2004. Earlier on help abuse: Aleven & Koedinger (2000).
+
+**Finding:** Students who "game the system" — systematically extracting answers by abusing
+hints, feedback, or available text rather than reasoning — learn only about **two-thirds as
+much** as comparable students who don't. Gaming is measurable from behavioral signals (very
+fast responses, rapid hint-cycling, answers that track the visible text) and correlates
+strongly with poor learning.
+
+**Implication:** This names and quantifies exactly the behavior to design against. The tutor
+should (a) **make answers ungameable** — production/transformation questions that the source
+text doesn't contain verbatim (see Generation Effect); (b) **gate help behind an attempt**
+(see Productive Failure) so hints can't be cycled for the answer; (c) **detect likely gaming**
+— an unusually fast, near-verbatim "correct" answer should *lower* confidence in mastery and
+trigger a transfer question on the same concept rather than advancement; (d) never let a
+concept be marked known on a single fast correct answer (ties to Metacognition / Calibration).
+
+**Where to apply:** Evaluation flow + difficulty engine. Treat suspiciously fast/verbatim
+correct answers as weak evidence; require a transfer check before advancing. Pairs with the
+calibration signal.
+
+---
+
+## Scaffolding & Contingent Tutoring
+
+**Source:** Wood, Bruner & Ross (1976), *The Role of Tutoring in Problem Solving*, Journal of
+Child Psychology and Psychiatry 17:89–100 (origin of "scaffolding"). Contingent-shift rule:
+Wood, Wood & Middleton (1978).
+
+**Finding:** Effective tutors provide support contingently and *fade* it: when the learner
+struggles, give more specific help on the next move; when the learner succeeds, give less on
+the next. The support is a temporary scaffold to be withdrawn as competence grows — keeping
+the task itself within reach while transferring control to the learner.
+
+**Implication:** This is the operational rule that ties the whole adaptive engine together.
+Help level should move *contingently and by one step* with performance — not jump to full
+explanation on a single miss, nor stay maximal once the learner recovers. The check-mode
+ladder (acknowledge → recall → application → deep) is exactly such a scaffold; the engine
+should step up one rung on a miss and *fade down* one rung on success, rather than pinning to
+extremes. This is the design intent behind `adjust_unit_difficulty()` moving ±1.
+
+**Where to apply:** `select_check_mode()` + `adjust_unit_difficulty()`: enforce single-step,
+contingent moves and active fading of scaffolds as the rolling pass-rate rises.
+
+---
+
+## Bloom's 2 Sigma & Mastery Learning
+
+**Source:** Bloom (1984), *The 2 Sigma Problem: The Search for Methods of Group Instruction
+as Effective as One-to-One Tutoring*, Educational Researcher 13(6):4–16.
+
+**Finding:** Bloom reported that students under one-to-one tutoring *with mastery learning*
+(don't advance until the current objective is met) performed ~2 standard deviations above
+conventional classroom students — i.e., the average tutored student beat ~98% of the class.
+The headline 2-sigma figure has not replicated at that magnitude (VanLehn 2011 puts realistic
+tutoring nearer d≈0.8), but the two design levers Bloom identified — **individualization** and
+**mastery gating** — remain well supported.
+
+**Implication:** openlearn's premise (a personal one-to-one tutor) is the right lever; the
+realistic target is a large-but-not-magical gain, achieved through individualized difficulty
+and mastery gating. Do not advance a unit on shallow or single-shot evidence — require
+demonstrated mastery (a passed transfer/production check), consistent with calibration and
+anti-gaming above.
+
+**Where to apply:** Unit-advancement logic; mastery gate before `current_unit` increments.
+
+---
+
 ## Application Summary
 
 | Feature | Research basis |
@@ -289,3 +482,56 @@ range, not just pass/fail.
 | REPL conversation as primary mode | ICAP interactive tier |
 | Confidence tracking vs. actual performance | Metacognition / calibration |
 | Show review rationale ("you marked this hard 5 days ago") | Spaced repetition motivation |
+| Target ~80–85% rolling pass rate as difficulty controller | 85% Rule, ZPD, desirable difficulties |
+| Leading/edge-case probes for non-confused learners | Impasse-driven learning, desirable difficulties |
+| Elicit before telling; prompt rather than explain | Student construction (Chi 2001) |
+| Questions require production/transform, not text lookup | Generation effect |
+| Attempt-gated help; distrust fast verbatim "correct" answers | Gaming the system / help abuse |
+| Step help up/down by one rung, fade scaffolds on success | Contingent tutoring / scaffolding |
+| Mastery gate before advancing a unit | Bloom 2 sigma / mastery learning |
+
+---
+
+## Adaptive Strategy Selection (synthesis)
+
+The research above does not point to one "best" tutoring style — it points to a *policy*
+that selects the move from the learner's current state. The unifying goal is to hold the
+learner in the productive zone (~80–85% success, answers requiring genuine production) and to
+prevent the two failure modes: **shutdown** (too hard, <~70% success) and **shallow fluency**
+(too easy or text-lookup, >~90% effortless success). The signals openlearn already tracks —
+rolling pass rate, per-answer `score`, consecutive correct/misses, response latency, and
+calibration — are sufficient to drive this.
+
+Recommended state → move policy (the basis for tuning `select_check_mode` and the tutor prompt):
+
+- **Struggling** (misses ≥2, or score <0.35, or pass rate <~70%): reduce intrinsic load —
+  one sub-concept at a time (Cognitive Load); attempt first, then a worked example (Productive
+  Failure, Worked Examples); contingent, specific help faded as they recover (Scaffolding).
+  Avoid pure recall-of-text; keep it producible but small.
+- **On track** (in the ~0.5–0.7 score / ~80–85% pass band): this is the target — keep them
+  here. Elicit rather than tell (Chi 2001); production/transfer questions (Generation Effect);
+  "why" and "what if" probes (Elaborative Interrogation). Hold difficulty steady.
+- **Mastering** (≥3 correct, score ≥0.8, pass rate >~90%): the danger zone for shallow
+  fluency. Do **not** just acknowledge and advance. Manufacture a productive impasse — an edge
+  case, a transfer to a novel context, "predict before I show you" (Impasse-Driven Learning,
+  Desirable Difficulties). Raise unit difficulty. Worked examples now *hurt* (Expertise
+  Reversal) — withhold them. This is where leading questions for a *non-confused* learner pay
+  off most.
+- **Any tier, suspected gaming** (very fast, near-verbatim correct answer): treat as weak
+  evidence — do not advance; pose an immediate transfer question on the same concept and lower
+  confidence in that concept (Gaming the System, Calibration).
+- **Advancement** is always mastery-gated: a concept/unit advances only on a passed
+  production/transfer check, never on a single fast correct answer or self-reported confidence
+  (Bloom mastery, Calibration).
+
+Answering Ross's framing questions directly:
+1. *Should leading questions be used even when the learner isn't confused?* Yes — for the
+   mastering/on-track learner this is the highest-value move, because it manufactures the
+   impasse that makes learning happen (VanLehn 2003) and counters fluency illusions (Bjork).
+2. *How do we stop "see material → copy answer → move on"?* Make checks ungameable by design
+   (production/transform, source closed — Generation Effect), gate help behind an attempt, and
+   distrust fast verbatim correct answers (Gaming the System). Comprehension is demonstrated by
+   transfer to a new case, not by reproduction of the just-seen text.
+3. *Stay in the sweet spot of challenge?* Drive difficulty toward an ~80–85% rolling pass rate
+   (85% Rule) with per-item answer quality in the 0.5–0.7 band (ZPD) — the productive struggle
+   zone where progress per unit time is maximized.
