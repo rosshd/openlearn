@@ -42,7 +42,7 @@ Evaluation notes:
 ---
 
 ### `litellm` — Unified LLM API
-**License:** MIT | **Size:** ~2MB + optional deps | **Deps:** `httpx`, `pydantic`
+**License:** MIT (core) — `enterprise/` subdirectory has a separate proprietary license | **Size:** ~2MB + optional deps | **Deps:** `httpx`, `pydantic`
 
 Drop-in wrapper around 100+ LLM providers (OpenAI, Anthropic, Groq, Ollama, Bedrock,
 Azure, Vertex, etc.) using a single `completion()` call. Handles streaming, retries,
@@ -54,7 +54,9 @@ Users can set `model=ollama/llama3.2` for fully local, private study sessions.
 Evaluation notes:
 - Adds ~2MB to the install; acceptable for the provider abstraction value.
 - Supports `stream=True`, `response_format` (JSON mode), and async.
-- AGPL-compatible (MIT).
+- AGPL-compatible: the MIT core is what we'd depend on. Do not vendor or include
+  anything from the `enterprise/` directory — that code is separately licensed and
+  covers features (SSO, budget guardrails) we don't need.
 - Alternative: build a thin manual abstraction (~100 lines) to avoid the dependency.
   LiteLLM is the right call unless install size becomes a hard constraint.
 - **Target: v0.7.0 multi-provider phase.**
