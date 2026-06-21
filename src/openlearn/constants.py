@@ -26,6 +26,32 @@ DEFAULT_COURSE_OPTIONS = {
 }
 GAMING_OVERLAP_TRIGRAM_JACCARD = 0.6
 GAMING_MIN_ANSWER_TOKENS = 6
+ROLLING_PASS_RATE_WINDOW = 10
+CUMULATIVE_QUIZ_MIN_PRACTICED_CONCEPTS = {
+    "efficient": 3,
+    "proficient": 4,
+    "deep": 4,
+}
+CUMULATIVE_QUIZ_MIN_ANSWERS = {
+    "efficient": 6,
+    "proficient": 5,
+    "deep": 4,
+}
+CUMULATIVE_QUIZ_DUE_REVIEW_THRESHOLD = {
+    "efficient": 3,
+    "proficient": 2,
+    "deep": 1,
+}
+CUMULATIVE_QUIZ_SIZE = {
+    "efficient": 3,
+    "proficient": 5,
+    "deep": 7,
+}
+CUMULATIVE_QUIZ_RECENT_UNITS = {
+    "efficient": 1,
+    "proficient": 2,
+    "deep": 3,
+}
 PROFILES = {
     "efficient": {
         "mastery_score": 0.7,

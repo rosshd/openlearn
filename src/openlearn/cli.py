@@ -33,6 +33,11 @@ from openlearn.constants import (
     CONFIG_FILE,
     CONTEXT_SUMMARY_CHAR_LIMIT,
     CONTEXT_SUMMARY_LINE_LIMIT,
+    CUMULATIVE_QUIZ_DUE_REVIEW_THRESHOLD,
+    CUMULATIVE_QUIZ_MIN_ANSWERS,
+    CUMULATIVE_QUIZ_MIN_PRACTICED_CONCEPTS,
+    CUMULATIVE_QUIZ_RECENT_UNITS,
+    CUMULATIVE_QUIZ_SIZE,
     COURSE_OPTION_LABELS,
     DEFAULT_BASE_URL,
     DEFAULT_COURSE_OPTIONS,
@@ -50,6 +55,7 @@ from openlearn.constants import (
     PLACEMENT_CONTEXT_FILENAME,
     PROFILES,
     PROMPT_TOPIC_LINE_LIMIT,
+    ROLLING_PASS_RATE_WINDOW,
     STATE_FILE,
 )
 from openlearn.models import PendingContext, Topic, TopicSummary
@@ -88,12 +94,12 @@ DYNAMIC_METADATA_KEYS = {
     "consecutive_misses",
     "difficulty_tier",
     "last_misconception",
+    "quiz_answers_since_last",
+    "quiz_history",
+    "quiz_practiced_since_last",
     "recent_answer_results",
     "rolling_pass_rate",
 }
-
-ROLLING_PASS_RATE_WINDOW = 10
-
 
 def is_dynamic_metadata_key(key: str) -> bool:
     return (
@@ -2780,6 +2786,8 @@ def course_completion_counts(metadata: dict[str, object]) -> tuple[int, int]:
 
 def next_course_action(topic: Topic) -> str:
     metadata = topic.metadata
+    if isinstance(metadata.get("pending_cumulative_quiz"), dict):
+        return "take the pending cumulative practice quiz"
     if metadata.get("pending_chapter_quiz") is True:
         return "take the pending chapter quiz"
     status = metadata.get("last_answer_status")
@@ -2912,7 +2920,7 @@ def course_options_prompt(metadata: dict[str, object]) -> str:
     )
     if options["quiz_after_chapter"]:
         lines.append(
-            "When the learner finishes the final slide of a chapter, give a short quiz before starting the next chapter."
+            "Use expected, low-stakes cumulative quizzes when spacing and practiced-material triggers say one is due; chapter-end quizzes are only an override."
         )
     else:
         lines.append("Do not force chapter-end quizzes unless the learner asks for one.")
@@ -2928,6 +2936,187 @@ def course_options_prompt(metadata: dict[str, object]) -> str:
             f"A chapter-end quiz is pending for {chapter}; quiz the learner before teaching the next chapter."
         )
     return "\n".join(f"- {line}" for line in lines)
+
+
+def cumulative_quiz_prompt(metadata: dict[str, object]) -> str:
+    pending = metadata.get("pending_cumulative_quiz")
+    if not isinstance(pending, dict):
+        return ""
+    concepts = pending.get("concepts")
+    rows = [item for item in concepts if isinstance(item, dict)] if isinstance(concepts, list) else []
+    concept_lines = []
+    for item in rows:
+        label = item.get("label")
+        concept_id = item.get("id")
+        if isinstance(label, str) and label.strip():
+            if isinstance(concept_id, str) and concept_id.strip():
+                concept_lines.append(f"- {concept_id.strip()}: {label.strip()}")
+            else:
+                concept_lines.append(f"- {label.strip()}")
+    profile_name = normalize_mastery_profile(pending.get("profile") or metadata.get("mastery_profile"))
+    depth = {
+        "efficient": "keep it short and mostly recent",
+        "proficient": "mix recent and earlier concepts with transfer questions",
+        "deep": "interleave more concepts and include explain-back prompts",
+    }[profile_name]
+    return textwrap.dedent(
+        f"""
+        Cumulative quiz is active. Frame it as low-stakes practice, not a grade.
+        Ask one question at a time over these concepts:
+        {chr(10).join(concept_lines) or "- the selected cumulative-review concepts"}
+        Use production or transfer questions that cannot be answered by quoting the just-shown text.
+        {depth}. Give brief feedback after each answer, then continue to the next item.
+        When the quiz is complete, summarize practice results without punitive scoring.
+        """
+    ).strip()
+
+
+def cumulative_quiz_due(metadata: dict[str, object]) -> bool:
+    if not course_options(metadata)["quiz_after_chapter"]:
+        return False
+    if isinstance(metadata.get("pending_cumulative_quiz"), dict):
+        return False
+    profile_name = normalize_mastery_profile(metadata.get("mastery_profile"))
+    try:
+        answers_since_last = int(metadata.get("quiz_answers_since_last") or 0)
+    except (TypeError, ValueError):
+        answers_since_last = 0
+    if answers_since_last < CUMULATIVE_QUIZ_MIN_ANSWERS[profile_name]:
+        return False
+    practiced = metadata.get("quiz_practiced_since_last")
+    practiced_count = len({item for item in practiced if isinstance(item, str) and item.strip()}) if isinstance(practiced, list) else 0
+    due_count = len(due_review_items(metadata))
+    return (
+        practiced_count >= CUMULATIVE_QUIZ_MIN_PRACTICED_CONCEPTS[profile_name]
+        or due_count >= CUMULATIVE_QUIZ_DUE_REVIEW_THRESHOLD[profile_name]
+    )
+
+
+def concept_catalog(metadata: dict[str, object]) -> dict[str, dict[str, object]]:
+    catalog: dict[str, dict[str, object]] = {}
+    units = metadata.get("course_units")
+    if not isinstance(units, list):
+        return catalog
+    for unit in units:
+        if not isinstance(unit, dict):
+            continue
+        unit_number = unit.get("unit")
+        concepts = unit.get("concepts")
+        if not isinstance(concepts, list):
+            continue
+        for concept in concepts:
+            if not isinstance(concept, dict):
+                continue
+            concept_id = concept.get("id")
+            label = concept.get("label")
+            if not isinstance(concept_id, str) or not concept_id.strip():
+                continue
+            catalog[concept_id] = {
+                "id": concept_id,
+                "label": label.strip() if isinstance(label, str) and label.strip() else concept_label_for_id(metadata, concept_id),
+                "unit": unit_number if isinstance(unit_number, int) else None,
+            }
+    return catalog
+
+
+def concept_id_for_label_lookup(metadata: dict[str, object], label: str) -> str:
+    key = concept_key(label)
+    for concept_id, item in concept_catalog(metadata).items():
+        concept_label = item.get("label")
+        if isinstance(concept_label, str) and concept_key(concept_label) == key:
+            return concept_id
+        if concept_key(concept_id) == key:
+            return concept_id
+    return concept_id_for_label(label)
+
+
+def add_quiz_candidate(
+    candidates: list[str], seen: set[str], concept_id: str, catalog: dict[str, dict[str, object]]
+) -> None:
+    if not concept_id or concept_id in seen:
+        return
+    if concept_id not in catalog:
+        catalog[concept_id] = {"id": concept_id, "label": concept_id.replace("-", " "), "unit": None}
+    candidates.append(concept_id)
+    seen.add(concept_id)
+
+
+def select_cumulative_quiz_concepts(metadata: dict[str, object]) -> list[dict[str, object]]:
+    profile_name = normalize_mastery_profile(metadata.get("mastery_profile"))
+    size = CUMULATIVE_QUIZ_SIZE[profile_name]
+    recent_units = CUMULATIVE_QUIZ_RECENT_UNITS[profile_name]
+    catalog = concept_catalog(metadata)
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    raw_weak_spots = metadata.get("weak_spots")
+    weak_spots = raw_weak_spots if isinstance(raw_weak_spots, list) else []
+    weak_keys = {
+        concept_key(item)
+        for item in weak_spots
+        if isinstance(item, str) and item.strip()
+    }
+    attempts = metadata.get("concept_attempts")
+    if isinstance(attempts, dict):
+        for concept_id, record in attempts.items():
+            if not isinstance(concept_id, str) or not isinstance(record, dict):
+                continue
+            label = str(catalog.get(concept_id, {}).get("label") or concept_label_for_id(metadata, concept_id))
+            misconceptions = record.get("misconceptions")
+            if (
+                isinstance(misconceptions, list)
+                and any(isinstance(item, str) and item.strip() for item in misconceptions)
+            ) or concept_key(label) in weak_keys:
+                add_quiz_candidate(candidates, seen, concept_id, catalog)
+
+    for item in due_review_items(metadata):
+        concept = item.get("concept")
+        if isinstance(concept, str) and concept.strip():
+            add_quiz_candidate(
+                candidates,
+                seen,
+                concept_id_for_label_lookup(metadata, concept),
+                catalog,
+            )
+
+    practiced = metadata.get("quiz_practiced_since_last")
+    if isinstance(practiced, list):
+        for concept_id in practiced:
+            if isinstance(concept_id, str):
+                add_quiz_candidate(candidates, seen, concept_id, catalog)
+
+    current_unit = metadata.get("current_unit")
+    min_unit = current_unit - recent_units + 1 if isinstance(current_unit, int) else None
+    for concept_id, item in catalog.items():
+        unit_number = item.get("unit")
+        if (
+            isinstance(current_unit, int)
+            and isinstance(min_unit, int)
+            and isinstance(unit_number, int)
+            and min_unit <= unit_number <= current_unit
+        ):
+            add_quiz_candidate(candidates, seen, concept_id, catalog)
+
+    return [
+        {"id": concept_id, "label": str(catalog[concept_id]["label"])}
+        for concept_id in candidates[:size]
+    ]
+
+
+def activate_cumulative_quiz_if_due(metadata: dict[str, object]) -> bool:
+    if not cumulative_quiz_due(metadata):
+        return False
+    concepts = select_cumulative_quiz_concepts(metadata)
+    if not concepts:
+        return False
+    metadata["pending_cumulative_quiz"] = {
+        "kind": "cumulative",
+        "created": today(),
+        "profile": normalize_mastery_profile(metadata.get("mastery_profile")),
+        "concept_ids": [item["id"] for item in concepts if isinstance(item.get("id"), str)],
+        "concepts": concepts,
+    }
+    return True
 
 
 def update_pending_chapter_quiz(
@@ -2990,6 +3179,24 @@ def update_rolling_pass_rate(metadata: dict[str, object]) -> None:
     history = history[-ROLLING_PASS_RATE_WINDOW:]
     metadata["recent_answer_results"] = history
     metadata["rolling_pass_rate"] = round(sum(1 for item in history if item) / len(history), 3)
+
+
+def update_cumulative_quiz_counters(metadata: dict[str, object], concept_id: str) -> None:
+    if not concept_id:
+        return
+    try:
+        metadata["quiz_answers_since_last"] = int(metadata.get("quiz_answers_since_last") or 0) + 1
+    except (TypeError, ValueError):
+        metadata["quiz_answers_since_last"] = 1
+    practiced = metadata.get("quiz_practiced_since_last")
+    values = (
+        [item for item in practiced if isinstance(item, str) and item.strip()]
+        if isinstance(practiced, list)
+        else []
+    )
+    if concept_id not in values:
+        values.append(concept_id)
+    metadata["quiz_practiced_since_last"] = values
 
 
 def difficulty_tier(metadata: dict[str, object]) -> str:
@@ -3229,24 +3436,42 @@ def apply_pending_question_answer_key(
 
 def update_quiz_history(
     metadata: dict[str, object], previous_metadata: dict[str, object], update: dict[str, object]
-) -> None:
-    if previous_metadata.get("pending_chapter_quiz") is not True:
-        return
+) -> dict[str, object] | None:
+    pending_cumulative = previous_metadata.get("pending_cumulative_quiz")
+    pending_chapter = previous_metadata.get("pending_chapter_quiz") is True
+    if not pending_chapter and not isinstance(pending_cumulative, dict):
+        return None
     score = update.get("quiz_score")
     summary = update.get("quiz_summary")
     concepts = update.get("quiz_concepts")
-    if not isinstance(score, str) and not isinstance(summary, str):
-        return
+    results = update.get("quiz_results")
+    if not isinstance(score, str) and not isinstance(summary, str) and not isinstance(results, list):
+        return None
 
     history = metadata.get("quiz_history")
     entries = [item for item in history if isinstance(item, dict)] if isinstance(history, list) else []
     concept_values = (
         [item for item in concepts if isinstance(item, str)] if isinstance(concepts, list) else []
     )
+    if not concept_values and isinstance(pending_cumulative, dict):
+        pending_concepts = pending_cumulative.get("concepts")
+        if isinstance(pending_concepts, list):
+            concept_values = [
+                str(item.get("label"))
+                for item in pending_concepts
+                if isinstance(item, dict) and isinstance(item.get("label"), str)
+            ]
+    chapter = previous_metadata.get("pending_quiz_chapter") or "chapter"
+    quiz_type = "chapter"
+    if isinstance(pending_cumulative, dict):
+        quiz_type = "cumulative"
+        chapter = "cumulative"
+        apply_cumulative_quiz_results(metadata, pending_cumulative, update)
     entries.append(
         {
             "date": today(),
-            "chapter": previous_metadata.get("pending_quiz_chapter") or "chapter",
+            "type": quiz_type,
+            "chapter": chapter,
             "score": score.strip() if isinstance(score, str) else "",
             "summary": summary.strip() if isinstance(summary, str) else "",
             "concepts": concept_values,
@@ -3255,6 +3480,76 @@ def update_quiz_history(
     metadata["quiz_history"] = entries
     metadata.pop("pending_chapter_quiz", None)
     metadata.pop("pending_quiz_chapter", None)
+    metadata.pop("pending_cumulative_quiz", None)
+    metadata["quiz_answers_since_last"] = 0
+    metadata["quiz_practiced_since_last"] = []
+    return {
+        "type": quiz_type,
+        "score": score.strip() if isinstance(score, str) else "",
+        "summary": summary.strip() if isinstance(summary, str) else "",
+        "concepts": concept_values,
+    }
+
+
+def apply_cumulative_quiz_results(
+    metadata: dict[str, object], pending: dict[str, object], update: dict[str, object]
+) -> None:
+    results = update.get("quiz_results")
+    if not isinstance(results, list):
+        results = []
+    raw_pending_concepts = pending.get("concepts")
+    pending_concepts = raw_pending_concepts if isinstance(raw_pending_concepts, list) else []
+    concept_labels = {
+        item.get("id"): item.get("label")
+        for item in pending_concepts
+        if isinstance(item, dict)
+        and isinstance(item.get("id"), str)
+        and isinstance(item.get("label"), str)
+    }
+    attempts = metadata.get("concept_attempts")
+    if not isinstance(attempts, dict):
+        attempts = {}
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        raw_id = item.get("concept_id")
+        label = item.get("concept")
+        if isinstance(raw_id, str) and raw_id.strip():
+            concept_id = raw_id.strip()
+        elif isinstance(label, str) and label.strip():
+            concept_id = concept_id_for_label_lookup(metadata, label)
+        else:
+            continue
+        concept_label = (
+            label.strip()
+            if isinstance(label, str) and label.strip()
+            else str(concept_labels.get(concept_id) or concept_label_for_id(metadata, concept_id))
+        )
+        status = item.get("status")
+        if status not in {"correct", "partial", "needs_work"}:
+            status = item.get("last_answer_status")
+        if status not in {"correct", "partial", "needs_work"}:
+            continue
+        score = item.get("score")
+        if not isinstance(score, (int, float)):
+            score = {"correct": 1.0, "partial": 0.5, "needs_work": 0.0}[str(status)]
+        score_value = max(0.0, min(1.0, float(score)))
+        record = attempts.setdefault(concept_id, {"attempts": 0, "correct_sum": 0.0})
+        if not isinstance(record, dict):
+            record = {"attempts": 0, "correct_sum": 0.0}
+            attempts[concept_id] = record
+        record["attempts"] = int(record.get("attempts") or 0) + 1
+        record["correct_sum"] = round(float(record.get("correct_sum") or 0) + score_value, 3)
+        record["last_score"] = round(score_value, 3)
+        answer_kind = normalized_answer_kind(item.get("answer_kind"))
+        is_transfer = answer_eval_is_transfer(item.get("is_transfer"))
+        if status == "correct":
+            record["recognition_only"] = answer_kind != "production"
+            if answer_kind == "production" and is_transfer:
+                record["passed_transfer"] = True
+        difficulty = {"correct": "easy", "partial": "hard", "needs_work": "missed"}[str(status)]
+        schedule_review_item(metadata, concept_label, difficulty, update_ebisu=True)
+    metadata["concept_attempts"] = attempts
 
 
 def save_course_started(topic: Topic, outline_prompt: str, outline: str) -> None:
@@ -4083,9 +4378,12 @@ def metadata_update_prompt(
         - answer_hint: one Socratic guiding question to help without giving the answer,
           or null. Only when last_answer_status is needs_work.
         - chapter_complete: true only when the learner demonstrated enough understanding to finish the current chapter.
-        - quiz_score: short quiz score such as 3/4, only after evaluating a chapter quiz.
-        - quiz_summary: one-sentence quiz result summary, only after evaluating a chapter quiz.
-        - quiz_concepts: concepts tested by the quiz, only after evaluating a chapter quiz.
+        - quiz_score: short quiz score such as 3/4, only after evaluating a chapter or cumulative quiz.
+        - quiz_summary: one-sentence quiz result summary, only after evaluating a chapter or cumulative quiz.
+        - quiz_concepts: concepts tested by the quiz, only after evaluating a chapter or cumulative quiz.
+        - quiz_results: for a completed cumulative quiz, a list of objects with
+          concept_id, concept, status (correct|partial|needs_work), score (0-1),
+          answer_kind, and is_transfer.
 
         Do not add broad course names. Prefer specific concepts. If there is no
         clear evidence, return empty arrays.
@@ -4231,6 +4529,7 @@ def update_learning_metadata(
                 }
             concept_record = rec
             metadata["concept_attempts"] = attempts
+            update_cumulative_quiz_counters(metadata, concept_id)
         if not (gaming_suspected and metadata.get("last_answer_status") == "correct"):
             merge_metadata_list(metadata, "known", update.get("known_add"))
 
@@ -4356,7 +4655,9 @@ def update_learning_metadata(
                             "to_unit": next_unit_number,
                             "profile": normalize_mastery_profile(metadata.get("mastery_profile")),
                         }
-        update_quiz_history(metadata, previous_metadata, update)
+        quiz_completed_event = update_quiz_history(metadata, previous_metadata, update)
+        if quiz_completed_event is None:
+            activate_cumulative_quiz_if_due(metadata)
         if metadata.get("last_answer_status") == "correct":
             metadata.pop("pending_question", None)
         save_state(topic.slug, state_from_metadata(metadata))
@@ -4396,6 +4697,8 @@ def update_learning_metadata(
             log_event(topic.slug, "mastery_changed", event_data)
         if unit_advanced_event:
             log_event(topic.slug, "unit_advanced", unit_advanced_event)
+        if quiz_completed_event:
+            log_event(topic.slug, "quiz_completed", quiz_completed_event)
         if isinstance(current_unit, int) and isinstance(units, list):
             for unit in units:
                 if not isinstance(unit, dict) or unit.get("unit") != current_unit:
@@ -6008,15 +6311,8 @@ def system_prompt(topic: Topic) -> str:
     verify_prompt = pending_verify_prompt(topic.metadata)
     hint_prompt = pending_hint_prompt(topic.metadata)
     tier = difficulty_tier(topic.metadata)
-    tier_prompt = _difficulty_tier_prompt(tier)
-    check_prompt = check_mode_prompt(
-        select_check_mode(
-            current_unit_difficulty(topic.metadata),
-            tier,
-            topic.metadata.get("mastery_profile"),
-        )
-    )
-    policy_prompt = state_move_policy_prompt(topic.metadata, tier)
+    move_prompt = tier_move_prompt(topic.metadata, tier)
+    quiz_prompt = cumulative_quiz_prompt(topic.metadata)
     return textwrap.dedent(
         f"""
         You are openLearn, a local-first AI learning tutor.
@@ -6075,11 +6371,9 @@ def system_prompt(topic: Topic) -> str:
         Format and question rules:
         {TUTOR_FORMAT_RULES}
 
-        {tier_prompt}
+        {move_prompt}
 
-        {check_prompt}
-
-        {policy_prompt}
+        {quiz_prompt}
 
         Do not keep printing full progress summaries after every answer. Mention
         progress only when it helps the learner feel oriented or encouraged.
@@ -6204,6 +6498,23 @@ def state_move_policy_prompt(metadata: dict[str, object], tier: str) -> str:
             f"- Rolling pass rate: {float(rate):.0%}. Aim the next check near the 80-85% success band by adjusting support and challenge, without changing saved difficulty unless the learner is graded."
         )
     return "\n".join(lines)
+
+
+def tier_move_prompt(metadata: dict[str, object], tier: str) -> str:
+    mode = select_check_mode(
+        current_unit_difficulty(metadata),
+        tier,
+        metadata.get("mastery_profile"),
+    )
+    sections = ["Tier and move policy:"]
+    tier_text = _difficulty_tier_prompt(tier)
+    if tier_text:
+        sections.append(tier_text)
+    check_text = check_mode_prompt(mode)
+    if check_text:
+        sections.append(check_text)
+    sections.append(state_move_policy_prompt(metadata, tier))
+    return "\n\n".join(sections)
 
 
 def _difficulty_tier_prompt(tier: str) -> str:

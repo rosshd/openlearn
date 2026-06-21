@@ -178,7 +178,8 @@ class CliStorageTests(unittest.TestCase):
         self.assertEqual(state["consecutive_correct"], 0)
         self.assertEqual(state["consecutive_misses"], 0)
         self.assertIsNone(metadata["last_video_focus"])
-        self.assertEqual(metadata["quiz_history"], [])
+        self.assertEqual(cli.read_topic("legacy").metadata["quiz_history"], [])
+        self.assertEqual(state["quiz_history"], [])
 
     def test_new_topic_starts_unstarted(self) -> None:
         call_silent(
@@ -4603,6 +4604,9 @@ class PromptInstructionTests(unittest.TestCase):
             "last_answer_status",
             "last_answer_score",
             "pending_hint",
+            "pending_cumulative_quiz",
+            "quiz_answers_since_last",
+            "quiz_practiced_since_last",
             "recent_answer_results",
             "rolling_pass_rate",
         ):
@@ -4613,6 +4617,8 @@ class PromptInstructionTests(unittest.TestCase):
         state = cli.load_state("vim")
         self.assertEqual(state["recent_answer_results"], [False, False])
         self.assertEqual(state["rolling_pass_rate"], 0.0)
+        self.assertEqual(state["quiz_answers_since_last"], 2)
+        self.assertEqual(state["quiz_practiced_since_last"], ["normal-mode"])
 
     def test_mastery_profile_defaults_infers_and_can_change(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Exam Prep", goal="cram for exam"))
@@ -4774,6 +4780,73 @@ class PromptInstructionTests(unittest.TestCase):
             ),
             "impasse",
         )
+
+    def test_cumulative_quiz_due_uses_spacing_practice_and_due_density(self) -> None:
+        metadata = {
+            "mastery_profile": "proficient",
+            "quiz_answers_since_last": 5,
+            "quiz_practiced_since_last": ["a", "b", "c", "d"],
+        }
+        self.assertTrue(cli.cumulative_quiz_due(metadata))
+
+        metadata["quiz_answers_since_last"] = 4
+        self.assertFalse(cli.cumulative_quiz_due(metadata))
+
+        metadata = {
+            "mastery_profile": "deep",
+            "quiz_answers_since_last": 4,
+            "quiz_practiced_since_last": ["a"],
+            "review_due": [{"concept": "Bayes rule", "due": cli.today(), "difficulty": "hard"}],
+        }
+        self.assertTrue(cli.cumulative_quiz_due(metadata))
+
+        metadata["pending_cumulative_quiz"] = {"kind": "cumulative"}
+        self.assertFalse(cli.cumulative_quiz_due(metadata))
+
+    def test_cumulative_quiz_selection_prioritizes_misconceptions_due_and_profile_size(self) -> None:
+        metadata = {
+            "mastery_profile": "efficient",
+            "current_unit": 3,
+            "weak_spots": ["Search heuristics"],
+            "course_units": [
+                {
+                    "unit": 1,
+                    "title": "Foundations",
+                    "concepts": [{"id": "state-space", "label": "State space"}],
+                },
+                {
+                    "unit": 2,
+                    "title": "Search",
+                    "concepts": [
+                        {"id": "search-heuristics", "label": "Search heuristics"},
+                        {"id": "admissibility", "label": "Admissibility"},
+                    ],
+                },
+                {
+                    "unit": 3,
+                    "title": "Bayes",
+                    "concepts": [
+                        {"id": "bayes-rule", "label": "Bayes rule"},
+                        {"id": "priors", "label": "Priors"},
+                    ],
+                },
+            ],
+            "concept_attempts": {
+                "search-heuristics": {"attempts": 1, "misconceptions": ["greedy is always optimal"]},
+                "priors": {"attempts": 1},
+            },
+            "review_due": [{"concept": "Bayes rule", "due": cli.today(), "difficulty": "hard"}],
+            "quiz_practiced_since_last": ["priors"],
+        }
+
+        selected = cli.select_cumulative_quiz_concepts(metadata)
+
+        self.assertEqual([item["id"] for item in selected], ["search-heuristics", "bayes-rule", "priors"])
+
+        metadata["mastery_profile"] = "deep"
+        selected = cli.select_cumulative_quiz_concepts(metadata)
+        self.assertLessEqual(len(selected), cli.CUMULATIVE_QUIZ_SIZE["deep"])
+        self.assertIn("state-space", [item["id"] for item in selected])
 
     def test_normalize_course_unit_difficulty_default_and_clamp(self) -> None:
         normalized = cli.normalize_topic_metadata(
@@ -5066,6 +5139,91 @@ class PromptInstructionTests(unittest.TestCase):
         self.assertEqual(updated.metadata["quiz_history"][0]["score"], "3/4")
         self.assertEqual(updated.metadata["quiz_history"][0]["concepts"], ["modes", "quit safely"])
 
+    def test_cumulative_quiz_completion_feeds_mastery_srs_and_event_log(self) -> None:
+        original_call_openai = cli.call_openai
+        cli.call_openai = lambda *_args, **_kwargs: json.dumps(
+            {
+                "last_answer_status": "correct",
+                "quiz_score": "2/2",
+                "quiz_summary": "Applied both ideas in new examples.",
+                "quiz_results": [
+                    {
+                        "concept_id": "bayes-rule",
+                        "concept": "Bayes rule",
+                        "status": "correct",
+                        "score": 1.0,
+                        "answer_kind": "production",
+                        "is_transfer": True,
+                    },
+                    {
+                        "concept_id": "priors",
+                        "concept": "Priors",
+                        "status": "partial",
+                        "score": 0.5,
+                        "answer_kind": "production",
+                        "is_transfer": True,
+                    },
+                ],
+            }
+        )
+        try:
+            call_silent(cli.cmd_new, Namespace(topic="AI", goal="learn bayes"))
+            path = cli.topic_path("ai")
+            metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+            metadata = dict(metadata)
+            metadata["course_units"] = [
+                {
+                    "unit": 1,
+                    "chapter": "1",
+                    "title": "Bayes",
+                    "slide_count": 1,
+                    "concepts": [
+                        {"id": "bayes-rule", "label": "Bayes rule"},
+                        {"id": "priors", "label": "Priors"},
+                    ],
+                }
+            ]
+            path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
+            state = cli.load_state("ai")
+            state["pending_cumulative_quiz"] = {
+                "kind": "cumulative",
+                "profile": "proficient",
+                "concepts": [
+                    {"id": "bayes-rule", "label": "Bayes rule"},
+                    {"id": "priors", "label": "Priors"},
+                ],
+            }
+            state["quiz_answers_since_last"] = 5
+            state["quiz_practiced_since_last"] = ["bayes-rule", "priors"]
+            cli.save_state("ai", state)
+
+            cli.update_learning_metadata(
+                cli.read_topic("ai"),
+                "quiz answers",
+                "Nice cumulative practice.",
+                "test-model",
+            )
+            updated = cli.read_topic("ai")
+        finally:
+            cli.call_openai = original_call_openai
+
+        self.assertNotIn("pending_cumulative_quiz", updated.metadata)
+        self.assertEqual(updated.metadata["quiz_answers_since_last"], 0)
+        self.assertEqual(updated.metadata["quiz_practiced_since_last"], [])
+        self.assertEqual(updated.metadata["quiz_history"][0]["type"], "cumulative")
+        self.assertEqual(updated.metadata["quiz_history"][0]["score"], "2/2")
+        bayes = updated.metadata["concept_attempts"]["bayes-rule"]
+        self.assertTrue(bayes["passed_transfer"])
+        self.assertFalse(bayes["recognition_only"])
+        self.assertTrue(any(item["concept"] == "Bayes rule" for item in updated.metadata["review_due"]))
+        events_path = cli.topic_events_path("ai")
+        events = [
+            json.loads(line)
+            for line in events_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        self.assertTrue(any(event["event_type"] == "quiz_completed" for event in events))
+
     def test_system_prompt_requests_answer_evaluation_before_advancing(self) -> None:
         topic = cli.Topic(
             slug="demo",
@@ -5252,6 +5410,41 @@ class PromptInstructionTests(unittest.TestCase):
         self.assertIn("why or what-if probes", on_track_prompt)
         self.assertIn("hold difficulty steady", on_track_prompt)
 
+    def test_system_prompt_includes_cumulative_quiz_fragment_only_when_active(self) -> None:
+        inactive = cli.Topic(
+            slug="demo",
+            path=Path("demo.md"),
+            metadata={"topic": "Demo"},
+            body="# Demo\n",
+        )
+        active = cli.Topic(
+            slug="demo",
+            path=Path("demo.md"),
+            metadata={
+                "topic": "Demo",
+                "mastery_profile": "deep",
+                "pending_cumulative_quiz": {
+                    "kind": "cumulative",
+                    "profile": "deep",
+                    "concepts": [
+                        {"id": "bayes-rule", "label": "Bayes rule"},
+                        {"id": "priors", "label": "Priors"},
+                    ],
+                },
+            },
+            body="# Demo\n",
+        )
+
+        self.assertNotIn("Cumulative quiz is active", cli.system_prompt(inactive))
+        prompt = cli.system_prompt(active)
+        normalized = " ".join(prompt.split())
+        self.assertIn("Cumulative quiz is active", prompt)
+        self.assertIn("Frame it as low-stakes practice, not a grade", normalized)
+        self.assertIn("Ask one question at a time", normalized)
+        self.assertIn("bayes-rule: Bayes rule", normalized)
+        self.assertIn("cannot be answered by quoting the just-shown text", normalized)
+        self.assertIn("explain-back", normalized)
+
     def test_system_prompt_includes_course_options_guidance(self) -> None:
         topic = cli.Topic(
             slug="demo",
@@ -5270,7 +5463,8 @@ class PromptInstructionTests(unittest.TestCase):
 
         prompt = cli.system_prompt(topic)
 
-        self.assertIn("When the learner finishes the final slide of a chapter", prompt)
+        self.assertIn("Use expected, low-stakes cumulative quizzes", prompt)
+        self.assertIn("chapter-end quizzes are only an override", prompt)
         self.assertIn("Briefly mention chapter/slide progress", prompt)
         self.assertIn("Prefer practical hands-on drills", prompt)
         self.assertNotIn("Before starting a new chapter", prompt)
