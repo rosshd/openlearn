@@ -6466,27 +6466,55 @@ def pending_hint_prompt(metadata: dict[str, object]) -> str:
 
 
 def state_move_policy_prompt(metadata: dict[str, object], tier: str) -> str:
+    return tier_move_prompt(metadata, tier)
+
+
+def check_intensity_instruction(mode: str) -> str:
+    instructions = {
+        "acknowledge": "Check intensity: acknowledge briefly in one sentence; do not add a graded question unless the learner asks for practice.",
+        "recall": "Check intensity: ask one small active-recall prompt about the concept just taught.",
+        "application": "Check intensity: ask the learner to apply the concept to a new example or explain why it works.",
+        "deep": "Check intensity: ask for one genuine attempt, then give a short worked example if needed, then one free-response check.",
+        "impasse": "Check intensity: manufacture a productive impasse with an edge case, novel transfer, or predict-before-I-show-you question.",
+    }
+    return instructions.get(mode, "")
+
+
+def tier_move_instruction(tier: str) -> str:
+    if tier == "struggling":
+        return (
+            "Tier move: struggling - reduce to one sub-concept and one follow-up, use plain vocabulary, "
+            "keep corrections positive, and give contingent, faded help after the attempt."
+        )
+    if tier == "mastering":
+        return (
+            "Tier move: mastering - prefer free-response, ask why/what-if questions, keep the pace brisk, "
+            "and withhold worked examples unless the learner asks after trying."
+        )
+    return (
+        "Tier move: on_track - use production or transfer checks with why or what-if probes, and hold difficulty steady."
+    )
+
+
+def tier_move_prompt(metadata: dict[str, object], tier: str) -> str:
+    mode = select_check_mode(
+        current_unit_difficulty(metadata),
+        tier,
+        metadata.get("mastery_profile"),
+    )
     profile_name = normalize_mastery_profile(metadata.get("mastery_profile"))
     frequency = profile_impasse_frequency(profile_name)
     lines = [
-        "State-to-move policy:",
-        "- Default move: elicit, do not tell. Start by asking the learner to produce, predict, explain, compare, or apply. Direct exposition is the fallback only for a genuine impasse.",
-        "- Ungameable checks are always on: require production or transformation (paraphrase, apply to a new example, predict, explain why, or find the edge case). Do not ask checks answerable by quoting the just-shown text.",
-        "- Attempt-gated help: do not give a worked example or the answer before the learner has made a genuine attempt. For a struggling learner, offer the worked example after the attempt.",
+        "Tutoring approach for this turn:",
+        "- Teach genuinely new material first with a concise explanation or worked example; then elicit. For checks and practice, elicit before telling.",
+        "- Checks must require production or transfer (paraphrase, apply to a new example, predict, explain why, or find the edge case), not quoting the just-shown text.",
+        "- Do not give the answer to a check before the learner tries.",
         f"- Mastery profile: {profile_name}; impasse-probe frequency: {frequency}.",
     ]
-    if tier == "mastering":
-        lines.append(
-            "- Mastering move: manufacture a productive impasse with an edge case, novel transfer, or predict-before-I-show-you prompt; withhold worked examples unless the learner asks after a genuine attempt."
-        )
-    elif tier == "struggling":
-        lines.append(
-            "- Struggling move: reduce to one sub-concept, elicit an attempt, then give a short worked example with contingent, faded help."
-        )
-    else:
-        lines.append(
-            "- On-track move: use production or transfer checks with why or what-if probes, and hold difficulty steady."
-        )
+    intensity = check_intensity_instruction(mode)
+    if intensity:
+        lines.append(f"- {intensity}")
+    lines.append(f"- {tier_move_instruction(tier)}")
     misconception = metadata.get("last_misconception")
     if isinstance(misconception, str) and misconception.strip():
         lines.append(
@@ -6500,96 +6528,12 @@ def state_move_policy_prompt(metadata: dict[str, object], tier: str) -> str:
     return "\n".join(lines)
 
 
-def tier_move_prompt(metadata: dict[str, object], tier: str) -> str:
-    mode = select_check_mode(
-        current_unit_difficulty(metadata),
-        tier,
-        metadata.get("mastery_profile"),
-    )
-    sections = ["Tier and move policy:"]
-    tier_text = _difficulty_tier_prompt(tier)
-    if tier_text:
-        sections.append(tier_text)
-    check_text = check_mode_prompt(mode)
-    if check_text:
-        sections.append(check_text)
-    sections.append(state_move_policy_prompt(metadata, tier))
-    return "\n\n".join(sections)
-
-
 def _difficulty_tier_prompt(tier: str) -> str:
-    if tier == "struggling":
-        return textwrap.dedent(
-            """
-            Learner difficulty signal: STRUGGLING
-            - Ask for one genuine attempt, then give a worked example before the next check question.
-            - Limit each response to ONE concept and ONE follow-up.
-            - Use plain vocabulary; define any jargon inline.
-            - Do not advance until the learner shows a clear correct response.
-            - Frame corrections positively: "Good direction — here is what to adjust:"
-            """
-        ).strip()
-    if tier == "mastering":
-        return textwrap.dedent(
-            """
-            Learner difficulty signal: MASTERING
-            - Prefer free-response over multiple choice.
-            - Ask "why does this work?" and "what breaks if you change X?" questions.
-            - Suggest an adjacent or more advanced concept after a correct answer.
-            - Skip worked examples unless the learner asks for one.
-            - Keep the pace brisk — do not over-explain concepts already demonstrated.
-            """
-        ).strip()
-    return ""
+    return tier_move_instruction(tier) if tier in {"struggling", "mastering"} else ""
 
 
 def check_mode_prompt(mode: str) -> str:
-    if mode == "acknowledge":
-        return textwrap.dedent(
-            """
-            Check mode: ACKNOWLEDGE
-            - Use one sentence to confirm whether the concept makes sense.
-            - Keep cognitive load low; do not add a graded question here.
-            - If the learner asks for practice, offer one small recall prompt.
-            """
-        ).strip()
-    if mode == "recall":
-        return textwrap.dedent(
-            """
-            Check mode: RECALL
-            - Ask one active-recall question about the concept just taught.
-            - Prefer production over recognition for concepts the learner has seen.
-            - Keep the question small enough to answer in one or two sentences.
-            """
-        ).strip()
-    if mode == "application":
-        return textwrap.dedent(
-            """
-            Check mode: APPLICATION
-            - Ask the learner to apply the concept to a new example or explain why it works.
-            - Prefer free-response over multiple choice unless recognition is the actual skill.
-            - Do not use a worked example first for mastering learners.
-            """
-        ).strip()
-    if mode == "impasse":
-        return textwrap.dedent(
-            """
-            Check mode: IMPASSE
-            - Manufacture a productive impasse with an edge case, novel transfer, or predict-before-I-show-you question.
-            - Require production or transformation; do not accept a quote from the just-shown text as sufficient.
-            - Withhold worked examples unless the learner asks after a genuine attempt.
-            """
-        ).strip()
-    if mode == "deep":
-        return textwrap.dedent(
-            """
-            Check mode: DEEP
-            - Ask for one genuine attempt before giving a worked example.
-            - After the attempt, give a short worked example that reduces cognitive load.
-            - Then ask one free-response check before advancing.
-            """
-        ).strip()
-    return ""
+    return check_intensity_instruction(mode)
 
 
 def generation_system_prompt(topic: Topic, current_plan: str = "") -> str:

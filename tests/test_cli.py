@@ -5299,7 +5299,7 @@ class PromptInstructionTests(unittest.TestCase):
         self.assertIn("guiding question", prompt)
 
     def test_tier_prompt_struggling_contains_worked_example(self) -> None:
-        self.assertIn("worked example", cli._difficulty_tier_prompt("struggling").lower())
+        self.assertIn("one sub-concept", cli._difficulty_tier_prompt("struggling"))
 
     def test_tier_prompt_mastering_contains_free_response(self) -> None:
         self.assertIn("free-response", cli._difficulty_tier_prompt("mastering").lower())
@@ -5310,7 +5310,7 @@ class PromptInstructionTests(unittest.TestCase):
     def test_check_mode_prompt_fragments(self) -> None:
         self.assertIn("one sentence", cli.check_mode_prompt("acknowledge"))
         self.assertIn("active-recall", cli.check_mode_prompt("recall"))
-        self.assertIn("free-response", cli.check_mode_prompt("application"))
+        self.assertIn("new example", cli.check_mode_prompt("application"))
         self.assertIn("genuine attempt", cli.check_mode_prompt("deep"))
         self.assertIn("productive impasse", cli.check_mode_prompt("impasse"))
 
@@ -5339,7 +5339,8 @@ class PromptInstructionTests(unittest.TestCase):
 
         prompt = cli.system_prompt(topic)
 
-        self.assertIn("Check mode: DEEP", prompt)
+        self.assertIn("Tutoring approach for this turn:", prompt)
+        self.assertIn("Check intensity: ask for one genuine attempt", prompt)
         self.assertIn("genuine attempt", prompt)
 
     def test_system_prompt_contains_state_move_policy_fragments(self) -> None:
@@ -5369,16 +5370,63 @@ class PromptInstructionTests(unittest.TestCase):
 
         prompt = cli.system_prompt(topic)
         normalized = " ".join(prompt.split())
+        section = prompt.split("Tutoring approach for this turn:", 1)[1].split(
+            "Do not keep printing full progress summaries", 1
+        )[0]
+        normalized_section = " ".join(section.split())
 
-        self.assertIn("Check mode: IMPASSE", prompt)
-        self.assertIn("Default move: elicit, do not tell", normalized)
-        self.assertIn("Do not ask checks answerable by quoting the just-shown text", normalized)
-        self.assertIn("do not give a worked example or the answer before", normalized)
+        self.assertIn("Tutoring approach for this turn:", prompt)
+        self.assertIn("Teach genuinely new material first", normalized)
+        self.assertIn("For checks and practice, elicit before telling", normalized)
+        self.assertIn("not quoting the just-shown text", normalized)
+        self.assertIn("Do not give the answer to a check before the learner tries", normalized)
         self.assertIn("Mastery profile: deep; impasse-probe frequency: high", normalized)
-        self.assertIn("manufacture a productive impasse", normalized)
+        self.assertIn("Check intensity: manufacture a productive impasse", normalized)
         self.assertIn("predict-before-I-show-you", normalized)
         self.assertIn("Rolling pass rate: 80%", normalized)
         self.assertIn("80-85% success band", normalized)
+        self.assertEqual(normalized_section.count("Do not give the answer to a check"), 1)
+        self.assertEqual(normalized_section.count("withhold worked examples"), 1)
+        self.assertEqual(normalized_section.count("genuine attempt"), 0)
+        self.assertEqual(normalized_section.count("productive impasse"), 1)
+
+    def test_tier_move_prompt_deduplicates_guidance_across_tiers(self) -> None:
+        cases = [
+            (
+                "struggling",
+                {
+                    "last_answer_score": 0.2,
+                    "consecutive_misses": 2,
+                    "course_units": [{"unit": 1, "difficulty": 8}],
+                    "current_unit": 1,
+                },
+            ),
+            ("on_track", {}),
+            (
+                "mastering",
+                {
+                    "mastery_profile": "deep",
+                    "last_answer_score": 0.9,
+                    "consecutive_correct": 3,
+                    "course_units": [{"unit": 1, "difficulty": 10}],
+                    "current_unit": 1,
+                },
+            ),
+        ]
+
+        for tier, metadata in cases:
+            with self.subTest(tier=tier):
+                prompt = cli.tier_move_prompt(metadata, tier)
+                self.assertEqual(prompt.count("Tutoring approach for this turn:"), 1)
+                self.assertEqual(prompt.count("Teach genuinely new material first"), 1)
+                self.assertEqual(prompt.count("For checks and practice, elicit before telling"), 1)
+                self.assertEqual(prompt.count("not quoting the just-shown text"), 1)
+                self.assertEqual(prompt.count("Do not give the answer to a check"), 1)
+                self.assertEqual(prompt.count("Check intensity:"), 1)
+                self.assertEqual(prompt.count("Tier move:"), 1)
+                self.assertNotIn("State-to-move policy:", prompt)
+                self.assertNotIn("Learner difficulty signal:", prompt)
+                self.assertNotIn("Check mode:", prompt)
 
     def test_system_prompt_policy_tracks_tier_specific_moves_and_misconception(self) -> None:
         struggling_topic = cli.Topic(
@@ -5402,11 +5450,11 @@ class PromptInstructionTests(unittest.TestCase):
         struggling_prompt = " ".join(cli.system_prompt(struggling_topic).split())
         on_track_prompt = " ".join(cli.system_prompt(on_track_topic).split())
 
-        self.assertIn("Struggling move: reduce to one sub-concept", struggling_prompt)
-        self.assertIn("worked example with contingent, faded help", struggling_prompt)
+        self.assertIn("Tier move: struggling - reduce to one sub-concept", struggling_prompt)
+        self.assertIn("contingent, faded help after the attempt", struggling_prompt)
         self.assertIn("Target this misconception next: thinks normal mode inserts text", struggling_prompt)
         self.assertIn("specific wrong model", struggling_prompt)
-        self.assertIn("On-track move: use production or transfer checks", on_track_prompt)
+        self.assertIn("Tier move: on_track - use production or transfer checks", on_track_prompt)
         self.assertIn("why or what-if probes", on_track_prompt)
         self.assertIn("hold difficulty steady", on_track_prompt)
 
