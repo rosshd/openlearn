@@ -212,6 +212,66 @@ class CliStorageTests(unittest.TestCase):
         self.assertNotIn("## Description", topic.body)
         self.assertIn("Understand AI fundamentals", topic.body)
 
+    def test_delayed_retrieval_metric_counts_spaced_review_and_quiz_events(self) -> None:
+        path = Path(self.home.name) / "events.jsonl"
+        events = [
+            {
+                "schema_version": cli.EVENT_SCHEMA_VERSION,
+                "ts": "2026-01-01T00:00:00+00:00",
+                "event_type": "answer_judged",
+                "slug": "demo",
+                "data": {"concept_id": "bayes-rule", "status": "correct", "score": 1.0},
+            },
+            {
+                "schema_version": cli.EVENT_SCHEMA_VERSION,
+                "ts": "2026-01-01T12:00:00+00:00",
+                "event_type": "answer_judged",
+                "slug": "demo",
+                "data": {
+                    "concept_id": "bayes-rule",
+                    "status": "correct",
+                    "score": 1.0,
+                    "source": "review",
+                },
+            },
+            {
+                "schema_version": cli.EVENT_SCHEMA_VERSION,
+                "ts": "2026-01-04T00:00:00+00:00",
+                "event_type": "answer_judged",
+                "slug": "demo",
+                "data": {
+                    "concept_id": "bayes-rule",
+                    "status": "correct",
+                    "score": 0.9,
+                    "source": "review",
+                },
+            },
+            {
+                "schema_version": cli.EVENT_SCHEMA_VERSION,
+                "ts": "2026-01-05T00:00:00+00:00",
+                "event_type": "quiz_completed",
+                "slug": "demo",
+                "data": {
+                    "results": [
+                        {"concept_id": "bayes-rule", "status": "needs_work", "score": 0.2},
+                        {"concept_id": "priors", "status": "correct", "score": 1.0},
+                    ]
+                },
+            },
+        ]
+        path.write_text(
+            "\n".join(json.dumps(event) for event in events) + "\nnot-json\n",
+            encoding="utf-8",
+        )
+
+        metric = cli.delayed_retrieval_metric_from_event_log(path, min_spacing_days=1)
+
+        self.assertEqual(metric["attempts"], 2)
+        self.assertEqual(metric["passed"], 1)
+        self.assertEqual(metric["pass_rate"], 0.5)
+        self.assertEqual(metric["by_concept"]["bayes-rule"], {"attempts": 2, "passed": 1})
+        self.assertNotIn("priors", metric["by_concept"])
+
     def test_load_state_missing_or_corrupt_returns_empty(self) -> None:
         self.assertEqual(cli.load_state("missing"), {})
         path = cli.topic_state_path("broken")

@@ -5869,6 +5869,146 @@ def log_event(slug: str, event_type: str, data: dict[str, object]) -> None:
         write_text_atomic(path, text)
 
 
+def load_event_log(path: Path) -> list[dict[str, object]]:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    events: list[dict[str, object]] = []
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict):
+            events.append(event)
+    return events
+
+
+def parse_event_ts(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def event_concept_id(event: dict[str, object]) -> str:
+    data = event.get("data")
+    if not isinstance(data, dict):
+        return ""
+    value = data.get("concept_id")
+    return value.strip() if isinstance(value, str) and value.strip() else ""
+
+
+def event_retrieval_source(event: dict[str, object]) -> str:
+    data = event.get("data")
+    if not isinstance(data, dict):
+        return ""
+    for key in ("retrieval_type", "source", "context"):
+        value = data.get(key)
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"review", "quiz", "cumulative_quiz", "srs"}:
+                return normalized
+    if data.get("is_retrieval") is True:
+        return "retrieval"
+    return ""
+
+
+def event_passed_retrieval(event: dict[str, object]) -> bool:
+    data = event.get("data")
+    if not isinstance(data, dict):
+        return False
+    status = data.get("status")
+    if status == "correct":
+        return True
+    score = data.get("score")
+    return isinstance(score, (int, float)) and float(score) >= 0.8
+
+
+def spaced_retrieval_items_from_event(
+    event: dict[str, object],
+) -> list[tuple[str, bool, str]]:
+    event_type = event.get("event_type")
+    data = event.get("data")
+    if not isinstance(data, dict):
+        return []
+    if event_type == "answer_judged":
+        concept_id = event_concept_id(event)
+        source = event_retrieval_source(event)
+        if concept_id and source:
+            return [(concept_id, event_passed_retrieval(event), source)]
+    if event_type == "quiz_completed":
+        results = data.get("results")
+        if not isinstance(results, list):
+            return []
+        items: list[tuple[str, bool, str]] = []
+        for result in results:
+            if not isinstance(result, dict):
+                continue
+            concept_id = result.get("concept_id")
+            if not isinstance(concept_id, str) or not concept_id.strip():
+                continue
+            status = result.get("status")
+            score = result.get("score")
+            passed = status == "correct" or (
+                isinstance(score, (int, float)) and float(score) >= 0.8
+            )
+            items.append((concept_id.strip(), passed, "quiz"))
+        return items
+    return []
+
+
+def delayed_retrieval_metric(
+    events: list[dict[str, object]],
+    min_spacing_days: int = 1,
+) -> dict[str, object]:
+    first_seen: dict[str, datetime] = {}
+    attempts = 0
+    passed = 0
+    by_concept: dict[str, dict[str, int]] = {}
+    for event in sorted(events, key=lambda item: str(item.get("ts") or "")):
+        ts = parse_event_ts(event.get("ts"))
+        if ts is None:
+            continue
+        concept_id = event_concept_id(event)
+        if concept_id and concept_id not in first_seen:
+            first_seen[concept_id] = ts
+        for retrieval_concept, retrieval_passed, _source in spaced_retrieval_items_from_event(event):
+            seen_at = first_seen.get(retrieval_concept)
+            if seen_at is None:
+                first_seen[retrieval_concept] = ts
+                continue
+            elapsed_days = (ts - seen_at).total_seconds() / 86400
+            if elapsed_days < max(0, min_spacing_days):
+                continue
+            attempts += 1
+            if retrieval_passed:
+                passed += 1
+            concept_counts = by_concept.setdefault(
+                retrieval_concept, {"attempts": 0, "passed": 0}
+            )
+            concept_counts["attempts"] += 1
+            if retrieval_passed:
+                concept_counts["passed"] += 1
+    return {
+        "attempts": attempts,
+        "passed": passed,
+        "pass_rate": (passed / attempts) if attempts else None,
+        "by_concept": by_concept,
+    }
+
+
+def delayed_retrieval_metric_from_event_log(
+    path: Path, min_spacing_days: int = 1
+) -> dict[str, object]:
+    return delayed_retrieval_metric(load_event_log(path), min_spacing_days=min_spacing_days)
+
+
 def state_from_metadata(metadata: dict[str, object]) -> dict[str, object]:
     state: dict[str, object] = {}
     for key, value in metadata.items():

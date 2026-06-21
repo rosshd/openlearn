@@ -1,62 +1,148 @@
 [
   {
+    "id": "vim-normal-correct",
     "question": "In Vim, which mode lets you run commands like dd?",
     "learner_answer": "Normal mode.",
-    "true_score": 1.0
+    "true_score": 1.0,
+    "expected_answer_kind": "production",
+    "expected_gameable": false
   },
   {
+    "id": "vim-normal-wrong",
     "question": "In Vim, which mode lets you run commands like dd?",
     "learner_answer": "Insert mode.",
-    "true_score": 0.0
+    "true_score": 0.0,
+    "expected_answer_kind": "production",
+    "expected_gameable": false
   },
   {
+    "id": "vim-dd-correct",
     "question": "What does dd do in Vim normal mode?",
     "learner_answer": "It deletes the current line.",
-    "true_score": 1.0
+    "true_score": 1.0,
+    "expected_answer_kind": "production",
+    "expected_gameable": false
   },
   {
+    "id": "vim-dd-partial",
     "question": "What does dd do in Vim normal mode?",
     "learner_answer": "It deletes a character.",
-    "true_score": 0.4
+    "true_score": 0.4,
+    "expected_answer_kind": "production",
+    "expected_gameable": false
   },
   {
+    "id": "vim-search-correct",
     "question": "What does /pattern do in Vim?",
     "learner_answer": "It searches forward for pattern.",
-    "true_score": 1.0
+    "true_score": 1.0,
+    "expected_answer_kind": "production",
+    "expected_gameable": false
   },
   {
+    "id": "vim-search-wrong",
     "question": "What does /pattern do in Vim?",
     "learner_answer": "It saves the file.",
-    "true_score": 0.0
+    "true_score": 0.0,
+    "expected_answer_kind": "production",
+    "expected_gameable": false
   },
   {
+    "id": "python-assignment-correct",
     "question": "In Python, what does a variable assignment do?",
     "learner_answer": "It binds a name to a value.",
-    "true_score": 1.0
+    "true_score": 1.0,
+    "expected_answer_kind": "production",
+    "expected_gameable": false
   },
   {
+    "id": "python-assignment-misconception",
     "question": "In Python, what does a variable assignment do?",
     "learner_answer": "It permanently stores data in the program file.",
-    "true_score": 0.3
+    "true_score": 0.3,
+    "expected_answer_kind": "production",
+    "expected_gameable": false
   },
   {
+    "id": "loop-correct",
     "question": "What does a loop let a program do?",
     "learner_answer": "Repeat a block of steps while a condition or sequence says to keep going.",
-    "true_score": 1.0
+    "true_score": 1.0,
+    "expected_answer_kind": "production",
+    "expected_gameable": false
   },
   {
+    "id": "loop-wrong",
     "question": "What does a loop let a program do?",
     "learner_answer": "Make the code run faster automatically.",
-    "true_score": 0.2
+    "true_score": 0.2,
+    "expected_answer_kind": "production",
+    "expected_gameable": false
   },
   {
+    "id": "recursion-base-correct",
     "question": "What is the base case in recursion for?",
     "learner_answer": "It stops the recursive calls.",
-    "true_score": 1.0
+    "true_score": 1.0,
+    "expected_answer_kind": "production",
+    "expected_gameable": false
   },
   {
+    "id": "recursion-base-wrong",
     "question": "What is the base case in recursion for?",
     "learner_answer": "It is where the function calls itself again.",
-    "true_score": 0.3
+    "true_score": 0.3,
+    "expected_answer_kind": "production",
+    "expected_gameable": false
+  },
+  {
+    "id": "mc-recognition-correct",
+    "question_kind": "multiple_choice",
+    "question": "Which data structure is LIFO?\nA) Queue\nB) Stack\nC) Hash map\nD) Array",
+    "learner_answer": "B",
+    "true_score": 1.0,
+    "expected_answer_kind": "recognition",
+    "expected_gameable": false
+  },
+  {
+    "id": "mc-recognition-wrong",
+    "question_kind": "multiple_choice",
+    "question": "Which data structure is FIFO?\nA) Queue\nB) Stack\nC) Tree\nD) Set",
+    "learner_answer": "B",
+    "true_score": 0.0,
+    "expected_answer_kind": "recognition",
+    "expected_gameable": false
+  },
+  {
+    "id": "copyable-definition",
+    "question": "Paraphrase this idea: A stack is last-in, first-out.",
+    "learner_answer": "A stack is last-in, first-out.",
+    "true_score": 0.6,
+    "expected_answer_kind": "production",
+    "expected_gameable": true
+  },
+  {
+    "id": "transfer-stack",
+    "question": "A browser Back button stores pages as you visit them. Which page should come back first, and why?",
+    "learner_answer": "The most recent page, because a stack returns the last item added first.",
+    "true_score": 1.0,
+    "expected_answer_kind": "production",
+    "expected_gameable": false
+  },
+  {
+    "id": "transfer-admissible-heuristic",
+    "question": "If an A* heuristic sometimes overestimates the true remaining cost, what can go wrong?",
+    "learner_answer": "A* can pick a path that looks cheap but is not actually optimal.",
+    "true_score": 0.9,
+    "expected_answer_kind": "production",
+    "expected_gameable": false
+  },
+  {
+    "id": "off-topic-answer",
+    "question": "Why does binary search need sorted input?",
+    "learner_answer": "I like turtles.",
+    "true_score": 0.0,
+    "expected_answer_kind": "production",
+    "expected_gameable": false
   }
 ]
