@@ -77,6 +77,23 @@ from openlearn.ui import (
     thinking_progress,
 )
 
+EVENT_SCHEMA_VERSION = 1
+
+DYNAMIC_METADATA_KEYS = {
+    "concept_attempts",
+    "consecutive_correct",
+    "consecutive_misses",
+    "difficulty_tier",
+}
+
+
+def is_dynamic_metadata_key(key: str) -> bool:
+    return (
+        key in DYNAMIC_METADATA_KEYS
+        or key.startswith("last_answer_")
+        or key.startswith("pending_")
+    )
+
 
 try:
     import readline as _readline
@@ -1830,7 +1847,8 @@ def save_placement_result(slug: str, model: str, results: list[dict[str, object]
         }
         merge_metadata_list(metadata, "known", known)
         merge_metadata_list(metadata, "weak_spots", weak)
-        write_text_atomic(topic.path, format_topic(metadata, body))
+        save_state(topic.slug, state_from_metadata(metadata))
+        write_text_atomic(topic.path, format_topic(stable_metadata_for_topic(metadata), body))
 
 
 def placement_level(results: list[dict[str, object]]) -> str:
@@ -2003,11 +2021,49 @@ def parse_course_units(outline: str) -> list[dict[str, object]]:
             "chapter": chapter,
             "title": title.rstrip("."),
             "slide_count": max(1, slide_count),
+            "concepts": concepts_from_unit_title(title.rstrip(".")),
         }
         if difficulty is not None:
             unit_data["difficulty"] = difficulty
         units.append(unit_data)
     return units
+
+
+def concept_id_for_label(label: str, fallback: str = "concept") -> str:
+    try:
+        return slugify(label)
+    except OpenLearnError:
+        return fallback
+
+
+def concepts_from_unit_title(title: str) -> list[dict[str, str]]:
+    label = title.strip() or "Concept"
+    return [{"id": concept_id_for_label(label), "label": label}]
+
+
+def normalize_concepts(value: object, fallback_label: str) -> list[dict[str, str]]:
+    concepts: list[dict[str, str]] = []
+    seen: set[str] = set()
+    if isinstance(value, list):
+        for index, item in enumerate(value, start=1):
+            if isinstance(item, dict):
+                raw_label = item.get("label") or item.get("id")
+                raw_id = item.get("id")
+            else:
+                raw_label = item
+                raw_id = None
+            if not isinstance(raw_label, str) or not raw_label.strip():
+                continue
+            label = raw_label.strip()
+            fallback = f"concept-{index}"
+            concept_id = raw_id.strip() if isinstance(raw_id, str) and raw_id.strip() else concept_id_for_label(label, fallback)
+            if concept_id in seen:
+                continue
+            seen.add(concept_id)
+            concepts.append({"id": concept_id, "label": label})
+    if concepts:
+        return concepts
+    return concepts_from_unit_title(fallback_label)
 
 
 def extract_unit_difficulty(text: str) -> int | None:
@@ -2255,13 +2311,16 @@ def advance_slide(slug: str, output_func=print, force: bool = False) -> bool:
     topic = read_topic(slug)
     last_lesson_response = last_tutor_lesson_response(topic)
     with file_lock(path):
-        metadata, body = parse_topic(path.read_text(encoding="utf-8"))
+        raw_metadata, body = parse_topic(path.read_text(encoding="utf-8"))
+        metadata = merge_topic_state(
+            normalize_topic_metadata(raw_metadata, slug), load_state(slug)
+        )
         metadata = dict(metadata)
         answer_status = metadata.get("last_answer_status")
         tutor_accepted = tutor_response_has_advance_cue(last_lesson_response)
         if answer_status in {"needs_work", "partial"} and not force and not tutor_accepted:
             metadata["review_session_active"] = False
-            write_text_atomic(path, format_topic(metadata, body))
+            write_text_atomic(path, format_topic(stable_metadata_for_topic(metadata), body))
             output_func(
                 "Last answer is not fully clear yet. Answer the follow-up or use /done --force to advance anyway."
             )
@@ -2318,7 +2377,14 @@ def advance_slide(slug: str, output_func=print, force: bool = False) -> bool:
         else:
             metadata.pop("pending_chapter_quiz", None)
             metadata.pop("pending_quiz_chapter", None)
-        write_text_atomic(path, format_topic(metadata, body))
+        save_state(slug, state_from_metadata(metadata))
+        write_text_atomic(path, format_topic(stable_metadata_for_topic(metadata), body))
+        if crossed_unit:
+            log_event(
+                slug,
+                "unit_advanced",
+                {"from_unit": completed_unit, "to_unit": unit},
+            )
 
     updated = read_topic(slug)
     set_active_topic(updated.slug)
@@ -2378,7 +2444,8 @@ def set_course_progress(slug: str, unit_value: str, slide_value: str) -> None:
         metadata["last_video_focus"] = None
         metadata.pop("pending_chapter_quiz", None)
         metadata.pop("pending_quiz_chapter", None)
-        write_text_atomic(path, format_topic(metadata, body))
+        save_state(slug, state_from_metadata(metadata))
+        write_text_atomic(path, format_topic(stable_metadata_for_topic(metadata), body))
 
 
 def set_review_session_active(slug: str, active: bool) -> None:
@@ -2587,7 +2654,10 @@ def save_scope_change(topic: Topic, prompt: str, proposal: str) -> None:
                     current_slide = metadata.get("current_slide")
                     if isinstance(slide_count, int) and isinstance(current_slide, int):
                         metadata["current_slide"] = min(current_slide, slide_count)
-        text = format_topic(metadata, body)
+        # Regenerated course_units may carry a parsed difficulty; strip dynamic
+        # fields so they don't leak back into the stable Markdown (state.json is
+        # left untouched — difficulties default/merge on the next read).
+        text = format_topic(stable_metadata_for_topic(metadata), body)
         write_text_atomic(topic.path, text)
     append_session(read_topic(topic.slug), "scope_change", prompt, proposal)
 
@@ -2835,7 +2905,10 @@ def update_quiz_history(
 def save_course_started(topic: Topic, outline_prompt: str, outline: str) -> None:
     with file_lock(topic.path):
         current_text = topic.path.read_text(encoding="utf-8")
-        metadata, body = parse_topic(current_text)
+        raw_metadata, body = parse_topic(current_text)
+        metadata = merge_topic_state(
+            normalize_topic_metadata(raw_metadata, topic.slug), load_state(topic.slug)
+        )
         metadata = dict(metadata)
         metadata["course_started"] = True
         units = parse_course_units(outline)
@@ -2846,7 +2919,9 @@ def save_course_started(topic: Topic, outline_prompt: str, outline: str) -> None
             metadata["current_focus"] = units[0]["title"]
         else:
             metadata["current_focus"] = metadata.get("current_focus") or "Unit 1"
-        write_text_atomic(topic.path, format_topic(metadata, body))
+        normalized = normalize_topic_metadata(metadata, topic.slug)
+        save_state(topic.slug, state_from_metadata(normalized))
+        write_text_atomic(topic.path, format_topic(stable_metadata_for_topic(normalized), body))
     append_session(read_topic(topic.slug), "course_plan", outline_prompt, outline)
 
 
@@ -3584,15 +3659,18 @@ def save_pending_question(
         return
     question = (question_text or extract_pending_question_text(answer) or last_question(answer)).strip()
     with file_lock(topic.path):
-        metadata, body = parse_topic(topic.path.read_text(encoding="utf-8"))
-        metadata = normalize_topic_metadata(metadata, topic.slug)
+        raw_metadata, body = parse_topic(topic.path.read_text(encoding="utf-8"))
+        metadata = merge_topic_state(
+            normalize_topic_metadata(raw_metadata, topic.slug), load_state(topic.slug)
+        )
         metadata["pending_question"] = {
             "kind": "multiple_choice",
             "answer_key": answer_key,
             "question": question,
             "created": today(),
         }
-        write_text_atomic(topic.path, format_topic(metadata, body))
+        save_state(topic.slug, state_from_metadata(metadata))
+        write_text_atomic(topic.path, format_topic(stable_metadata_for_topic(metadata), body))
 
 
 def extract_pending_question_text(text: str) -> str:
@@ -3679,7 +3757,10 @@ def update_learning_metadata(
 
     with file_lock(topic.path):
         current_text = topic.path.read_text(encoding="utf-8")
-        metadata, body = parse_topic(current_text)
+        raw_metadata, body = parse_topic(current_text)
+        metadata = merge_topic_state(
+            normalize_topic_metadata(raw_metadata, topic.slug), load_state(topic.slug)
+        )
         metadata = dict(metadata)
         previous_metadata = dict(metadata)
         merge_metadata_list(metadata, "known", update.get("known_add"))
@@ -3746,6 +3827,12 @@ def update_learning_metadata(
         score_val = metadata.get("last_answer_score")
         current_unit = metadata.get("current_unit")
         units = metadata.get("course_units")
+        previous_unit_difficulty: int | None = None
+        if isinstance(current_unit, int) and isinstance(units, list):
+            for unit in units:
+                if isinstance(unit, dict) and unit.get("unit") == current_unit:
+                    previous_unit_difficulty = clamp_unit_difficulty(unit.get("difficulty"))
+                    break
         # Only recalibrate unit difficulty on a freshly graded answer this turn.
         # last_answer_score persists across turns, so guarding on its mere presence
         # would ratchet difficulty on every non-graded update until it saturates.
@@ -3772,8 +3859,38 @@ def update_learning_metadata(
         update_quiz_history(metadata, previous_metadata, update)
         if metadata.get("last_answer_status") == "correct":
             metadata.pop("pending_question", None)
+        save_state(topic.slug, state_from_metadata(metadata))
         write_topic_backup(topic.path, current_text)
-        write_text_atomic(topic.path, format_topic(metadata, body))
+        write_text_atomic(topic.path, format_topic(stable_metadata_for_topic(metadata), body))
+        if metadata.get("last_answer_status") in {"correct", "partial", "needs_work"}:
+            event_data: dict[str, object] = {
+                "status": metadata.get("last_answer_status"),
+                "learner_prompt": learner_prompt,
+            }
+            if isinstance(metadata.get("last_answer_score"), (int, float)):
+                event_data["score"] = metadata["last_answer_score"]
+            if isinstance(metadata.get("current_focus"), str):
+                event_data["current_focus"] = metadata["current_focus"]
+            log_event(topic.slug, "answer_judged", event_data)
+        if isinstance(current_unit, int) and isinstance(units, list):
+            for unit in units:
+                if not isinstance(unit, dict) or unit.get("unit") != current_unit:
+                    continue
+                new_difficulty = clamp_unit_difficulty(unit.get("difficulty"))
+                if (
+                    previous_unit_difficulty is not None
+                    and new_difficulty != previous_unit_difficulty
+                ):
+                    log_event(
+                        topic.slug,
+                        "difficulty_changed",
+                        {
+                            "unit": current_unit,
+                            "from": previous_unit_difficulty,
+                            "to": new_difficulty,
+                        },
+                    )
+                break
 
 
 def merge_metadata_list(
@@ -4280,6 +4397,14 @@ def topic_path(slug: str) -> Path:
     return topics_dir() / f"{slug}.md"
 
 
+def topic_state_path(slug: str) -> Path:
+    return topics_dir() / f"{slug}.state.json"
+
+
+def topic_events_path(slug: str) -> Path:
+    return topics_dir() / f"{slug}.events.jsonl"
+
+
 def topic_lock_path(slug: str) -> Path:
     path = topic_path(slug)
     return path.with_name(f".{path.name}.lock")
@@ -4772,8 +4897,10 @@ def read_topic(slug: str) -> Topic:
     if not path.exists():
         raise OpenLearnError(f"topic not found: {slug}")
     text = path.read_text(encoding="utf-8")
-    metadata, body = parse_topic(text)
-    metadata = normalize_topic_metadata(metadata, slug)
+    raw_metadata, body = parse_topic(text)
+    metadata = normalize_topic_metadata(raw_metadata, slug)
+    state = migrate_topic_state_if_needed(slug, path, text, raw_metadata, body)
+    metadata = merge_topic_state(metadata, state)
     return Topic(slug=slug, path=path, metadata=metadata, body=body)
 
 
@@ -4875,9 +5002,269 @@ def clear_active_topic() -> None:
             path.unlink(missing_ok=True)
 
 
+def load_state(slug: str) -> dict[str, object]:
+    path = topic_state_path(slug)
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_state(slug: str, state: dict[str, object]) -> None:
+    path = topic_state_path(slug)
+    with file_lock(path):
+        write_text_atomic(path, json.dumps(state, indent=2, sort_keys=True) + "\n")
+
+
+def log_event(slug: str, event_type: str, data: dict[str, object]) -> None:
+    path = topic_events_path(slug)
+    event = {
+        "schema_version": EVENT_SCHEMA_VERSION,
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "event_type": event_type,
+        "slug": slug,
+        "data": data,
+    }
+    with file_lock(path):
+        existing = ""
+        if path.exists():
+            try:
+                existing = path.read_text(encoding="utf-8")
+            except OSError:
+                existing = ""
+        text = existing
+        if text and not text.endswith("\n"):
+            text += "\n"
+        text += json.dumps(event, sort_keys=True) + "\n"
+        write_text_atomic(path, text)
+
+
+def state_from_metadata(metadata: dict[str, object]) -> dict[str, object]:
+    state: dict[str, object] = {}
+    for key, value in metadata.items():
+        if is_dynamic_metadata_key(key):
+            state[key] = value
+    unit_state: dict[str, dict[str, object]] = {}
+    units = metadata.get("course_units")
+    if isinstance(units, list):
+        for unit in units:
+            if not isinstance(unit, dict):
+                continue
+            unit_id = unit.get("unit")
+            if not isinstance(unit_id, int):
+                continue
+            record: dict[str, object] = {}
+            if "difficulty" in unit:
+                record["difficulty"] = clamp_unit_difficulty(unit.get("difficulty"))
+            if isinstance(unit.get("difficulty_locked"), bool):
+                record["difficulty_locked"] = unit["difficulty_locked"]
+            if record:
+                unit_state[str(unit_id)] = record
+    if unit_state:
+        state["unit_state"] = unit_state
+    return state
+
+
+def stable_metadata_for_topic(metadata: dict[str, object]) -> dict[str, object]:
+    stable: dict[str, object] = {}
+    for key, value in metadata.items():
+        if is_dynamic_metadata_key(key):
+            continue
+        if key == "course_units" and isinstance(value, list):
+            units: list[object] = []
+            for unit in value:
+                if not isinstance(unit, dict):
+                    units.append(unit)
+                    continue
+                cleaned = dict(unit)
+                cleaned.pop("difficulty", None)
+                cleaned.pop("difficulty_locked", None)
+                units.append(cleaned)
+            stable[key] = units
+        else:
+            stable[key] = value
+    return stable
+
+
+def merge_topic_state(
+    metadata: dict[str, object], state: dict[str, object]
+) -> dict[str, object]:
+    merged = dict(metadata)
+    for key, value in state.items():
+        if key == "unit_state":
+            continue
+        if is_dynamic_metadata_key(key):
+            merged[key] = value
+    units = merged.get("course_units")
+    unit_state = state.get("unit_state")
+    if isinstance(units, list):
+        updated_units: list[object] = []
+        for unit in units:
+            if not isinstance(unit, dict):
+                updated_units.append(unit)
+                continue
+            updated = dict(unit)
+            record = None
+            unit_id = unit.get("unit")
+            if isinstance(unit_state, dict) and isinstance(unit_id, int):
+                candidate = unit_state.get(str(unit_id))
+                if isinstance(candidate, dict):
+                    record = candidate
+            if record:
+                if "difficulty" in record:
+                    updated["difficulty"] = clamp_unit_difficulty(record.get("difficulty"))
+                if isinstance(record.get("difficulty_locked"), bool):
+                    updated["difficulty_locked"] = record["difficulty_locked"]
+            else:
+                updated["difficulty"] = clamp_unit_difficulty(updated.get("difficulty"))
+            updated_units.append(updated)
+        merged["course_units"] = updated_units
+    return normalize_dynamic_state_defaults(merged)
+
+
+def normalize_dynamic_state_defaults(metadata: dict[str, object]) -> dict[str, object]:
+    normalized = dict(metadata)
+    status = normalized.get("last_answer_status")
+    if not isinstance(status, str) or status not in {"", "correct", "partial", "needs_work"}:
+        normalized["last_answer_status"] = ""
+    for key in ("consecutive_correct", "consecutive_misses"):
+        value = normalized.get(key)
+        if not isinstance(value, int) or value < 0:
+            normalized[key] = 0
+    return normalized
+
+
+def migrate_concept_attempt_keys(
+    attempts: object, metadata: dict[str, object]
+) -> object:
+    if not isinstance(attempts, dict):
+        return attempts
+    label_to_id: dict[str, str] = {}
+    units = metadata.get("course_units")
+    if isinstance(units, list):
+        for unit in units:
+            if not isinstance(unit, dict):
+                continue
+            concepts = unit.get("concepts")
+            if not isinstance(concepts, list):
+                continue
+            for concept in concepts:
+                if not isinstance(concept, dict):
+                    continue
+                label = concept.get("label")
+                concept_id = concept.get("id")
+                if isinstance(label, str) and isinstance(concept_id, str):
+                    label_to_id[label.strip().lower()] = concept_id
+                    label_to_id[concept_id.strip().lower()] = concept_id
+    migrated: dict[str, object] = {}
+    for key, value in attempts.items():
+        if not isinstance(key, str):
+            continue
+        concept_id = label_to_id.get(key.strip().lower(), concept_id_for_label(key))
+        migrated[concept_id] = value
+    return migrated
+
+
+def dynamic_state_value_is_default(key: str, value: object) -> bool:
+    if key == "last_answer_status":
+        return value in {"", None}
+    if key in {"consecutive_correct", "consecutive_misses"}:
+        return value in {0, None}
+    if key == "concept_attempts":
+        return not isinstance(value, dict) or not value
+    if key == "difficulty_tier":
+        return value in {"on_track", "", None}
+    if key.startswith("last_answer_") or key.startswith("pending_"):
+        return value in {"", None} or value == [] or value == {}
+    return value is None
+
+
+def merge_migrated_state(
+    dynamic_state: dict[str, object], existing_state: dict[str, object]
+) -> dict[str, object]:
+    merged = dict(existing_state)
+    for key, value in dynamic_state.items():
+        if key == "unit_state":
+            continue
+        if key not in existing_state or dynamic_state_value_is_default(key, existing_state[key]):
+            merged[key] = value
+    dynamic_units = dynamic_state.get("unit_state")
+    existing_units = existing_state.get("unit_state")
+    if isinstance(dynamic_units, dict) or isinstance(existing_units, dict):
+        unit_state: dict[str, object] = {}
+        if isinstance(existing_units, dict):
+            unit_state.update(existing_units)
+        if isinstance(dynamic_units, dict):
+            for unit_id, record in dynamic_units.items():
+                if not isinstance(record, dict):
+                    continue
+                existing_record = unit_state.get(unit_id)
+                if not isinstance(existing_record, dict):
+                    unit_state[unit_id] = record
+                    continue
+                merged_record = dict(existing_record)
+                existing_difficulty = existing_record.get("difficulty")
+                if (
+                    "difficulty" in record
+                    and (existing_difficulty is None or clamp_unit_difficulty(existing_difficulty) == 5)
+                ):
+                    merged_record["difficulty"] = record["difficulty"]
+                if "difficulty_locked" in record and "difficulty_locked" not in existing_record:
+                    merged_record["difficulty_locked"] = record["difficulty_locked"]
+                unit_state[unit_id] = merged_record
+        merged["unit_state"] = unit_state
+    return merged
+
+
+def migrate_topic_state_if_needed(
+    slug: str,
+    path: Path,
+    original_text: str,
+    metadata: dict[str, object],
+    body: str,
+) -> dict[str, object]:
+    dynamic_state = state_from_metadata(metadata)
+    if not dynamic_state:
+        return load_state(slug)
+    with file_lock(path):
+        current_text = path.read_text(encoding="utf-8")
+        current_metadata, current_body = parse_topic(current_text)
+        dynamic_state = state_from_metadata(current_metadata)
+        current_metadata = normalize_topic_metadata(current_metadata, slug)
+        existing_state = load_state(slug)
+        if "concept_attempts" in dynamic_state:
+            dynamic_state["concept_attempts"] = migrate_concept_attempt_keys(
+                dynamic_state["concept_attempts"], current_metadata
+            )
+        state_path = topic_state_path(slug)
+        markdown_is_newer = not state_path.exists() or path.stat().st_mtime >= state_path.stat().st_mtime
+        if markdown_is_newer:
+            merged_state = {**existing_state, **dynamic_state}
+            if isinstance(dynamic_state.get("unit_state"), dict) or isinstance(existing_state.get("unit_state"), dict):
+                merged_units: dict[str, object] = {}
+                if isinstance(existing_state.get("unit_state"), dict):
+                    merged_units.update(existing_state["unit_state"])
+                if isinstance(dynamic_state.get("unit_state"), dict):
+                    merged_units.update(dynamic_state["unit_state"])
+                merged_state["unit_state"] = merged_units
+        else:
+            merged_state = merge_migrated_state(dynamic_state, existing_state)
+        save_state(slug, merged_state)
+        stable_metadata = stable_metadata_for_topic(current_metadata)
+        if stable_metadata != current_metadata:
+            write_topic_backup(path, current_text or original_text)
+            write_text_atomic(path, format_topic(stable_metadata, current_body or body))
+        return merged_state
+
+
 def write_topic(path: Path, metadata: dict[str, object], body: str) -> None:
     with file_lock(path):
-        write_text_atomic(path, format_topic(normalize_topic_metadata(metadata, path.stem), body))
+        normalized = normalize_topic_metadata(metadata, path.stem)
+        save_state(path.stem, state_from_metadata(normalized))
+        write_text_atomic(path, format_topic(stable_metadata_for_topic(normalized), body))
 
 
 def normalize_topic_metadata(metadata: dict[str, object], slug: str) -> dict[str, object]:
@@ -4941,6 +5328,7 @@ def normalize_topic_metadata(metadata: dict[str, object], slug: str) -> dict[str
                     "title": title,
                     "slide_count": max(1, slide_count),
                     "difficulty": clamp_unit_difficulty(unit.get("difficulty")),
+                    "concepts": normalize_concepts(unit.get("concepts"), title),
                 }
             )
         normalized["course_units"] = cleaned
@@ -4961,7 +5349,8 @@ def repair_topic_metadata(slug: str) -> bool:
         if normalized == metadata:
             return False
         write_topic_backup(path, current_text)
-        write_text_atomic(path, format_topic(normalized, body))
+        save_state(slug, state_from_metadata(normalized))
+        write_text_atomic(path, format_topic(stable_metadata_for_topic(normalized), body))
         return True
 
 

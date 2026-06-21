@@ -1,0 +1,62 @@
+[
+  {
+    "question": "In Vim, which mode lets you run commands like dd?",
+    "learner_answer": "Normal mode.",
+    "true_score": 1.0
+  },
+  {
+    "question": "In Vim, which mode lets you run commands like dd?",
+    "learner_answer": "Insert mode.",
+    "true_score": 0.0
+  },
+  {
+    "question": "What does dd do in Vim normal mode?",
+    "learner_answer": "It deletes the current line.",
+    "true_score": 1.0
+  },
+  {
+    "question": "What does dd do in Vim normal mode?",
+    "learner_answer": "It deletes a character.",
+    "true_score": 0.4
+  },
+  {
+    "question": "What does /pattern do in Vim?",
+    "learner_answer": "It searches forward for pattern.",
+    "true_score": 1.0
+  },
+  {
+    "question": "What does /pattern do in Vim?",
+    "learner_answer": "It saves the file.",
+    "true_score": 0.0
+  },
+  {
+    "question": "In Python, what does a variable assignment do?",
+    "learner_answer": "It binds a name to a value.",
+    "true_score": 1.0
+  },
+  {
+    "question": "In Python, what does a variable assignment do?",
+    "learner_answer": "It permanently stores data in the program file.",
+    "true_score": 0.3
+  },
+  {
+    "question": "What does a loop let a program do?",
+    "learner_answer": "Repeat a block of steps while a condition or sequence says to keep going.",
+    "true_score": 1.0
+  },
+  {
+    "question": "What does a loop let a program do?",
+    "learner_answer": "Make the code run faster automatically.",
+    "true_score": 0.2
+  },
+  {
+    "question": "What is the base case in recursion for?",
+    "learner_answer": "It stops the recursive calls.",
+    "true_score": 1.0
+  },
+  {
+    "question": "What is the base case in recursion for?",
+    "learner_answer": "It is where the function calls itself again.",
+    "true_score": 0.3
+  }
+]

@@ -173,9 +173,10 @@ class CliStorageTests(unittest.TestCase):
 
         self.assertIn("Metadata repaired: legacy", output)
         self.assertEqual(metadata["course_options"], cli.DEFAULT_COURSE_OPTIONS)
-        self.assertEqual(metadata["last_answer_status"], "")
-        self.assertEqual(metadata["consecutive_correct"], 0)
-        self.assertEqual(metadata["consecutive_misses"], 0)
+        state = cli.load_state("legacy")
+        self.assertEqual(state["last_answer_status"], "")
+        self.assertEqual(state["consecutive_correct"], 0)
+        self.assertEqual(state["consecutive_misses"], 0)
         self.assertIsNone(metadata["last_video_focus"])
         self.assertEqual(metadata["quiz_history"], [])
 
@@ -209,6 +210,59 @@ class CliStorageTests(unittest.TestCase):
         self.assertNotIn("description", topic.metadata)
         self.assertNotIn("## Description", topic.body)
         self.assertIn("Understand AI fundamentals", topic.body)
+
+    def test_load_state_missing_or_corrupt_returns_empty(self) -> None:
+        self.assertEqual(cli.load_state("missing"), {})
+        path = cli.topic_state_path("broken")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{not json", encoding="utf-8")
+
+        self.assertEqual(cli.load_state("broken"), {})
+
+    def test_read_topic_migrates_dynamic_frontmatter_to_state(self) -> None:
+        call_silent(cli.cmd_init, Namespace())
+        path = cli.topic_path("legacy")
+        metadata = {
+            "topic": "Legacy",
+            "slug": "legacy",
+            "current_focus": "Mode switching",
+            "last_answer_status": "partial",
+            "last_answer_score": 0.5,
+            "consecutive_correct": 0,
+            "consecutive_misses": 1,
+            "pending_hint": "What changes when you press Esc?",
+            "difficulty_tier": "struggling",
+            "concept_attempts": {
+                "Mode switching": {"attempts": 2, "correct_sum": 1.0}
+            },
+            "course_units": [
+                {
+                    "unit": 1,
+                    "chapter": "1.1",
+                    "title": "Mode switching",
+                    "slide_count": 2,
+                    "difficulty": 7,
+                    "difficulty_locked": True,
+                    "concepts": [{"label": "Mode switching"}],
+                }
+            ],
+        }
+        path.write_text(cli.format_topic(metadata, "# Legacy\n"), encoding="utf-8")
+
+        topic = cli.read_topic("legacy")
+        migrated_metadata, _body = cli.parse_topic(path.read_text(encoding="utf-8"))
+        state = cli.load_state("legacy")
+
+        self.assertEqual(topic.metadata["last_answer_status"], "partial")
+        self.assertEqual(state["last_answer_score"], 0.5)
+        self.assertEqual(state["pending_hint"], "What changes when you press Esc?")
+        self.assertEqual(state["unit_state"]["1"]["difficulty"], 7)
+        self.assertIs(state["unit_state"]["1"]["difficulty_locked"], True)
+        self.assertEqual(state["concept_attempts"]["mode-switching"]["attempts"], 2)
+        self.assertNotIn("last_answer_status", migrated_metadata)
+        self.assertNotIn("pending_hint", migrated_metadata)
+        self.assertNotIn("difficulty", migrated_metadata["course_units"][0])
+        self.assertTrue(cli.topic_backup_path(path).exists())
 
     def test_cmd_templates_lists_all_templates(self) -> None:
         output = []
@@ -2274,9 +2328,11 @@ class InteractiveTests(unittest.TestCase):
                     "chapter": "1",
                     "title": "Definitions",
                     "slide_count": 2,
+                    "concepts": [{"id": "definitions", "label": "Definitions"}],
                 }
             ],
         )
+        self.assertEqual(cli.load_state("intro-ai")["unit_state"]["1"]["difficulty"], 5)
         self.assertEqual(metadata["current_unit"], 1)
         self.assertEqual(metadata["current_slide"], 1)
         self.assertEqual(metadata["current_focus"], "Definitions")
@@ -2343,9 +2399,10 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(len(displayed_lesson.split()), 220)
         self.assertNotIn("word224", displayed_lesson)
         self.assertNotIn("word224", body)
-        self.assertEqual(metadata["pending_question"]["answer_key"], "C")
-        self.assertIn("Which option is correct after the trim point?", metadata["pending_question"]["question"])
-        self.assertIn("C) Hidden option", metadata["pending_question"]["question"])
+        pending = cli.read_topic("intro-ai").metadata["pending_question"]
+        self.assertEqual(pending["answer_key"], "C")
+        self.assertIn("Which option is correct after the trim point?", pending["question"])
+        self.assertIn("C) Hidden option", pending["question"])
 
     def test_start_course_rejecting_outline_requests_changes_then_regenerates(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Intro AI", goal="basics"))
@@ -4200,6 +4257,16 @@ class PromptInstructionTests(unittest.TestCase):
 
         self.assertEqual(updated.metadata["concept_attempts"]["variables"]["attempts"], 2)
         self.assertEqual(updated.metadata["concept_attempts"]["variables"]["correct_sum"], 2.0)
+        state = cli.load_state("variables")
+        self.assertEqual(state["concept_attempts"]["variables"]["attempts"], 2)
+        raw_metadata, _body = cli.parse_topic(cli.topic_path("variables").read_text(encoding="utf-8"))
+        self.assertNotIn("concept_attempts", raw_metadata)
+        events = [
+            json.loads(line)
+            for line in cli.topic_events_path("variables").read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertEqual([event["event_type"] for event in events], ["answer_judged", "answer_judged"])
+        self.assertEqual(events[-1]["schema_version"], cli.EVENT_SCHEMA_VERSION)
 
     def test_streak_increments_on_new_day(self) -> None:
         yesterday = (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()
@@ -4358,6 +4425,8 @@ class PromptInstructionTests(unittest.TestCase):
         )
 
         self.assertEqual(units[0]["difficulty"], 7)
+        self.assertEqual(units[0]["concepts"], [{"id": "loops", "label": "Loops"}])
+        self.assertEqual(units[1]["concepts"], [{"id": "lists", "label": "Lists"}])
         self.assertNotIn("difficulty", units[1])
 
     def test_unit_difficulty_only_adjusts_on_freshly_graded_turn(self) -> None:
