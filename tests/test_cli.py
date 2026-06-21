@@ -4329,6 +4329,124 @@ class PromptInstructionTests(unittest.TestCase):
         self.assertEqual([event["event_type"] for event in events], ["answer_judged", "answer_judged"])
         self.assertEqual(events[-1]["schema_version"], cli.EVENT_SCHEMA_VERSION)
 
+    def test_answer_judged_event_marks_review_session_as_retrieval(self) -> None:
+        original_call_openai = cli.call_openai
+        original_parse_metadata_update = cli.parse_metadata_update
+        cli.call_openai = lambda *_args, **_kwargs: "{}"
+        cli.parse_metadata_update = lambda _raw: {
+            "last_answer_status": "correct",
+            "answer_score": 1.0,
+            "answer_kind": "production",
+            "is_transfer": True,
+            "gameable": False,
+        }
+        try:
+            call_silent(cli.cmd_new, Namespace(topic="AI", goal="learn ai"))
+            path = cli.topic_path("ai")
+            metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+            metadata = dict(metadata)
+            metadata["current_focus"] = "A* admissibility"
+            path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
+
+            cli.update_learning_metadata(
+                cli.read_topic("ai"),
+                "A* needs the heuristic not to overestimate",
+                "Correct.",
+                "test-model",
+                is_review_session=True,
+            )
+        finally:
+            cli.call_openai = original_call_openai
+            cli.parse_metadata_update = original_parse_metadata_update
+
+        events = [
+            json.loads(line)
+            for line in cli.topic_events_path("ai").read_text(encoding="utf-8").splitlines()
+        ]
+        data = events[-1]["data"]
+        self.assertEqual(data["source"], "review")
+        self.assertIs(data["is_retrieval"], True)
+        metric = cli.delayed_retrieval_metric(events, min_spacing_days=0)
+        self.assertEqual(metric["attempts"], 1)
+        self.assertEqual(metric["passed"], 1)
+
+    def test_answer_judged_event_marks_srs_due_focus_as_retrieval(self) -> None:
+        original_call_openai = cli.call_openai
+        original_parse_metadata_update = cli.parse_metadata_update
+        cli.call_openai = lambda *_args, **_kwargs: "{}"
+        cli.parse_metadata_update = lambda _raw: {
+            "last_answer_status": "correct",
+            "answer_score": 1.0,
+            "answer_kind": "production",
+            "is_transfer": True,
+            "gameable": False,
+        }
+        try:
+            call_silent(cli.cmd_new, Namespace(topic="AI", goal="learn ai"))
+            path = cli.topic_path("ai")
+            metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+            metadata = dict(metadata)
+            metadata["current_focus"] = "A* admissibility"
+            metadata["review_due"] = [
+                {"concept": "A* admissibility", "due": cli.today(), "difficulty": "hard"}
+            ]
+            path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
+
+            cli.update_learning_metadata(
+                cli.read_topic("ai"),
+                "A* needs the heuristic not to overestimate",
+                "Correct.",
+                "test-model",
+            )
+        finally:
+            cli.call_openai = original_call_openai
+            cli.parse_metadata_update = original_parse_metadata_update
+
+        events = [
+            json.loads(line)
+            for line in cli.topic_events_path("ai").read_text(encoding="utf-8").splitlines()
+        ]
+        data = events[-1]["data"]
+        self.assertEqual(data["source"], "srs")
+        self.assertIs(data["is_retrieval"], True)
+
+    def test_answer_judged_event_does_not_mark_non_review_non_due_answer(self) -> None:
+        original_call_openai = cli.call_openai
+        original_parse_metadata_update = cli.parse_metadata_update
+        cli.call_openai = lambda *_args, **_kwargs: "{}"
+        cli.parse_metadata_update = lambda _raw: {
+            "last_answer_status": "correct",
+            "answer_score": 1.0,
+            "answer_kind": "production",
+            "is_transfer": True,
+            "gameable": False,
+        }
+        try:
+            call_silent(cli.cmd_new, Namespace(topic="AI", goal="learn ai"))
+            path = cli.topic_path("ai")
+            metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+            metadata = dict(metadata)
+            metadata["current_focus"] = "A* admissibility"
+            path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
+
+            cli.update_learning_metadata(
+                cli.read_topic("ai"),
+                "A* needs the heuristic not to overestimate",
+                "Correct.",
+                "test-model",
+            )
+        finally:
+            cli.call_openai = original_call_openai
+            cli.parse_metadata_update = original_parse_metadata_update
+
+        events = [
+            json.loads(line)
+            for line in cli.topic_events_path("ai").read_text(encoding="utf-8").splitlines()
+        ]
+        data = events[-1]["data"]
+        self.assertNotIn("source", data)
+        self.assertNotIn("is_retrieval", data)
+
     def test_judge_fields_update_concept_misconceptions(self) -> None:
         original_call_openai = cli.call_openai
         original_parse_metadata_update = cli.parse_metadata_update

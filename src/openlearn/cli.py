@@ -3434,6 +3434,33 @@ def apply_pending_question_answer_key(
         metadata["last_answer_status"] = "needs_work"
 
 
+def due_review_matches_answer(
+    metadata: dict[str, object],
+    due_items: list[dict[str, str]],
+    concept_id: str,
+    focus: object,
+) -> bool:
+    keys = set()
+    if concept_id:
+        keys.add(concept_key(concept_id))
+        keys.add(concept_key(concept_label_for_id(metadata, concept_id)))
+    if isinstance(focus, str) and focus.strip():
+        keys.add(concept_key(focus))
+    keys.discard("")
+    if not keys:
+        return False
+    for item in due_items:
+        concept = item.get("concept")
+        if not isinstance(concept, str) or not concept.strip():
+            continue
+        concept_keys = {concept_key(concept)}
+        if concept_id:
+            concept_keys.add(concept_key(concept_id_for_label_lookup(metadata, concept)))
+        if keys & concept_keys:
+            return True
+    return False
+
+
 def update_quiz_history(
     metadata: dict[str, object], previous_metadata: dict[str, object], update: dict[str, object]
 ) -> dict[str, object] | None:
@@ -4437,6 +4464,7 @@ def update_learning_metadata(
         known_before_update = list(metadata.get("known") or [])
         merge_metadata_list(metadata, "weak_spots", update.get("weak_spots_add"))
         normalize_review_due_metadata(metadata)
+        due_review_items_at_answer = due_review_items(metadata)
         schedule_review_additions(metadata, update.get("review_due_add"))
         remove_known_from_review_lists(metadata)
         previous_focus = metadata.get("current_focus")
@@ -4672,6 +4700,9 @@ def update_learning_metadata(
                 event_data["score"] = metadata["last_answer_score"]
             if isinstance(metadata.get("current_focus"), str):
                 event_data["current_focus"] = metadata["current_focus"]
+            if is_review_session:
+                event_data["source"] = "review"
+                event_data["is_retrieval"] = True
             if fresh_score:
                 event_data["answer_kind"] = answer_kind
                 event_data["is_transfer"] = is_transfer
@@ -4681,6 +4712,14 @@ def update_learning_metadata(
                 event_data["answer_tokens"] = answer_token_count
                 if concept_id:
                     event_data["concept_id"] = concept_id
+                if not is_review_session and due_review_matches_answer(
+                    metadata,
+                    due_review_items_at_answer,
+                    concept_id,
+                    metadata.get("current_focus"),
+                ):
+                    event_data["source"] = "srs"
+                    event_data["is_retrieval"] = True
             log_event(topic.slug, "answer_judged", event_data)
         if gaming_suspected:
             log_event(
