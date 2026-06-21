@@ -88,7 +88,11 @@ DYNAMIC_METADATA_KEYS = {
     "consecutive_misses",
     "difficulty_tier",
     "last_misconception",
+    "recent_answer_results",
+    "rolling_pass_rate",
 }
+
+ROLLING_PASS_RATE_WINDOW = 10
 
 
 def is_dynamic_metadata_key(key: str) -> bool:
@@ -2972,6 +2976,22 @@ def update_momentum_counters(metadata: dict[str, object]) -> None:
         metadata["consecutive_misses"] = misses + 1
 
 
+def update_rolling_pass_rate(metadata: dict[str, object]) -> None:
+    status = metadata.get("last_answer_status")
+    if status not in {"correct", "partial", "needs_work"}:
+        return
+    existing = metadata.get("recent_answer_results")
+    history = (
+        [bool(item) for item in existing]
+        if isinstance(existing, list)
+        else []
+    )
+    history.append(status == "correct")
+    history = history[-ROLLING_PASS_RATE_WINDOW:]
+    metadata["recent_answer_results"] = history
+    metadata["rolling_pass_rate"] = round(sum(1 for item in history if item) / len(history), 3)
+
+
 def difficulty_tier(metadata: dict[str, object]) -> str:
     """Returns 'struggling', 'on_track', or 'mastering'."""
     try:
@@ -3013,14 +3033,15 @@ def adjust_unit_difficulty(
     return current
 
 
-def select_check_mode(unit_difficulty: int, tier: str) -> str:
+def select_check_mode(unit_difficulty: int, tier: str, profile: object = None) -> str:
     difficulty = clamp_unit_difficulty(unit_difficulty)
+    frequency = profile_impasse_frequency(profile)
     # Matrix: low difficulty (1-3) gets cheaper checks, high difficulty (8-10)
     # gets production-heavy checks. Struggling learners receive more support,
     # while mastering learners avoid worked examples unless difficulty is high.
     if difficulty <= 3:
         if tier == "mastering":
-            return "acknowledge"
+            return "recall" if frequency == "high" else "acknowledge"
         # Easy material: a struggling learner needs retrieval, not a worked
         # example (intrinsic load is already low). Same as on_track here.
         return "recall"
@@ -3030,11 +3051,24 @@ def select_check_mode(unit_difficulty: int, tier: str) -> str:
         if tier == "struggling":
             return "deep"
         if tier == "mastering":
-            return "recall"
+            return "application" if frequency == "high" else "recall"
         return "recall"
     if tier == "struggling":
         return "deep"
+    if tier == "mastering" and frequency == "high":
+        return "impasse"
     return "application"
+
+
+def profile_impasse_frequency(profile: object) -> str:
+    if isinstance(profile, dict):
+        value = profile.get("impasse_probe_frequency")
+        if value in {"low", "medium", "high"}:
+            return str(value)
+        return "medium"
+    if isinstance(profile, str):
+        return str(PROFILES[normalize_mastery_profile(profile)]["impasse_probe_frequency"])
+    return "medium"
 
 
 def answer_tokens(text: str) -> list[str]:
@@ -4243,6 +4277,8 @@ def update_learning_metadata(
         else:
             metadata.pop("pending_hint", None)
         update_momentum_counters(metadata)
+        if fresh_score:
+            update_rolling_pass_rate(metadata)
         score_val = metadata.get("last_answer_score")
         current_unit = metadata.get("current_unit")
         units = metadata.get("course_units")
@@ -5974,8 +6010,13 @@ def system_prompt(topic: Topic) -> str:
     tier = difficulty_tier(topic.metadata)
     tier_prompt = _difficulty_tier_prompt(tier)
     check_prompt = check_mode_prompt(
-        select_check_mode(current_unit_difficulty(topic.metadata), tier)
+        select_check_mode(
+            current_unit_difficulty(topic.metadata),
+            tier,
+            topic.metadata.get("mastery_profile"),
+        )
     )
+    policy_prompt = state_move_policy_prompt(topic.metadata, tier)
     return textwrap.dedent(
         f"""
         You are openLearn, a local-first AI learning tutor.
@@ -6037,6 +6078,8 @@ def system_prompt(topic: Topic) -> str:
         {tier_prompt}
 
         {check_prompt}
+
+        {policy_prompt}
 
         Do not keep printing full progress summaries after every answer. Mention
         progress only when it helps the learner feel oriented or encouraged.
@@ -6128,12 +6171,47 @@ def pending_hint_prompt(metadata: dict[str, object]) -> str:
     )
 
 
+def state_move_policy_prompt(metadata: dict[str, object], tier: str) -> str:
+    profile_name = normalize_mastery_profile(metadata.get("mastery_profile"))
+    frequency = profile_impasse_frequency(profile_name)
+    lines = [
+        "State-to-move policy:",
+        "- Default move: elicit, do not tell. Start by asking the learner to produce, predict, explain, compare, or apply. Direct exposition is the fallback only for a genuine impasse.",
+        "- Ungameable checks are always on: require production or transformation (paraphrase, apply to a new example, predict, explain why, or find the edge case). Do not ask checks answerable by quoting the just-shown text.",
+        "- Attempt-gated help: do not give a worked example or the answer before the learner has made a genuine attempt. For a struggling learner, offer the worked example after the attempt.",
+        f"- Mastery profile: {profile_name}; impasse-probe frequency: {frequency}.",
+    ]
+    if tier == "mastering":
+        lines.append(
+            "- Mastering move: manufacture a productive impasse with an edge case, novel transfer, or predict-before-I-show-you prompt; withhold worked examples unless the learner asks after a genuine attempt."
+        )
+    elif tier == "struggling":
+        lines.append(
+            "- Struggling move: reduce to one sub-concept, elicit an attempt, then give a short worked example with contingent, faded help."
+        )
+    else:
+        lines.append(
+            "- On-track move: use production or transfer checks with why or what-if probes, and hold difficulty steady."
+        )
+    misconception = metadata.get("last_misconception")
+    if isinstance(misconception, str) and misconception.strip():
+        lines.append(
+            f"- Target this misconception next: {one_line(misconception)}. Address that specific wrong model before introducing a new concept."
+        )
+    rate = metadata.get("rolling_pass_rate")
+    if isinstance(rate, (int, float)):
+        lines.append(
+            f"- Rolling pass rate: {float(rate):.0%}. Aim the next check near the 80-85% success band by adjusting support and challenge, without changing saved difficulty unless the learner is graded."
+        )
+    return "\n".join(lines)
+
+
 def _difficulty_tier_prompt(tier: str) -> str:
     if tier == "struggling":
         return textwrap.dedent(
             """
             Learner difficulty signal: STRUGGLING
-            - Give a worked example BEFORE asking a check question.
+            - Ask for one genuine attempt, then give a worked example before the next check question.
             - Limit each response to ONE concept and ONE follow-up.
             - Use plain vocabulary; define any jargon inline.
             - Do not advance until the learner shows a clear correct response.
@@ -6180,6 +6258,15 @@ def check_mode_prompt(mode: str) -> str:
             - Ask the learner to apply the concept to a new example or explain why it works.
             - Prefer free-response over multiple choice unless recognition is the actual skill.
             - Do not use a worked example first for mastering learners.
+            """
+        ).strip()
+    if mode == "impasse":
+        return textwrap.dedent(
+            """
+            Check mode: IMPASSE
+            - Manufacture a productive impasse with an edge case, novel transfer, or predict-before-I-show-you question.
+            - Require production or transformation; do not accept a quote from the just-shown text as sufficient.
+            - Withhold worked examples unless the learner asks after a genuine attempt.
             """
         ).strip()
     if mode == "deep":

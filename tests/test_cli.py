@@ -4603,11 +4603,16 @@ class PromptInstructionTests(unittest.TestCase):
             "last_answer_status",
             "last_answer_score",
             "pending_hint",
+            "recent_answer_results",
+            "rolling_pass_rate",
         ):
             self.assertNotIn(key, raw_metadata)
         self.assertNotIn("difficulty", raw_metadata["course_units"][0])
         self.assertNotIn("difficulty_locked", raw_metadata["course_units"][0])
         self.assertIn({"id": "normal-mode", "label": "Normal mode"}, raw_metadata["course_units"][0]["concepts"])
+        state = cli.load_state("vim")
+        self.assertEqual(state["recent_answer_results"], [False, False])
+        self.assertEqual(state["rolling_pass_rate"], 0.0)
 
     def test_mastery_profile_defaults_infers_and_can_change(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Exam Prep", goal="cram for exam"))
@@ -4756,6 +4761,19 @@ class PromptInstructionTests(unittest.TestCase):
         # Struggling on mid-difficulty material gets the worked-example scaffold
         # (LEARNING_SCIENCE.md), not a harder unscaffolded application task.
         self.assertEqual(cli.select_check_mode(5, "struggling"), "deep")
+
+    def test_select_check_mode_uses_profile_for_mastering_impasse_frequency(self) -> None:
+        self.assertEqual(cli.select_check_mode(1, "mastering", "efficient"), "acknowledge")
+        self.assertEqual(cli.select_check_mode(5, "mastering", "proficient"), "recall")
+        self.assertEqual(cli.select_check_mode(1, "mastering", "deep"), "recall")
+        self.assertEqual(cli.select_check_mode(5, "mastering", "deep"), "application")
+        self.assertEqual(cli.select_check_mode(10, "mastering", "deep"), "impasse")
+        self.assertEqual(
+            cli.select_check_mode(
+                10, "mastering", {"impasse_probe_frequency": "high"}
+            ),
+            "impasse",
+        )
 
     def test_normalize_course_unit_difficulty_default_and_clamp(self) -> None:
         normalized = cli.normalize_topic_metadata(
@@ -5136,6 +5154,7 @@ class PromptInstructionTests(unittest.TestCase):
         self.assertIn("active-recall", cli.check_mode_prompt("recall"))
         self.assertIn("free-response", cli.check_mode_prompt("application"))
         self.assertIn("genuine attempt", cli.check_mode_prompt("deep"))
+        self.assertIn("productive impasse", cli.check_mode_prompt("impasse"))
 
     def test_system_prompt_contains_selected_check_mode_fragment(self) -> None:
         topic = cli.Topic(
@@ -5164,6 +5183,74 @@ class PromptInstructionTests(unittest.TestCase):
 
         self.assertIn("Check mode: DEEP", prompt)
         self.assertIn("genuine attempt", prompt)
+
+    def test_system_prompt_contains_state_move_policy_fragments(self) -> None:
+        topic = cli.Topic(
+            slug="demo",
+            path=Path("demo.md"),
+            metadata={
+                "topic": "Demo",
+                "course_started": True,
+                "current_unit": 1,
+                "course_units": [
+                    {
+                        "unit": 1,
+                        "chapter": "1",
+                        "title": "Hard concept",
+                        "slide_count": 2,
+                        "difficulty": 10,
+                    }
+                ],
+                "mastery_profile": "deep",
+                "last_answer_score": 0.9,
+                "consecutive_correct": 3,
+                "rolling_pass_rate": 0.8,
+            },
+            body="# Demo\n",
+        )
+
+        prompt = cli.system_prompt(topic)
+        normalized = " ".join(prompt.split())
+
+        self.assertIn("Check mode: IMPASSE", prompt)
+        self.assertIn("Default move: elicit, do not tell", normalized)
+        self.assertIn("Do not ask checks answerable by quoting the just-shown text", normalized)
+        self.assertIn("do not give a worked example or the answer before", normalized)
+        self.assertIn("Mastery profile: deep; impasse-probe frequency: high", normalized)
+        self.assertIn("manufacture a productive impasse", normalized)
+        self.assertIn("predict-before-I-show-you", normalized)
+        self.assertIn("Rolling pass rate: 80%", normalized)
+        self.assertIn("80-85% success band", normalized)
+
+    def test_system_prompt_policy_tracks_tier_specific_moves_and_misconception(self) -> None:
+        struggling_topic = cli.Topic(
+            slug="demo",
+            path=Path("demo.md"),
+            metadata={
+                "topic": "Demo",
+                "last_answer_score": 0.2,
+                "consecutive_misses": 2,
+                "last_misconception": "thinks normal mode inserts text",
+            },
+            body="# Demo\n",
+        )
+        on_track_topic = cli.Topic(
+            slug="demo",
+            path=Path("demo.md"),
+            metadata={"topic": "Demo"},
+            body="# Demo\n",
+        )
+
+        struggling_prompt = " ".join(cli.system_prompt(struggling_topic).split())
+        on_track_prompt = " ".join(cli.system_prompt(on_track_topic).split())
+
+        self.assertIn("Struggling move: reduce to one sub-concept", struggling_prompt)
+        self.assertIn("worked example with contingent, faded help", struggling_prompt)
+        self.assertIn("Target this misconception next: thinks normal mode inserts text", struggling_prompt)
+        self.assertIn("specific wrong model", struggling_prompt)
+        self.assertIn("On-track move: use production or transfer checks", on_track_prompt)
+        self.assertIn("why or what-if probes", on_track_prompt)
+        self.assertIn("hold difficulty steady", on_track_prompt)
 
     def test_system_prompt_includes_course_options_guidance(self) -> None:
         topic = cli.Topic(
