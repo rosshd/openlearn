@@ -24,6 +24,34 @@ DEFAULT_COURSE_OPTIONS = {
     "hands_on_drills": True,
     "suggest_videos": False,
 }
+GAMING_OVERLAP_TRIGRAM_JACCARD = 0.6
+GAMING_MIN_ANSWER_TOKENS = 6
+PROFILES = {
+    "efficient": {
+        "mastery_score": 0.7,
+        "mastery_rate": 0.7,
+        "unit_mastery_fraction": 0.7,
+        "transfer_required": False,
+        "recognition_counts": True,
+        "impasse_probe_frequency": "low",
+    },
+    "proficient": {
+        "mastery_score": 0.8,
+        "mastery_rate": 0.75,
+        "unit_mastery_fraction": 0.8,
+        "transfer_required": True,
+        "recognition_counts": False,
+        "impasse_probe_frequency": "medium",
+    },
+    "deep": {
+        "mastery_score": 0.9,
+        "mastery_rate": 0.85,
+        "unit_mastery_fraction": 0.9,
+        "transfer_required": True,
+        "recognition_counts": False,
+        "impasse_probe_frequency": "high",
+    },
+}
 PLACEMENT_CONTEXT_FILENAME = "placement-quiz.txt"
 COURSE_OPTION_LABELS = {
     "quiz_after_chapter": "Quiz after finished chapter",

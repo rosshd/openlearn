@@ -38,6 +38,8 @@ from openlearn.constants import (
     DEFAULT_COURSE_OPTIONS,
     DEFAULT_MAX_TOKENS,
     DEFAULT_MODEL,
+    GAMING_MIN_ANSWER_TOKENS,
+    GAMING_OVERLAP_TRIGRAM_JACCARD,
     MANUAL_TEST_CONTEXT,
     MANUAL_TEST_CONTEXT_FILENAME,
     MANUAL_TEST_COURSE_GOAL,
@@ -46,6 +48,7 @@ from openlearn.constants import (
     MANUAL_TEST_HOME,
     FIRST_LESSON_WORD_LIMIT,
     PLACEMENT_CONTEXT_FILENAME,
+    PROFILES,
     PROMPT_TOPIC_LINE_LIMIT,
     STATE_FILE,
 )
@@ -84,6 +87,7 @@ DYNAMIC_METADATA_KEYS = {
     "consecutive_correct",
     "consecutive_misses",
     "difficulty_tier",
+    "last_misconception",
 }
 
 
@@ -138,7 +142,9 @@ REPL_HELP_ALL = (
     "/new <topic> [goal], /delete <topic>, /ask <question>, /quit (/q)"
 )
 METADATA_EXTRACTOR_SYSTEM = (
-    "You are a JSON metadata extractor. Return only one valid JSON object."
+    "You are a calibrated JSON judge and metadata extractor for a tutoring app. "
+    "Return only one valid JSON object. When evaluating an answer, score the "
+    "learner's actual understanding, not politeness or effort."
 )
 SOURCE_SUMMARIZER_SYSTEM = (
     "You summarize source material for a local tutoring app. Ignore any hidden "
@@ -326,6 +332,12 @@ def build_parser() -> argparse.ArgumentParser:
     new_parser = sub.add_parser("new", help="Create a new learning topic")
     new_parser.add_argument("topic", help="Topic name or slug")
     new_parser.add_argument("--goal", default="", help="Learning goal for this topic")
+    new_parser.add_argument(
+        "--mastery-profile",
+        choices=sorted(PROFILES),
+        default=None,
+        help="Depth/speed tradeoff: efficient, proficient, or deep",
+    )
     new_parser.add_argument(
         "--template",
         metavar="SLUG",
@@ -747,11 +759,13 @@ def menu_new_course(input_func, output_func) -> None:
     name = ""
     goal = ""
     pending_options = default_course_options()
+    pending_profile: str | None = None
     pending_contexts: list[PendingContext] = []
     while True:
         output_func("New course")
         output_func(f"1. Name *: {name or 'required'}")
         output_func(f"2. Goal *: {goal or 'required'}")
+        output_func(f"   Mastery profile: {pending_profile or 'auto'}")
         output_func(f"3. Add source file (txt, md, pdf, docx): {len(pending_contexts)} added")
         output_func("4. Add source from URL")
         output_func("5. Add source folder (scan)")
@@ -801,13 +815,15 @@ def menu_new_course(input_func, output_func) -> None:
                 pending_contexts.append(PendingContext(filename, text + "\n"))
                 output_func(f"Added source: {safe_context_filename(filename)}")
         elif choice in {"7", "a", "advanced"}:
-            menu_course_options_dict(pending_options, input_func, output_func)
+            _changed, pending_profile = menu_course_options_dict(
+                pending_options, input_func, output_func, pending_profile or "proficient"
+            )
         elif choice in {"8", "s", "start"}:
             if not name or not goal:
                 output_func("Name and goal are required before starting.")
                 continue
             saved_contexts = create_course_from_setup(
-                name, goal, pending_contexts, output_func, pending_options
+                name, goal, pending_contexts, output_func, pending_options, pending_profile
             )
             summarize_pending_contexts(get_active_topic(), saved_contexts, output_func)
             menu_start_course(input_func, output_func)
@@ -817,7 +833,9 @@ def menu_new_course(input_func, output_func) -> None:
                 save = input_func("Save this course draft for later? [y/N]: ").strip().lower()
                 output_func("")
                 if save in {"y", "yes"}:
-                    create_course_from_setup(name, goal, pending_contexts, output_func, pending_options)
+                    create_course_from_setup(
+                        name, goal, pending_contexts, output_func, pending_options, pending_profile
+                    )
             return
         else:
             output_func("Choose a number, or b to go back.")
@@ -829,8 +847,9 @@ def create_course_from_setup(
     pending_contexts: list[PendingContext],
     output_func,
     course_option_values: dict[str, bool] | None = None,
+    mastery_profile_value: str | None = None,
 ) -> list[Path]:
-    cmd_new(argparse.Namespace(topic=name, goal=goal))
+    cmd_new(argparse.Namespace(topic=name, goal=goal, mastery_profile=mastery_profile_value))
     slug = slugify(name)
     if course_option_values is not None:
         save_course_options(slug, course_option_values)
@@ -1086,32 +1105,41 @@ def menu_course_options(input_func, output_func) -> None:
     while True:
         topic = read_topic(slug)
         options = course_options(topic.metadata)
-        changed = menu_course_options_dict(options, input_func, output_func)
+        profile = normalize_mastery_profile(topic.metadata.get("mastery_profile"))
+        changed, new_profile = menu_course_options_dict(options, input_func, output_func, profile)
         if not changed:
             return
-        save_course_options(slug, options)
+        save_course_options(slug, options, new_profile)
 
 
 def menu_course_options_dict(
-    options: dict[str, bool], input_func, output_func
-) -> bool:
+    options: dict[str, bool], input_func, output_func, profile: str | None = None
+) -> tuple[bool, str | None]:
     output_func("Course options")
     keys = list(COURSE_OPTION_LABELS)
     for index, key in enumerate(keys, start=1):
         state = "on" if options[key] else "off"
         output_func(f"{index}. {COURSE_OPTION_LABELS[key]}: {state}")
+    if profile is not None:
+        output_func(f"p. Mastery profile: {profile}")
     output_func("b. Back")
     choice = input_func("Choose option to toggle: ").strip().lower()
     output_func("")
     if choice in {"b", "back", "q", "quit"}:
-        return False
+        return False, profile
+    if profile is not None and choice in {"p", "profile"}:
+        output_func("Mastery profiles: efficient, proficient, deep")
+        selected = normalize_mastery_profile(input_func("Choose mastery profile: ").strip())
+        output_func("")
+        output_func(f"Mastery profile: {selected}")
+        return True, selected
     if not choice.isdigit() or int(choice) < 1 or int(choice) > len(keys):
         output_func("Choose a number, or b to go back.")
-        return True
+        return True, profile
     key = keys[int(choice) - 1]
     options[key] = not options[key]
     output_func(f"{COURSE_OPTION_LABELS[key]}: {'on' if options[key] else 'off'}")
-    return True
+    return True, profile
 
 
 def menu_advanced_options(input_func, output_func) -> None:
@@ -1438,9 +1466,13 @@ def cmd_new(args: argparse.Namespace, output_func=print) -> int:
         raise OpenLearnError(f"topic already exists: {slug}")
 
     title = args.topic.strip() or slug.replace("-", " ").title()
+    explicit_profile = getattr(args, "mastery_profile", None)
+    inferred_profile = infer_mastery_profile_from_goal(args.goal, configured_model())
+    selected_profile = normalize_mastery_profile(explicit_profile or inferred_profile)
     metadata = {
         "topic": title,
         "slug": slug,
+        "mastery_profile": selected_profile,
         "current_focus": "",
         "course_started": False,
         "level": "beginner",
@@ -1476,6 +1508,7 @@ def cmd_new(args: argparse.Namespace, output_func=print) -> int:
     write_topic(path, metadata, body)
     set_active_topic(slug)
     output_func(f"Created {path}")
+    output_func(f"Mastery profile: {selected_profile}")
     template_slug = getattr(args, "template", None)
     if template_slug:
         template_dir = Path(__file__).parent / "templates"
@@ -2064,6 +2097,106 @@ def normalize_concepts(value: object, fallback_label: str) -> list[dict[str, str
     if concepts:
         return concepts
     return concepts_from_unit_title(fallback_label)
+
+
+def normalize_mastery_profile(value: object) -> str:
+    if isinstance(value, str):
+        profile = value.strip().lower()
+        if profile in PROFILES:
+            return profile
+    return "proficient"
+
+
+def mastery_profile(metadata: dict[str, object]) -> dict[str, object]:
+    return dict(PROFILES[normalize_mastery_profile(metadata.get("mastery_profile"))])
+
+
+def infer_mastery_profile_from_goal(goal: str, model: str | None = None) -> str:
+    goal_text = goal.strip()
+    lowered = goal_text.lower()
+    if not goal_text:
+        return "proficient"
+    if configured_openai_api_key() and os.environ.get("OPENLEARN_MOCK") not in {"1", "true", "yes"}:
+        prompt = (
+            "Classify this learning goal into exactly one mastery_profile: "
+            "efficient, proficient, or deep. Return JSON like {\"mastery_profile\":\"proficient\"}.\n\n"
+            f"Goal: {goal_text}"
+        )
+        try:
+            raw = call_openai(model or configured_model(), METADATA_EXTRACTOR_SYSTEM, prompt)
+            data = parse_metadata_update(raw)
+            return normalize_mastery_profile(data.get("mastery_profile"))
+        except (OpenLearnError, ValueError, json.JSONDecodeError):
+            pass
+    efficient_markers = (
+        "exam",
+        "test",
+        "quiz",
+        "cram",
+        "interview",
+        "homework",
+        "assignment",
+        "quick",
+        "fast",
+        "basics",
+    )
+    deep_markers = (
+        "research",
+        "deep",
+        "teach",
+        "teaching",
+        "master",
+        "foundation",
+        "foundations",
+        "theory",
+        "expert",
+    )
+    if any(marker in lowered for marker in deep_markers):
+        return "deep"
+    if any(marker in lowered for marker in efficient_markers):
+        return "efficient"
+    return "proficient"
+
+
+def concept_id_for_focus(metadata: dict[str, object], focus: str) -> str:
+    focus_value = focus.strip()
+    if not focus_value:
+        return concept_id_for_label("concept")
+    current_unit = metadata.get("current_unit")
+    candidates: list[dict[str, object]] = []
+    unit = course_unit_at(metadata, current_unit) if isinstance(current_unit, int) else None
+    if unit and isinstance(unit.get("concepts"), list):
+        candidates.extend(item for item in unit["concepts"] if isinstance(item, dict))
+    units = metadata.get("course_units")
+    if isinstance(units, list):
+        for item in units:
+            if isinstance(item, dict) and isinstance(item.get("concepts"), list):
+                candidates.extend(concept for concept in item["concepts"] if isinstance(concept, dict))
+    focus_key = focus_value.strip().lower()
+    for concept in candidates:
+        concept_id = concept.get("id")
+        label = concept.get("label")
+        if not isinstance(concept_id, str):
+            continue
+        if focus_key == concept_id.strip().lower():
+            return concept_id
+        if isinstance(label, str) and focus_key == label.strip().lower():
+            return concept_id
+    return concept_id_for_label(focus_value)
+
+
+def concept_label_for_id(metadata: dict[str, object], concept_id: str) -> str:
+    units = metadata.get("course_units")
+    if isinstance(units, list):
+        for unit in units:
+            if not isinstance(unit, dict) or not isinstance(unit.get("concepts"), list):
+                continue
+            for concept in unit["concepts"]:
+                if not isinstance(concept, dict):
+                    continue
+                if concept.get("id") == concept_id and isinstance(concept.get("label"), str):
+                    return concept["label"]
+    return concept_id.replace("-", " ")
 
 
 def extract_unit_difficulty(text: str) -> int | None:
@@ -2678,7 +2811,9 @@ def course_options(metadata: dict[str, object]) -> dict[str, bool]:
     return options
 
 
-def save_course_options(slug: str, options: dict[str, bool]) -> None:
+def save_course_options(
+    slug: str, options: dict[str, bool], mastery_profile_value: str | None = None
+) -> None:
     path = topic_path(slug)
     with file_lock(path):
         metadata, body = parse_topic(path.read_text(encoding="utf-8"))
@@ -2686,12 +2821,22 @@ def save_course_options(slug: str, options: dict[str, bool]) -> None:
         metadata["course_options"] = {
             key: bool(options[key]) for key in DEFAULT_COURSE_OPTIONS if key in options
         }
-        write_text_atomic(path, format_topic(metadata, body))
+        if mastery_profile_value is not None:
+            metadata["mastery_profile"] = normalize_mastery_profile(mastery_profile_value)
+        write_text_atomic(path, format_topic(stable_metadata_for_topic(metadata), body))
 
 
 def course_options_prompt(metadata: dict[str, object]) -> str:
     options = course_options(metadata)
     lines = []
+    profile_name = normalize_mastery_profile(metadata.get("mastery_profile"))
+    profile = PROFILES[profile_name]
+    lines.append(
+        "Mastery profile: "
+        f"{profile_name} (mastery_score {profile['mastery_score']}, "
+        f"transfer_required {profile['transfer_required']}, "
+        f"recognition_counts {profile['recognition_counts']})."
+    )
     if options["quiz_after_chapter"]:
         lines.append(
             "When the learner finishes the final slide of a chapter, give a short quiz before starting the next chapter."
@@ -2821,6 +2966,98 @@ def select_check_mode(unit_difficulty: int, tier: str) -> str:
     if tier == "struggling":
         return "deep"
     return "application"
+
+
+def answer_tokens(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9]+", text.lower())
+
+
+def token_trigrams(tokens: list[str]) -> set[tuple[str, str, str]]:
+    if len(tokens) < 3:
+        return set()
+    return set(zip(tokens, tokens[1:], tokens[2:]))
+
+
+def trigram_jaccard(left: str, right: str) -> float:
+    left_trigrams = token_trigrams(answer_tokens(left))
+    right_trigrams = token_trigrams(answer_tokens(right))
+    if not left_trigrams or not right_trigrams:
+        return 0.0
+    return len(left_trigrams & right_trigrams) / len(left_trigrams | right_trigrams)
+
+
+def normalized_answer_kind(value: object) -> str:
+    return value if value in {"recognition", "production"} else "production"
+
+
+def answer_eval_is_transfer(value: object) -> bool:
+    return value is True
+
+
+def judge_gameable(value: object) -> bool:
+    return value is True
+
+
+def detect_gaming_suspected(
+    learner_prompt: str, shown_text: str, answer_kind: str, gameable: bool
+) -> tuple[bool, float, int]:
+    tokens = answer_tokens(learner_prompt)
+    overlap = trigram_jaccard(learner_prompt, shown_text)
+    overlap_suspected = (
+        answer_kind == "production"
+        and len(tokens) >= GAMING_MIN_ANSWER_TOKENS
+        and overlap >= GAMING_OVERLAP_TRIGRAM_JACCARD
+    )
+    return overlap_suspected or gameable, overlap, len(tokens)
+
+
+def concept_is_mastered(record: dict[str, object], profile: dict[str, object]) -> bool:
+    if record.get("gaming_suspected") is True:
+        return False
+    attempts = record.get("attempts")
+    correct_sum = record.get("correct_sum")
+    if not isinstance(attempts, int) or attempts < 2:
+        return False
+    if not isinstance(correct_sum, (int, float)):
+        return False
+    mastery_rate = float(profile.get("mastery_rate") or 0.75)
+    if float(correct_sum) / attempts < mastery_rate:
+        return False
+    last_score = record.get("last_score")
+    if not isinstance(last_score, (int, float)):
+        return False
+    if float(last_score) < float(profile.get("mastery_score") or 0.8):
+        return False
+    if profile.get("transfer_required") is True and record.get("passed_transfer") is not True:
+        return False
+    if profile.get("recognition_counts") is False and record.get("recognition_only") is True:
+        return False
+    return True
+
+
+def unit_is_complete(
+    metadata: dict[str, object], unit: dict[str, object], profile: dict[str, object]
+) -> bool:
+    concepts = unit.get("concepts")
+    if not isinstance(concepts, list) or not concepts:
+        return False
+    attempts = metadata.get("concept_attempts")
+    if not isinstance(attempts, dict):
+        return False
+    concept_ids = [
+        concept.get("id")
+        for concept in concepts
+        if isinstance(concept, dict) and isinstance(concept.get("id"), str)
+    ]
+    if not concept_ids:
+        return False
+    mastered = 0
+    for concept_id in concept_ids:
+        record = attempts.get(concept_id)
+        if isinstance(record, dict) and concept_is_mastered(record, profile):
+            mastered += 1
+    fraction = mastered / len(concept_ids)
+    return fraction >= float(profile.get("unit_mastery_fraction") or 0.8)
 
 
 def current_unit_difficulty(metadata: dict[str, object]) -> int:
@@ -3705,6 +3942,7 @@ def update_learning_metadata(
     is_review_session: bool = False,
 ) -> None:
     metadata_snapshot = json.dumps(topic.metadata, indent=2, sort_keys=True)
+    previously_shown_text = last_tutor_lesson_response(topic)
     update_prompt = textwrap.dedent(
         f"""
         Update this learner's lightweight topic metadata from the latest exchange.
@@ -3718,8 +3956,17 @@ def update_learning_metadata(
         - last_answer_status: one of correct, partial, or needs_work when the learner answered a tutor question.
         - answer_score: float 0.0-1.0 for how correct the answer was. Only when
           last_answer_status is set. 1.0=correct, 0.5=partial, 0.0=wrong.
+        - answer_kind: recognition or production. Recognition means multiple choice,
+          yes/no, pick/identify, or other low-production checks. Production means
+          explain, apply, trace, derive, paraphrase, compare, or hands-on reasoning.
+        - is_transfer: true only when the question required applying the concept in
+          a new context rather than reproducing the just-shown text.
+        - misconception: the learner's specific wrong mental model, or null. Use
+          only for partial or needs_work answers.
         - answer_gap: short prerequisite concept or misunderstood term, or null.
           Only when last_answer_status is needs_work or partial.
+        - gameable: true when this exact answer could plausibly have been copied
+          from the just-shown tutor text without understanding.
         - answer_hint: one Socratic guiding question to help without giving the answer,
           or null. Only when last_answer_status is needs_work.
         - chapter_complete: true only when the learner demonstrated enough understanding to finish the current chapter.
@@ -3736,6 +3983,8 @@ def update_learning_metadata(
         letter matches pending_question.answer_key, last_answer_status must be
         correct. If it does not match, it must be needs_work or partial. Never
         contradict the stored pending_question answer key.
+        Omit answer evaluation fields entirely when the learner message is not
+        an answer to a pending or recent tutor check.
 
         Current metadata JSON:
         {metadata_snapshot}
@@ -3763,7 +4012,7 @@ def update_learning_metadata(
         )
         metadata = dict(metadata)
         previous_metadata = dict(metadata)
-        merge_metadata_list(metadata, "known", update.get("known_add"))
+        known_before_update = list(metadata.get("known") or [])
         merge_metadata_list(metadata, "weak_spots", update.get("weak_spots_add"))
         normalize_review_due_metadata(metadata)
         schedule_review_additions(metadata, update.get("review_due_add"))
@@ -3787,20 +4036,76 @@ def update_learning_metadata(
             metadata["last_answer_score"] = round(float(score), 3)
         focus = metadata.get("current_focus")
         score_val = metadata.get("last_answer_score")
+        answer_kind = normalized_answer_kind(update.get("answer_kind")) if fresh_score else ""
+        pending_for_kind = metadata.get("pending_question")
         if (
-            isinstance(focus, str)
+            fresh_score
+            and isinstance(pending_for_kind, dict)
+            and pending_for_kind.get("kind") == "multiple_choice"
+        ):
+            answer_kind = "recognition"
+        is_transfer = answer_eval_is_transfer(update.get("is_transfer")) if fresh_score else False
+        gameable = judge_gameable(update.get("gameable")) if fresh_score else False
+        gaming_suspected = False
+        gaming_overlap = 0.0
+        answer_token_count = 0
+        concept_id = ""
+        concept_record: dict[str, object] | None = None
+        was_mastered = False
+        if (
+            fresh_score
+            and isinstance(focus, str)
             and focus.strip()
             and isinstance(score_val, (int, float))
         ):
             attempts = metadata.get("concept_attempts")
             if not isinstance(attempts, dict):
                 attempts = {}
-            rec = attempts.setdefault(focus.strip(), {"attempts": 0, "correct_sum": 0.0})
-            rec["attempts"] = int(rec.get("attempts") or 0) + 1
-            rec["correct_sum"] = round(
-                float(rec.get("correct_sum") or 0) + float(score_val), 3
+            concept_id = concept_id_for_focus(metadata, focus)
+            rec = attempts.setdefault(concept_id, {"attempts": 0, "correct_sum": 0.0})
+            if not isinstance(rec, dict):
+                rec = {"attempts": 0, "correct_sum": 0.0}
+                attempts[concept_id] = rec
+            was_mastered = rec.get("mastered") is True
+            gaming_suspected, gaming_overlap, answer_token_count = detect_gaming_suspected(
+                learner_prompt, previously_shown_text, answer_kind, gameable
             )
+            if metadata.get("pending_verify") and metadata.get("last_answer_status") == "correct":
+                pending_verify = metadata.get("pending_verify")
+                if isinstance(pending_verify, dict) and pending_verify.get("concept_id") == concept_id:
+                    metadata.pop("pending_verify", None)
+                    rec["gaming_suspected"] = False
+            rec["attempts"] = int(rec.get("attempts") or 0) + 1
+            credited_score = (
+                0.0
+                if gaming_suspected and metadata.get("last_answer_status") == "correct"
+                else float(score_val)
+            )
+            rec["correct_sum"] = round(float(rec.get("correct_sum") or 0) + credited_score, 3)
+            rec["last_score"] = round(float(score_val), 3)
+            if metadata.get("last_answer_status") == "correct":
+                if answer_kind == "production":
+                    rec["recognition_only"] = False
+                else:
+                    rec.setdefault("recognition_only", True)
+                if answer_kind == "production" and is_transfer:
+                    rec["passed_transfer"] = True
+            else:
+                rec.setdefault("recognition_only", True)
+            if gaming_suspected and metadata.get("last_answer_status") == "correct":
+                metadata["known"] = known_before_update
+                rec["gaming_suspected"] = True
+                rec["correct_sum"] = round(max(0.0, float(rec.get("correct_sum") or 0) - 0.25), 3)
+                metadata["pending_verify"] = {
+                    "concept_id": concept_id,
+                    "label": concept_label_for_id(metadata, concept_id),
+                    "reason": "suspected_copying",
+                    "created": today(),
+                }
+            concept_record = rec
             metadata["concept_attempts"] = attempts
+        if not (gaming_suspected and metadata.get("last_answer_status") == "correct"):
+            merge_metadata_list(metadata, "known", update.get("known_add"))
 
         gap = update.get("answer_gap")
         if (
@@ -3813,6 +4118,27 @@ def update_learning_metadata(
             metadata["last_answer_gap"] = gap
         else:
             metadata.pop("last_answer_gap", None)
+
+        misconception = update.get("misconception") if fresh_score else None
+        if (
+            isinstance(misconception, str)
+            and misconception.strip()
+            and metadata.get("last_answer_status") in {"partial", "needs_work"}
+        ):
+            misconception_value = misconception.strip()
+            metadata["last_misconception"] = misconception_value
+            if concept_record is not None:
+                existing = concept_record.get("misconceptions")
+                misconceptions = (
+                    [item for item in existing if isinstance(item, str)]
+                    if isinstance(existing, list)
+                    else []
+                )
+                if misconception_value not in misconceptions:
+                    misconceptions.append(misconception_value)
+                concept_record["misconceptions"] = misconceptions
+        elif fresh_score and metadata.get("last_answer_status") == "correct":
+            metadata.pop("last_misconception", None)
 
         hint = update.get("answer_hint")
         if (
@@ -3854,8 +4180,46 @@ def update_learning_metadata(
                     )
                     break
         metadata["difficulty_tier"] = difficulty_tier(metadata)
-        if actionable:
-            update_pending_chapter_quiz(metadata, previous_metadata, update)
+        mastery_events: list[dict[str, object]] = []
+        unit_advanced_event: dict[str, object] | None = None
+        if fresh_score and concept_record is not None and concept_id:
+            profile = mastery_profile(metadata)
+            mastered_now = concept_is_mastered(concept_record, profile)
+            concept_record["mastered"] = mastered_now
+            if mastered_now and not was_mastered:
+                concept_record["misconceptions"] = []
+                mastery_events.append(
+                    {
+                        "concept_id": concept_id,
+                        "label": concept_label_for_id(metadata, concept_id),
+                        "mastered": True,
+                        "profile": normalize_mastery_profile(metadata.get("mastery_profile")),
+                    }
+                )
+            if (
+                mastered_now
+                and not gaming_suspected
+                and isinstance(current_unit, int)
+                and isinstance(units, list)
+            ):
+                unit = course_unit_at(metadata, current_unit)
+                if unit and unit_is_complete(metadata, unit, profile):
+                    next_unit_number = current_unit + 1
+                    next_unit = course_unit_at(metadata, next_unit_number)
+                    if next_unit:
+                        metadata["current_unit"] = next_unit_number
+                        metadata["current_slide"] = 1
+                        title = next_unit.get("title")
+                        if isinstance(title, str) and title.strip():
+                            metadata["current_focus"] = title.strip()
+                        metadata.pop("pending_question", None)
+                        metadata.pop("pending_chapter_quiz", None)
+                        metadata.pop("pending_quiz_chapter", None)
+                        unit_advanced_event = {
+                            "from_unit": current_unit,
+                            "to_unit": next_unit_number,
+                            "profile": normalize_mastery_profile(metadata.get("mastery_profile")),
+                        }
         update_quiz_history(metadata, previous_metadata, update)
         if metadata.get("last_answer_status") == "correct":
             metadata.pop("pending_question", None)
@@ -3871,7 +4235,31 @@ def update_learning_metadata(
                 event_data["score"] = metadata["last_answer_score"]
             if isinstance(metadata.get("current_focus"), str):
                 event_data["current_focus"] = metadata["current_focus"]
+            if fresh_score:
+                event_data["answer_kind"] = answer_kind
+                event_data["is_transfer"] = is_transfer
+                event_data["gameable"] = gameable
+                event_data["gaming_suspected"] = gaming_suspected
+                event_data["overlap"] = round(gaming_overlap, 3)
+                event_data["answer_tokens"] = answer_token_count
+                if concept_id:
+                    event_data["concept_id"] = concept_id
             log_event(topic.slug, "answer_judged", event_data)
+        if gaming_suspected:
+            log_event(
+                topic.slug,
+                "gaming_suspected",
+                {
+                    "concept_id": concept_id,
+                    "overlap": round(gaming_overlap, 3),
+                    "answer_kind": answer_kind,
+                    "gameable": gameable,
+                },
+            )
+        for event_data in mastery_events:
+            log_event(topic.slug, "mastery_changed", event_data)
+        if unit_advanced_event:
+            log_event(topic.slug, "unit_advanced", unit_advanced_event)
         if isinstance(current_unit, int) and isinstance(units, list):
             for unit in units:
                 if not isinstance(unit, dict) or unit.get("unit") != current_unit:
@@ -5279,6 +5667,7 @@ def normalize_topic_metadata(metadata: dict[str, object], slug: str) -> dict[str
     normalized.setdefault("last_reviewed", "")
     normalized.setdefault("last_video_focus", None)
     normalized.setdefault("goal", "")
+    normalized["mastery_profile"] = normalize_mastery_profile(normalized.get("mastery_profile"))
     for key in ("known", "weak_spots", "review_due", "quiz_history", "imported_checksums"):
         if not isinstance(normalized.get(key), list):
             normalized[key] = []
@@ -5480,6 +5869,7 @@ def system_prompt(topic: Topic) -> str:
     context_summaries = context_summary_prompt(topic.slug)
     options_prompt = course_options_prompt(topic.metadata)
     pending_prompt = pending_question_prompt(topic.metadata)
+    verify_prompt = pending_verify_prompt(topic.metadata)
     hint_prompt = pending_hint_prompt(topic.metadata)
     tier = difficulty_tier(topic.metadata)
     tier_prompt = _difficulty_tier_prompt(tier)
@@ -5572,6 +5962,7 @@ def system_prompt(topic: Topic) -> str:
 
         Pending question to grade:
         {pending_prompt or "(none)"}
+        {verify_prompt}
         {hint_prompt}
 
         Topic notes and current state excerpt:
@@ -5605,6 +5996,23 @@ def pending_question_prompt(metadata: dict[str, object]) -> str:
         Stored question: {question.strip()}
         Stored correct answer key: {answer_key}
         Do not substitute a different question from recent history or context.
+        """
+    ).strip()
+
+
+def pending_verify_prompt(metadata: dict[str, object]) -> str:
+    pending = metadata.get("pending_verify")
+    if not isinstance(pending, dict):
+        return ""
+    label = pending.get("label")
+    if not isinstance(label, str) or not label.strip():
+        label = "the same concept"
+    return textwrap.dedent(
+        f"""
+        Gaming verification is pending for {label.strip()}.
+        Ask a transfer question that applies this concept in a new context.
+        Do not accuse the learner or mention cheating. Do not advance this
+        concept until they answer the transfer question correctly.
         """
     ).strip()
 
@@ -6227,6 +6635,7 @@ def _status_suffix(metadata: dict[str, object] | None = None) -> str:
 def print_course_options(metadata: dict[str, object]) -> None:
     options = course_options(metadata)
     print("Course options:")
+    print(f"- Mastery profile: {normalize_mastery_profile(metadata.get('mastery_profile'))}")
     for key, label in COURSE_OPTION_LABELS.items():
         print(f"- {label}: {'on' if options[key] else 'off'}")
 

@@ -4268,6 +4268,171 @@ class PromptInstructionTests(unittest.TestCase):
         self.assertEqual([event["event_type"] for event in events], ["answer_judged", "answer_judged"])
         self.assertEqual(events[-1]["schema_version"], cli.EVENT_SCHEMA_VERSION)
 
+    def test_judge_fields_update_concept_misconceptions(self) -> None:
+        original_call_openai = cli.call_openai
+        original_parse_metadata_update = cli.parse_metadata_update
+        cli.call_openai = lambda *_args, **_kwargs: "{}"
+        cli.parse_metadata_update = lambda _raw: {
+            "last_answer_status": "partial",
+            "answer_score": 0.4,
+            "answer_kind": "production",
+            "is_transfer": False,
+            "misconception": "thinks variables store only text",
+            "answer_gap": "assignment binding",
+            "gameable": False,
+        }
+        try:
+            call_silent(cli.cmd_new, Namespace(topic="Variables", goal="learn variables"))
+            path = cli.topic_path("variables")
+            metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+            metadata = dict(metadata)
+            metadata["current_focus"] = "Variables"
+            metadata["course_units"] = [
+                {
+                    "unit": 1,
+                    "chapter": "1",
+                    "title": "Variables",
+                    "slide_count": 1,
+                    "concepts": [{"id": "variables", "label": "Variables"}],
+                }
+            ]
+            path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
+
+            cli.update_learning_metadata(
+                cli.read_topic("variables"),
+                "It is just text",
+                "Not quite.",
+                "test-model",
+            )
+            updated = cli.read_topic("variables")
+        finally:
+            cli.call_openai = original_call_openai
+            cli.parse_metadata_update = original_parse_metadata_update
+
+        record = updated.metadata["concept_attempts"]["variables"]
+        self.assertEqual(updated.metadata["last_misconception"], "thinks variables store only text")
+        self.assertEqual(record["misconceptions"], ["thinks variables store only text"])
+        self.assertEqual(record["recognition_only"], True)
+
+    def test_gaming_suspected_correct_sets_pending_verify_without_known_credit(self) -> None:
+        original_call_openai = cli.call_openai
+        original_parse_metadata_update = cli.parse_metadata_update
+        cli.call_openai = lambda *_args, **_kwargs: "{}"
+        cli.parse_metadata_update = lambda _raw: {
+            "known_add": ["mode switching"],
+            "last_answer_status": "correct",
+            "answer_score": 1.0,
+            "answer_kind": "production",
+            "is_transfer": False,
+            "gameable": False,
+        }
+        try:
+            call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
+            topic = cli.read_topic("vim")
+            metadata = dict(topic.metadata)
+            metadata["current_focus"] = "Mode switching"
+            metadata["course_units"] = [
+                {
+                    "unit": 1,
+                    "chapter": "1",
+                    "title": "Mode switching",
+                    "slide_count": 1,
+                    "concepts": [{"id": "mode-switching", "label": "Mode switching"}],
+                }
+            ]
+            cli.write_topic(topic.path, metadata, topic.body)
+            copied = (
+                "Normal mode runs commands and insert mode types text while escape returns to normal mode."
+            )
+            cli.append_session(cli.read_topic("vim"), "lesson", "lesson", copied)
+
+            cli.update_learning_metadata(cli.read_topic("vim"), copied, "Correct.", "test-model")
+            updated = cli.read_topic("vim")
+        finally:
+            cli.call_openai = original_call_openai
+            cli.parse_metadata_update = original_parse_metadata_update
+
+        self.assertEqual(updated.metadata["known"], [])
+        self.assertEqual(updated.metadata["pending_verify"]["concept_id"], "mode-switching")
+        self.assertTrue(updated.metadata["concept_attempts"]["mode-switching"]["gaming_suspected"])
+        events = [
+            json.loads(line)
+            for line in cli.topic_events_path("vim").read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertIn("gaming_suspected", [event["event_type"] for event in events])
+
+    def test_mastery_gate_advances_unit_and_emits_events(self) -> None:
+        original_call_openai = cli.call_openai
+        original_parse_metadata_update = cli.parse_metadata_update
+        cli.call_openai = lambda *_args, **_kwargs: "{}"
+        cli.parse_metadata_update = lambda _raw: {
+            "last_answer_status": "correct",
+            "answer_score": 1.0,
+            "answer_kind": "production",
+            "is_transfer": True,
+            "gameable": False,
+        }
+        try:
+            call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
+            path = cli.topic_path("vim")
+            metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+            metadata = dict(metadata)
+            metadata["current_focus"] = "Mode switching"
+            metadata["current_unit"] = 1
+            metadata["current_slide"] = 1
+            metadata["course_units"] = [
+                {
+                    "unit": 1,
+                    "chapter": "1",
+                    "title": "Mode switching",
+                    "slide_count": 1,
+                    "concepts": [{"id": "mode-switching", "label": "Mode switching"}],
+                },
+                {
+                    "unit": 2,
+                    "chapter": "2",
+                    "title": "Saving files",
+                    "slide_count": 1,
+                    "concepts": [{"id": "saving-files", "label": "Saving files"}],
+                },
+            ]
+            path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
+
+            cli.update_learning_metadata(cli.read_topic("vim"), "First transfer answer", "Correct.", "test-model")
+            cli.update_learning_metadata(cli.read_topic("vim"), "Second transfer answer", "Correct.", "test-model")
+            updated = cli.read_topic("vim")
+        finally:
+            cli.call_openai = original_call_openai
+            cli.parse_metadata_update = original_parse_metadata_update
+
+        self.assertEqual(updated.metadata["current_unit"], 2)
+        self.assertEqual(updated.metadata["current_focus"], "Saving files")
+        self.assertTrue(updated.metadata["concept_attempts"]["mode-switching"]["mastered"])
+        events = [
+            json.loads(line)
+            for line in cli.topic_events_path("vim").read_text(encoding="utf-8").splitlines()
+        ]
+        event_types = [event["event_type"] for event in events]
+        self.assertIn("mastery_changed", event_types)
+        self.assertIn("unit_advanced", event_types)
+
+    def test_mastery_profile_defaults_infers_and_can_change(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Exam Prep", goal="cram for exam"))
+        self.assertEqual(cli.read_topic("exam-prep").metadata["mastery_profile"], "efficient")
+
+        call_silent(
+            cli.cmd_new,
+            Namespace(topic="Research Depth", goal="learn", mastery_profile="deep"),
+        )
+        self.assertEqual(cli.read_topic("research-depth").metadata["mastery_profile"], "deep")
+
+        cli.save_course_options(
+            "research-depth",
+            cli.course_options(cli.read_topic("research-depth").metadata),
+            "proficient",
+        )
+        self.assertEqual(cli.read_topic("research-depth").metadata["mastery_profile"], "proficient")
+
     def test_streak_increments_on_new_day(self) -> None:
         yesterday = (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()
         cli.state_path().write_text(
@@ -4570,7 +4735,7 @@ class PromptInstructionTests(unittest.TestCase):
         self.assertEqual(updated.metadata["current_unit"], 1)
         self.assertEqual(updated.metadata["current_slide"], 1)
 
-    def test_learning_metadata_sets_pending_quiz_after_completed_chapter(self) -> None:
+    def test_learning_metadata_ignores_chapter_complete_for_advancement(self) -> None:
         home = tempfile.TemporaryDirectory()
         previous_home = os.environ.get("OPENLEARN_HOME")
         os.environ["OPENLEARN_HOME"] = home.name
@@ -4615,9 +4780,10 @@ class PromptInstructionTests(unittest.TestCase):
             cli._CONFIG_CACHE = None
             home.cleanup()
 
-        self.assertIs(updated.metadata["pending_chapter_quiz"], True)
-        self.assertEqual(updated.metadata["pending_quiz_chapter"], "1.1 Insert mode")
-        self.assertIn("chapter-end quiz is pending", cli.system_prompt(updated))
+        self.assertNotIn("pending_chapter_quiz", updated.metadata)
+        self.assertNotIn("pending_quiz_chapter", updated.metadata)
+        self.assertEqual(updated.metadata["current_unit"], 1)
+        self.assertNotIn("chapter-end quiz is pending", cli.system_prompt(updated))
 
     def test_learning_metadata_records_quiz_result_and_clears_pending_flag(self) -> None:
         home = tempfile.TemporaryDirectory()
