@@ -1980,6 +1980,8 @@ def course_outline_prompt(
         "Create 4-8 ordered units with short titles and one-line outcomes. "
         "For each unit, include a planned slide count in parentheses, for example "
         "1.2 Insert mode in Vim (3 slides, difficulty 4/10) - Outcome. "
+        "After each unit, add a Concepts: line with 2-4 key concepts for that unit, "
+        "separated by semicolons, for example Concepts: Normal mode; Insert mode; Mode switching. "
         "Assign each unit an initial difficulty from 1-10 where 1 is very easy "
         "and 10 is very hard. "
         f"{_slide_count_guidance(topic.slug)}"
@@ -2019,17 +2021,71 @@ def first_lesson_prompt(outline: str) -> str:
     )
 
 
+def parse_concept_labels(text: str) -> list[str]:
+    match = re.search(r"\bconcepts?\s*:\s*(.+)$", text, flags=re.IGNORECASE)
+    if not match:
+        return []
+    raw = match.group(1)
+    raw = re.sub(r"\s+[-–—]\s+.*$", "", raw).strip()
+    values = [
+        item.strip(" \t-•,.;")
+        for item in re.split(r"\s*;\s*|\s*,\s*(?=[A-Z0-9])", raw)
+    ]
+    labels: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if not value:
+            continue
+        key = value.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        labels.append(value)
+    return labels[:4]
+
+
+def concepts_from_labels(labels: list[str], fallback_title: str) -> list[dict[str, str]]:
+    concepts: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for label in labels:
+        concept_id = concept_id_for_label(label)
+        if concept_id in seen:
+            continue
+        seen.add(concept_id)
+        concepts.append({"id": concept_id, "label": label.strip()})
+    return concepts or concepts_from_unit_title(fallback_title)
+
+
 def parse_course_units(outline: str) -> list[dict[str, object]]:
     units: list[dict[str, object]] = []
-    for line in outline.splitlines():
+    lines = outline.splitlines()
+    index = 0
+    while index < len(lines):
+        line = lines[index]
         match = re.match(
             r"^\s*(\d+)(?:\.(\d+))?[.)]?\s+(.+?)(?:\s+[-–—]\s+.*)?$",
             line.strip(),
             flags=re.IGNORECASE,
         )
         if not match:
+            index += 1
             continue
+        inline_concepts = parse_concept_labels(line)
+        lookahead = index + 1
+        concept_labels = list(inline_concepts)
+        while lookahead < len(lines):
+            next_line = lines[lookahead].strip()
+            if re.match(r"^\d+(?:\.\d+)?[.)]?\s+", next_line):
+                break
+            labels = parse_concept_labels(next_line)
+            if labels:
+                concept_labels.extend(labels)
+                break
+            if next_line:
+                break
+            lookahead += 1
         raw_title = match.group(3).strip()
+        raw_title = re.sub(r"\s*\(?\bconcepts?\s*:.*$", "", raw_title, flags=re.IGNORECASE).strip()
         difficulty = extract_unit_difficulty(raw_title)
         title = re.sub(r"\s+\(\d+\s+slides?\)\s*$", "", raw_title, flags=re.IGNORECASE)
         title = re.sub(
@@ -2054,11 +2110,12 @@ def parse_course_units(outline: str) -> list[dict[str, object]]:
             "chapter": chapter,
             "title": title.rstrip("."),
             "slide_count": max(1, slide_count),
-            "concepts": concepts_from_unit_title(title.rstrip(".")),
+            "concepts": concepts_from_labels(concept_labels, title.rstrip(".")),
         }
         if difficulty is not None:
             unit_data["difficulty"] = difficulty
         units.append(unit_data)
+        index += 1
     return units
 
 
@@ -2182,7 +2239,19 @@ def concept_id_for_focus(metadata: dict[str, object], focus: str) -> str:
             return concept_id
         if isinstance(label, str) and focus_key == label.strip().lower():
             return concept_id
-    return concept_id_for_label(focus_value)
+    concept_id = concept_id_for_label(focus_value)
+    unit = course_unit_at(metadata, current_unit) if isinstance(current_unit, int) else None
+    if unit is not None:
+        concepts = unit.get("concepts")
+        if not isinstance(concepts, list):
+            concepts = []
+            unit["concepts"] = concepts
+        if not any(
+            isinstance(concept, dict) and concept.get("id") == concept_id
+            for concept in concepts
+        ):
+            concepts.append({"id": concept_id, "label": focus_value})
+    return concept_id
 
 
 def concept_label_for_id(metadata: dict[str, object], concept_id: str) -> str:
@@ -3051,12 +3120,27 @@ def unit_is_complete(
     ]
     if not concept_ids:
         return False
-    mastered = 0
+    practiced_ids: list[str] = []
+    unit_number = unit.get("unit")
     for concept_id in concept_ids:
+        record = attempts.get(concept_id)
+        if not isinstance(record, dict):
+            continue
+        raw_attempts = record.get("attempts")
+        if not isinstance(raw_attempts, int) or raw_attempts < 1:
+            continue
+        record_unit = record.get("unit")
+        if isinstance(record_unit, int) and isinstance(unit_number, int) and record_unit != unit_number:
+            continue
+        practiced_ids.append(concept_id)
+    if not practiced_ids:
+        return False
+    mastered = 0
+    for concept_id in practiced_ids:
         record = attempts.get(concept_id)
         if isinstance(record, dict) and concept_is_mastered(record, profile):
             mastered += 1
-    fraction = mastered / len(concept_ids)
+    fraction = mastered / len(practiced_ids)
     return fraction >= float(profile.get("unit_mastery_fraction") or 0.8)
 
 
@@ -3934,16 +4018,11 @@ def extract_pending_question_text(text: str) -> str:
     return "\n".join(selected).strip()
 
 
-def update_learning_metadata(
-    topic: Topic,
-    learner_prompt: str,
-    tutor_answer: str,
-    model: str,
-    is_review_session: bool = False,
-) -> None:
-    metadata_snapshot = json.dumps(topic.metadata, indent=2, sort_keys=True)
-    previously_shown_text = last_tutor_lesson_response(topic)
-    update_prompt = textwrap.dedent(
+def metadata_update_prompt(
+    metadata: dict[str, object], learner_prompt: str, tutor_answer: str
+) -> str:
+    metadata_snapshot = json.dumps(metadata, indent=2, sort_keys=True)
+    return textwrap.dedent(
         f"""
         Update this learner's lightweight topic metadata from the latest exchange.
         Return only a JSON object with these optional keys:
@@ -3996,6 +4075,17 @@ def update_learning_metadata(
         {tutor_answer}
         """
     ).strip()
+
+
+def update_learning_metadata(
+    topic: Topic,
+    learner_prompt: str,
+    tutor_answer: str,
+    model: str,
+    is_review_session: bool = False,
+) -> None:
+    previously_shown_text = last_tutor_lesson_response(topic)
+    update_prompt = metadata_update_prompt(topic.metadata, learner_prompt, tutor_answer)
     try:
         raw_update = call_openai(model, METADATA_EXTRACTOR_SYSTEM, update_prompt)
         update = parse_metadata_update(raw_update)
@@ -4066,6 +4156,9 @@ def update_learning_metadata(
             if not isinstance(rec, dict):
                 rec = {"attempts": 0, "correct_sum": 0.0}
                 attempts[concept_id] = rec
+            current_unit_for_record = metadata.get("current_unit")
+            if isinstance(current_unit_for_record, int):
+                rec["unit"] = current_unit_for_record
             was_mastered = rec.get("mastered") is True
             gaming_suspected, gaming_overlap, answer_token_count = detect_gaming_suspected(
                 learner_prompt, previously_shown_text, answer_kind, gameable
@@ -4203,7 +4296,14 @@ def update_learning_metadata(
                 and isinstance(units, list)
             ):
                 unit = course_unit_at(metadata, current_unit)
-                if unit and unit_is_complete(metadata, unit, profile):
+                slide = metadata.get("current_slide")
+                slide_count = unit.get("slide_count") if unit else None
+                on_last_slide = (
+                    isinstance(slide, int)
+                    and isinstance(slide_count, int)
+                    and slide >= slide_count
+                )
+                if unit and on_last_slide and unit_is_complete(metadata, unit, profile):
                     next_unit_number = current_unit + 1
                     next_unit = course_unit_at(metadata, next_unit_number)
                     if next_unit:

@@ -4416,6 +4416,199 @@ class PromptInstructionTests(unittest.TestCase):
         self.assertIn("mastery_changed", event_types)
         self.assertIn("unit_advanced", event_types)
 
+    def test_mastery_auto_advances_when_focus_is_finer_than_unit_title(self) -> None:
+        original_call_openai = cli.call_openai
+        original_parse_metadata_update = cli.parse_metadata_update
+        cli.call_openai = lambda *_args, **_kwargs: "{}"
+        cli.parse_metadata_update = lambda _raw: {
+            "last_answer_status": "correct",
+            "answer_score": 1.0,
+            "answer_kind": "production",
+            "is_transfer": True,
+            "gameable": False,
+        }
+        try:
+            call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
+            path = cli.topic_path("vim")
+            metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+            metadata = dict(metadata)
+            metadata["current_focus"] = "Normal mode"
+            metadata["current_unit"] = 1
+            metadata["current_slide"] = 1
+            metadata["course_units"] = [
+                {
+                    "unit": 1,
+                    "chapter": "1",
+                    "title": "Modes",
+                    "slide_count": 1,
+                    "concepts": [{"id": "modes", "label": "Modes"}],
+                },
+                {
+                    "unit": 2,
+                    "chapter": "2",
+                    "title": "Saving",
+                    "slide_count": 1,
+                    "concepts": [{"id": "saving", "label": "Saving"}],
+                },
+            ]
+            path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
+
+            cli.update_learning_metadata(cli.read_topic("vim"), "first transfer", "Correct.", "test-model")
+            cli.update_learning_metadata(cli.read_topic("vim"), "second transfer", "Correct.", "test-model")
+            updated = cli.read_topic("vim")
+            raw_metadata, _body = cli.parse_topic(path.read_text(encoding="utf-8"))
+        finally:
+            cli.call_openai = original_call_openai
+            cli.parse_metadata_update = original_parse_metadata_update
+
+        self.assertEqual(updated.metadata["current_unit"], 2)
+        self.assertIn(
+            {"id": "normal-mode", "label": "Normal mode"},
+            raw_metadata["course_units"][0]["concepts"],
+        )
+        self.assertEqual(updated.metadata["concept_attempts"]["normal-mode"]["unit"], 1)
+
+    def test_unit_completion_uses_practiced_concepts_fraction(self) -> None:
+        unit = {
+            "unit": 1,
+            "concepts": [
+                {"id": "a", "label": "A"},
+                {"id": "b", "label": "B"},
+                {"id": "c", "label": "C"},
+                {"id": "d", "label": "D"},
+            ],
+        }
+        metadata = {
+            "concept_attempts": {
+                "a": {
+                    "unit": 1,
+                    "attempts": 2,
+                    "correct_sum": 2.0,
+                    "last_score": 1.0,
+                    "passed_transfer": True,
+                    "recognition_only": False,
+                },
+                "b": {
+                    "unit": 1,
+                    "attempts": 2,
+                    "correct_sum": 1.0,
+                    "last_score": 0.4,
+                    "passed_transfer": False,
+                    "recognition_only": False,
+                },
+            }
+        }
+
+        self.assertFalse(cli.unit_is_complete(metadata, unit, cli.PROFILES["proficient"]))
+        metadata["concept_attempts"]["b"].update(
+            {"correct_sum": 2.0, "last_score": 1.0, "passed_transfer": True}
+        )
+        self.assertTrue(cli.unit_is_complete(metadata, unit, cli.PROFILES["proficient"]))
+
+    def test_mastery_auto_advance_waits_until_last_slide(self) -> None:
+        original_call_openai = cli.call_openai
+        original_parse_metadata_update = cli.parse_metadata_update
+        cli.call_openai = lambda *_args, **_kwargs: "{}"
+        cli.parse_metadata_update = lambda _raw: {
+            "last_answer_status": "correct",
+            "answer_score": 1.0,
+            "answer_kind": "production",
+            "is_transfer": True,
+            "gameable": False,
+        }
+        try:
+            call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
+            path = cli.topic_path("vim")
+            metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+            metadata = dict(metadata)
+            metadata["current_focus"] = "Normal mode"
+            metadata["current_unit"] = 1
+            metadata["current_slide"] = 1
+            metadata["course_units"] = [
+                {
+                    "unit": 1,
+                    "chapter": "1",
+                    "title": "Modes",
+                    "slide_count": 2,
+                    "concepts": [{"id": "normal-mode", "label": "Normal mode"}],
+                },
+                {
+                    "unit": 2,
+                    "chapter": "2",
+                    "title": "Saving",
+                    "slide_count": 1,
+                    "concepts": [{"id": "saving", "label": "Saving"}],
+                },
+            ]
+            path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
+
+            cli.update_learning_metadata(cli.read_topic("vim"), "first transfer", "Correct.", "test-model")
+            cli.update_learning_metadata(cli.read_topic("vim"), "second transfer", "Correct.", "test-model")
+            updated = cli.read_topic("vim")
+        finally:
+            cli.call_openai = original_call_openai
+            cli.parse_metadata_update = original_parse_metadata_update
+
+        self.assertEqual(updated.metadata["current_unit"], 1)
+        self.assertEqual(updated.metadata["current_slide"], 1)
+        self.assertTrue(updated.metadata["concept_attempts"]["normal-mode"]["mastered"])
+
+    def test_dynamic_state_does_not_leak_to_topic_frontmatter(self) -> None:
+        original_call_openai = cli.call_openai
+        original_parse_metadata_update = cli.parse_metadata_update
+        cli.call_openai = lambda *_args, **_kwargs: "{}"
+        cli.parse_metadata_update = lambda _raw: {
+            "last_answer_status": "partial",
+            "answer_score": 0.5,
+            "answer_kind": "production",
+            "is_transfer": False,
+            "misconception": "confuses modes",
+            "answer_hint": "Which mode runs commands?",
+            "gameable": False,
+        }
+        try:
+            call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
+            path = cli.topic_path("vim")
+            metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+            metadata = dict(metadata)
+            metadata["current_focus"] = "Normal mode"
+            metadata["current_unit"] = 1
+            metadata["current_slide"] = 1
+            metadata["course_units"] = [
+                {
+                    "unit": 1,
+                    "chapter": "1",
+                    "title": "Modes",
+                    "slide_count": 1,
+                    "difficulty": 7,
+                    "difficulty_locked": True,
+                    "concepts": [{"id": "normal-mode", "label": "Normal mode"}],
+                }
+            ]
+            path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
+
+            cli.update_learning_metadata(cli.read_topic("vim"), "answer one", "Try again.", "test-model")
+            cli.update_learning_metadata(cli.read_topic("vim"), "answer two", "Try again.", "test-model")
+            raw_metadata, _body = cli.parse_topic(path.read_text(encoding="utf-8"))
+        finally:
+            cli.call_openai = original_call_openai
+            cli.parse_metadata_update = original_parse_metadata_update
+
+        for key in (
+            "concept_attempts",
+            "pending_verify",
+            "last_misconception",
+            "consecutive_correct",
+            "consecutive_misses",
+            "last_answer_status",
+            "last_answer_score",
+            "pending_hint",
+        ):
+            self.assertNotIn(key, raw_metadata)
+        self.assertNotIn("difficulty", raw_metadata["course_units"][0])
+        self.assertNotIn("difficulty_locked", raw_metadata["course_units"][0])
+        self.assertIn({"id": "normal-mode", "label": "Normal mode"}, raw_metadata["course_units"][0]["concepts"])
+
     def test_mastery_profile_defaults_infers_and_can_change(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Exam Prep", goal="cram for exam"))
         self.assertEqual(cli.read_topic("exam-prep").metadata["mastery_profile"], "efficient")
@@ -4593,6 +4786,31 @@ class PromptInstructionTests(unittest.TestCase):
         self.assertEqual(units[0]["concepts"], [{"id": "loops", "label": "Loops"}])
         self.assertEqual(units[1]["concepts"], [{"id": "lists", "label": "Lists"}])
         self.assertNotIn("difficulty", units[1])
+
+    def test_parse_course_units_captures_concepts_lines(self) -> None:
+        units = cli.parse_course_units(
+            "Units:\n"
+            "1.1 Vim modes (3 slides, difficulty 4/10) - Switch modes.\n"
+            "Concepts: Normal mode; Insert mode; Mode switching\n"
+            "1.2 Editing commands (4 slides) - Change text.\n"
+            "Concepts: Delete operator; Change operator"
+        )
+
+        self.assertEqual(
+            units[0]["concepts"],
+            [
+                {"id": "normal-mode", "label": "Normal mode"},
+                {"id": "insert-mode", "label": "Insert mode"},
+                {"id": "mode-switching", "label": "Mode switching"},
+            ],
+        )
+        self.assertEqual(
+            units[1]["concepts"],
+            [
+                {"id": "delete-operator", "label": "Delete operator"},
+                {"id": "change-operator", "label": "Change operator"},
+            ],
+        )
 
     def test_unit_difficulty_only_adjusts_on_freshly_graded_turn(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
