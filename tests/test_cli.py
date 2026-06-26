@@ -57,7 +57,12 @@ class CliStorageTests(unittest.TestCase):
         self.home = tempfile.TemporaryDirectory()
         self.previous_env = {
             name: os.environ.get(name)
-            for name in ("OPENLEARN_HOME", "OPENLEARN_MODEL", "OPENLEARN_BASE_URL", "OPENAI_API_KEY")
+            for name in (
+                "OPENLEARN_HOME",
+                "OPENLEARN_MODEL",
+                "OPENLEARN_BASE_URL",
+                "OPENAI_API_KEY",
+            )
         }
         os.environ["OPENLEARN_HOME"] = self.home.name
         os.environ.pop("OPENLEARN_MODEL", None)
@@ -293,9 +298,7 @@ class CliStorageTests(unittest.TestCase):
             "consecutive_misses": 1,
             "pending_hint": "What changes when you press Esc?",
             "difficulty_tier": "struggling",
-            "concept_attempts": {
-                "Mode switching": {"attempts": 2, "correct_sum": 1.0}
-            },
+            "concept_attempts": {"Mode switching": {"attempts": 2, "correct_sum": 1.0}},
             "course_units": [
                 {
                     "unit": 1,
@@ -458,9 +461,7 @@ class CliStorageTests(unittest.TestCase):
         prompt = cli.system_prompt(topic)
 
         self.assertEqual(saved.name, "overview.txt")
-        self.assertEqual(
-            saved.read_text(encoding="utf-8"), source.read_text(encoding="utf-8")
-        )
+        self.assertEqual(saved.read_text(encoding="utf-8"), source.read_text(encoding="utf-8"))
         self.assertIn("- overview.txt", prompt)
         self.assertNotIn("Important course overview", prompt)
 
@@ -948,9 +949,7 @@ class CliStorageTests(unittest.TestCase):
             path = cli.topic_path(slug)
             metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
             metadata = dict(metadata)
-            metadata["review_due"] = [
-                {"concept": concept, "due": due, "difficulty": "hard"}
-            ]
+            metadata["review_due"] = [{"concept": concept, "due": due, "difficulty": "hard"}]
             path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
 
         output = capture_stdout(cli.cmd_due, Namespace())
@@ -1083,9 +1082,7 @@ class CliStorageTests(unittest.TestCase):
         self.assertTrue(cli.valid_due_date(due_easy))
         self.assertTrue(cli.valid_due_date(due_missed))
         # A confidently recalled concept should be scheduled further out than a missed one.
-        self.assertGreater(
-            date.fromisoformat(due_easy), date.fromisoformat(due_missed)
-        )
+        self.assertGreater(date.fromisoformat(due_easy), date.fromisoformat(due_missed))
 
     def test_normalize_review_due_preserves_valid_ebisu_model(self) -> None:
         metadata = {
@@ -1163,8 +1160,7 @@ class CliStorageTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         topic = cli.read_topic(cli.MANUAL_TEST_COURSE_SLUG)
         context = (
-            cli.topic_context_dir(cli.MANUAL_TEST_COURSE_SLUG)
-            / cli.MANUAL_TEST_CONTEXT_FILENAME
+            cli.topic_context_dir(cli.MANUAL_TEST_COURSE_SLUG) / cli.MANUAL_TEST_CONTEXT_FILENAME
         )
 
         self.assertEqual(os.environ["OPENLEARN_HOME"], str(home.resolve()))
@@ -1221,9 +1217,7 @@ class CliStorageTests(unittest.TestCase):
         finally:
             cli.call_openai = original_call_openai
 
-        metadata, body = cli.parse_topic(
-            cli.topic_path("persistence").read_text(encoding="utf-8")
-        )
+        metadata, body = cli.parse_topic(cli.topic_path("persistence").read_text(encoding="utf-8"))
 
         self.assertEqual(metadata["last_reviewed"], cli.today())
         self.assertIn("## Session Log", body)
@@ -1361,9 +1355,7 @@ class CliStorageTests(unittest.TestCase):
         cli.set_active_topic("older-topic")
         output = []
 
-        selected = cli.choose_topic(
-            iter_input(["2"]), output.append, "Switch to topic"
-        )
+        selected = cli.choose_topic(iter_input(["2"]), output.append, "Switch to topic")
 
         self.assertEqual(selected, "older-topic")
         self.assertIn("Switch to topic", output)
@@ -1493,9 +1485,7 @@ class ProviderResponseTests(unittest.TestCase):
         self.assertEqual(text, "Feedback: Good.")
 
     def test_sanitize_model_output_hides_answer_key_comments(self) -> None:
-        text = cli.sanitize_model_output(
-            "Check: Choose one.\nA) One\nB) Two\n<!-- answer: B -->"
-        )
+        text = cli.sanitize_model_output("Check: Choose one.\nA) One\nB) Two\n<!-- answer: B -->")
 
         self.assertEqual(text, "Check: Choose one.\nA) One\nB) Two")
         self.assertEqual(cli.extract_answer_key("Check\n<!-- answer: B -->"), "B")
@@ -1627,7 +1617,9 @@ class ProviderResponseTests(unittest.TestCase):
 class InteractiveTests(unittest.TestCase):
     def setUp(self) -> None:
         self.home = tempfile.TemporaryDirectory()
-        self.previous_env = {name: os.environ.get(name) for name in ("OPENLEARN_HOME", "OPENAI_API_KEY")}
+        self.previous_env = {
+            name: os.environ.get(name) for name in ("OPENLEARN_HOME", "OPENAI_API_KEY")
+        }
         os.environ["OPENLEARN_HOME"] = self.home.name
         os.environ["OPENAI_API_KEY"] = "sk-test"
         cli._CONFIG_CACHE = None
@@ -1652,9 +1644,7 @@ class InteractiveTests(unittest.TestCase):
 
         class FakeParser:
             def parse_args(self, _argv):
-                return Namespace(
-                    func=lambda _args: (_ for _ in ()).throw(KeyboardInterrupt)
-                )
+                return Namespace(func=lambda _args: (_ for _ in ()).throw(KeyboardInterrupt))
 
         cli.build_parser = lambda: FakeParser()
         stderr = io.StringIO()
@@ -1764,9 +1754,7 @@ class InteractiveTests(unittest.TestCase):
             calls.append(("resume", args.topic, args.model))
             return 0
 
-        def fake_ask_topic(
-            topic: str | None, prompt: str, model: str | None, **_kwargs
-        ) -> str:
+        def fake_ask_topic(topic: str | None, prompt: str, model: str | None, **_kwargs) -> str:
             calls.append(("ask", topic, prompt, model))
             return "answer"
 
@@ -1943,9 +1931,7 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(calls, ["start"])
         self.assertTrue((cli.topic_context_dir("vim") / "syllabus.txt").exists())
         self.assertEqual(
-            (cli.topic_context_dir("vim") / "syllabus.summary.txt").read_text(
-                encoding="utf-8"
-            ),
+            (cli.topic_context_dir("vim") / "syllabus.summary.txt").read_text(encoding="utf-8"),
             "Summary: modes and motions.\n",
         )
 
@@ -2144,9 +2130,7 @@ class InteractiveTests(unittest.TestCase):
     def test_new_course_setup_can_set_advanced_options_before_creation(self) -> None:
         exit_code = call_silent(
             cli.run_menu,
-            input_func=iter_input(
-                ["1", "1", "Vim", "2", "Learn vim", "7", "1", "b", "y", "q"]
-            ),
+            input_func=iter_input(["1", "1", "Vim", "2", "Learn vim", "7", "1", "b", "y", "q"]),
             output_func=lambda _text: None,
         )
 
@@ -2160,9 +2144,7 @@ class InteractiveTests(unittest.TestCase):
 
         exit_code = call_silent(
             cli.run_menu,
-            input_func=iter_input(
-                ["2", "4", "Schedule", "Week 1: Vim modes", ".", "b", "q"]
-            ),
+            input_func=iter_input(["2", "4", "Schedule", "Week 1: Vim modes", ".", "b", "q"]),
             output_func=lambda _text: None,
         )
 
@@ -2187,9 +2169,7 @@ class InteractiveTests(unittest.TestCase):
         sys.modules["requests"] = types.SimpleNamespace(
             get=lambda _url, timeout=None, headers=None: FakeResponse()
         )
-        sys.modules["trafilatura"] = types.SimpleNamespace(
-            extract=lambda _html: extract_text
-        )
+        sys.modules["trafilatura"] = types.SimpleNamespace(extract=lambda _html: extract_text)
         cli.call_openai = lambda *_args, **_kwargs: "Summary: web lecture."
 
         def restore() -> None:
@@ -2224,9 +2204,7 @@ class InteractiveTests(unittest.TestCase):
 
         contexts = cli.pending_contexts_from_dir(folder, lambda _text: None)
 
-        self.assertEqual(
-            sorted(context.filename for context in contexts), ["a.txt", "b.md"]
-        )
+        self.assertEqual(sorted(context.filename for context in contexts), ["a.txt", "b.md"])
 
     def test_context_files_menu_imports_from_url(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Intro AI", goal="basics"))
@@ -2234,25 +2212,18 @@ class InteractiveTests(unittest.TestCase):
         try:
             exit_code = call_silent(
                 cli.run_menu,
-                input_func=iter_input(
-                    ["2", "2", "https://example.edu/lectures/week-1", "b", "q"]
-                ),
+                input_func=iter_input(["2", "2", "https://example.edu/lectures/week-1", "b", "q"]),
                 output_func=lambda _text: None,
             )
         finally:
             restore()
 
         saved = cli.topic_context_dir("intro-ai") / "example-edu-lectures-week-1.txt"
-        summary = (
-            cli.topic_context_dir("intro-ai")
-            / "example-edu-lectures-week-1.summary.txt"
-        )
+        summary = cli.topic_context_dir("intro-ai") / "example-edu-lectures-week-1.summary.txt"
         self.assertEqual(exit_code, 0)
         self.assertTrue(saved.exists())
         self.assertTrue(summary.exists())
-        self.assertEqual(
-            len(cli.read_topic("intro-ai").metadata["imported_checksums"]), 1
-        )
+        self.assertEqual(len(cli.read_topic("intro-ai").metadata["imported_checksums"]), 1)
 
     def test_context_files_menu_scans_folder(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Intro AI", goal="basics"))
@@ -2272,9 +2243,7 @@ class InteractiveTests(unittest.TestCase):
             cli.call_openai = original_call_openai
 
         self.assertEqual(exit_code, 0)
-        self.assertEqual(
-            len(cli.read_topic("intro-ai").metadata["imported_checksums"]), 2
-        )
+        self.assertEqual(len(cli.read_topic("intro-ai").metadata["imported_checksums"]), 2)
 
     def test_new_course_setup_imports_from_url(self) -> None:
         restore = self._install_fake_web()
@@ -2375,9 +2344,7 @@ class InteractiveTests(unittest.TestCase):
         finally:
             cli.call_openai = original_call_openai
 
-        metadata, body = cli.parse_topic(
-            cli.topic_path("intro-ai").read_text(encoding="utf-8")
-        )
+        metadata, body = cli.parse_topic(cli.topic_path("intro-ai").read_text(encoding="utf-8"))
 
         self.assertEqual(exit_code, 0)
         self.assertIs(metadata["course_started"], True)
@@ -2452,9 +2419,7 @@ class InteractiveTests(unittest.TestCase):
         finally:
             cli.call_openai = original_call_openai
 
-        metadata, body = cli.parse_topic(
-            cli.topic_path("intro-ai").read_text(encoding="utf-8")
-        )
+        metadata, body = cli.parse_topic(cli.topic_path("intro-ai").read_text(encoding="utf-8"))
         displayed_lesson = " ".join(line for line in output if line.startswith("word"))
 
         self.assertEqual(len(displayed_lesson.split()), 220)
@@ -2488,9 +2453,7 @@ class InteractiveTests(unittest.TestCase):
         finally:
             cli.call_openai = original_call_openai
 
-        metadata, body = cli.parse_topic(
-            cli.topic_path("intro-ai").read_text(encoding="utf-8")
-        )
+        metadata, body = cli.parse_topic(cli.topic_path("intro-ai").read_text(encoding="utf-8"))
 
         self.assertEqual(exit_code, 0)
         self.assertIs(metadata["course_started"], True)
@@ -2512,7 +2475,9 @@ class InteractiveTests(unittest.TestCase):
             match = re.search(r"Difficulty: (\d+)", user)
             difficulty = match.group(1) if match else "1"
             answer_key = {"1": "A", "3": "C", "2": "D"}.get(difficulty, "A")
-            concept = {"1": "modes", "3": "operators", "2": "insert mode"}.get(difficulty, "unknown")
+            concept = {"1": "modes", "3": "operators", "2": "insert mode"}.get(
+                difficulty, "unknown"
+            )
             return json.dumps(
                 {
                     "question": f"Question difficulty {difficulty}\nA) one\nB) two\nC) three\nD) four",
@@ -2724,7 +2689,11 @@ class InteractiveTests(unittest.TestCase):
 
     def test_course_outline_prompt_includes_placement_context(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
-        cli.write_context_text("vim", cli.PLACEMENT_CONTEXT_FILENAME, "Level: intermediate\nKnown: modes\nWeak spots: operators")
+        cli.write_context_text(
+            "vim",
+            cli.PLACEMENT_CONTEXT_FILENAME,
+            "Level: intermediate\nKnown: modes\nWeak spots: operators",
+        )
 
         prompt = cli.course_outline_prompt(cli.read_topic("vim"))
 
@@ -2880,7 +2849,9 @@ class InteractiveTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         clean = list(output)
-        status_index = next(index for index, line in enumerate(clean) if "openlearn" in line and "Vim" in line)
+        status_index = next(
+            index for index, line in enumerate(clean) if "openlearn" in line and "Vim" in line
+        )
         ask_index = output.index("ASK_TOPIC_CALLED")
         self.assertLess(status_index, ask_index)
 
@@ -3103,7 +3074,9 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(updated.metadata["current_slide"], 2)
         self.assertNotIn("9:9", updated.metadata["slide_contents"])
         self.assertIn("Normal mode runs commands", saved["content"])
-        self.assertIn("Previous completed slide content Unit 1 Slide 1", cli.current_lesson_prompt(updated))
+        self.assertIn(
+            "Previous completed slide content Unit 1 Slide 1", cli.current_lesson_prompt(updated)
+        )
 
     def test_repl_done_blocks_needs_work_without_force(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
@@ -3280,7 +3253,9 @@ class InteractiveTests(unittest.TestCase):
         call_silent(cli.cmd_new, Namespace(topic="Arrays", goal="practice leetcode arrays"))
         original_call_openai = cli.call_openai
         original_popen = cli.subprocess.Popen
-        cli.call_openai = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("model called"))
+        cli.call_openai = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("model called")
+        )
         cli.subprocess.Popen = lambda _args: None
         try:
             cli.handle_repl_command("drill --leetcode", output_func=lambda _text: None)
@@ -3323,7 +3298,9 @@ class InteractiveTests(unittest.TestCase):
 
         captured_prompt = []
         cli.subprocess.run = fake_run
-        cli.call_openai = lambda _model, _system, user: captured_prompt.append(user) or "Feedback: fix the return value."
+        cli.call_openai = lambda _model, _system, user: (
+            captured_prompt.append(user) or "Feedback: fix the return value."
+        )
         try:
             result = cli.cmd_check(Namespace(topic="python", model=None), output_func=output.append)
         finally:
@@ -3332,7 +3309,9 @@ class InteractiveTests(unittest.TestCase):
 
         self.assertEqual(result, 1)
         self.assertIn("if True:", drill_path.read_text(encoding="utf-8"))
-        self.assertEqual(run_calls[0][0], [sys.executable, "-m", "pytest", str(drill_path), "-v", "--tb=short"])
+        self.assertEqual(
+            run_calls[0][0], [sys.executable, "-m", "pytest", str(drill_path), "-v", "--tb=short"]
+        )
         self.assertIn("FAILED test_case_1", captured_prompt[0])
         self.assertTrue(any("fix the return value" in line for line in output))
 
@@ -3351,7 +3330,7 @@ class InteractiveTests(unittest.TestCase):
         cli.enable_drill_tests(path)
 
         text = path.read_text(encoding="utf-8")
-        self.assertIn('mentions if False: but is not the guard', text)
+        self.assertIn("mentions if False: but is not the guard", text)
         self.assertIn("if True:\n    def test_case_1", text)
 
     def test_repl_plan_command_prints_course_units(self) -> None:
@@ -3385,7 +3364,13 @@ class InteractiveTests(unittest.TestCase):
             {"unit": 1, "chapter": "1.1", "title": "Modes", "slide_count": 2},
         ]
         metadata["quiz_history"] = [
-            {"date": "2026-01-01", "chapter": "1.1 Modes", "score": "2/3", "summary": "missed modes", "concepts": ["modes"]}
+            {
+                "date": "2026-01-01",
+                "chapter": "1.1 Modes",
+                "score": "2/3",
+                "summary": "missed modes",
+                "concepts": ["modes"],
+            }
         ]
         path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
 
@@ -3406,9 +3391,7 @@ class InteractiveTests(unittest.TestCase):
 
         def fake_call_openai(_model: str, system: str, user: str) -> str:
             calls.append((system, user))
-            return (
-                "Scope: Practical Vim\nUnits:\n1.1 Modes (2 slides) - Learn modes.\n1.2 Search (1 slide) - Use slash search."
-            )
+            return "Scope: Practical Vim\nUnits:\n1.1 Modes (2 slides) - Learn modes.\n1.2 Search (1 slide) - Use slash search."
 
         cli.call_openai = fake_call_openai
         try:
@@ -3432,7 +3415,12 @@ class PromptInstructionTests(unittest.TestCase):
         self.home = tempfile.TemporaryDirectory()
         self.previous_env = {
             name: os.environ.get(name)
-            for name in ("OPENLEARN_HOME", "OPENLEARN_MODEL", "OPENLEARN_BASE_URL", "OPENAI_API_KEY")
+            for name in (
+                "OPENLEARN_HOME",
+                "OPENLEARN_MODEL",
+                "OPENLEARN_BASE_URL",
+                "OPENAI_API_KEY",
+            )
         }
         os.environ["OPENLEARN_HOME"] = self.home.name
         os.environ.pop("OPENLEARN_MODEL", None)
@@ -3934,9 +3922,7 @@ class PromptInstructionTests(unittest.TestCase):
         original_call_openai = cli.call_openai
         original_write_text_atomic = cli.write_text_atomic
 
-        cli.call_openai = lambda *_args, **_kwargs: json.dumps(
-            {"known_add": ["normal mode"]}
-        )
+        cli.call_openai = lambda *_args, **_kwargs: json.dumps({"known_add": ["normal mode"]})
 
         def failing_write(path: Path, text: str) -> None:
             if path == topic.path:
@@ -4320,13 +4306,17 @@ class PromptInstructionTests(unittest.TestCase):
         self.assertEqual(updated.metadata["concept_attempts"]["variables"]["correct_sum"], 2.0)
         state = cli.load_state("variables")
         self.assertEqual(state["concept_attempts"]["variables"]["attempts"], 2)
-        raw_metadata, _body = cli.parse_topic(cli.topic_path("variables").read_text(encoding="utf-8"))
+        raw_metadata, _body = cli.parse_topic(
+            cli.topic_path("variables").read_text(encoding="utf-8")
+        )
         self.assertNotIn("concept_attempts", raw_metadata)
         events = [
             json.loads(line)
             for line in cli.topic_events_path("variables").read_text(encoding="utf-8").splitlines()
         ]
-        self.assertEqual([event["event_type"] for event in events], ["answer_judged", "answer_judged"])
+        self.assertEqual(
+            [event["event_type"] for event in events], ["answer_judged", "answer_judged"]
+        )
         self.assertEqual(events[-1]["schema_version"], cli.EVENT_SCHEMA_VERSION)
 
     def test_answer_judged_event_marks_review_session_as_retrieval(self) -> None:
@@ -4520,9 +4510,7 @@ class PromptInstructionTests(unittest.TestCase):
                 }
             ]
             cli.write_topic(topic.path, metadata, topic.body)
-            copied = (
-                "Normal mode runs commands and insert mode types text while escape returns to normal mode."
-            )
+            copied = "Normal mode runs commands and insert mode types text while escape returns to normal mode."
             cli.append_session(cli.read_topic("vim"), "lesson", "lesson", copied)
 
             cli.update_learning_metadata(cli.read_topic("vim"), copied, "Correct.", "test-model")
@@ -4577,8 +4565,12 @@ class PromptInstructionTests(unittest.TestCase):
             ]
             path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
 
-            cli.update_learning_metadata(cli.read_topic("vim"), "First transfer answer", "Correct.", "test-model")
-            cli.update_learning_metadata(cli.read_topic("vim"), "Second transfer answer", "Correct.", "test-model")
+            cli.update_learning_metadata(
+                cli.read_topic("vim"), "First transfer answer", "Correct.", "test-model"
+            )
+            cli.update_learning_metadata(
+                cli.read_topic("vim"), "Second transfer answer", "Correct.", "test-model"
+            )
             updated = cli.read_topic("vim")
         finally:
             cli.call_openai = original_call_openai
@@ -4632,8 +4624,12 @@ class PromptInstructionTests(unittest.TestCase):
             ]
             path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
 
-            cli.update_learning_metadata(cli.read_topic("vim"), "first transfer", "Correct.", "test-model")
-            cli.update_learning_metadata(cli.read_topic("vim"), "second transfer", "Correct.", "test-model")
+            cli.update_learning_metadata(
+                cli.read_topic("vim"), "first transfer", "Correct.", "test-model"
+            )
+            cli.update_learning_metadata(
+                cli.read_topic("vim"), "second transfer", "Correct.", "test-model"
+            )
             updated = cli.read_topic("vim")
             raw_metadata, _body = cli.parse_topic(path.read_text(encoding="utf-8"))
         finally:
@@ -4721,8 +4717,12 @@ class PromptInstructionTests(unittest.TestCase):
             ]
             path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
 
-            cli.update_learning_metadata(cli.read_topic("vim"), "first transfer", "Correct.", "test-model")
-            cli.update_learning_metadata(cli.read_topic("vim"), "second transfer", "Correct.", "test-model")
+            cli.update_learning_metadata(
+                cli.read_topic("vim"), "first transfer", "Correct.", "test-model"
+            )
+            cli.update_learning_metadata(
+                cli.read_topic("vim"), "second transfer", "Correct.", "test-model"
+            )
             updated = cli.read_topic("vim")
         finally:
             cli.call_openai = original_call_openai
@@ -4766,8 +4766,12 @@ class PromptInstructionTests(unittest.TestCase):
             ]
             path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
 
-            cli.update_learning_metadata(cli.read_topic("vim"), "answer one", "Try again.", "test-model")
-            cli.update_learning_metadata(cli.read_topic("vim"), "answer two", "Try again.", "test-model")
+            cli.update_learning_metadata(
+                cli.read_topic("vim"), "answer one", "Try again.", "test-model"
+            )
+            cli.update_learning_metadata(
+                cli.read_topic("vim"), "answer two", "Try again.", "test-model"
+            )
             raw_metadata, _body = cli.parse_topic(path.read_text(encoding="utf-8"))
         finally:
             cli.call_openai = original_call_openai
@@ -4791,7 +4795,10 @@ class PromptInstructionTests(unittest.TestCase):
             self.assertNotIn(key, raw_metadata)
         self.assertNotIn("difficulty", raw_metadata["course_units"][0])
         self.assertNotIn("difficulty_locked", raw_metadata["course_units"][0])
-        self.assertIn({"id": "normal-mode", "label": "Normal mode"}, raw_metadata["course_units"][0]["concepts"])
+        self.assertIn(
+            {"id": "normal-mode", "label": "Normal mode"},
+            raw_metadata["course_units"][0]["concepts"],
+        )
         state = cli.load_state("vim")
         self.assertEqual(state["recent_answer_results"], [False, False])
         self.assertEqual(state["rolling_pass_rate"], 0.0)
@@ -4953,9 +4960,7 @@ class PromptInstructionTests(unittest.TestCase):
         self.assertEqual(cli.select_check_mode(5, "mastering", "deep"), "application")
         self.assertEqual(cli.select_check_mode(10, "mastering", "deep"), "impasse")
         self.assertEqual(
-            cli.select_check_mode(
-                10, "mastering", {"impasse_probe_frequency": "high"}
-            ),
+            cli.select_check_mode(10, "mastering", {"impasse_probe_frequency": "high"}),
             "impasse",
         )
 
@@ -4981,7 +4986,9 @@ class PromptInstructionTests(unittest.TestCase):
         metadata["pending_cumulative_quiz"] = {"kind": "cumulative"}
         self.assertFalse(cli.cumulative_quiz_due(metadata))
 
-    def test_cumulative_quiz_selection_prioritizes_misconceptions_due_and_profile_size(self) -> None:
+    def test_cumulative_quiz_selection_prioritizes_misconceptions_due_and_profile_size(
+        self,
+    ) -> None:
         metadata = {
             "mastery_profile": "efficient",
             "current_unit": 3,
@@ -5010,7 +5017,10 @@ class PromptInstructionTests(unittest.TestCase):
                 },
             ],
             "concept_attempts": {
-                "search-heuristics": {"attempts": 1, "misconceptions": ["greedy is always optimal"]},
+                "search-heuristics": {
+                    "attempts": 1,
+                    "misconceptions": ["greedy is always optimal"],
+                },
                 "priors": {"attempts": 1},
             },
             "review_due": [{"concept": "Bayes rule", "due": cli.today(), "difficulty": "hard"}],
@@ -5019,7 +5029,9 @@ class PromptInstructionTests(unittest.TestCase):
 
         selected = cli.select_cumulative_quiz_concepts(metadata)
 
-        self.assertEqual([item["id"] for item in selected], ["search-heuristics", "bayes-rule", "priors"])
+        self.assertEqual(
+            [item["id"] for item in selected], ["search-heuristics", "bayes-rule", "priors"]
+        )
 
         metadata["mastery_profile"] = "deep"
         selected = cli.select_cumulative_quiz_concepts(metadata)
@@ -5393,7 +5405,9 @@ class PromptInstructionTests(unittest.TestCase):
         bayes = updated.metadata["concept_attempts"]["bayes-rule"]
         self.assertTrue(bayes["passed_transfer"])
         self.assertFalse(bayes["recognition_only"])
-        self.assertTrue(any(item["concept"] == "Bayes rule" for item in updated.metadata["review_due"]))
+        self.assertTrue(
+            any(item["concept"] == "Bayes rule" for item in updated.metadata["review_due"])
+        )
         events_path = cli.topic_events_path("ai")
         events = [
             json.loads(line)
@@ -5439,7 +5453,7 @@ class PromptInstructionTests(unittest.TestCase):
         self.assertIn("Use multiple choice when testing recognition", rules)
         self.assertIn("disambiguating common confusions", rules)
         self.assertIn("Use free response when the learner needs to explain reasoning", rules)
-        self.assertIn("Avoid multiple choice for \"why\" questions", rules)
+        self.assertIn('Avoid multiple choice for "why" questions', rules)
         self.assertIn("Use hands-on checks when the concept is a keybinding", rules)
         self.assertIn("Skip the check when the slide is only orientation", rules)
 
@@ -5630,7 +5644,9 @@ class PromptInstructionTests(unittest.TestCase):
 
         self.assertIn("Tier move: struggling - reduce to one sub-concept", struggling_prompt)
         self.assertIn("contingent, faded help after the attempt", struggling_prompt)
-        self.assertIn("Target this misconception next: thinks normal mode inserts text", struggling_prompt)
+        self.assertIn(
+            "Target this misconception next: thinks normal mode inserts text", struggling_prompt
+        )
         self.assertIn("specific wrong model", struggling_prompt)
         self.assertIn("Tier move: on_track - use production or transfer checks", on_track_prompt)
         self.assertIn("why or what-if probes", on_track_prompt)
@@ -5822,7 +5838,12 @@ class PromptContextTests(unittest.TestCase):
         self.home = tempfile.TemporaryDirectory()
         self.previous_env = {
             name: os.environ.get(name)
-            for name in ("OPENLEARN_HOME", "OPENLEARN_MODEL", "OPENLEARN_BASE_URL", "OPENAI_API_KEY")
+            for name in (
+                "OPENLEARN_HOME",
+                "OPENLEARN_MODEL",
+                "OPENLEARN_BASE_URL",
+                "OPENAI_API_KEY",
+            )
         }
         os.environ["OPENLEARN_HOME"] = self.home.name
         os.environ.pop("OPENLEARN_MODEL", None)
@@ -6211,9 +6232,7 @@ class VideoSuggestionTests(unittest.TestCase):
 
     def test_parse_video_results_returns_empty_on_malformed_html(self) -> None:
         self.assertEqual(cli.parse_video_results("<html>no data here</html>"), [])
-        self.assertEqual(
-            cli.parse_video_results("ytInitialData = {not valid json};"), []
-        )
+        self.assertEqual(cli.parse_video_results("ytInitialData = {not valid json};"), [])
 
     def test_fetch_video_suggestions_degrades_gracefully_on_error(self) -> None:
         fake_requests = types.SimpleNamespace(
@@ -6255,7 +6274,9 @@ class VideoSuggestionTests(unittest.TestCase):
             self.assertEqual(captured, [])
 
             # Opt-in on, correct answer → no suggestions.
-            cli.save_course_options(slug, dict(cli.course_options(cli.read_topic(slug).metadata), suggest_videos=True))
+            cli.save_course_options(
+                slug, dict(cli.course_options(cli.read_topic(slug).metadata), suggest_videos=True)
+            )
             self._set_meta(slug, {"last_answer_status": "correct", "current_focus": "quicksort"})
             cli.maybe_suggest_videos(slug, captured.append)
             self.assertEqual(captured, [])
@@ -6325,12 +6346,15 @@ class VideoSuggestionTests(unittest.TestCase):
     def test_cmd_videos_uses_current_focus_and_prints_results(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Networks", goal="learn"))
         slug = "networks"
-        self._set_meta(slug, {"current_focus": "TCP handshake", "last_video_focus": "TCP handshake"})
+        self._set_meta(
+            slug, {"current_focus": "TCP handshake", "last_video_focus": "TCP handshake"}
+        )
         seen_query = []
         original = cli.fetch_video_suggestions
-        cli.fetch_video_suggestions = lambda query, limit=3: seen_query.append((query, limit)) or [
-            {"title": "TCP 101", "url": "https://youtu.be/tcp", "duration": "10:00"}
-        ]
+        cli.fetch_video_suggestions = lambda query, limit=3: (
+            seen_query.append((query, limit))
+            or [{"title": "TCP 101", "url": "https://youtu.be/tcp", "duration": "10:00"}]
+        )
         output = []
         try:
             code = cli.cmd_videos(
@@ -6357,7 +6381,9 @@ class VideoSuggestionTests(unittest.TestCase):
         self.assertTrue(any("No videos found" in line for line in output))
 
     def test_parse_videos_count_extracts_flag_and_clamps(self) -> None:
-        self.assertEqual(cli.parse_videos_count(["--n", "5", "binary", "search"]), (5, ["binary", "search"]))
+        self.assertEqual(
+            cli.parse_videos_count(["--n", "5", "binary", "search"]), (5, ["binary", "search"])
+        )
         self.assertEqual(cli.parse_videos_count(["graphs"]), (3, ["graphs"]))
         self.assertEqual(cli.parse_videos_count(["--n", "99"]), (10, []))
 

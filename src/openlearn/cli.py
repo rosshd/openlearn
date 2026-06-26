@@ -99,11 +99,10 @@ DYNAMIC_METADATA_KEYS = {
     "rolling_pass_rate",
 }
 
+
 def is_dynamic_metadata_key(key: str) -> bool:
     return (
-        key in DYNAMIC_METADATA_KEYS
-        or key.startswith("last_answer_")
-        or key.startswith("pending_")
+        key in DYNAMIC_METADATA_KEYS or key.startswith("last_answer_") or key.startswith("pending_")
     )
 
 
@@ -247,14 +246,10 @@ def build_parser() -> argparse.ArgumentParser:
     menu_parser = sub.add_parser("menu", help="Open a simple interactive menu")
     menu_parser.set_defaults(func=cmd_menu)
 
-    templates_parser = sub.add_parser(
-        "templates", help="List starter course templates"
-    )
+    templates_parser = sub.add_parser("templates", help="List starter course templates")
     templates_parser.set_defaults(func=cmd_templates)
 
-    test_parser = sub.add_parser(
-        "test", help="Seed and open the built-in manual test course"
-    )
+    test_parser = sub.add_parser("test", help="Seed and open the built-in manual test course")
     test_parser.add_argument(
         "--home",
         default=None,
@@ -285,18 +280,14 @@ def build_parser() -> argparse.ArgumentParser:
     repl_parser = sub.add_parser(
         "repl", aliases=["shell"], help="Start an interactive learning session"
     )
-    repl_parser.add_argument(
-        "topic", nargs="?", help="Topic slug, defaults to active/recent"
-    )
+    repl_parser.add_argument("topic", nargs="?", help="Topic slug, defaults to active/recent")
     repl_parser.add_argument(
         "--model", default=None, help="Override model for model-backed requests"
     )
     repl_parser.set_defaults(func=cmd_repl)
 
     tui_parser = sub.add_parser("tui", help="Start a prompt-toolkit TUI (optional dependency)")
-    tui_parser.add_argument(
-        "topic", nargs="?", help="Topic slug, defaults to active/recent"
-    )
+    tui_parser.add_argument("topic", nargs="?", help="Topic slug, defaults to active/recent")
     tui_parser.add_argument(
         "--model", default=None, help="Override model for model-backed requests"
     )
@@ -305,22 +296,14 @@ def build_parser() -> argparse.ArgumentParser:
     config_parser = sub.add_parser("config", help="Manage local model configuration")
     config_sub = config_parser.add_subparsers(required=True)
 
-    config_show = config_sub.add_parser(
-        "show", help="Show configured provider and model"
-    )
+    config_show = config_sub.add_parser("show", help="Show configured provider and model")
     config_show.set_defaults(func=cmd_config_show)
 
-    config_set_key = config_sub.add_parser(
-        "set-key", help="Save an OpenAI API key locally"
-    )
-    config_set_key.add_argument(
-        "api_key", nargs="?", help="API key; prompted securely if omitted"
-    )
+    config_set_key = config_sub.add_parser("set-key", help="Save an OpenAI API key locally")
+    config_set_key.add_argument("api_key", nargs="?", help="API key; prompted securely if omitted")
     config_set_key.set_defaults(func=cmd_config_set_key)
 
-    config_set_model = config_sub.add_parser(
-        "set-model", help="Save the default model name"
-    )
+    config_set_model = config_sub.add_parser("set-model", help="Save the default model name")
     config_set_model.add_argument("model", help="Model name, for example gpt-4.1-mini")
     config_set_model.set_defaults(func=cmd_config_set_model)
 
@@ -332,9 +315,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     config_set_base_url.set_defaults(func=cmd_config_set_base_url)
 
-    config_clear_key = config_sub.add_parser(
-        "clear-key", help="Remove the saved API key"
-    )
+    config_clear_key = config_sub.add_parser("clear-key", help="Remove the saved API key")
     config_clear_key.set_defaults(func=cmd_config_clear_key)
 
     new_parser = sub.add_parser("new", help="Create a new learning topic")
@@ -355,8 +336,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     delete_parser = sub.add_parser("delete", help="Delete a local learning topic")
     delete_parser.add_argument("topic", nargs="?", help="Topic slug")
-    delete_parser.add_argument("--yes", action="store_true", help="Confirm deletion without prompting")
-    delete_parser.add_argument("--all", action="store_true", help="Delete all local topics with one confirmation")
+    delete_parser.add_argument(
+        "--yes", action="store_true", help="Confirm deletion without prompting"
+    )
+    delete_parser.add_argument(
+        "--all", action="store_true", help="Delete all local topics with one confirmation"
+    )
     delete_parser.set_defaults(func=cmd_delete)
 
     list_parser = sub.add_parser("list", help="List local learning topics")
@@ -370,21 +355,15 @@ def build_parser() -> argparse.ArgumentParser:
     status_parser.set_defaults(func=cmd_status)
 
     stats_parser = sub.add_parser("stats", help="Show study progress")
-    stats_parser.add_argument(
-        "topic", nargs="?", help="Topic slug (default: active topic)"
-    )
+    stats_parser.add_argument("topic", nargs="?", help="Topic slug (default: active topic)")
     stats_parser.set_defaults(func=cmd_stats)
 
     summary_parser = sub.add_parser("summary", help="Show a course progress summary")
-    summary_parser.add_argument(
-        "topic", nargs="?", help="Topic slug, defaults to active/recent"
-    )
+    summary_parser.add_argument("topic", nargs="?", help="Topic slug, defaults to active/recent")
     summary_parser.set_defaults(func=cmd_summary)
 
     repair_parser = sub.add_parser("repair", help="Fill missing metadata defaults")
-    repair_parser.add_argument(
-        "topic", nargs="?", help="Topic slug, defaults to active/recent"
-    )
+    repair_parser.add_argument("topic", nargs="?", help="Topic slug, defaults to active/recent")
     repair_parser.set_defaults(func=cmd_repair)
 
     active_parser = sub.add_parser("active", help="Show or set the active topic")
@@ -392,9 +371,7 @@ def build_parser() -> argparse.ArgumentParser:
     active_parser.set_defaults(func=cmd_active)
 
     edit_parser = sub.add_parser("edit", help="Open a topic file in $EDITOR")
-    edit_parser.add_argument(
-        "topic", nargs="?", help="Topic slug, defaults to active/recent"
-    )
+    edit_parser.add_argument("topic", nargs="?", help="Topic slug, defaults to active/recent")
     edit_parser.set_defaults(func=cmd_edit)
 
     import_parser = sub.add_parser("import", help="Import source material")
@@ -409,9 +386,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     paste_parser = sub.add_parser("paste", help="Paste source material in $EDITOR")
     paste_parser.add_argument("topic", help="Topic slug")
-    paste_parser.add_argument(
-        "--name", default="pasted-notes.txt", help="Source filename to save"
-    )
+    paste_parser.add_argument("--name", default="pasted-notes.txt", help="Source filename to save")
     paste_parser.add_argument(
         "--model", default=None, help="Override model for source summarization"
     )
@@ -420,16 +395,12 @@ def build_parser() -> argparse.ArgumentParser:
     chat_parser = sub.add_parser("chat", help="Ask the tutor about a topic")
     chat_parser.add_argument("topic", help="Topic slug")
     chat_parser.add_argument("prompt", help="Question or request")
-    chat_parser.add_argument(
-        "--model", default=None, help="Override model for this request"
-    )
+    chat_parser.add_argument("--model", default=None, help="Override model for this request")
     chat_parser.set_defaults(func=cmd_chat)
 
     review_parser = sub.add_parser("review", help="Generate a focused review session")
     review_parser.add_argument("topic", help="Topic slug")
-    review_parser.add_argument(
-        "--model", default=None, help="Override model for this request"
-    )
+    review_parser.add_argument("--model", default=None, help="Override model for this request")
     review_parser.add_argument(
         "--due",
         action="store_true",
@@ -441,12 +412,8 @@ def build_parser() -> argparse.ArgumentParser:
     due_parser = sub.add_parser("due", help="List review concepts due today")
     due_parser.set_defaults(func=cmd_due)
 
-    videos_parser = sub.add_parser(
-        "videos", help="Suggest YouTube videos for a topic concept"
-    )
-    videos_parser.add_argument(
-        "topic", nargs="?", help="Topic slug, defaults to active/recent"
-    )
+    videos_parser = sub.add_parser("videos", help="Suggest YouTube videos for a topic concept")
+    videos_parser.add_argument("topic", nargs="?", help="Topic slug, defaults to active/recent")
     videos_parser.add_argument(
         "--query", default=None, help="Concept to search for (defaults to current focus)"
     )
@@ -456,41 +423,27 @@ def build_parser() -> argparse.ArgumentParser:
     videos_parser.set_defaults(func=cmd_videos)
 
     resume_parser = sub.add_parser("resume", help="Resume the active or selected topic")
-    resume_parser.add_argument(
-        "topic", nargs="?", help="Topic slug, defaults to active/recent"
-    )
-    resume_parser.add_argument(
-        "--model", default=None, help="Override model for this request"
-    )
+    resume_parser.add_argument("topic", nargs="?", help="Topic slug, defaults to active/recent")
+    resume_parser.add_argument("--model", default=None, help="Override model for this request")
     resume_parser.set_defaults(func=cmd_resume)
 
     next_parser = sub.add_parser("next", help="Generate the next short learning step")
-    next_parser.add_argument(
-        "topic", nargs="?", help="Topic slug, defaults to active/recent"
-    )
-    next_parser.add_argument(
-        "--model", default=None, help="Override model for this request"
-    )
+    next_parser.add_argument("topic", nargs="?", help="Topic slug, defaults to active/recent")
+    next_parser.add_argument("--model", default=None, help="Override model for this request")
     next_parser.set_defaults(func=cmd_next)
 
     chapter_parser = sub.add_parser("chapter", help="Jump to a specific course chapter")
     chapter_parser.add_argument(
         "unit", nargs="?", type=int, help="Unit number to jump to (interactive if omitted)"
     )
-    chapter_parser.add_argument(
-        "topic", nargs="?", help="Topic slug, defaults to active/recent"
-    )
-    chapter_parser.add_argument(
-        "--model", default=None, help="Override model for this request"
-    )
+    chapter_parser.add_argument("topic", nargs="?", help="Topic slug, defaults to active/recent")
+    chapter_parser.add_argument("--model", default=None, help="Override model for this request")
     chapter_parser.set_defaults(func=cmd_chapter_select)
 
     return parser
 
 
-def cmd_init(
-    args: argparse.Namespace, output_func=print, input_func=input
-) -> int:
+def cmd_init(args: argparse.Namespace, output_func=print, input_func=input) -> int:
     import getpass
 
     maybe_print_migration_notice()
@@ -585,9 +538,7 @@ def cmd_templates(_args: argparse.Namespace, output_func=print) -> int:
             data = json.loads(file.read_text(encoding="utf-8"))
             tags = ", ".join(data.get("tags") or [])
             unit_count = len(data.get("units") or [])
-            output_func(
-                f"  {data['slug']:<22} {data['name']:<30} [{tags}]  {unit_count} units"
-            )
+            output_func(f"  {data['slug']:<22} {data['name']:<30} [{tags}]  {unit_count} units")
         except Exception:
             pass
     output_func("")
@@ -620,17 +571,12 @@ def cmd_test(args: argparse.Namespace) -> int:
 
     seed_manual_test_course(started=args.resume, with_session=args.resume)
     if args.with_lock:
-        topic_lock_path(MANUAL_TEST_COURSE_SLUG).write_text(
-            "manual stale lock\n", encoding="utf-8"
-        )
+        topic_lock_path(MANUAL_TEST_COURSE_SLUG).write_text("manual stale lock\n", encoding="utf-8")
 
     print("Seeded openLearn manual test course")
     print(f"OPENLEARN_HOME={home}")
     print(f"Topic: {topic_path(MANUAL_TEST_COURSE_SLUG)}")
-    print(
-        "Context: "
-        f"{topic_context_dir(MANUAL_TEST_COURSE_SLUG) / MANUAL_TEST_CONTEXT_FILENAME}"
-    )
+    print(f"Context: {topic_context_dir(MANUAL_TEST_COURSE_SLUG) / MANUAL_TEST_CONTEXT_FILENAME}")
     if args.with_lock:
         print(f"Stale lock: {topic_lock_path(MANUAL_TEST_COURSE_SLUG)}")
     print("")
@@ -805,9 +751,7 @@ def menu_new_course(input_func, output_func) -> None:
             folder = input_func("Folder to scan: ").strip()
             output_func("")
             if folder:
-                pending_contexts.extend(
-                    pending_contexts_from_dir(Path(folder), output_func)
-                )
+                pending_contexts.extend(pending_contexts_from_dir(Path(folder), output_func))
         elif choice in {"6", "p", "paste"}:
             filename = input_func("Context file name: ").strip() or "pasted-info.txt"
             output_func("")
@@ -869,13 +813,12 @@ def create_course_from_setup(
     return saved_contexts
 
 
-def summarize_pending_contexts(
-    active: str | None, context_paths: list[Path], output_func
-) -> None:
+def summarize_pending_contexts(active: str | None, context_paths: list[Path], output_func) -> None:
     if not active or not context_paths:
         return
     pending = [
-        path for path in context_paths
+        path
+        for path in context_paths
         if not (topic_context_dir(active) / f"{path.stem}.summary.txt").exists()
     ]
     if not pending:
@@ -904,9 +847,13 @@ def read_pending_context(source: Path, output_func=print) -> PendingContext:
         raise OpenLearnError(f"context file not found: {source}")
     suffix = source.suffix.lower()
     if suffix not in {".txt", ".md", ".pdf", ".docx"}:
-        raise OpenLearnError("only .txt, .md, .pdf, and .docx context files are supported right now")
+        raise OpenLearnError(
+            "only .txt, .md, .pdf, and .docx context files are supported right now"
+        )
     if suffix == ".pdf":
-        return PendingContext(source.with_suffix(".txt").name, _extract_pdf_text(source, output_func))
+        return PendingContext(
+            source.with_suffix(".txt").name, _extract_pdf_text(source, output_func)
+        )
     if suffix == ".docx":
         return PendingContext(source.with_suffix(".txt").name, _extract_docx_text(source))
     return PendingContext(source.name, source.read_text(encoding="utf-8"))
@@ -942,11 +889,7 @@ def scan_source_files(directory: Path) -> list[Path]:
 
 def seed_manual_test_course(started: bool = False, with_session: bool = False) -> None:
     if not topic_path(MANUAL_TEST_COURSE_SLUG).exists():
-        cmd_new(
-            argparse.Namespace(
-                topic=MANUAL_TEST_COURSE_NAME, goal=MANUAL_TEST_COURSE_GOAL
-            )
-        )
+        cmd_new(argparse.Namespace(topic=MANUAL_TEST_COURSE_NAME, goal=MANUAL_TEST_COURSE_GOAL))
     else:
         set_active_topic(MANUAL_TEST_COURSE_SLUG)
 
@@ -1015,9 +958,11 @@ def menu_topics(input_func, output_func) -> None:
     if choice == "1":
         cmd_active(argparse.Namespace(topic=topic))
     elif choice == "2":
-        confirm = input_func(
-            f"Delete {topic}? This is not reversible. Are you sure? [y/N]: "
-        ).strip().lower()
+        confirm = (
+            input_func(f"Delete {topic}? This is not reversible. Are you sure? [y/N]: ")
+            .strip()
+            .lower()
+        )
         if confirm in {"y", "yes"}:
             cmd_delete(argparse.Namespace(topic=topic, yes=True))
         else:
@@ -1095,9 +1040,13 @@ def menu_context_files(input_func, output_func) -> None:
             if not files:
                 output_func("No context files to delete.")
                 continue
-            confirm = input_func(
-                f"Delete all {len(files)} context file(s)? This is not reversible. [y/N]: "
-            ).strip().lower()
+            confirm = (
+                input_func(
+                    f"Delete all {len(files)} context file(s)? This is not reversible. [y/N]: "
+                )
+                .strip()
+                .lower()
+            )
             if confirm in {"y", "yes"}:
                 for path in files:
                     path.unlink()
@@ -1344,9 +1293,7 @@ def handle_repl_command(
             output_func=output_func,
         )
     elif name == "status":
-        cmd_status(
-            argparse.Namespace(topic=args[0] if args else resolve_topic_slug(None))
-        )
+        cmd_status(argparse.Namespace(topic=args[0] if args else resolve_topic_slug(None)))
     elif name == "summary":
         cmd_summary(argparse.Namespace(topic=args[0] if args else None))
     elif name in {"options", "opts"}:
@@ -1394,7 +1341,9 @@ def handle_repl_command(
     elif name in {"delete", "del", "rm"}:
         if not args:
             raise OpenLearnError("usage: /delete <topic>")
-        output_func("Use the non-interactive command for deletion: openlearn delete " + slugify(args[0]))
+        output_func(
+            "Use the non-interactive command for deletion: openlearn delete " + slugify(args[0])
+        )
     elif name == "ask":
         if not args:
             raise OpenLearnError("usage: /ask <question>")
@@ -1580,7 +1529,9 @@ def start_course(input_func=input, output_func=print, model: str | None = None) 
     feedback = ""
     rejected_outline = ""
 
-    placement_answer = input_func("Run optional placement quiz before planning? [y/N]: ").strip().lower()
+    placement_answer = (
+        input_func("Run optional placement quiz before planning? [y/N]: ").strip().lower()
+    )
     output_func("")
     if placement_answer in {"y", "yes"}:
         run_placement_quiz(topic, model, input_func, output_func)
@@ -1744,8 +1695,8 @@ def placement_question_prompt(
         Base questions on the learner's specific setup and context files when available,
         not generic defaults.
 
-        Course: {topic.metadata.get('topic', topic.slug)}
-        Goal: {topic.metadata.get('goal', '')}
+        Course: {topic.metadata.get("topic", topic.slug)}
+        Goal: {topic.metadata.get("goal", "")}
         Difficulty: {difficulty}
         Prior placement results:
         {json.dumps(results[-4:], indent=2)}
@@ -1841,7 +1792,7 @@ def placement_evaluation(
         - concept: short concept name
         - note: one short note about what the answer shows
 
-        Course: {topic.metadata.get('topic', topic.slug)}
+        Course: {topic.metadata.get("topic", topic.slug)}
         Difficulty: {difficulty}
         Prior results: {json.dumps(results[-4:], indent=2)}
         Correct choice letter: {answer_key or "unknown"}
@@ -1897,7 +1848,8 @@ def placement_level(results: list[dict[str, object]]) -> str:
         return "beginner"
     correct_count = sum(1 for item in results if item.get("correct") is True)
     max_difficulty = max(
-        [item.get("difficulty") for item in results if isinstance(item.get("difficulty"), int)] or [1]
+        [item.get("difficulty") for item in results if isinstance(item.get("difficulty"), int)]
+        or [1]
     )
     if correct_count >= 4 and max_difficulty >= 6:
         return "advanced"
@@ -1930,8 +1882,7 @@ def _context_file_count(slug: str) -> int:
     if not directory.exists():
         return 0
     return sum(
-        1 for f in directory.iterdir()
-        if f.is_file() and not f.name.endswith(".summary.txt")
+        1 for f in directory.iterdir() if f.is_file() and not f.name.endswith(".summary.txt")
     )
 
 
@@ -1955,17 +1906,14 @@ def _slide_count_guidance(slug: str) -> str:
     )
 
 
-def course_outline_prompt(
-    topic: Topic, feedback: str = "", rejected_outline: str = ""
-) -> str:
+def course_outline_prompt(topic: Topic, feedback: str = "", rejected_outline: str = "") -> str:
     goal = str(topic.metadata.get("goal") or "")
     template_units = topic.metadata.get("template_units")
     template_hint = ""
     if isinstance(template_units, list) and template_units:
         units_text = "\n".join(f"  {unit}" for unit in template_units)
         template_hint = (
-            f"\nSuggested unit structure (adapt freely, don't copy verbatim):\n"
-            f"{units_text}\n"
+            f"\nSuggested unit structure (adapt freely, don't copy verbatim):\n{units_text}\n"
         )
     placement_context = placement_context_prompt(topic.slug)
     revision_text = ""
@@ -2035,10 +1983,7 @@ def parse_concept_labels(text: str) -> list[str]:
         return []
     raw = match.group(1)
     raw = re.sub(r"\s+[-–—]\s+.*$", "", raw).strip()
-    values = [
-        item.strip(" \t-•,.;")
-        for item in re.split(r"\s*;\s*|\s*,\s*(?=[A-Z0-9])", raw)
-    ]
+    values = [item.strip(" \t-•,.;") for item in re.split(r"\s*;\s*|\s*,\s*(?=[A-Z0-9])", raw)]
     labels: list[str] = []
     seen: set[str] = set()
     for value in values:
@@ -2154,7 +2099,11 @@ def normalize_concepts(value: object, fallback_label: str) -> list[dict[str, str
                 continue
             label = raw_label.strip()
             fallback = f"concept-{index}"
-            concept_id = raw_id.strip() if isinstance(raw_id, str) and raw_id.strip() else concept_id_for_label(label, fallback)
+            concept_id = (
+                raw_id.strip()
+                if isinstance(raw_id, str) and raw_id.strip()
+                else concept_id_for_label(label, fallback)
+            )
             if concept_id in seen:
                 continue
             seen.add(concept_id)
@@ -2184,7 +2133,7 @@ def infer_mastery_profile_from_goal(goal: str, model: str | None = None) -> str:
     if configured_openai_api_key() and os.environ.get("OPENLEARN_MOCK") not in {"1", "true", "yes"}:
         prompt = (
             "Classify this learning goal into exactly one mastery_profile: "
-            "efficient, proficient, or deep. Return JSON like {\"mastery_profile\":\"proficient\"}.\n\n"
+            'efficient, proficient, or deep. Return JSON like {"mastery_profile":"proficient"}.\n\n'
             f"Goal: {goal_text}"
         )
         try:
@@ -2236,7 +2185,9 @@ def concept_id_for_focus(metadata: dict[str, object], focus: str) -> str:
     if isinstance(units, list):
         for item in units:
             if isinstance(item, dict) and isinstance(item.get("concepts"), list):
-                candidates.extend(concept for concept in item["concepts"] if isinstance(concept, dict))
+                candidates.extend(
+                    concept for concept in item["concepts"] if isinstance(concept, dict)
+                )
     focus_key = focus_value.strip().lower()
     for concept in candidates:
         concept_id = concept.get("id")
@@ -2255,8 +2206,7 @@ def concept_id_for_focus(metadata: dict[str, object], focus: str) -> str:
             concepts = []
             unit["concepts"] = concepts
         if not any(
-            isinstance(concept, dict) and concept.get("id") == concept_id
-            for concept in concepts
+            isinstance(concept, dict) and concept.get("id") == concept_id for concept in concepts
         ):
             concepts.append({"id": concept_id, "label": focus_value})
     return concept_id
@@ -2418,14 +2368,15 @@ def last_tutor_lesson_response(topic: Topic) -> str:
     _topic_body, session_log = split_session_log(topic.body)
     entries = session_entries(session_log)
     for entry in reversed(entries):
-        if entry["kind"] in {"lesson", "next", "resume", "review", "chat"} and entry["response"].strip():
+        if (
+            entry["kind"] in {"lesson", "next", "resume", "review", "chat"}
+            and entry["response"].strip()
+        ):
             return entry["response"].strip()
     return ""
 
 
-def persist_current_slide_content(
-    metadata: dict[str, object], answer: str
-) -> None:
+def persist_current_slide_content(metadata: dict[str, object], answer: str) -> None:
     unit = metadata.get("current_unit")
     slide = metadata.get("current_slide")
     if not isinstance(unit, int) or not isinstance(slide, int):
@@ -2522,9 +2473,7 @@ def advance_slide(slug: str, output_func=print, force: bool = False) -> bool:
     last_lesson_response = last_tutor_lesson_response(topic)
     with file_lock(path):
         raw_metadata, body = parse_topic(path.read_text(encoding="utf-8"))
-        metadata = merge_topic_state(
-            normalize_topic_metadata(raw_metadata, slug), load_state(slug)
-        )
+        metadata = merge_topic_state(normalize_topic_metadata(raw_metadata, slug), load_state(slug))
         metadata = dict(metadata)
         answer_status = metadata.get("last_answer_status")
         tutor_accepted = tutor_response_has_advance_cue(last_lesson_response)
@@ -2702,7 +2651,11 @@ def cmd_chapter_select(
 
     set_course_progress(slug, str(unit_num), "1")
     updated = read_topic(slug)
-    output_func(structured_progress_line(updated) or topic_progress_line(updated) or f"Jumped to Unit {unit_num}.")
+    output_func(
+        structured_progress_line(updated)
+        or topic_progress_line(updated)
+        or f"Jumped to Unit {unit_num}."
+    )
     return 0
 
 
@@ -2749,7 +2702,9 @@ def print_course_summary(topic: Topic, output_func=print) -> None:
         if isinstance(latest, dict):
             score = latest.get("score")
             summary = latest.get("summary")
-            output_func(f"Latest quiz: {score if score is not None else 'unscored'} - {summary or 'no summary'}")
+            output_func(
+                f"Latest quiz: {score if score is not None else 'unscored'} - {summary or 'no summary'}"
+            )
     else:
         output_func("Quizzes completed: 0")
     next_action = next_course_action(topic)
@@ -2941,7 +2896,9 @@ def cumulative_quiz_prompt(metadata: dict[str, object]) -> str:
     if not isinstance(pending, dict):
         return ""
     concepts = pending.get("concepts")
-    rows = [item for item in concepts if isinstance(item, dict)] if isinstance(concepts, list) else []
+    rows = (
+        [item for item in concepts if isinstance(item, dict)] if isinstance(concepts, list) else []
+    )
     concept_lines = []
     for item in rows:
         label = item.get("label")
@@ -2951,7 +2908,9 @@ def cumulative_quiz_prompt(metadata: dict[str, object]) -> str:
                 concept_lines.append(f"- {concept_id.strip()}: {label.strip()}")
             else:
                 concept_lines.append(f"- {label.strip()}")
-    profile_name = normalize_mastery_profile(pending.get("profile") or metadata.get("mastery_profile"))
+    profile_name = normalize_mastery_profile(
+        pending.get("profile") or metadata.get("mastery_profile")
+    )
     depth = {
         "efficient": "keep it short and mostly recent",
         "proficient": "mix recent and earlier concepts with transfer questions",
@@ -2982,7 +2941,11 @@ def cumulative_quiz_due(metadata: dict[str, object]) -> bool:
     if answers_since_last < CUMULATIVE_QUIZ_MIN_ANSWERS[profile_name]:
         return False
     practiced = metadata.get("quiz_practiced_since_last")
-    practiced_count = len({item for item in practiced if isinstance(item, str) and item.strip()}) if isinstance(practiced, list) else 0
+    practiced_count = (
+        len({item for item in practiced if isinstance(item, str) and item.strip()})
+        if isinstance(practiced, list)
+        else 0
+    )
     due_count = len(due_review_items(metadata))
     return (
         practiced_count >= CUMULATIVE_QUIZ_MIN_PRACTICED_CONCEPTS[profile_name]
@@ -3011,7 +2974,9 @@ def concept_catalog(metadata: dict[str, object]) -> dict[str, dict[str, object]]
                 continue
             catalog[concept_id] = {
                 "id": concept_id,
-                "label": label.strip() if isinstance(label, str) and label.strip() else concept_label_for_id(metadata, concept_id),
+                "label": label.strip()
+                if isinstance(label, str) and label.strip()
+                else concept_label_for_id(metadata, concept_id),
                 "unit": unit_number if isinstance(unit_number, int) else None,
             }
     return catalog
@@ -3034,7 +2999,11 @@ def add_quiz_candidate(
     if not concept_id or concept_id in seen:
         return
     if concept_id not in catalog:
-        catalog[concept_id] = {"id": concept_id, "label": concept_id.replace("-", " "), "unit": None}
+        catalog[concept_id] = {
+            "id": concept_id,
+            "label": concept_id.replace("-", " "),
+            "unit": None,
+        }
     candidates.append(concept_id)
     seen.add(concept_id)
 
@@ -3049,17 +3018,16 @@ def select_cumulative_quiz_concepts(metadata: dict[str, object]) -> list[dict[st
 
     raw_weak_spots = metadata.get("weak_spots")
     weak_spots = raw_weak_spots if isinstance(raw_weak_spots, list) else []
-    weak_keys = {
-        concept_key(item)
-        for item in weak_spots
-        if isinstance(item, str) and item.strip()
-    }
+    weak_keys = {concept_key(item) for item in weak_spots if isinstance(item, str) and item.strip()}
     attempts = metadata.get("concept_attempts")
     if isinstance(attempts, dict):
         for concept_id, record in attempts.items():
             if not isinstance(concept_id, str) or not isinstance(record, dict):
                 continue
-            label = str(catalog.get(concept_id, {}).get("label") or concept_label_for_id(metadata, concept_id))
+            label = str(
+                catalog.get(concept_id, {}).get("label")
+                or concept_label_for_id(metadata, concept_id)
+            )
             misconceptions = record.get("misconceptions")
             if (
                 isinstance(misconceptions, list)
@@ -3168,11 +3136,7 @@ def update_rolling_pass_rate(metadata: dict[str, object]) -> None:
     if status not in {"correct", "partial", "needs_work"}:
         return
     existing = metadata.get("recent_answer_results")
-    history = (
-        [bool(item) for item in existing]
-        if isinstance(existing, list)
-        else []
-    )
+    history = [bool(item) for item in existing] if isinstance(existing, list) else []
     history.append(status == "correct")
     history = history[-ROLLING_PASS_RATE_WINDOW:]
     metadata["recent_answer_results"] = history
@@ -3369,7 +3333,11 @@ def unit_is_complete(
         if not isinstance(raw_attempts, int) or raw_attempts < 1:
             continue
         record_unit = record.get("unit")
-        if isinstance(record_unit, int) and isinstance(unit_number, int) and record_unit != unit_number:
+        if (
+            isinstance(record_unit, int)
+            and isinstance(unit_number, int)
+            and record_unit != unit_number
+        ):
             continue
         practiced_ids.append(concept_id)
     if not practiced_ids:
@@ -3414,9 +3382,7 @@ def learner_answer_is_actionable(learner_prompt: str, metadata: dict[str, object
     return True
 
 
-def apply_pending_question_answer_key(
-    metadata: dict[str, object], learner_prompt: str
-) -> None:
+def apply_pending_question_answer_key(metadata: dict[str, object], learner_prompt: str) -> None:
     pending = metadata.get("pending_question")
     if not isinstance(pending, dict) or pending.get("kind") != "multiple_choice":
         return
@@ -3470,11 +3436,17 @@ def update_quiz_history(
     summary = update.get("quiz_summary")
     concepts = update.get("quiz_concepts")
     results = update.get("quiz_results")
-    if not isinstance(score, str) and not isinstance(summary, str) and not isinstance(results, list):
+    if (
+        not isinstance(score, str)
+        and not isinstance(summary, str)
+        and not isinstance(results, list)
+    ):
         return None
 
     history = metadata.get("quiz_history")
-    entries = [item for item in history if isinstance(item, dict)] if isinstance(history, list) else []
+    entries = (
+        [item for item in history if isinstance(item, dict)] if isinstance(history, list) else []
+    )
     concept_values = (
         [item for item in concepts if isinstance(item, str)] if isinstance(concepts, list) else []
     )
@@ -3616,13 +3588,17 @@ def cmd_delete(args: argparse.Namespace) -> int:
         print(f"Deleted {len(slugs)} topic(s).")
         return 0
     if not args.topic:
-        raise OpenLearnError("usage: openlearn delete <topic> [--yes] or openlearn delete --all --yes")
+        raise OpenLearnError(
+            "usage: openlearn delete <topic> [--yes] or openlearn delete --all --yes"
+        )
     slug = slugify(args.topic)
     path = topic_path(slug)
     if not path.exists():
         raise OpenLearnError(f"topic not found: {slug}")
     if not args.yes:
-        raise OpenLearnError(f"deleting a topic is permanent; rerun with: openlearn delete {slug} --yes")
+        raise OpenLearnError(
+            f"deleting a topic is permanent; rerun with: openlearn delete {slug} --yes"
+        )
 
     delete_topic_files(slug)
     if get_active_topic() == slug:
@@ -3642,9 +3618,7 @@ def delete_topic_files(slug: str) -> None:
 def cmd_list(_args: argparse.Namespace) -> int:
     paths = sorted(topics_dir().glob("*.md"))
     if not paths:
-        print(
-            "No topics yet. Create one with: openlearn new vim --goal 'Learn Vim basics'"
-        )
+        print("No topics yet. Create one with: openlearn new vim --goal 'Learn Vim basics'")
         return 0
     for path in paths:
         topic = read_topic_summary(path)
@@ -3655,19 +3629,13 @@ def cmd_list(_args: argparse.Namespace) -> int:
 def cmd_recent(_args: argparse.Namespace) -> int:
     topics = recent_topic_summaries()
     if not topics:
-        print(
-            "No topics yet. Create one with: openlearn new vim --goal 'Learn Vim basics'"
-        )
+        print("No topics yet. Create one with: openlearn new vim --goal 'Learn Vim basics'")
         return 0
     active = get_active_topic()
     for topic in topics:
-        updated = datetime.fromtimestamp(topic.path.stat().st_mtime).strftime(
-            "%Y-%m-%d %H:%M"
-        )
+        updated = datetime.fromtimestamp(topic.path.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
         active_marker = "*" if topic.slug == active else " "
-        print(
-            f"{active_marker} {topic.slug}\t{updated}\t{topic.metadata.get('topic', topic.slug)}"
-        )
+        print(f"{active_marker} {topic.slug}\t{updated}\t{topic.metadata.get('topic', topic.slug)}")
     return 0
 
 
@@ -3747,9 +3715,7 @@ def cmd_stats(args: argparse.Namespace, output_func=print) -> int:
                 accuracies.append(round(s / a * 100))
 
             plt.clf()
-            plt.simple_bar(
-                concepts, accuracies, width=50, title="Concept accuracy (%)"
-            )
+            plt.simple_bar(concepts, accuracies, width=50, title="Concept accuracy (%)")
             plt.show()
         else:
             output_func("No concept accuracy data yet.")
@@ -3901,9 +3867,7 @@ def ask_topic(
         model=model, system=system_prompt(topic), user=prompt, output_func=output_func
     )
     answer = print_and_append_model_answer(topic, "chat", prompt, answer, output_func=output_func)
-    update_learning_metadata(
-        topic, prompt, answer, model, is_review_session=is_review_session
-    )
+    update_learning_metadata(topic, prompt, answer, model, is_review_session=is_review_session)
     maybe_suggest_videos(topic.slug, output_func)
     return answer
 
@@ -3935,9 +3899,7 @@ def cmd_check(args: argparse.Namespace, output_func=print) -> int:
         capture_output=True,
         text=True,
     )
-    output = "\n".join(
-        part for part in [result.stdout.strip(), result.stderr.strip()] if part
-    )
+    output = "\n".join(part for part in [result.stdout.strip(), result.stderr.strip()] if part)
     user = (
         "The learner attempted this drill. "
         f"Pytest return code: {result.returncode}\n\n"
@@ -3946,7 +3908,9 @@ def cmd_check(args: argparse.Namespace, output_func=print) -> int:
         "reinforce the key idea and suggest one small next practice step."
     )
     model = args.model or str(topic.metadata.get("model") or configured_model())
-    answer = call_openai_streaming(model=model, system=system_prompt(topic), user=user, output_func=output_func)
+    answer = call_openai_streaming(
+        model=model, system=system_prompt(topic), user=user, output_func=output_func
+    )
     print_and_append_model_answer(topic, "check", user, answer, output_func=output_func)
     return result.returncode
 
@@ -3954,8 +3918,16 @@ def cmd_check(args: argparse.Namespace, output_func=print) -> int:
 def drill_generation_prompt(topic: Topic) -> str:
     known = topic.metadata.get("known")
     weak_spots = topic.metadata.get("weak_spots")
-    known_text = ", ".join(item for item in known if isinstance(item, str)) if isinstance(known, list) else ""
-    weak_text = ", ".join(item for item in weak_spots if isinstance(item, str)) if isinstance(weak_spots, list) else ""
+    known_text = (
+        ", ".join(item for item in known if isinstance(item, str))
+        if isinstance(known, list)
+        else ""
+    )
+    weak_text = (
+        ", ".join(item for item in weak_spots if isinstance(item, str))
+        if isinstance(weak_spots, list)
+        else ""
+    )
     return textwrap.dedent(
         f"""
         Generate one Python coding drill for this learner.
@@ -3975,9 +3947,9 @@ def drill_generation_prompt(topic: Topic) -> str:
         - Include 2-4 concrete test cases.
         - The function_stub must contain exactly one top-level function.
 
-        Topic: {topic.metadata.get('topic', topic.slug)}
-        Goal: {topic.metadata.get('goal', '')}
-        Current focus: {topic.metadata.get('current_focus', '')}
+        Topic: {topic.metadata.get("topic", topic.slug)}
+        Goal: {topic.metadata.get("goal", "")}
+        Current focus: {topic.metadata.get("current_focus", "")}
         Known: {known_text}
         Weak spots: {weak_text}
         """
@@ -4129,7 +4101,9 @@ def curated_drill(topic: Topic) -> dict[str, object]:
     focus = f"{topic.metadata.get('current_focus', '')} {topic.metadata.get('goal', '')}".casefold()
     for drill in drills:
         tags = drill.get("tags")
-        if isinstance(tags, list) and any(isinstance(tag, str) and tag.casefold() in focus for tag in tags):
+        if isinstance(tags, list) and any(
+            isinstance(tag, str) and tag.casefold() in focus for tag in tags
+        ):
             return validate_drill_data(drill)
     if not drills:
         raise OpenLearnError("no curated drills are available")
@@ -4138,7 +4112,11 @@ def curated_drill(topic: Topic) -> dict[str, object]:
 
 def load_curated_drills() -> list[dict[str, object]]:
     try:
-        text = importlib.resources.files("openlearn").joinpath("drills.json").read_text(encoding="utf-8")
+        text = (
+            importlib.resources.files("openlearn")
+            .joinpath("drills.json")
+            .read_text(encoding="utf-8")
+        )
     except (FileNotFoundError, ModuleNotFoundError) as exc:
         raise OpenLearnError("curated drills file is missing") from exc
     data = json.loads(text)
@@ -4147,9 +4125,7 @@ def load_curated_drills() -> list[dict[str, object]]:
     return [item for item in data if isinstance(item, dict)]
 
 
-def cmd_review(
-    args: argparse.Namespace, input_func=None, output_func=print
-) -> int:
+def cmd_review(args: argparse.Namespace, input_func=None, output_func=print) -> int:
     topic = read_topic(slugify(args.topic))
     set_active_topic(topic.slug)
     model = args.model or str(topic.metadata.get("model") or configured_model())
@@ -4332,7 +4308,9 @@ def save_pending_question(
 ) -> None:
     if answer_key not in {"A", "B", "C", "D"}:
         return
-    question = (question_text or extract_pending_question_text(answer) or last_question(answer)).strip()
+    question = (
+        question_text or extract_pending_question_text(answer) or last_question(answer)
+    ).strip()
     with file_lock(topic.path):
         raw_metadata, body = parse_topic(topic.path.read_text(encoding="utf-8"))
         metadata = merge_topic_state(
@@ -4524,7 +4502,10 @@ def update_learning_metadata(
             )
             if metadata.get("pending_verify") and metadata.get("last_answer_status") == "correct":
                 pending_verify = metadata.get("pending_verify")
-                if isinstance(pending_verify, dict) and pending_verify.get("concept_id") == concept_id:
+                if (
+                    isinstance(pending_verify, dict)
+                    and pending_verify.get("concept_id") == concept_id
+                ):
                     metadata.pop("pending_verify", None)
                     rec["gaming_suspected"] = False
             rec["attempts"] = int(rec.get("attempts") or 0) + 1
@@ -4561,11 +4542,7 @@ def update_learning_metadata(
             merge_metadata_list(metadata, "known", update.get("known_add"))
 
         gap = update.get("answer_gap")
-        if (
-            isinstance(gap, str)
-            and gap.strip()
-            and metadata.get("last_answer_status") != "correct"
-        ):
+        if isinstance(gap, str) and gap.strip() and metadata.get("last_answer_status") != "correct":
             gap = gap.strip()
             merge_metadata_list(metadata, "weak_spots", [gap])
             metadata["last_answer_gap"] = gap
@@ -4661,9 +4638,7 @@ def update_learning_metadata(
                 slide = metadata.get("current_slide")
                 slide_count = unit.get("slide_count") if unit else None
                 on_last_slide = (
-                    isinstance(slide, int)
-                    and isinstance(slide_count, int)
-                    and slide >= slide_count
+                    isinstance(slide, int) and isinstance(slide_count, int) and slide >= slide_count
                 )
                 if unit and on_last_slide and unit_is_complete(metadata, unit, profile):
                     next_unit_number = current_unit + 1
@@ -4758,16 +4733,12 @@ def update_learning_metadata(
                 break
 
 
-def merge_metadata_list(
-    metadata: dict[str, object], key: str, additions: object
-) -> None:
+def merge_metadata_list(metadata: dict[str, object], key: str, additions: object) -> None:
     if not isinstance(additions, list):
         return
     existing = metadata.get(key)
     values = (
-        [item for item in existing if isinstance(item, str)]
-        if isinstance(existing, list)
-        else []
+        [item for item in existing if isinstance(item, str)] if isinstance(existing, list) else []
     )
     seen = {concept_key(item) for item in values}
     for item in additions:
@@ -4799,11 +4770,7 @@ def normalize_review_due_metadata(metadata: dict[str, object]) -> None:
             concept_value = item.get("concept")
             concept = concept_value.strip() if isinstance(concept_value, str) else ""
             due_value = item.get("due")
-            due = (
-                due_value
-                if isinstance(due_value, str) and valid_due_date(due_value)
-                else today()
-            )
+            due = due_value if isinstance(due_value, str) and valid_due_date(due_value) else today()
             difficulty_value = item.get("difficulty")
             difficulty = (
                 difficulty_value
@@ -4815,8 +4782,7 @@ def normalize_review_due_metadata(metadata: dict[str, object]) -> None:
             last_reviewed_value = item.get("last_reviewed")
             last_reviewed = (
                 last_reviewed_value
-                if isinstance(last_reviewed_value, str)
-                and valid_due_date(last_reviewed_value)
+                if isinstance(last_reviewed_value, str) and valid_due_date(last_reviewed_value)
                 else None
             )
         else:
@@ -4862,9 +4828,7 @@ def schedule_review_additions(metadata: dict[str, object], additions: object) ->
                 metadata,
                 concept,
                 difficulty if isinstance(difficulty, str) else "hard",
-                due=due
-                if isinstance(due, str) and valid_due_date(due)
-                else today(),
+                due=due if isinstance(due, str) and valid_due_date(due) else today(),
             )
 
 
@@ -5001,9 +4965,7 @@ def next_review_due_ebisu(difficulty: str, ebisu_model: object = None) -> str | 
         ebisu = _load_ebisu()
         model = normalized_ebisu_model(ebisu_model)
         if model is None:
-            model = normalized_ebisu_model(
-                ebisu.defaultModel(ebisu_initial_halflife(difficulty))
-            )
+            model = normalized_ebisu_model(ebisu.defaultModel(ebisu_initial_halflife(difficulty)))
         if model is None:
             return None
         days = float(ebisu.modelToPercentileDecay(model, configured_ebisu_threshold()))
@@ -5035,9 +4997,7 @@ def update_ebisu_model(
         ebisu = _load_ebisu()
         base = normalized_ebisu_model(model)
         if base is None:
-            base = normalized_ebisu_model(
-                ebisu.defaultModel(ebisu_initial_halflife(difficulty))
-            )
+            base = normalized_ebisu_model(ebisu.defaultModel(ebisu_initial_halflife(difficulty)))
         if base is None:
             return None
         successes, total = EBISU_REVIEW_OUTCOME.get(difficulty, (1, 2))
@@ -5052,9 +5012,7 @@ def update_ebisu_model(
     return normalized_ebisu_model(updated)
 
 
-def existing_review_ebisu_model(
-    metadata: dict[str, object], concept: str
-) -> list[float] | None:
+def existing_review_ebisu_model(metadata: dict[str, object], concept: str) -> list[float] | None:
     items = metadata.get("review_due")
     if not isinstance(items, list):
         return None
@@ -5139,7 +5097,9 @@ def remove_known_from_review_lists(metadata: dict[str, object]) -> None:
     values = metadata.get("weak_spots")
     if isinstance(values, list):
         metadata["weak_spots"] = [
-            item for item in values if isinstance(item, str) and concept_key(item) not in known_values
+            item
+            for item in values
+            if isinstance(item, str) and concept_key(item) not in known_values
         ]
     values = metadata.get("review_due")
     if isinstance(values, list):
@@ -5180,7 +5140,9 @@ def maybe_print_migration_notice() -> None:
     new_home = Path(user_data_dir("openlearn", appauthor=False)).expanduser().resolve()
     if old_home.exists() and not new_home.exists():
         print(f"Existing data found at {old_home}. New default location is {new_home}.")
-        print("Set OPENLEARN_HOME to keep using the old location, or move the directory when ready.")
+        print(
+            "Set OPENLEARN_HOME to keep using the old location, or move the directory when ready."
+        )
 
 
 def topics_dir() -> Path:
@@ -5242,11 +5204,7 @@ def configured_base_url(config: dict[str, object] | None = None) -> str:
         return env_base_url.rstrip("/")
     config = read_config() if config is None else config
     base_url = config.get("base_url")
-    return (
-        base_url.rstrip("/")
-        if isinstance(base_url, str) and base_url
-        else DEFAULT_BASE_URL
-    )
+    return base_url.rstrip("/") if isinstance(base_url, str) and base_url else DEFAULT_BASE_URL
 
 
 def configured_openai_api_key() -> str | None:
@@ -5464,11 +5422,9 @@ def parse_video_results(html: str, limit: int = 3) -> list[dict[str, str]]:
         json_start += 1
     try:
         data, _end = json.JSONDecoder().raw_decode(html, idx=json_start)
-        sections = (
-            data["contents"]["twoColumnSearchResultsRenderer"]["primaryContents"][
-                "sectionListRenderer"
-            ]["contents"]
-        )
+        sections = data["contents"]["twoColumnSearchResultsRenderer"]["primaryContents"][
+            "sectionListRenderer"
+        ]["contents"]
     except (json.JSONDecodeError, KeyError, TypeError):
         return []
     results: list[dict[str, str]] = []
@@ -5599,16 +5555,18 @@ def save_imported_checksum(slug: str, checksum: str) -> None:
         metadata, body = parse_topic(path.read_text(encoding="utf-8"))
         metadata = dict(metadata)
         values = metadata.get("imported_checksums")
-        checksums = [value for value in values if isinstance(value, str)] if isinstance(values, list) else []
+        checksums = (
+            [value for value in values if isinstance(value, str)]
+            if isinstance(values, list)
+            else []
+        )
         if checksum not in checksums:
             checksums.append(checksum)
         metadata["imported_checksums"] = checksums
         write_text_atomic(path, format_topic(metadata, body))
 
 
-def cmd_import_scan(
-    slug: str, directory: Path, model: str | None = None, output_func=print
-) -> int:
+def cmd_import_scan(slug: str, directory: Path, model: str | None = None, output_func=print) -> int:
     directory = directory.expanduser().resolve()
     if not directory.exists() or not directory.is_dir():
         raise OpenLearnError(f"scan directory not found: {directory}")
@@ -5705,7 +5663,7 @@ def summarize_context_file(
         except ConnectionResetError:
             if attempt == 2:
                 raise OpenLearnError(f"connection reset after 3 attempts: {source.name}")
-            time.sleep(2 ** attempt)
+            time.sleep(2**attempt)
     summary_path = topic_context_dir(slug) / f"{source.stem}.summary.txt"
     write_text_atomic(summary_path, summary.rstrip() + "\n")
     return summary_path
@@ -5789,9 +5747,7 @@ def list_topics() -> list[TopicSummary]:
 def recent_topic_paths() -> list[Path]:
     if not topics_dir().exists():
         return []
-    return sorted(
-        topics_dir().glob("*.md"), key=lambda path: path.stat().st_mtime, reverse=True
-    )
+    return sorted(topics_dir().glob("*.md"), key=lambda path: path.stat().st_mtime, reverse=True)
 
 
 def resolve_topic_slug(value: str | None) -> str:
@@ -6016,7 +5972,9 @@ def delayed_retrieval_metric(
         concept_id = event_concept_id(event)
         if concept_id and concept_id not in first_seen:
             first_seen[concept_id] = ts
-        for retrieval_concept, retrieval_passed, _source in spaced_retrieval_items_from_event(event):
+        for retrieval_concept, retrieval_passed, _source in spaced_retrieval_items_from_event(
+            event
+        ):
             seen_at = first_seen.get(retrieval_concept)
             if seen_at is None:
                 first_seen[retrieval_concept] = ts
@@ -6027,9 +5985,7 @@ def delayed_retrieval_metric(
             attempts += 1
             if retrieval_passed:
                 passed += 1
-            concept_counts = by_concept.setdefault(
-                retrieval_concept, {"attempts": 0, "passed": 0}
-            )
+            concept_counts = by_concept.setdefault(retrieval_concept, {"attempts": 0, "passed": 0})
             concept_counts["attempts"] += 1
             if retrieval_passed:
                 concept_counts["passed"] += 1
@@ -6094,9 +6050,7 @@ def stable_metadata_for_topic(metadata: dict[str, object]) -> dict[str, object]:
     return stable
 
 
-def merge_topic_state(
-    metadata: dict[str, object], state: dict[str, object]
-) -> dict[str, object]:
+def merge_topic_state(metadata: dict[str, object], state: dict[str, object]) -> dict[str, object]:
     merged = dict(metadata)
     for key, value in state.items():
         if key == "unit_state":
@@ -6142,9 +6096,7 @@ def normalize_dynamic_state_defaults(metadata: dict[str, object]) -> dict[str, o
     return normalized
 
 
-def migrate_concept_attempt_keys(
-    attempts: object, metadata: dict[str, object]
-) -> object:
+def migrate_concept_attempt_keys(attempts: object, metadata: dict[str, object]) -> object:
     if not isinstance(attempts, dict):
         return attempts
     label_to_id: dict[str, str] = {}
@@ -6212,9 +6164,8 @@ def merge_migrated_state(
                     continue
                 merged_record = dict(existing_record)
                 existing_difficulty = existing_record.get("difficulty")
-                if (
-                    "difficulty" in record
-                    and (existing_difficulty is None or clamp_unit_difficulty(existing_difficulty) == 5)
+                if "difficulty" in record and (
+                    existing_difficulty is None or clamp_unit_difficulty(existing_difficulty) == 5
                 ):
                     merged_record["difficulty"] = record["difficulty"]
                 if "difficulty_locked" in record and "difficulty_locked" not in existing_record:
@@ -6245,10 +6196,14 @@ def migrate_topic_state_if_needed(
                 dynamic_state["concept_attempts"], current_metadata
             )
         state_path = topic_state_path(slug)
-        markdown_is_newer = not state_path.exists() or path.stat().st_mtime >= state_path.stat().st_mtime
+        markdown_is_newer = (
+            not state_path.exists() or path.stat().st_mtime >= state_path.stat().st_mtime
+        )
         if markdown_is_newer:
             merged_state = {**existing_state, **dynamic_state}
-            if isinstance(dynamic_state.get("unit_state"), dict) or isinstance(existing_state.get("unit_state"), dict):
+            if isinstance(dynamic_state.get("unit_state"), dict) or isinstance(
+                existing_state.get("unit_state"), dict
+            ):
                 merged_units: dict[str, object] = {}
                 if isinstance(existing_state.get("unit_state"), dict):
                     merged_units.update(existing_state["unit_state"])
@@ -6290,7 +6245,9 @@ def normalize_topic_metadata(metadata: dict[str, object], slug: str) -> dict[str
             normalized[key] = []
     if not isinstance(normalized.get("placement_result"), dict):
         normalized["placement_result"] = {}
-    if "pending_question" in normalized and not isinstance(normalized.get("pending_question"), dict):
+    if "pending_question" in normalized and not isinstance(
+        normalized.get("pending_question"), dict
+    ):
         normalized.pop("pending_question", None)
     if "active_drill" in normalized and not isinstance(normalized.get("active_drill"), str):
         normalized.pop("active_drill", None)
@@ -6428,9 +6385,7 @@ def read_topic_metadata(path: Path) -> dict[str, object]:
                 break
             metadata_lines.append(line)
         else:
-            raise OpenLearnError(
-                f"invalid topic metadata: missing closing delimiter in {path}"
-            )
+            raise OpenLearnError(f"invalid topic metadata: missing closing delimiter in {path}")
     try:
         data = json.loads("".join(metadata_lines))
     except json.JSONDecodeError as exc:
@@ -6669,9 +6624,7 @@ def tier_move_instruction(tier: str) -> str:
             "Tier move: mastering - prefer free-response, ask why/what-if questions, keep the pace brisk, "
             "and withhold worked examples unless the learner asks after trying."
         )
-    return (
-        "Tier move: on_track - use production or transfer checks with why or what-if probes, and hold difficulty steady."
-    )
+    return "Tier move: on_track - use production or transfer checks with why or what-if probes, and hold difficulty steady."
 
 
 def tier_move_prompt(metadata: dict[str, object], tier: str) -> str:
@@ -6730,22 +6683,22 @@ def generation_system_prompt(topic: Topic, current_plan: str = "") -> str:
         hyphen bullets. No Markdown headings, no decorative formatting.
 
         Course:
-        {topic.metadata.get('topic', topic.slug)}
+        {topic.metadata.get("topic", topic.slug)}
 
         Goal:
-        {topic.metadata.get('goal', '') or '(none)'}
+        {topic.metadata.get("goal", "") or "(none)"}
 
         Level:
-        {topic.metadata.get('level', '') or 'beginner'}
+        {topic.metadata.get("level", "") or "beginner"}
 
         Placement context:
-        {placement_context or '(none)'}
+        {placement_context or "(none)"}
 
         Local context summaries:
-        {context_summaries or '(none)'}
+        {context_summaries or "(none)"}
 
         Current plan:
-        {current_plan or accepted_course_plan(topic) or '(none)'}
+        {current_plan or accepted_course_plan(topic) or "(none)"}
         """
     ).strip()
 
@@ -6812,7 +6765,9 @@ def compact_session_context(topic: Topic, session_log: str) -> str:
     if progress:
         lines.append(f"Current lesson position: {progress}")
     status = topic.metadata.get("last_answer_status")
-    lines.append(f"Last answer status: {status if isinstance(status, str) and status else 'not evaluated'}")
+    lines.append(
+        f"Last answer status: {status if isinstance(status, str) and status else 'not evaluated'}"
+    )
     score = topic.metadata.get("last_answer_score")
     if isinstance(score, float):
         lines.append(f"Last answer score: {score:.2f}")
@@ -6938,9 +6893,7 @@ def session_entries(session_log: str) -> list[dict[str, str]]:
     for index, heading in enumerate(headings):
         end = headings[index + 1].start() if index + 1 < len(headings) else len(session_log)
         block = session_log[heading.end() : end]
-        prompt_match = re.search(
-            r"(?s)\*\*Prompt\*\*\s*(.*?)\s*\*\*Response\*\*\s*(.*)", block
-        )
+        prompt_match = re.search(r"(?s)\*\*Prompt\*\*\s*(.*?)\s*\*\*Response\*\*\s*(.*)", block)
         if not prompt_match:
             continue
         entries.append(
@@ -6989,15 +6942,15 @@ def _mock_openai_response(model: str, system: str, user: str) -> str:
     if "summarize this context file" in prompt or "summarize" in prompt and "context" in prompt:
         return "- Summary: mock summary of provided context.\n- Key points: concise bullets."
     # Course outline
-    if "create a concise course plan" in prompt or "course plan" in prompt or "create a concise course plan before teaching" in prompt:
-        return (
-            "Scope: Mock scope\nExcludes: None\nAssumptions: Beginner\nUnits:\n1. Modes (2 slides) - Understand insert vs normal.\n2. Movement (2 slides) - h j k l.\n3. Editing (2 slides) - x dd p.\n4. Save and quit (1 slide) - :wq"
-        )
+    if (
+        "create a concise course plan" in prompt
+        or "course plan" in prompt
+        or "create a concise course plan before teaching" in prompt
+    ):
+        return "Scope: Mock scope\nExcludes: None\nAssumptions: Beginner\nUnits:\n1. Modes (2 slides) - Understand insert vs normal.\n2. Movement (2 slides) - h j k l.\n3. Editing (2 slides) - x dd p.\n4. Save and quit (1 slide) - :wq"
     # First lesson
     if "start teaching unit 1" in prompt or "start teaching" in prompt or "first lesson" in prompt:
-        return (
-            "Lesson: Normal vs Insert.\nExample: Press i to enter Insert, Esc to return to Normal.\nCheck: Which mode runs commands like dd or /search? <!-- answer: B -->\nAction: Try switching modes in your editor."
-        )
+        return "Lesson: Normal vs Insert.\nExample: Press i to enter Insert, Esc to return to Normal.\nCheck: Which mode runs commands like dd or /search? <!-- answer: B -->\nAction: Try switching modes in your editor."
     # Default small tutor response
     return "**Lesson:** Mock reply. Ask a focused question to continue."
 
@@ -7010,9 +6963,7 @@ def call_openai(model: str, system: str, user: str) -> str:
 
     api_key = configured_openai_api_key()
     if not api_key:
-        raise OpenLearnError(
-            "OpenAI API key is required. Run: openlearn config set-key"
-        )
+        raise OpenLearnError("OpenAI API key is required. Run: openlearn config set-key")
 
     payload = {
         "model": model,
@@ -7038,9 +6989,7 @@ def call_openai(model: str, system: str, user: str) -> str:
             data = json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
-        raise OpenLearnError(
-            f"OpenAI request failed: HTTP {exc.code}: {detail}"
-        ) from exc
+        raise OpenLearnError(f"OpenAI request failed: HTTP {exc.code}: {detail}") from exc
     except URLError as exc:
         raise OpenLearnError(f"OpenAI request failed: {exc.reason}") from exc
 
@@ -7093,9 +7042,7 @@ def call_openai_streaming(
 
     api_key = configured_openai_api_key()
     if not api_key:
-        raise OpenLearnError(
-            "OpenAI API key is required. Run: openlearn config set-key"
-        )
+        raise OpenLearnError("OpenAI API key is required. Run: openlearn config set-key")
 
     payload = {
         "model": model,
@@ -7141,9 +7088,7 @@ def call_openai_streaming(
                 chunks.append(text)
     except HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
-        raise OpenLearnError(
-            f"OpenAI request failed: HTTP {exc.code}: {detail}"
-        ) from exc
+        raise OpenLearnError(f"OpenAI request failed: HTTP {exc.code}: {detail}") from exc
     except URLError as exc:
         raise OpenLearnError(f"OpenAI request failed: {exc.reason}") from exc
     finally:
@@ -7208,9 +7153,7 @@ def extract_response_text(data: dict[str, object]) -> str:
     for item in data.get("output", []) if isinstance(data.get("output"), list) else []:
         if not isinstance(item, dict):
             continue
-        for content in (
-            item.get("content", []) if isinstance(item.get("content"), list) else []
-        ):
+        for content in item.get("content", []) if isinstance(item.get("content"), list) else []:
             if isinstance(content, dict) and content.get("type") in {
                 "output_text",
                 "text",
@@ -7223,7 +7166,9 @@ def extract_response_text(data: dict[str, object]) -> str:
 
 def print_status_bar(topic: Topic, output_func=print) -> None:
     metadata = topic.metadata
-    progress = structured_progress_line(topic) or topic_progress_line(topic).removeprefix("Progress: ")
+    progress = structured_progress_line(topic) or topic_progress_line(topic).removeprefix(
+        "Progress: "
+    )
     if not progress:
         progress = "Unit 1" if metadata.get("course_started") is True else "not set"
     focus = str(metadata.get("current_focus") or "not set")

@@ -68,10 +68,7 @@ def test_conversation_quality(scenario_path):
 
     metric = GEval(
         name=scenario["name"],
-        criteria=(
-            f"Evaluate this AI tutor response against these criteria:\n"
-            f"{rubric_text}"
-        ),
+        criteria=(f"Evaluate this AI tutor response against these criteria:\n{rubric_text}"),
         evaluation_params=["actual_output"],
         threshold=0.7,
     )
@@ -81,6 +78,5 @@ def test_conversation_quality(scenario_path):
     )
     metric.measure(test_case)
     assert metric.score >= 0.7, (
-        f"Scenario '{scenario['name']}' failed "
-        f"(score {metric.score:.2f}): {metric.reason}"
+        f"Scenario '{scenario['name']}' failed (score {metric.score:.2f}): {metric.reason}"
     )

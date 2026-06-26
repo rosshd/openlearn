@@ -38,7 +38,9 @@ def require_real_model() -> str:
     return api_key
 
 
-def run_tutor_turn(scenario: dict[str, object], tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
+def run_tutor_turn(
+    scenario: dict[str, object], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> str:
     api_key = require_real_model()
     monkeypatch.setenv("OPENLEARN_HOME", str(tmp_path))
     monkeypatch.setenv("OPENAI_API_KEY", api_key)

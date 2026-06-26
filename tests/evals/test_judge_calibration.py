@@ -75,7 +75,10 @@ def test_judge_calibration_mean_absolute_error() -> None:
         errors.append(abs(float(score) - float(case["true_score"])))
         expected_answer_kind = case.get("expected_answer_kind")
         answer_kind = judged.get("answer_kind")
-        if expected_answer_kind in {"recognition", "production"} and answer_kind in {"recognition", "production"}:
+        if expected_answer_kind in {"recognition", "production"} and answer_kind in {
+            "recognition",
+            "production",
+        }:
             answer_kind_checks.append(answer_kind == expected_answer_kind)
         expected_gameable = case.get("expected_gameable")
         gameable = judged.get("gameable")
