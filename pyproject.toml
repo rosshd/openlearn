@@ -57,3 +57,18 @@ addopts = "-m 'not slow'"
 markers = [
     "slow: marks tests as slow (AI judge calls; skip with -m 'not slow')",
 ]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["src", "tests"]
+# tui.py is an optional, lazily-imported prompt_toolkit front end; its dependency
+# is intentionally not installed, so exclude it from the always-on lint lane.
+extend-exclude = ["src/openlearn/tui.py"]
+
+[tool.pyright]
+venvPath = "."
+venv = ".venv"
+include = ["src"]
+exclude = ["src/openlearn/tui.py"]
+typeCheckingMode = "basic"

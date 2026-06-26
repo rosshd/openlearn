@@ -76,9 +76,7 @@ from openlearn.ui import (
     emit_resume_line,
     emit_tutor_markdown,
     format_action,
-    format_resume_line,
     print_error,
-    print_list,
     print_menu,
     print_section,
     review_due_table,
@@ -3609,7 +3607,7 @@ def cmd_delete(args: argparse.Namespace) -> int:
             raise OpenLearnError("no topics to delete")
         if not args.yes:
             raise OpenLearnError(
-                f"deleting all topics is permanent; rerun with: openlearn delete --all --yes"
+                "deleting all topics is permanent; rerun with: openlearn delete --all --yes"
             )
         slugs = [path.stem for path in paths]
         for slug in slugs:
@@ -4476,7 +4474,8 @@ def update_learning_metadata(
         update_answer_status(metadata, update)
         apply_pending_question_answer_key(metadata, learner_prompt)
         update_review_schedule(metadata, update, is_review_session=is_review_session)
-        actionable = learner_answer_is_actionable(learner_prompt, metadata)
+        # Called for its side effect on metadata["last_answer_status"]; return unused.
+        learner_answer_is_actionable(learner_prompt, metadata)
         if metadata.get("last_answer_status") == "correct":
             metadata.pop("pending_hint", None)
             metadata.pop("last_answer_gap", None)
