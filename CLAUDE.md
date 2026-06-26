@@ -14,6 +14,8 @@ Local-first AI tutoring CLI. Python, editable install via `pip install -e .`. En
 ## Data layout
 
 - `learning-topics/*.md` — user-owned topic files (Markdown + JSON frontmatter between `---`)
+- `learning-topics/<slug>.state.json` — dynamic learner model (concept records, counters, quiz history); machine-written, not meant for hand-editing
+- `learning-topics/<slug>.events.jsonl` — append-only event log (`answer_judged`, `difficulty_changed`, etc.); never mutated
 - `state.json` — active-topic state
 - `config.json` — API key, model, base URL (gitignored)
 - `learning-topics/context/<slug>/` — imported source summaries
