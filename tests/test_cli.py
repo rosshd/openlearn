@@ -25,6 +25,46 @@ class UiFormattingTests(unittest.TestCase):
         self.assertIn("A) One", text)
         self.assertIn("B) Two", text)
 
+    def test_tutor_markdown_styles_plain_section_labels(self) -> None:
+        markdown = ui.tutor_markdown(
+            "Lesson: Learn this.\n\nExample: Try it.\n\nCheck: What happens?"
+        )
+
+        styled_output = io.StringIO()
+        ui.Console(
+            file=styled_output,
+            force_terminal=True,
+            color_system="standard",
+            no_color=False,
+            theme=ui.OPENLEARN_THEME,
+            width=80,
+        ).print(markdown)
+        self.assertIn("\x1b[1;36mLesson:\x1b[0m", styled_output.getvalue())
+        text = ui.render_plain(markdown)
+        self.assertIn("Lesson: Learn this.", text)
+        self.assertIn("\n\nExample: Try it.", text)
+        self.assertIn("\n\nCheck: What happens?", text)
+
+    def test_repl_tutor_output_emits_styled_plain_section_labels(self) -> None:
+        styled_output = io.StringIO()
+        original_console = ui.console
+        ui.console = ui.Console(
+            file=styled_output,
+            force_terminal=True,
+            color_system="standard",
+            no_color=False,
+            theme=ui.OPENLEARN_THEME,
+            width=80,
+        )
+        try:
+            cli.emit_tutor_output("Feedback: Correct.\n\nNext: Try another.")
+        finally:
+            ui.console = original_console
+
+        rendered = styled_output.getvalue()
+        self.assertIn("\x1b[1;36mFeedback:\x1b[0m", rendered)
+        self.assertIn("\x1b[1;36mNext:\x1b[0m", rendered)
+
     def test_status_bar_renders_plain_text_for_capture(self) -> None:
         text = ui.render_plain(ui.status_bar("Mac Workflow", "Unit 1/2", "Copy and paste"))
 
@@ -2372,6 +2412,10 @@ class InteractiveTests(unittest.TestCase):
         self.assertIn("Generate course planning or lesson-start material only", calls[0][0])
         self.assertIn("Generate course planning or lesson-start material only", calls[1][0])
         self.assertNotIn("Recent session history", calls[0][0])
+        pending = cli.read_topic("intro-ai").metadata["pending_question"]
+        self.assertEqual(pending["kind"], "free_response")
+        self.assertIn("Question: What is AI?", pending["question"])
+        self.assertNotIn("answer_key", pending)
 
     def test_start_course_blank_revision_keeps_course_unstarted(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Intro AI", goal="basics"))
@@ -2429,6 +2473,43 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(pending["answer_key"], "C")
         self.assertIn("Which option is correct after the trim point?", pending["question"])
         self.assertIn("C) Hidden option", pending["question"])
+
+    def test_start_course_keeps_multiple_choice_question_when_answer_key_is_missing(
+        self,
+    ) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Intro AI", goal="basics"))
+        original_call_openai = cli.call_openai
+
+        def fake_call_openai(_model: str, _system: str, user: str) -> str:
+            if "Create a concise course plan" in user:
+                return "Scope: AI basics\nUnits:\n1. Definitions (1 slide) - Explain AI."
+            return (
+                "Lesson: AI systems perform tasks.\n"
+                "Check: Which description fits AI?\n"
+                "A) A database\nB) Intelligent task systems\nC) A network\nD) A terminal"
+            )
+
+        cli.call_openai = fake_call_openai
+        try:
+            call_silent(
+                cli.start_course,
+                input_func=iter_input(["n", "y"]),
+                output_func=lambda _text: None,
+            )
+        finally:
+            cli.call_openai = original_call_openai
+
+        topic = cli.read_topic("intro-ai")
+        pending = topic.metadata["pending_question"]
+
+        self.assertEqual(cli.repl_prompt(), "Answer> ")
+        self.assertEqual(pending["kind"], "multiple_choice")
+        self.assertIn("Check: Which description fits AI?", pending["question"])
+        self.assertIn("B) Intelligent task systems", pending["question"])
+        self.assertNotIn("answer_key", pending)
+        prompt = cli.system_prompt(topic)
+        self.assertIn("Stored question: Check: Which description fits AI?", prompt)
+        self.assertIn("B) Intelligent task systems", prompt)
 
     def test_start_course_rejecting_outline_requests_changes_then_regenerates(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Intro AI", goal="basics"))
@@ -2855,6 +2936,110 @@ class InteractiveTests(unittest.TestCase):
         ask_index = output.index("ASK_TOPIC_CALLED")
         self.assertLess(status_index, ask_index)
 
+    def test_repl_prints_status_above_tutor_response(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
+        original_ask_topic = cli.ask_topic
+        output = []
+
+        def fake_ask_topic(*_args, output_func=print, **_kwargs) -> str:
+            output_func("")
+            output_func("Feedback: Correct.")
+            output_func("")
+            return "Feedback: Correct."
+
+        cli.ask_topic = fake_ask_topic
+        try:
+            call_silent(
+                cli.run_repl,
+                input_func=iter_input(["answer", "/q"]),
+                output_func=output.append,
+                show_intro=False,
+            )
+        finally:
+            cli.ask_topic = original_ask_topic
+
+        self.assertIn("Feedback: Correct.", output)
+        feedback_index = output.index("Feedback: Correct.")
+        status_index = next(index for index, line in enumerate(output) if "openlearn" in line)
+        self.assertLess(status_index, feedback_index)
+        self.assertFalse(any("openlearn" in line for line in output[feedback_index + 1 :]))
+
+    def test_repl_advance_intent_records_preference_and_skips_stale_question(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Mac Workflow", goal="Learn macOS"))
+        path = cli.topic_path("mac-workflow")
+        metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+        metadata = dict(metadata)
+        metadata.update(
+            {
+                "course_started": True,
+                "course_units": [
+                    {
+                        "unit": 1,
+                        "chapter": "1.1",
+                        "title": "Terminal essentials",
+                        "slide_count": 2,
+                    }
+                ],
+                "current_unit": 1,
+                "current_slide": 1,
+                "current_focus": "Rectangle snapping",
+                "last_answer_status": "needs_work",
+                "pending_question": {
+                    "kind": "free_response",
+                    "question": "What is the corner shortcut?",
+                    "created": cli.today(),
+                },
+            }
+        )
+        path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
+        original_ask_topic = cli.ask_topic
+        original_cmd_next = cli.cmd_next
+        calls = []
+        cli.ask_topic = lambda *_args, **_kwargs: calls.append("ask") or ""
+        cli.cmd_next = lambda *_args, **_kwargs: calls.append("next") or 0
+        try:
+            call_silent(
+                cli.run_repl,
+                input_func=iter_input(
+                    ["No, skip corner snapping because I don't need it. Let's continue.", "/q"]
+                ),
+                output_func=lambda _text: None,
+                show_intro=False,
+            )
+        finally:
+            cli.ask_topic = original_ask_topic
+            cli.cmd_next = original_cmd_next
+
+        updated = cli.read_topic("mac-workflow")
+        self.assertEqual(updated.metadata["current_slide"], 2)
+        self.assertEqual(updated.metadata["last_answer_status"], "")
+        self.assertNotIn("pending_question", updated.metadata)
+        self.assertIn(
+            "No, skip corner snapping because I don't need it. Let's continue.",
+            updated.metadata["learner_preferences"],
+        )
+        self.assertEqual(calls, ["next"])
+
+    def test_resume_restores_navigation_preferences_from_existing_history(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Mac Workflow", goal="Learn macOS"))
+        topic = cli.read_topic("mac-workflow")
+        cli.append_session(
+            topic,
+            "chat",
+            "No corner snapping. Let's continue because I don't need it.",
+            "Next: What corner shortcut do you use?",
+        )
+
+        updated = cli.restore_learner_preferences_from_history(
+            cli.read_topic("mac-workflow")
+        )
+
+        self.assertIn(
+            "No corner snapping. Let's continue because I don't need it.",
+            updated.metadata["learner_preferences"],
+        )
+        self.assertEqual(updated.metadata["last_answer_status"], "")
+
     def test_model_answer_saves_pending_multiple_choice_key(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
         original_call_openai = cli.call_openai
@@ -3078,7 +3263,7 @@ class InteractiveTests(unittest.TestCase):
             "Previous completed slide content Unit 1 Slide 1", cli.current_lesson_prompt(updated)
         )
 
-    def test_repl_done_blocks_needs_work_without_force(self) -> None:
+    def test_repl_done_advances_despite_stale_needs_work_status(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
         path = cli.topic_path("vim")
         metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
@@ -3101,20 +3286,11 @@ class InteractiveTests(unittest.TestCase):
             cli.cmd_next = original_cmd_next
 
         topic = cli.read_topic("vim")
-        self.assertEqual(topic.metadata["current_slide"], 1)
-        self.assertIs(topic.metadata["review_session_active"], False)
-        self.assertIn("Last answer is not fully clear", output[0])
-
-        original_cmd_next = cli.cmd_next
-        cli.cmd_next = lambda _args, **_kwargs: 0
-        try:
-            cli.handle_repl_command("done --force", output_func=output.append)
-        finally:
-            cli.cmd_next = original_cmd_next
-        topic = cli.read_topic("vim")
         self.assertEqual(topic.metadata["current_slide"], 2)
+        self.assertIs(topic.metadata["review_session_active"], False)
+        self.assertFalse(any("Last answer is not fully clear" in line for line in output))
 
-    def test_repl_done_blocks_partial_without_force(self) -> None:
+    def test_repl_done_advances_despite_stale_partial_status(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
         path = cli.topic_path("vim")
         metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
@@ -3136,8 +3312,8 @@ class InteractiveTests(unittest.TestCase):
             cli.cmd_next = original_cmd_next
 
         topic = cli.read_topic("vim")
-        self.assertEqual(topic.metadata["current_slide"], 1)
-        self.assertIn("Last answer is not fully clear", output[0])
+        self.assertEqual(topic.metadata["current_slide"], 2)
+        self.assertFalse(any("Last answer is not fully clear" in line for line in output))
 
     def test_repl_done_allows_partial_when_tutor_invited_done_with_varied_wording(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
@@ -5481,6 +5657,34 @@ class PromptInstructionTests(unittest.TestCase):
         self.assertIn("Stored correct answer key: A", prompt)
         self.assertIn("Do not substitute a different question", prompt)
 
+    def test_system_prompt_does_not_allow_undocumented_keybindings(self) -> None:
+        topic = cli.Topic(
+            slug="demo",
+            path=Path("demo.md"),
+            metadata={"topic": "Demo"},
+            body="# Demo\n",
+        )
+
+        prompt = cli.system_prompt(topic)
+
+        self.assertIn("Never invent or assume a default keybinding", prompt)
+        self.assertIn("does not prove that it is running", prompt)
+        self.assertIn("context does not explicitly", prompt)
+
+    def test_pending_question_prompt_keeps_question_without_answer_key(self) -> None:
+        prompt = cli.pending_question_prompt(
+            {
+                "pending_question": {
+                    "kind": "multiple_choice",
+                    "question": "Which one?\nA) One\nB) Two\nC) Three\nD) Four",
+                }
+            }
+        )
+
+        self.assertIn("Stored question: Which one?", prompt)
+        self.assertIn("B) Two", prompt)
+        self.assertNotIn("Stored correct answer key", prompt)
+
     def test_pending_hint_prompt_empty_when_no_hint(self) -> None:
         self.assertEqual(cli.pending_hint_prompt({}), "")
 
@@ -5731,6 +5935,9 @@ class PromptInstructionTests(unittest.TestCase):
         self.assertIn("Use free response for reasoning or algorithm tracing", prompt)
         self.assertIn("Do not ask a question just to ask one", prompt)
         self.assertIn("Use this compact structure", prompt)
+        self.assertIn("Teach exactly one concept", prompt)
+        self.assertIn("exactly one Lesson section", prompt)
+        self.assertIn("at most one Check section", prompt)
         self.assertIn(f"Hard limit: {cli.FIRST_LESSON_WORD_LIMIT} words", prompt)
 
     def test_trim_words_enforces_first_lesson_limit(self) -> None:
@@ -5738,6 +5945,20 @@ class PromptInstructionTests(unittest.TestCase):
 
         trimmed = cli.trim_words(text, 220)
 
+        self.assertEqual(len(trimmed.split()), 220)
+        self.assertTrue(trimmed.endswith("..."))
+
+    def test_trim_words_preserves_lesson_section_formatting(self) -> None:
+        text = (
+            "Lesson: " + " ".join(f"lesson{index}" for index in range(110))
+            + "\n\nExample: "
+            + " ".join(f"example{index}" for index in range(110))
+            + "\n\nCheck: What happens next?"
+        )
+
+        trimmed = cli.trim_words(text, 220)
+
+        self.assertIn("\n\nExample:", trimmed)
         self.assertEqual(len(trimmed.split()), 220)
         self.assertTrue(trimmed.endswith("..."))
 
@@ -5829,8 +6050,61 @@ class PromptInstructionTests(unittest.TestCase):
         self.assertIn("insert mode enters text", context)
         self.assertIn("Current focus: Vim modes", context)
         self.assertIn("Last learner message: I think insert mode", context)
-        self.assertIn("Question they may be answering: Which mode lets you type text?", context)
-        self.assertIn("Last tutor response: Not quite", context)
+        self.assertIn("Last tutor response:\nNot quite", context)
+        self.assertIn("Which mode lets you type text?", context)
+
+    def test_print_resume_context_shows_learner_context_without_replaying_tutor(self) -> None:
+        body = textwrap.dedent(
+            """\
+            # Demo
+
+            ## Session Log
+
+            ### 2026-01-01 10:00 UTC - chat
+
+            **Prompt**
+
+            My short answer
+
+            **Response**
+
+            Feedback: That is correct.
+
+            Example: This second paragraph must remain visible.
+
+            Check: What should happen next?
+            """
+        )
+        topic = cli.Topic(
+            slug="demo",
+            path=Path("demo.md"),
+            metadata={"topic": "Demo", "current_focus": "basics"},
+            body=body,
+        )
+        output = []
+
+        cli.print_resume_context(topic, "", output.append)
+
+        rendered = "\n".join(output)
+        self.assertIn("You: My short answer", rendered)
+        self.assertNotIn("Tutor:", rendered)
+        self.assertNotIn("This second paragraph must remain visible.", rendered)
+        self.assertNotIn("Check: What should happen next?", rendered)
+
+    def test_print_and_append_model_answer_does_not_add_display_spacing(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Spacing", goal="test spacing"))
+        topic = cli.read_topic("spacing")
+        output = []
+
+        cli.print_and_append_model_answer(
+            topic,
+            "chat",
+            "Question",
+            "Feedback: Answer",
+            output_func=output.append,
+        )
+
+        self.assertEqual(output, [])
 
 
 class PromptContextTests(unittest.TestCase):

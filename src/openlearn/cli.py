@@ -11,6 +11,7 @@ import json
 import os
 import random
 import re
+import select
 import shutil
 import shlex
 import subprocess
@@ -85,6 +86,8 @@ from openlearn.ui import (
 )
 
 EVENT_SCHEMA_VERSION = 1
+REPL_PASTE_INITIAL_WAIT_SECONDS = 0.05
+REPL_PASTE_CONTINUATION_WAIT_SECONDS = 0.01
 
 DYNAMIC_METADATA_KEYS = {
     "concept_attempts",
@@ -220,7 +223,6 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("", file=sys.stderr)
         return 130
-
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -1141,6 +1143,30 @@ def repl_prompt() -> str:
     return "Answer> " if topic.metadata.get("pending_question") else "openlearn> "
 
 
+def read_repl_message(prompt: str, input_func=input) -> str:
+    first_line = input_func(prompt)
+    if input_func is not input or not sys.stdin.isatty():
+        return first_line
+
+    lines = [first_line]
+    wait_seconds = REPL_PASTE_INITIAL_WAIT_SECONDS
+    while stdin_has_line(wait_seconds):
+        line = sys.stdin.readline()
+        if line == "":
+            break
+        lines.append(line.rstrip("\r\n"))
+        wait_seconds = REPL_PASTE_CONTINUATION_WAIT_SECONDS
+    return "\n".join(lines)
+
+
+def stdin_has_line(timeout: float) -> bool:
+    try:
+        readable, _, _ = select.select([sys.stdin], [], [], timeout)
+    except (OSError, TypeError, ValueError):
+        return False
+    return bool(readable)
+
+
 def run_repl(
     topic_value: str | None = None,
     model: str | None = None,
@@ -1157,11 +1183,6 @@ def run_repl(
         output_func(
             "Type a question to ask the active topic. Commands: /help, /resume, /next, /done, /review, /summary, /options, /plan, /progress, /scope, /q"
         )
-        try:
-            topic = read_topic(resolve_topic_slug(topic_value))
-            print_status_bar(topic, output_func)
-        except OpenLearnError:
-            pass
 
     def print_active_status_bar() -> None:
         try:
@@ -1171,7 +1192,7 @@ def run_repl(
 
     while True:
         try:
-            prompt = input_func(repl_prompt()).strip()
+            prompt = read_repl_message(repl_prompt(), input_func=input_func).strip()
         except EOFError:
             output_func("")
             break
@@ -1186,12 +1207,14 @@ def run_repl(
                 handle_repl_command(
                     prompt[1:], model=model, input_func=input_func, output_func=output_func
                 )
+            elif handle_natural_advance(prompt, model=model, output_func=output_func):
+                continue
             else:
+                print_active_status_bar()
                 ask_topic(None, prompt, model, output_func=output_func)
         except OpenLearnError as exc:
-            print_error(str(exc), output_func)
-        finally:
             print_active_status_bar()
+            print_error(str(exc), output_func)
 
     try:
         _session_minutes = round(
@@ -1210,6 +1233,103 @@ def run_repl(
     except Exception:
         pass
     return 0
+
+
+def learner_requests_advance(prompt: str) -> bool:
+    value = one_line(prompt).lower()
+    if value in {"continue", "next", "next slide", "move on", "skip"}:
+        return True
+    patterns = (
+        r"\b(?:let'?s|lets)\s+(?:continue|move on|go on|go to (?:the )?next)",
+        r"\b(?:move|go)\s+(?:on|to (?:the )?next (?:slide|topic|lesson))\b",
+        r"\bskip\b.+\b(?:continue|move on|next)\b",
+        r"\b(?:continue|move on)\s+to (?:the )?next\b",
+    )
+    return any(re.search(pattern, value) for pattern in patterns)
+
+
+def learner_preference_from_advance(prompt: str) -> str:
+    value = one_line(prompt)
+    if not re.search(
+        r"(?i)\b(skip|don'?t need|do not need|proficient|already know|comfortable with|not interested)",
+        value,
+    ):
+        return ""
+    return value
+
+
+def clear_learning_gate(metadata: dict[str, object]) -> None:
+    metadata["last_answer_status"] = ""
+    for key in (
+        "last_answer_gap",
+        "last_answer_hint",
+        "last_answer_score",
+        "pending_hint",
+        "pending_question",
+        "pending_verify",
+    ):
+        metadata.pop(key, None)
+
+
+def save_learner_navigation_preference(topic: Topic, prompt: str) -> None:
+    preference = learner_preference_from_advance(prompt)
+    if not preference:
+        return
+    with file_lock(topic.path):
+        raw_metadata, body = parse_topic(topic.path.read_text(encoding="utf-8"))
+        metadata = merge_topic_state(
+            normalize_topic_metadata(raw_metadata, topic.slug), load_state(topic.slug)
+        )
+        preferences = metadata.get("learner_preferences")
+        values = (
+            [item for item in preferences if isinstance(item, str) and item.strip()]
+            if isinstance(preferences, list)
+            else []
+        )
+        if preference not in values:
+            values.append(preference)
+        metadata["learner_preferences"] = values[-20:]
+        clear_learning_gate(metadata)
+        save_state(topic.slug, state_from_metadata(metadata))
+        write_text_atomic(
+            topic.path,
+            format_topic(stable_metadata_for_topic(metadata), body),
+        )
+
+
+def restore_learner_preferences_from_history(topic: Topic) -> Topic:
+    _body, session_log = split_session_log(topic.body)
+    entries = session_entries(session_log)
+    existing = topic.metadata.get("learner_preferences")
+    known = (
+        {item for item in existing if isinstance(item, str) and item.strip()}
+        if isinstance(existing, list)
+        else set()
+    )
+    for entry in entries:
+        prompt = entry["prompt"]
+        if (
+            prompt not in known
+            and learner_requests_advance(prompt)
+            and learner_preference_from_advance(prompt)
+        ):
+            save_learner_navigation_preference(topic, prompt)
+            known.add(prompt)
+    return read_topic(topic.slug)
+
+
+def handle_natural_advance(prompt: str, model: str | None = None, output_func=print) -> bool:
+    if not learner_requests_advance(prompt):
+        return False
+    slug = resolve_topic_slug(None)
+    topic = read_topic(slug)
+    save_learner_navigation_preference(topic, prompt)
+    if not advance_slide(slug, output_func, force=True):
+        return True
+    output_func("")
+    output_func("Loading next slide...")
+    cmd_next(argparse.Namespace(topic=slug, model=model), output_func=output_func)
+    return True
 
 
 def handle_repl_command(
@@ -1238,11 +1358,10 @@ def handle_repl_command(
             output_func=output_func,
         )
     elif name in {"done", "next-slide"}:
-        force = any(arg in {"--force", "force", "yes"} for arg in args)
         topic_args = [arg for arg in args if arg not in {"--force", "force", "yes"}]
         topic_value = topic_args[0] if topic_args else None
         slug = resolve_topic_slug(topic_value)
-        if advance_slide(slug, output_func, force=force):
+        if advance_slide(slug, output_func, force=True):
             updated = read_topic(slug)
             output_func("")
             if updated.metadata.get("pending_chapter_quiz") is True:
@@ -1960,7 +2079,9 @@ def placement_context_prompt(slug: str) -> str:
 def first_lesson_prompt(outline: str) -> str:
     return (
         "Start teaching unit 1 from this accepted course plan. "
-        "Do not repeat the whole plan. Use this compact structure:\n"
+        "Do not repeat the whole plan. Teach exactly one concept. "
+        "Use exactly one Lesson section, one Example section, and at most one "
+        "Check section, then stop. Use this compact structure:\n"
         "Lesson: teach one concept in 2-4 sentences.\n"
         "Example: give one concrete example.\n"
         "Check: ask one important check-for-understanding question only if the "
@@ -2521,11 +2642,11 @@ def advance_slide(slug: str, output_func=print, force: bool = False) -> bool:
         metadata["current_unit"] = unit
         metadata["current_slide"] = slide
         metadata["review_session_active"] = False
+        clear_learning_gate(metadata)
         if current:
             title = current.get("title")
             if isinstance(title, str) and title.strip():
                 metadata["current_focus"] = title.strip()
-        metadata.pop("pending_question", None)
         if crossed_unit and course_options(metadata).get("quiz_after_chapter"):
             completed_unit_data = course_unit_at(metadata, completed_unit)
             metadata["pending_chapter_quiz"] = True
@@ -4216,6 +4337,7 @@ def cmd_due(_args: argparse.Namespace, output_func=print) -> int:
 
 def cmd_resume(args: argparse.Namespace, output_func=print) -> int:
     topic = read_topic(resolve_topic_slug(args.topic))
+    topic = restore_learner_preferences_from_history(topic)
     set_active_topic(topic.slug)
     set_review_session_active(topic.slug, False)
     model = args.model or str(topic.metadata.get("model") or configured_model())
@@ -4246,6 +4368,7 @@ def cmd_next(args: argparse.Namespace, output_func=print) -> int:
     topic = read_topic(resolve_topic_slug(args.topic))
     set_active_topic(topic.slug)
     set_review_session_active(topic.slug, False)
+    print_status_bar(topic, output_func)
     model = args.model or str(topic.metadata.get("model") or configured_model())
     lesson_context = current_lesson_prompt(topic)
     user = (
@@ -4294,8 +4417,6 @@ def print_and_append_model_answer(
 ) -> str:
     global _LAST_RESPONSE_ANSWER_KEY
     answer = sanitize_model_output(answer)
-    if answer:
-        output_func("")
     append_session(topic, kind, prompt, answer, mark_reviewed=mark_reviewed)
     if kind in {"chat", "resume", "next", "lesson", "review"}:
         save_pending_question(topic, answer, _LAST_RESPONSE_ANSWER_KEY)
@@ -4306,22 +4427,31 @@ def print_and_append_model_answer(
 def save_pending_question(
     topic: Topic, answer: str, answer_key: str, question_text: str | None = None
 ) -> None:
-    if answer_key not in {"A", "B", "C", "D"}:
+    has_answer_key = answer_key in {"A", "B", "C", "D"}
+    if not has_answer_key and question_text is None:
         return
     question = (
         question_text or extract_pending_question_text(answer) or last_question(answer)
     ).strip()
+    if not question:
+        return
+    is_multiple_choice = has_answer_key or any(
+        re.match(r"(?i)^[A-D][\).:-]\s+", line.strip())
+        for line in question.splitlines()
+    )
+    pending_question: dict[str, str] = {
+        "kind": "multiple_choice" if is_multiple_choice else "free_response",
+        "question": question,
+        "created": today(),
+    }
+    if has_answer_key:
+        pending_question["answer_key"] = answer_key
     with file_lock(topic.path):
         raw_metadata, body = parse_topic(topic.path.read_text(encoding="utf-8"))
         metadata = merge_topic_state(
             normalize_topic_metadata(raw_metadata, topic.slug), load_state(topic.slug)
         )
-        metadata["pending_question"] = {
-            "kind": "multiple_choice",
-            "answer_key": answer_key,
-            "question": question,
-            "created": today(),
-        }
+        metadata["pending_question"] = pending_question
         save_state(topic.slug, state_from_metadata(metadata))
         write_text_atomic(topic.path, format_topic(stable_metadata_for_topic(metadata), body))
 
@@ -5672,10 +5802,10 @@ def summarize_context_file(
 def trim_words(text: str, limit: int) -> str:
     if limit <= 0:
         return ""
-    words = text.split()
+    words = list(re.finditer(r"\S+", text))
     if len(words) <= limit:
         return text
-    return " ".join(words[:limit]).rstrip() + "..."
+    return text[: words[limit - 1].end()].rstrip() + "..."
 
 
 def write_context_text(slug: str, filename: str, text: str) -> Path:
@@ -6465,8 +6595,12 @@ def system_prompt(topic: Topic) -> str:
         shows confusion, correct the misconception, stay on the same concept,
         and ask a focused follow-up or give a smaller drill. Do not advance just
         because the learner says no, seems uncertain, or gives an incorrect
-        answer. Mark a concept as ready to move on only after the learner shows
-        understanding.
+        answer. An explicit request to skip, continue, move on, or go to the next
+        slide is a navigation decision, not an answer. Obey it immediately and
+        do not keep testing the skipped material. Mark a concept as ready to move
+        on after the learner shows understanding or explicitly chooses to skip it.
+        Treat learner_preferences in topic metadata as durable constraints. Never
+        reintroduce a skipped topic unless the learner explicitly asks for it.
 
         Ask questions only when they test important knowledge, diagnose a likely
         gap, or help the learner practice. Do not ask filler clarifying questions
@@ -6522,6 +6656,11 @@ def system_prompt(topic: Topic) -> str:
         keybindings, tools, and setup) rather than generic defaults. If the context
         says Ctrl+x closes a pane, that is correct for this learner — do not
         contradict it with generic tmux defaults.
+        Never invent or assume a default keybinding. A tool being installed or
+        named in context does not prove that it is running or that its default
+        shortcuts are configured. If the learner's context does not explicitly
+        specify a binding, say that it is not documented and tell the learner
+        where to verify it.
 
         Current data:
         Topic metadata:
@@ -6558,13 +6697,13 @@ def pending_question_prompt(metadata: dict[str, object]) -> str:
     answer_key = pending.get("answer_key")
     if not isinstance(question, str) or not question.strip():
         return ""
-    if not isinstance(answer_key, str) or answer_key not in {"A", "B", "C", "D"}:
-        return ""
+    answer_key_instruction = ""
+    if isinstance(answer_key, str) and answer_key in {"A", "B", "C", "D"}:
+        answer_key_instruction = f"\nStored correct answer key: {answer_key}"
     return textwrap.dedent(
         f"""
         Grade the learner's next answer against this exact question only.
-        Stored question: {question.strip()}
-        Stored correct answer key: {answer_key}
+        Stored question: {question.strip()}{answer_key_instruction}
         Do not substitute a different question from recent history or context.
         """
     ).strip()
@@ -6830,16 +6969,11 @@ def resume_context_prompt(topic: Topic) -> str:
     )
     if last_interaction and last_interaction["kind"] == "chat":
         lines.append(f"Last learner message: {snippet(last_interaction['prompt'], 180)}")
-        question = last_question(last_interaction["response"])
-        if question:
-            lines.append(f"Question they may be answering: {snippet(question, 180)}")
     elif last_interaction and last_interaction["kind"] == "review":
-        question = last_question(last_interaction["response"])
-        if question:
-            lines.append(f"Question they may be answering: {snippet(question, 180)}")
+        lines.append(f"Last learner message: {snippet(last_interaction['prompt'], 180)}")
     if last_entry["response"].strip():
         label = "Last tutor response" if last_entry["kind"] != "resume" else "Previous resume"
-        lines.append(f"{label}: {snippet(last_entry['response'], 220)}")
+        lines.append(f"{label}:\n{last_entry['response'].strip()}")
     return "\n".join(lines)
 
 
@@ -6872,19 +7006,10 @@ def print_resume_context(topic: Topic, context: str, output_func=print) -> None:
             None,
         )
         if last_interaction:
-            question = last_question(last_interaction["response"])
-            if question:
-                snip = snippet(question, 160).replace("**", "")
-                emit_resume_line(f"Last question: {snip}", output_func)
-        last_entry = entries[-1]
-        if last_entry["response"].strip():
-            label = "Last response"
-            snip = snippet(last_entry["response"], 200).replace("**", "")
-            emit_resume_line(f"{label}: {snip}", output_func)
+            learner_context = snippet(last_interaction["prompt"], 180).replace("**", "")
+            emit_resume_line(f"You: {learner_context}", output_func)
     elif not progress:
         emit_resume_line("No previous session yet.", output_func)
-
-    output_func("")
 
 
 def session_entries(session_log: str) -> list[dict[str, str]]:

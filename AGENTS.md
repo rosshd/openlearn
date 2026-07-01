@@ -1,39 +1,44 @@
-# openlearn Agent Instructions
+# openlearn Agent Map
 
-## Project
+openlearn is a local-first AI tutoring CLI.
+Keep this file short and route deeper context to skills only when needed.
 
-openlearn is a local-first AI tutoring CLI. The entry point is `openlearn`; the main implementation lives in `src/openlearn/cli.py`.
+## Fast Context
 
-## Key Files
+- Entry point: `openlearn`, implemented mostly in `src/openlearn/cli.py`.
+- Core helpers: `src/openlearn/constants.py`, `src/openlearn/models.py`, `src/openlearn/text.py`, `src/openlearn/ui.py`.
+- Tests: `tests/`, with human smoke flows in `manual-tests/`.
+- User-owned data: `learning-topics/*.md`, `*.state.json`, `*.events.jsonl`, `state.json`, `config.json`, and imported context files.
 
-- `src/openlearn/cli.py`: commands, REPL, tutor prompts, model calls, storage flows.
-- `src/openlearn/constants.py`: prompt constants and limits.
-- `src/openlearn/models.py`: dataclasses for topic/session state.
-- `src/openlearn/text.py`: parsing and text helpers.
-- `tests/`: unittest and pytest coverage.
-- `manual-tests/`: human smoke flows.
+## Non-Negotiables
 
-## Working Rules
-
-- Keep the project local-first. Do not commit topic files, context imports, `config.json`, `state.json`, API keys, or `.env` files.
-- Preserve the Markdown plus JSON topic format unless the task explicitly changes storage.
-- Respect environment precedence: env vars first, then `config.json`, then defaults.
-- Keep edits scoped. Avoid unrelated refactors, dependency churn, or broad prompt rewrites.
-- For phase-style work, follow the exact brief, named fields, order, and scope boundaries.
+- Keep the product local-first.
+- Preserve the Markdown plus JSON topic format unless explicitly changing storage.
+- Respect config precedence: environment variables, then `config.json`, then defaults.
+- Do not commit topic files, imported context, state files, config, API keys, or `.env`.
+- Keep prompt, storage, and learner-model changes scoped and test-backed.
 - For bug fixes, reproduce or reason from the user-visible flow before patching.
+
+## Skill Routing
+
+- Use `.claude/skills/openlearn-validate/` after code edits, before review, before push, or when asked to run checks.
+- Use `.claude/skills/openlearn-architecture/` for storage, provider, import, event log, or module-boundary work.
+- Use `.claude/skills/openlearn-tutor-policy/` for tutor prompts, answer judging, mastery, anti-gaming, quiz, SRS, and learning-science decisions.
+- Use `.claude/skills/openlearn-phase-review/` when reviewing a phase implementation or writing the next phase prompt.
 
 ## Verification
 
-One command gates a change:
+Green gate:
 
 ```bash
-make check    # lint + unit + pytest + mock smoke; must be green before push
+make check
 ```
 
-Before a PR, collect evidence with `make review` (writes logs + diff to
-`.artifacts/review/`). For the full mock flow use `make e2e`. `make typecheck`
-(pyright) is available but non-blocking. Slow AI-judge evals are marker-gated;
-do not run them unless the task calls for real model evaluation.
+Before a PR:
 
-For the detailed validation/review/PR-prep workflow, see the
-`openlearn-validate` skill (`.claude/skills/openlearn-validate/`).
+```bash
+make review
+```
+
+`make typecheck` is available but non-blocking.
+Run slow AI-judge evals only when the task is about model-output quality.

@@ -11,8 +11,15 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.rule import Rule
 from rich.table import Table
 from rich.text import Text
+from rich.theme import Theme
 
-console = Console()
+OPENLEARN_THEME = Theme(
+    {
+        "markdown.strong": "bold cyan",
+    }
+)
+
+console = Console(theme=OPENLEARN_THEME)
 
 PROMPT = "> "
 
@@ -146,7 +153,12 @@ def emit_resume_line(line: str, output_func=print) -> None:
 
 
 def tutor_markdown(text: str) -> Markdown:
-    return Markdown(text)
+    styled = re.sub(
+        r"(?m)^(Lesson|Feedback|Example|Check|Hint|Next|Action):",
+        r"**\1:**",
+        text,
+    )
+    return Markdown(styled)
 
 
 def emit_tutor_markdown(text: str, output_func=print) -> None:

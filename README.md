@@ -6,161 +6,18 @@
 
 Local-first AI tutoring that keeps learning state in files you own.
 
-openLearn is an open-source, local-first AI learning workspace. It keeps your curriculum, progress, review state, and session notes in files you own, while letting you bring your own model API key.
-
-The early version is intentionally small: a Python CLI that creates topic files, reads local learning state, and uses OpenAI-compatible chat-completion APIs when you ask for tutoring, review, resume help, or next steps.
+openLearn is an open-source Python CLI for course creation, tutoring, review, drills, imports, and progress tracking.
+It stores curriculum, learner state, session notes, and context files locally while using an OpenAI-compatible chat-completions API only for model-backed actions.
 
 ## Principles
 
-- Local-first by default: learning topics live under `learning-topics/`.
-- Bring your own API key first: no required account, hosted service, or subscription.
-- Transparent model usage: only relevant topic state is sent to the model.
-- Human-readable memory: topics are Markdown files with simple metadata.
-- Open core: the project is licensed under AGPLv3 to keep hosted modifications open.
+- Local-first: topics and learner state live under your openLearn home.
+- Bring your own API key: no required hosted account or subscription.
+- Transparent scope: model calls use the selected topic, bounded notes, recent context, and the current prompt.
+- Human-readable memory: topic files are Markdown with JSON metadata.
+- Open core: AGPLv3 keeps hosted modifications open.
 
-## Current Commands
-
-```bash
-python -m openlearn
-python -m openlearn init
-python -m openlearn menu
-python -m openlearn repl
-python -m openlearn config set-key
-python -m openlearn config set-model gpt-4.1-mini
-python -m openlearn config set-base-url https://api.openai.com/v1
-python -m openlearn config show
-python -m openlearn config clear-key
-python -m openlearn new vim --goal "Learn Vim motions and macros"
-python -m openlearn delete vim --yes
-python -m openlearn list
-python -m openlearn recent
-python -m openlearn active vim
-python -m openlearn status vim
-python -m openlearn summary vim
-python -m openlearn repair vim
-python -m openlearn edit vim
-python -m openlearn resume
-python -m openlearn next
-python -m openlearn chat vim "How should I practice macros?"
-python -m openlearn review vim
-```
-
-Commands and interactive actions that need model output require an API key: `chat`, `review`, `resume`, `next`, REPL questions, and model-backed menu actions.
-Running `openlearn` with no command opens the interactive menu.
-
-## Demo
-
-Create a local learning workspace and a topic:
-
-```bash
-openlearn init
-openlearn new vim --goal "Use Vim comfortably for real editing"
-```
-
-New topics start as unstarted courses. In the menu, choose `Start course` to have the tutor propose a compact course scope and unit plan. Accept the outline with `y`, or answer `n` to explain what should change and regenerate it. Once accepted, openLearn saves the plan, starts lesson one, and continues in the REPL.
-
-Check what openLearn knows about the topic:
-
-```bash
-openlearn status vim
-```
-
-Example output:
-
-```text
-Topic: vim
-Goal: Use Vim comfortably for real editing
-Current focus: not set
-Level: beginner
-Model: gpt-4.1-mini
-Known: none
-Weak spots: none
-Review due: none
-```
-
-Resume later without remembering the topic name:
-
-```bash
-openlearn resume
-```
-
-`resume` reads the active or most recent topic, sends only that topic's relevant local state to the configured model provider, prints a short continuation plan, and appends the session back into the topic file.
-
-Review a topic when you want active recall:
-
-```bash
-openlearn review vim
-```
-
-For back-and-forth learning, start the REPL directly:
-
-```bash
-openlearn repl
-```
-
-Inside the REPL, type normal questions to ask the active topic without retyping `openlearn chat <topic> ...` every time. The interactive menu also enters the REPL automatically after learning actions that ask for a learner response.
-
-```text
-openlearn> I think the answer is registers. Am I right?
-openlearn> /next
-openlearn> /review
-openlearn> /status
-openlearn> /summary
-openlearn> /options
-openlearn> /plan
-openlearn> /progress 2 1
-openlearn> /scope add a short search-and-replace chapter
-openlearn> /quit
-```
-
-Useful REPL commands are `/help`, `/resume`, `/next`, `/review`, `/status`, `/summary`, `/options`, `/plan`, `/progress [unit slide]`, `/scope <change>`, `/active <topic>`, `/recent`, `/new <topic> [goal]`, `/ask <question>`, and `/quit`.
-
-Course options are stored in the topic file. The first options include chapter-end quizzes, progress reminders, weak-spot review before new chapters, and hands-on drills. If chapter-end quizzes are enabled, openLearn records a pending quiz when the learner finishes a chapter and stores quiz results in local metadata after evaluation.
-
-Your topic notes remain normal Markdown files under `learning-topics/`, so you can inspect or edit them directly at any time.
-
-## Intended Workflow
-
-The daily workflow should be fast enough to use between classes, coding sessions, or focused study blocks.
-
-Create a topic once:
-
-```bash
-openlearn new vim --goal "Use Vim comfortably for real editing"
-```
-
-Resume later with no topic name:
-
-```bash
-openlearn resume
-```
-
-`resume` uses the active topic. If no active topic exists, it falls back to the most recently changed topic file. Topic commands like `new`, `status`, `chat`, `review`, `resume`, and `next` update the active topic automatically.
-
-Fast commands:
-
-- `openlearn recent`: show recently used topics.
-- `openlearn active`: show the active topic.
-- `openlearn active os`: switch active topic.
-- `openlearn edit`: open the active topic file in `$EDITOR`.
-- `openlearn menu`: open a numbered menu for common actions; learning actions continue into the REPL automatically.
-- `openlearn repl`: start a back-and-forth learning prompt.
-- `openlearn delete vim --yes`: permanently delete a local topic file.
-- `openlearn resume`: recap and continue where you left off.
-- `openlearn next`: generate the next 10-15 minute learning step.
-- `openlearn review vim`: generate a short active-recall review.
-
-The target experience is:
-
-```bash
-openlearn resume
-```
-
-Then learn, answer the recall question, and leave. The topic file keeps the session log for next time.
-
-## Setup
-
-From the project directory:
+## Install
 
 ```bash
 python -m venv .venv
@@ -168,84 +25,97 @@ source .venv/bin/activate
 pip install -e .
 ```
 
-Run tests:
+Run the app:
 
 ```bash
-python -m unittest
+openlearn
 ```
 
-The tests use temporary directories and do not require an API key.
-
-Set an OpenAI API key before using `chat` or `review`:
+Run the project gate:
 
 ```bash
+make check
+```
+
+## Configuration
+
+Interactive setup:
+
+```bash
+openlearn init
 openlearn config set-key
-```
-
-This stores the key in `config.json` under your openLearn home with file permissions set to owner-read/write when supported by the OS. `config.json` is ignored by Git.
-
-Set the default model:
-
-```bash
 openlearn config set-model gpt-4.1-mini
-```
-
-Use an OpenAI-compatible provider:
-
-```bash
 openlearn config set-base-url https://api.openai.com/v1
-```
-
-The base URL should point at an API that supports `POST /chat/completions` with OpenAI-style request and response shapes.
-
-Check config:
-
-```bash
 openlearn config show
 ```
 
-Power users can still use environment variables. These take precedence over saved config:
+Environment variables override saved config:
 
 ```bash
 export OPENAI_API_KEY="your-key"
 export OPENLEARN_MODEL="gpt-4.1-mini"
 export OPENLEARN_BASE_URL="https://api.openai.com/v1"
+export OPENLEARN_HOME="/path/to/openlearn-data"
 ```
 
-Optional settings:
+If `OPENLEARN_HOME` is unset, openLearn uses the current directory when it contains `learning-topics/`; otherwise it uses the platform data directory.
+
+## Daily Workflow
 
 ```bash
-export OPENLEARN_HOME="/path/to/your/openlearn-data"
+openlearn new vim --goal "Use Vim comfortably for real editing"
+openlearn resume
 ```
 
-If `OPENLEARN_HOME` is not set, openLearn uses the current project directory when it contains `learning-topics/`; otherwise it uses `~/.openlearn`.
+`resume` uses the active topic.
+If no active topic exists, it falls back to the most recently changed topic.
+Learning actions from the menu continue into the REPL automatically.
+Interactive sessions support multiline paste as one learner message.
+Plain requests such as "continue", "move on", or "skip" advance the current slide; if the wording includes a preference such as "I don't need this", openLearn stores it as a learner preference.
+
+Inside the REPL:
+
+```text
+openlearn> /n
+openlearn> continue
+openlearn> /done
+openlearn> /review
+openlearn> /drill
+openlearn> /check
+openlearn> /videos --n 3 registers
+openlearn> /status
+openlearn> /q
+```
+
+Use `/help --all` for the full REPL command list.
+
+## Command Surface
+
+| Area | Commands |
+| --- | --- |
+| Setup | `init`, `config show`, `config set-key`, `config set-model`, `config set-base-url`, `config clear-key` |
+| Topics | `new`, `delete`, `list`, `recent`, `active`, `edit`, `status`, `summary`, `stats`, `repair` |
+| Learning | `menu`, `repl`, `chat`, `resume`, `next`, `review`, `chapter`, `due` |
+| Sources | `import <topic> <file>`, `import <topic> --url <url>`, `import <topic> --scan <dir>`, `paste` |
+| Practice | `videos`, REPL `/drill`, REPL `/check` |
+| Utilities | `templates`, `test`, `tui` |
+
+Model-backed commands require an API key unless `OPENLEARN_MOCK=1` is set for tests.
+`repl` also has the `shell` alias.
 
 ## Local Files
 
-openLearn keeps user data outside Git by default:
-
-- `learning-topics/*.md`: user-owned topic notes and session logs.
+- `learning-topics/*.md`: user-owned topic notes, course plan, metadata, and session log.
+- `learning-topics/<slug>.state.json`: dynamic learner model.
+- `learning-topics/<slug>.events.jsonl`: append-only learning events.
+- `learning-topics/context/<slug>/`: imported source summaries.
+- `learning-topics/drills/<slug>/`: generated drill files.
 - `state.json`: active-topic state.
-- `config.json`: saved model settings and optional API key.
+- `config.json`: saved provider settings and optional API key.
 
-These files are ignored because they may contain private notes, class material, or credentials.
-
-Delete a topic when you no longer need its local notes:
-
-```bash
-openlearn delete vim --yes
-```
-
-Deletion is permanent. Since topic files are user-owned Markdown files, you can also back up or move them manually before deleting.
-
-## Pricing Language
-
-The product direction is:
-
-> Bring your own API key, or optionally use transparent usage-based hosted credits with no subscription required.
-
-The hosted-credit path is intentionally not part of the MVP.
+These files are ignored by Git because they may contain private notes, class material, or credentials.
 
 ## License
 
-openLearn is licensed under the GNU Affero General Public License v3.0 or later. See `LICENSE`.
+openLearn is licensed under AGPL-3.0-or-later.
+See `LICENSE`.
