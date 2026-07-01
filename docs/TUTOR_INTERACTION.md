@@ -71,5 +71,5 @@ Slow AI-judge evals should focus on judge calibration, move quality, anti-answer
 1. Harden the judge and learner-state updates.
 2. Strengthen deterministic gaming detection.
 3. Encode move policy in prompt fragments and pure selection logic.
-4. Replace chapter-only quizzing with cumulative retrieval.
-5. Add slow-lane evals for judge calibration and tutor-move quality.
+4. Tune cumulative quiz thresholds and expand retrieval coverage.
+5. Expand slow-lane eval fixtures for judge calibration and tutor-move quality.
