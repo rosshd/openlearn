@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pexpect
 
 
@@ -68,6 +70,27 @@ def test_repl_unknown_command_no_crash(spawn_openlearn) -> None:
         proc.expect("openlearn> ")
         proc.sendline("/q")
         proc.expect(pexpect.EOF)
+    finally:
+        proc.close()
+
+
+def test_repl_multiline_paste_is_one_learner_message(spawn_openlearn) -> None:
+    spawn_openlearn.create_topic()
+    proc = spawn_openlearn.spawn("repl")
+    try:
+        proc.expect("openlearn> ")
+        proc.send(
+            "This was our dialogue:\nLesson: First pasted line.\nCheck: Second pasted line?\n"
+        )
+        proc.expect("openlearn> ")
+        proc.sendline("/q")
+        proc.expect(pexpect.EOF)
+
+        topic_path = Path(spawn_openlearn.env["OPENLEARN_HOME"]) / "learning-topics" / "workflow.md"
+        topic_text = topic_path.read_text(encoding="utf-8")
+        assert topic_text.count(" - chat") == 1
+        assert "This was our dialogue:\nLesson: First pasted line." in topic_text
+        assert "Check: Second pasted line?" in topic_text
     finally:
         proc.close()
 

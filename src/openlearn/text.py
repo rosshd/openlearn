@@ -55,9 +55,7 @@ def sanitize_model_output(text: str) -> str:
     text = re.sub(r"(?im)^\s*answer\s*key\s*:\s*[A-D]\s*$", "", text)
     text = re.sub(r"(?im)^\s*correct\s+answer\s*:\s*[A-D]\s*[\).:-]?.*$", "", text)
     text = re.sub(r"(?im)^\s*\(?answer\s*:\s*[A-D]\)?.*$", "", text)
-    blocked = re.compile(
-        r"\b(system reminder|operational mode|read-only mode)\b", re.IGNORECASE
-    )
+    blocked = re.compile(r"\b(system reminder|operational mode|read-only mode)\b", re.IGNORECASE)
     instruction_action = re.compile(
         r"^\s*Action:\s+(Ask|Reiterate|Introduce|Explain|Provide|Fill in|Create|Generate|Respond|Evaluate)\b",
         re.IGNORECASE,

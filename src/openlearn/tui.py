@@ -7,9 +7,8 @@ the rest of the CLI remains usable without the extra dependency.
 """
 from __future__ import annotations
 
-from typing import List
 
-from .cli import run_repl, resolve_topic_slug, handle_repl_command
+from .cli import resolve_topic_slug, handle_repl_command
 
 
 def run_tui(topic: str | None = None, model: str | None = None) -> int:
@@ -20,7 +19,6 @@ def run_tui(topic: str | None = None, model: str | None = None) -> int:
     try:
         from prompt_toolkit import PromptSession
         from prompt_toolkit.completion import Completer, Completion
-        from prompt_toolkit.patch_stdout import patch_stdout
         from prompt_toolkit.history import FileHistory
     except Exception:
         print(
@@ -29,7 +27,6 @@ def run_tui(topic: str | None = None, model: str | None = None) -> int:
         return 2
 
     # Helper: history file under project_home
-    from pathlib import Path
     from .cli import project_home, recent_topic_summaries
 
     history_path = project_home() / "tui_history.txt"
@@ -96,7 +93,7 @@ def run_tui(topic: str | None = None, model: str | None = None) -> int:
 def _prompt_toolkit_loop(session: "PromptSession", topic_slug: str | None, model: str | None) -> int:
     """Loop that reads input from prompt-toolkit and delegates to existing handlers."""
     # Reuse run_repl's logic for commands by calling handle_repl_command and ask_topic
-    from .cli import run_repl, ask_topic
+    from .cli import ask_topic
 
     # Show intro similar to run_repl
     print("== openLearn TUI ==")

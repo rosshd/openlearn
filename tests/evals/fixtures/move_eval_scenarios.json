@@ -1,0 +1,142 @@
+[
+  {
+    "id": "pending_verify_transfer",
+    "name": "pending_verify asks transfer question without answer reveal",
+    "learner_message": "So I got it right, can we move on?",
+    "metadata": {
+      "topic": "A* search",
+      "slug": "move-eval",
+      "goal": "Understand A* search",
+      "course_started": true,
+      "current_unit": 1,
+      "current_slide": 2,
+      "current_focus": "Admissible heuristics",
+      "mastery_profile": "proficient",
+      "pending_verify": {
+        "concept_id": "admissible-heuristics",
+        "label": "Admissible heuristics",
+        "reason": "suspected_copying",
+        "created": "2026-01-01"
+      },
+      "course_units": [
+        {
+          "unit": 1,
+          "chapter": "1",
+          "title": "A* search",
+          "slide_count": 2,
+          "concepts": [{"id": "admissible-heuristics", "label": "Admissible heuristics"}]
+        }
+      ]
+    },
+    "body": "# A* search\n\nAdmissible heuristics never overestimate the remaining cost.\n",
+    "rubric": [
+      "The tutor asks a transfer or application question about admissible heuristics in a new context.",
+      "The tutor does not reveal the answer to that transfer question.",
+      "The tutor does not accuse the learner of cheating or copying.",
+      "The tutor does not advance to a new concept."
+    ]
+  },
+  {
+    "id": "mastering_impasse",
+    "name": "mastering tier manufactures impasse without unsolicited worked example",
+    "learner_message": "Continue.",
+    "metadata": {
+      "topic": "Recursion",
+      "slug": "move-eval",
+      "goal": "Develop deep understanding of recursion",
+      "course_started": true,
+      "current_unit": 1,
+      "current_slide": 2,
+      "current_focus": "Base cases",
+      "mastery_profile": "deep",
+      "last_answer_status": "correct",
+      "last_answer_score": 0.95,
+      "consecutive_correct": 3,
+      "rolling_pass_rate": 0.95,
+      "course_units": [
+        {
+          "unit": 1,
+          "chapter": "1",
+          "title": "Recursion",
+          "slide_count": 2,
+          "difficulty": 10,
+          "concepts": [{"id": "base-cases", "label": "Base cases"}]
+        }
+      ]
+    },
+    "body": "# Recursion\n\nA base case stops recursive calls.\n",
+    "rubric": [
+      "The tutor includes an impasse, edge-case, prediction, or transfer probe.",
+      "The probe requires production, not picking from choices or repeating a definition.",
+      "The tutor does not give an unsolicited worked example or full solution.",
+      "The tutor keeps the pace brisk."
+    ]
+  },
+  {
+    "id": "struggling_scaffold",
+    "name": "struggling tier scaffolds one concept and attempt-gates help",
+    "learner_message": "I still do not understand why binary search needs sorted input.",
+    "metadata": {
+      "topic": "Binary search",
+      "slug": "move-eval",
+      "goal": "Learn search algorithms",
+      "course_started": true,
+      "current_unit": 1,
+      "current_slide": 1,
+      "current_focus": "Sorted input invariant",
+      "mastery_profile": "proficient",
+      "last_answer_status": "needs_work",
+      "last_answer_score": 0.2,
+      "consecutive_misses": 2,
+      "course_units": [
+        {
+          "unit": 1,
+          "chapter": "1",
+          "title": "Binary search",
+          "slide_count": 2,
+          "difficulty": 8,
+          "concepts": [{"id": "sorted-input-invariant", "label": "Sorted input invariant"}]
+        }
+      ]
+    },
+    "body": "# Binary search\n\nBinary search compares with the middle item and discards half the search range.\n",
+    "rubric": [
+      "The tutor focuses on one sub-concept rather than introducing several new ideas.",
+      "The tutor uses a small scaffold or guiding question before giving the full answer.",
+      "If a worked example appears, it is short and follows or accompanies an attempt prompt.",
+      "The response is concrete and confidence-building."
+    ]
+  },
+  {
+    "id": "ungameable_check",
+    "name": "check question is not quoteable from shown text",
+    "learner_message": "Quiz me on stacks.",
+    "metadata": {
+      "topic": "Stacks",
+      "slug": "move-eval",
+      "goal": "Understand stack behavior",
+      "course_started": true,
+      "current_unit": 1,
+      "current_slide": 1,
+      "current_focus": "LIFO order",
+      "mastery_profile": "proficient",
+      "course_units": [
+        {
+          "unit": 1,
+          "chapter": "1",
+          "title": "Stacks",
+          "slide_count": 1,
+          "difficulty": 6,
+          "concepts": [{"id": "lifo-order", "label": "LIFO order"}]
+        }
+      ]
+    },
+    "body": "# Stacks\n\nA stack is last-in, first-out. Push adds an item; pop removes the most recently pushed item.\n",
+    "rubric": [
+      "The tutor asks a check question that requires applying, predicting, paraphrasing, or explaining why.",
+      "The check cannot be answered correctly by copying one sentence from the topic notes.",
+      "The check is production-oriented rather than simple recognition.",
+      "The tutor does not immediately provide the answer."
+    ]
+  }
+]

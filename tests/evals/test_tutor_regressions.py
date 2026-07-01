@@ -178,4 +178,8 @@ def make_regression_test(case: dict[str, Any]):
 
 
 for _filename, _case in load_regressions():
-    setattr(TutorRegressionTests, f"test_{_case.get('name', _filename.removesuffix('.json'))}", make_regression_test(_case))
+    setattr(
+        TutorRegressionTests,
+        f"test_{_case.get('name', _filename.removesuffix('.json'))}",
+        make_regression_test(_case),
+    )

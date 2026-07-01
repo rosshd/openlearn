@@ -9,12 +9,15 @@ __pycache__/
 dist/
 build/
 *.egg-info/
+.artifacts/
 
 # Local learning data is user-owned and may contain private notes.
 config.json
 state.json
 *.lock
 learning-topics/*.md
+learning-topics/*.state.json
+learning-topics/*.events.jsonl
 learning-topics/*/
 
 !.gitkeep

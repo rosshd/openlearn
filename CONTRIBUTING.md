@@ -7,17 +7,18 @@ Thanks for helping improve openLearn.
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -e .
-python -m unittest
+pip install -e .[dev]
+make check
 ```
 
 ## Project Expectations
 
 - Keep the core local-first: topic notes, review state, and API keys should stay user-owned by default.
-- Do not commit private learning data, `config.json`, `state.json`, topic Markdown files, API keys, or `.env` files.
+- Do not commit private learning data, imported context, `config.json`, `state.json`, topic files, API keys, or `.env`.
+- Preserve the Markdown plus JSON topic format unless a migration is explicit.
 - Prefer small, focused changes with tests when behavior changes.
-- Keep dependencies minimal unless a dependency clearly improves the MVP.
-- Update `README.md` or `docs/ARCHITECTURE.md` when command behavior, storage, or provider behavior changes.
+- Keep dependencies minimal unless a dependency clearly improves the product.
+- Update docs when command behavior, storage, provider behavior, or tutor policy changes.
 
 ## License
 

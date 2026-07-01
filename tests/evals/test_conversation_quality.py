@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import json
 import sys
+import unittest
 from argparse import Namespace
 from pathlib import Path
 
-import pytest
+try:
+    import pytest
+except ImportError:  # pytest is a dev/slow-lane dep; skip under plain `unittest`
+    raise unittest.SkipTest("pytest not installed (slow eval lane only)")
 
 SCENARIOS_DIR = Path(__file__).parent / "scenarios"
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
@@ -64,10 +68,7 @@ def test_conversation_quality(scenario_path):
 
     metric = GEval(
         name=scenario["name"],
-        criteria=(
-            f"Evaluate this AI tutor response against these criteria:\n"
-            f"{rubric_text}"
-        ),
+        criteria=(f"Evaluate this AI tutor response against these criteria:\n{rubric_text}"),
         evaluation_params=["actual_output"],
         threshold=0.7,
     )
@@ -77,6 +78,5 @@ def test_conversation_quality(scenario_path):
     )
     metric.measure(test_case)
     assert metric.score >= 0.7, (
-        f"Scenario '{scenario['name']}' failed "
-        f"(score {metric.score:.2f}): {metric.reason}"
+        f"Scenario '{scenario['name']}' failed (score {metric.score:.2f}): {metric.reason}"
     )
