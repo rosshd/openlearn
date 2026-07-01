@@ -17,6 +17,7 @@ state.json
 *.lock
 learning-topics/*.md
 learning-topics/*.state.json
+learning-topics/*.events.jsonl
 learning-topics/*/
 
 !.gitkeep
