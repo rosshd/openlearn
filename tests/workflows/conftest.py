@@ -13,9 +13,7 @@ import pexpect
 import pytest
 
 
-ANSI_RE = re.compile(
-    r"(?:\x1b\][^\x07]*(?:\x07|\x1b\\)|\x1b\[[0-?]*[ -/]*[@-~])"
-)
+ANSI_RE = re.compile(r"(?:\x1b\][^\x07]*(?:\x07|\x1b\\)|\x1b\[[0-?]*[ -/]*[@-~])")
 
 
 def strip_ansi(text: str) -> str:

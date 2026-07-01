@@ -3030,9 +3030,7 @@ class InteractiveTests(unittest.TestCase):
             "Next: What corner shortcut do you use?",
         )
 
-        updated = cli.restore_learner_preferences_from_history(
-            cli.read_topic("mac-workflow")
-        )
+        updated = cli.restore_learner_preferences_from_history(cli.read_topic("mac-workflow"))
 
         self.assertIn(
             "No corner snapping. Let's continue because I don't need it.",
@@ -5950,7 +5948,8 @@ class PromptInstructionTests(unittest.TestCase):
 
     def test_trim_words_preserves_lesson_section_formatting(self) -> None:
         text = (
-            "Lesson: " + " ".join(f"lesson{index}" for index in range(110))
+            "Lesson: "
+            + " ".join(f"lesson{index}" for index in range(110))
             + "\n\nExample: "
             + " ".join(f"example{index}" for index in range(110))
             + "\n\nCheck: What happens next?"

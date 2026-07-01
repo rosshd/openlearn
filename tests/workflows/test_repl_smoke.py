@@ -79,14 +79,14 @@ def test_repl_multiline_paste_is_one_learner_message(spawn_openlearn) -> None:
     proc = spawn_openlearn.spawn("repl")
     try:
         proc.expect("openlearn> ")
-        proc.send("This was our dialogue:\nLesson: First pasted line.\nCheck: Second pasted line?\n")
+        proc.send(
+            "This was our dialogue:\nLesson: First pasted line.\nCheck: Second pasted line?\n"
+        )
         proc.expect("openlearn> ")
         proc.sendline("/q")
         proc.expect(pexpect.EOF)
 
-        topic_path = (
-            Path(spawn_openlearn.env["OPENLEARN_HOME"]) / "learning-topics" / "workflow.md"
-        )
+        topic_path = Path(spawn_openlearn.env["OPENLEARN_HOME"]) / "learning-topics" / "workflow.md"
         topic_text = topic_path.read_text(encoding="utf-8")
         assert topic_text.count(" - chat") == 1
         assert "This was our dialogue:\nLesson: First pasted line." in topic_text

@@ -224,6 +224,7 @@ def main(argv: list[str] | None = None) -> int:
         print("", file=sys.stderr)
         return 130
 
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="openlearn",
@@ -3210,7 +3211,6 @@ def activate_cumulative_quiz_if_due(metadata: dict[str, object]) -> bool:
     return True
 
 
-
 def update_answer_status(metadata: dict[str, object], update: dict[str, object]) -> None:
     status = update.get("last_answer_status")
     if not isinstance(status, str):
@@ -4421,8 +4421,7 @@ def save_pending_question(
     if not question:
         return
     is_multiple_choice = has_answer_key or any(
-        re.match(r"(?i)^[A-D][\).:-]\s+", line.strip())
-        for line in question.splitlines()
+        re.match(r"(?i)^[A-D][\).:-]\s+", line.strip()) for line in question.splitlines()
     )
     pending_question: dict[str, str] = {
         "kind": "multiple_choice" if is_multiple_choice else "free_response",
