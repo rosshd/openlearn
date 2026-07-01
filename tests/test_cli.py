@@ -1754,7 +1754,8 @@ class InteractiveTests(unittest.TestCase):
         clean = list(output)
         self.assertTrue(any("openLearn" in line for line in clean))
         self.assertTrue(any("openlearn" in line for line in clean))
-        self.assertIn("1  New course", clean)
+        self.assertIn("1  Quick Learn", clean)
+        self.assertIn("2  New course", clean)
         self.assertNotIn("1  Resume", clean)
         self.assertNotIn("  10  REPL", clean)
 
@@ -1768,7 +1769,8 @@ class InteractiveTests(unittest.TestCase):
         self.assertIsNone(cli.get_active_topic())
         clean = list(output)
         self.assertIn("openlearn  ·  none  ·  not started  ·  not set", clean)
-        self.assertIn("1  New course", clean)
+        self.assertIn("1  Quick Learn", clean)
+        self.assertIn("2  New course", clean)
         self.assertNotIn("1  Resume", clean)
         self.assertNotIn("Next step", output)
 
@@ -1842,7 +1844,8 @@ class InteractiveTests(unittest.TestCase):
         self.assertIn("4  Course options", output)
         self.assertIn("5  Context files", output)
         self.assertIn("6  Topics", output)
-        self.assertIn("7  New course", output)
+        self.assertIn("7  Quick Learn", output)
+        self.assertIn("8  New course", output)
         self.assertIn("q  Quit", output)
         self.assertNotIn("-  ", output)
         self.assertFalse(any("Topic status" in line for line in output))
@@ -1886,7 +1889,7 @@ class InteractiveTests(unittest.TestCase):
         exit_code = call_silent(
             cli.run_menu,
             input_func=iter_input(
-                ["1", "1", "Menu Topic", "2", "Practice menu flow", "b", "y", "q"]
+                ["2", "1", "Menu Topic", "2", "Practice menu flow", "b", "y", "q"]
             ),
             output_func=lambda _text: None,
         )
@@ -1915,7 +1918,7 @@ class InteractiveTests(unittest.TestCase):
             exit_code = call_silent(
                 cli.run_menu,
                 input_func=iter_input(
-                    ["1", "1", "Menu Topic", "2", "Practice menu flow", "8", "q"]
+                    ["2", "1", "Menu Topic", "2", "Practice menu flow", "8", "q"]
                 ),
                 output_func=lambda _text: None,
             )
@@ -1926,6 +1929,192 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(calls, ["start", ("repl", False)])
         self.assertTrue(cli.topic_path("menu-topic").exists())
+
+    def test_quick_learn_file_creates_separate_started_topic(self) -> None:
+        source = Path(self.home.name) / "midterm-review.md"
+        source.write_text(
+            "# Midterm\n\n- Explain supply and demand.\n- Practice equilibrium shifts.\n",
+            encoding="utf-8",
+        )
+        original_streaming = cli.call_openai_streaming
+        original_call_openai = cli.call_openai
+        prompts = []
+
+        def fake_streaming(model, system, user, output_func=print, **_kwargs):
+            prompts.append(user)
+            if "Summarize this context file" in user:
+                answer = "- Concepts: supply, demand, and equilibrium shifts."
+            else:
+                answer = (
+                    "Scope: Midterm review\nExcludes: Material outside the source\n"
+                    "Assumptions: None\nUnits:\n"
+                    "1. Supply and demand (1 slide, difficulty 3/10) - Explain curves.\n"
+                    "Concepts: Supply; Demand\n"
+                    "2. Equilibrium shifts (1 slide, difficulty 5/10) - Apply changes.\n"
+                    "Concepts: Equilibrium; Curve shifts"
+                )
+            output_func(answer)
+            return answer
+
+        cli.call_openai_streaming = fake_streaming
+        cli.call_openai = lambda *_args, **_kwargs: (
+            "Lesson: Supply describes how quantity offered changes with price.\n"
+            "Example: A higher price can increase quantity supplied.\n"
+            "Check: What happens to quantity supplied when price rises?"
+        )
+        try:
+            exit_code = cli.quick_learn_from_source(
+                str(source),
+                name=None,
+                goal=None,
+                model="test-model",
+                input_func=lambda _prompt: self.fail("Quick Learn prompted unexpectedly"),
+                output_func=lambda _text: None,
+                enter_repl=False,
+            )
+        finally:
+            cli.call_openai_streaming = original_streaming
+            cli.call_openai = original_call_openai
+
+        topic = cli.read_topic("midterm-review")
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(topic.metadata["learning_mode"], "quick")
+        self.assertEqual(topic.metadata["quick_source_type"], "file")
+        self.assertEqual(topic.metadata["mastery_profile"], "efficient")
+        self.assertTrue(topic.metadata["course_started"])
+        self.assertEqual(topic.metadata["current_unit"], 1)
+        self.assertIn("pending_question", topic.metadata)
+        self.assertTrue((cli.topic_context_dir(topic.slug) / "midterm-review.md").exists())
+        self.assertTrue((cli.topic_context_dir(topic.slug) / "midterm-review.summary.txt").exists())
+        self.assertEqual(len(prompts), 2)
+        self.assertIn("This is Quick Learn", prompts[1])
+        self.assertNotIn("placement", "\n".join(prompts).lower())
+
+    def test_quick_learn_empty_file_creates_no_topic(self) -> None:
+        source = Path(self.home.name) / "empty.md"
+        source.write_text("", encoding="utf-8")
+
+        with self.assertRaisesRegex(cli.OpenLearnError, "empty"):
+            cli.quick_learn_from_source(
+                str(source),
+                name=None,
+                goal=None,
+                model="test-model",
+                output_func=lambda _text: None,
+                enter_repl=False,
+            )
+
+        self.assertFalse(cli.topic_path("empty").exists())
+
+    def test_quick_learn_folder_excludes_secrets_and_build_output(self) -> None:
+        folder = Path(self.home.name) / "review-folder"
+        (folder / "build").mkdir(parents=True)
+        (folder / "README.md").write_text("Core review concepts.", encoding="utf-8")
+        (folder / "lesson.py").write_text("def equilibrium(): pass\n", encoding="utf-8")
+        (folder / ".env").write_text("SECRET=value\n", encoding="utf-8")
+        (folder / "build" / "generated.js").write_text("generated\n", encoding="utf-8")
+
+        contexts = cli.quick_directory_contexts(folder, output_func=lambda _text: None)
+        bundle = cli.quick_source_bundle(contexts)
+        text = "\n".join(context.text for context in contexts)
+
+        self.assertEqual(
+            [context.filename for context in contexts],
+            [
+                "quick-selection-manifest.txt",
+                "readme-md.txt",
+                "lesson-py.txt",
+            ],
+        )
+        self.assertNotIn("SECRET", text)
+        self.assertNotIn("generated", text)
+        self.assertIn("readme-md.txt", bundle.text)
+        self.assertLessEqual(len(bundle.text), cli.QUICK_LEARN_BUNDLE_CHAR_LIMIT)
+
+    def test_quick_learn_public_github_url_validation(self) -> None:
+        self.assertEqual(
+            cli.github_repository_parts("https://github.com/rosshd/openlearn"),
+            ("rosshd", "openlearn"),
+        )
+        self.assertEqual(
+            cli.github_repository_parts("https://github.com/rosshd/openlearn.git"),
+            ("rosshd", "openlearn"),
+        )
+        self.assertIsNone(cli.github_repository_parts("https://example.com/repo"))
+        with self.assertRaisesRegex(cli.OpenLearnError, "not arbitrary web URLs"):
+            cli.quick_source_kind_and_label("https://example.com/study-guide")
+
+    def test_quick_learn_github_clone_is_shallow_and_temporary(self) -> None:
+        original_run = cli.subprocess.run
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append((command, kwargs))
+            clone_dir = Path(command[-1])
+            clone_dir.mkdir(parents=True)
+            (clone_dir / "README.md").write_text("Repository overview.", encoding="utf-8")
+            return cli.subprocess.CompletedProcess(command, 0, "", "")
+
+        cli.subprocess.run = fake_run
+        try:
+            contexts = cli.quick_source_contexts(
+                "https://github.com/rosshd/openlearn",
+                "github",
+                output_func=lambda _text: None,
+            )
+        finally:
+            cli.subprocess.run = original_run
+
+        self.assertEqual(
+            calls[0][0][:6],
+            ["git", "-c", "core.hooksPath=/dev/null", "clone", "--depth", "1"],
+        )
+        self.assertEqual(calls[0][1]["env"]["GIT_TERMINAL_PROMPT"], "0")
+        self.assertEqual(calls[0][1]["env"]["GIT_CONFIG_NOSYSTEM"], "1")
+        self.assertEqual(calls[0][1]["env"]["GIT_CONFIG_GLOBAL"], "/dev/null")
+        self.assertIn("readme-md.txt", [context.filename for context in contexts])
+        self.assertFalse(Path(calls[0][0][-1]).exists())
+
+    def test_quick_learn_existing_topic_is_not_changed(self) -> None:
+        source = Path(self.home.name) / "midterm.md"
+        source.write_text("Review notes.", encoding="utf-8")
+        call_silent(cli.cmd_new, Namespace(topic="Midterm", goal="existing course"))
+        before = cli.topic_path("midterm").read_text(encoding="utf-8")
+
+        with self.assertRaisesRegex(cli.OpenLearnError, "choose another name"):
+            cli.quick_learn_from_source(
+                str(source),
+                name=None,
+                goal=None,
+                model="test-model",
+                output_func=lambda _text: None,
+                enter_repl=False,
+            )
+
+        self.assertEqual(
+            cli.topic_path("midterm").read_text(encoding="utf-8"),
+            before,
+        )
+
+    def test_quick_learn_parser_accepts_alias_and_overrides(self) -> None:
+        args = cli.build_parser().parse_args(
+            [
+                "quick-learn",
+                "review.pdf",
+                "--name",
+                "Biology Midterm",
+                "--goal",
+                "Pass the midterm",
+                "--model",
+                "test-model",
+            ]
+        )
+
+        self.assertIs(args.func, cli.cmd_quick_learn)
+        self.assertEqual(args.source, "review.pdf")
+        self.assertEqual(args.name, "Biology Midterm")
+        self.assertEqual(args.goal, "Pass the midterm")
+        self.assertEqual(args.model, "test-model")
 
     def test_new_course_setup_imports_and_summarizes_context_before_start(self) -> None:
         source = Path(self.home.name) / "syllabus.txt"
@@ -1949,7 +2138,7 @@ class InteractiveTests(unittest.TestCase):
                 cli.run_menu,
                 input_func=iter_input(
                     [
-                        "1",
+                        "2",
                         "1",
                         "Vim",
                         "2",
@@ -2020,7 +2209,7 @@ class InteractiveTests(unittest.TestCase):
     def test_new_course_setup_shows_required_fields(self) -> None:
         output = []
 
-        exit_code = cli.run_menu(input_func=iter_input(["1", "b", "q"]), output_func=output.append)
+        exit_code = cli.run_menu(input_func=iter_input(["2", "b", "q"]), output_func=output.append)
 
         self.assertEqual(exit_code, 0)
         self.assertIn("New course", output)
@@ -2170,7 +2359,7 @@ class InteractiveTests(unittest.TestCase):
     def test_new_course_setup_can_set_advanced_options_before_creation(self) -> None:
         exit_code = call_silent(
             cli.run_menu,
-            input_func=iter_input(["1", "1", "Vim", "2", "Learn vim", "7", "1", "b", "y", "q"]),
+            input_func=iter_input(["2", "1", "Vim", "2", "Learn vim", "7", "1", "b", "y", "q"]),
             output_func=lambda _text: None,
         )
 
@@ -2296,7 +2485,7 @@ class InteractiveTests(unittest.TestCase):
                 cli.run_menu,
                 input_func=iter_input(
                     [
-                        "1",
+                        "2",
                         "1",
                         "Web Course",
                         "2",
@@ -3260,6 +3449,43 @@ class InteractiveTests(unittest.TestCase):
         self.assertIn(
             "Previous completed slide content Unit 1 Slide 1", cli.current_lesson_prompt(updated)
         )
+
+    def test_lesson_prompt_lists_covered_and_target_concepts(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="OS", goal="review"))
+        path = cli.topic_path("os")
+        metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+        metadata = dict(metadata)
+        metadata["current_unit"] = 2
+        metadata["current_slide"] = 1
+        metadata["course_units"] = [
+            {
+                "unit": 1,
+                "chapter": "1",
+                "title": "Hardware",
+                "slide_count": 2,
+                "concepts": [{"id": "cache", "label": "Cache locality"}],
+            },
+            {
+                "unit": 2,
+                "chapter": "2",
+                "title": "Processes",
+                "slide_count": 2,
+                "concepts": [{"id": "fork", "label": "Fork system call"}],
+            },
+        ]
+        path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
+        prompt = cli.current_lesson_prompt(cli.read_topic("os"))
+        self.assertIn("Concepts this unit must cover: Fork system call", prompt)
+        self.assertIn("Already taught in earlier units", prompt)
+        self.assertIn("Cache locality", prompt)
+
+    def test_quick_learn_slide_guidance_favors_fewer_slides(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="OS", goal="review"))
+        normal = cli._slide_count_guidance("os")
+        quick = cli._slide_count_guidance("os", quick_learn=True)
+        self.assertIn("Quick Learn", quick)
+        self.assertIn("2-4 slides per unit", quick)
+        self.assertNotEqual(normal, quick)
 
     def test_repl_done_advances_despite_stale_needs_work_status(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
@@ -4760,6 +4986,75 @@ class PromptInstructionTests(unittest.TestCase):
         event_types = [event["event_type"] for event in events]
         self.assertIn("mastery_changed", event_types)
         self.assertIn("unit_advanced", event_types)
+
+    def test_quick_learn_stays_efficient_after_first_unit_mastery(self) -> None:
+        original_call_openai = cli.call_openai
+        original_parse_metadata_update = cli.parse_metadata_update
+        cli.call_openai = lambda *_args, **_kwargs: "{}"
+        cli.parse_metadata_update = lambda _raw: {
+            "last_answer_status": "correct",
+            "answer_score": 1.0,
+            "answer_kind": "production",
+            "is_transfer": True,
+            "gameable": False,
+        }
+        try:
+            call_silent(
+                cli.cmd_new,
+                Namespace(
+                    topic="Midterm",
+                    goal="review",
+                    mastery_profile="efficient",
+                    template=None,
+                ),
+            )
+            path = cli.topic_path("midterm")
+            metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+            metadata = dict(metadata)
+            metadata["learning_mode"] = "quick"
+            metadata["quick_source_type"] = "file"
+            metadata["current_focus"] = "Foundations"
+            metadata["current_unit"] = 1
+            metadata["current_slide"] = 1
+            metadata["course_units"] = [
+                {
+                    "unit": 1,
+                    "chapter": "1",
+                    "title": "Foundations",
+                    "slide_count": 1,
+                    "concepts": [{"id": "foundations", "label": "Foundations"}],
+                },
+                {
+                    "unit": 2,
+                    "chapter": "2",
+                    "title": "Applications",
+                    "slide_count": 1,
+                    "concepts": [{"id": "applications", "label": "Applications"}],
+                },
+            ]
+            path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
+
+            cli.update_learning_metadata(
+                cli.read_topic("midterm"), "first answer", "Correct.", "test-model"
+            )
+            cli.update_learning_metadata(
+                cli.read_topic("midterm"), "second answer", "Correct.", "test-model"
+            )
+            updated = cli.read_topic("midterm")
+        finally:
+            cli.call_openai = original_call_openai
+            cli.parse_metadata_update = original_parse_metadata_update
+
+        self.assertEqual(updated.metadata["current_unit"], 2)
+        self.assertEqual(updated.metadata["mastery_profile"], "efficient")
+        events = [
+            json.loads(line)
+            for line in cli.topic_events_path("midterm").read_text(encoding="utf-8").splitlines()
+        ]
+        promotions = [
+            event for event in events if event["event_type"] == "mastery_profile_promoted"
+        ]
+        self.assertEqual(len(promotions), 0)
 
     def test_mastery_auto_advances_when_focus_is_finer_than_unit_title(self) -> None:
         original_call_openai = cli.call_openai

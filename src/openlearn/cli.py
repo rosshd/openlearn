@@ -56,6 +56,10 @@ from openlearn.constants import (
     PLACEMENT_CONTEXT_FILENAME,
     PROFILES,
     PROMPT_TOPIC_LINE_LIMIT,
+    QUICK_LEARN_BUNDLE_CHAR_LIMIT,
+    QUICK_LEARN_MAX_FILE_BYTES,
+    QUICK_LEARN_MAX_FILES,
+    QUICK_LEARN_MAX_TOTAL_CHARS,
     ROLLING_PASS_RATE_WINDOW,
     STATE_FILE,
 )
@@ -424,6 +428,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     import_parser.set_defaults(func=cmd_import)
 
+    quick_parser = sub.add_parser(
+        "quick",
+        aliases=["quick-learn"],
+        help="Start a focused lesson from a file, folder, or public GitHub repository",
+    )
+    quick_parser.add_argument("source", help="File, folder, or public GitHub repository URL")
+    quick_parser.add_argument("--name", default=None, help="Override the generated topic name")
+    quick_parser.add_argument("--goal", default=None, help="Override the assessment goal")
+    quick_parser.add_argument("--model", default=None, help="Override model for this session")
+    quick_parser.set_defaults(func=cmd_quick_learn)
+
     paste_parser = sub.add_parser("paste", help="Paste source material in $EDITOR")
     paste_parser.add_argument("topic", help="Topic slug")
     paste_parser.add_argument("--name", default="pasted-notes.txt", help="Source filename to save")
@@ -685,6 +700,7 @@ def run_menu(input_func=input, output_func=print) -> int:
             add_action("Context files", lambda: menu_context_files(input_func, output_func))
         if recent_topic_summaries():
             add_action("Topics", lambda: menu_topics(input_func, output_func))
+        add_action("Quick Learn", lambda: menu_quick_learn(input_func, output_func))
         add_action("New course", lambda: menu_new_course(input_func, output_func))
 
         rows = [(key, label) for key, (label, _action) in quick_actions.items()]
@@ -751,6 +767,24 @@ def menu_review(input_func, output_func, due_only: bool = False) -> None:
         output_func=output_func,
     )
     run_repl(input_func=input_func, output_func=output_func, show_intro=False)
+
+
+def menu_quick_learn(input_func, output_func) -> None:
+    source = input_func("File, folder, or public GitHub repository: ").strip()
+    output_func("")
+    if not source:
+        return
+    name = input_func("Topic name (press Enter to derive from source): ").strip() or None
+    output_func("")
+    quick_learn_from_source(
+        source,
+        name=name,
+        goal=None,
+        model=None,
+        input_func=input_func,
+        output_func=output_func,
+        enter_repl=True,
+    )
 
 
 def menu_new_course(input_func, output_func) -> None:
@@ -1661,9 +1695,22 @@ def choose_topic(input_func, output_func, title: str) -> str | None:
 
     output_func(title)
     active = get_active_topic()
-    for index, topic in enumerate(topics, start=1):
-        marker = "*" if topic.slug == active else " "
-        output_func(f"{index}. {marker} {topic.slug}")
+    indexed_topics: list[TopicSummary] = []
+    groups = [
+        ("Courses", [topic for topic in topics if topic.metadata.get("learning_mode") != "quick"]),
+        (
+            "Quick Learn",
+            [topic for topic in topics if topic.metadata.get("learning_mode") == "quick"],
+        ),
+    ]
+    for label, group in groups:
+        if not group:
+            continue
+        output_func(f"{label}:")
+        for topic in group:
+            indexed_topics.append(topic)
+            marker = "*" if topic.slug == active else " "
+            output_func(f"{len(indexed_topics)}. {marker} {topic.slug}")
     output_func("q. Cancel")
 
     choice = input_func("Choose topic: ").strip().lower()
@@ -1672,9 +1719,9 @@ def choose_topic(input_func, output_func, title: str) -> str | None:
     if not choice.isdigit():
         raise OpenLearnError("choose a topic number, or q to cancel")
     index = int(choice)
-    if index < 1 or index > len(topics):
+    if index < 1 or index > len(indexed_topics):
         raise OpenLearnError("topic choice out of range")
-    return topics[index - 1].slug
+    return indexed_topics[index - 1].slug
 
 
 def active_topic_needs_course_start(active_slug: str | None) -> bool:
@@ -1725,12 +1772,17 @@ def start_course(input_func=input, output_func=print, model: str | None = None) 
         rejected_outline = outline
 
     save_course_started(topic, outline_prompt, outline)
+    teach_first_lesson(read_topic(topic.slug), outline, model, output_func)
+    return 0
+
+
+def teach_first_lesson(topic: Topic, outline: str, model: str, output_func=print) -> None:
     print_section("First lesson", output_func)
     lesson_prompt = first_lesson_prompt(outline)
     global _LAST_RESPONSE_ANSWER_KEY
     raw_lesson = call_openai(
         model,
-        generation_system_prompt(read_topic(topic.slug), current_plan=outline),
+        generation_system_prompt(topic, current_plan=outline),
         lesson_prompt,
     )
     _LAST_RESPONSE_ANSWER_KEY = extract_answer_key(raw_lesson)
@@ -1746,7 +1798,6 @@ def start_course(input_func=input, output_func=print, model: str | None = None) 
         question_text=pending_question_text,
     )
     _LAST_RESPONSE_ANSWER_KEY = ""
-    return 0
 
 
 def run_placement_quiz(topic: Topic, model: str, input_func=input, output_func=print) -> None:
@@ -2051,7 +2102,14 @@ def _context_file_count(slug: str) -> int:
     )
 
 
-def _slide_count_guidance(slug: str) -> str:
+def _slide_count_guidance(slug: str, quick_learn: bool = False) -> str:
+    if quick_learn:
+        return (
+            "This is Quick Learn: optimize for coverage per minute, not depth. "
+            "Use 2-4 slides per unit, packing several related concepts into each slide "
+            "rather than spreading one idea across many slides. Never split a single "
+            "definition, comparison, or example across multiple slides. "
+        )
     n = _context_file_count(slug)
     if n >= 20:
         return (
@@ -2071,7 +2129,13 @@ def _slide_count_guidance(slug: str) -> str:
     )
 
 
-def course_outline_prompt(topic: Topic, feedback: str = "", rejected_outline: str = "") -> str:
+def course_outline_prompt(
+    topic: Topic,
+    feedback: str = "",
+    rejected_outline: str = "",
+    *,
+    quick_learn: bool = False,
+) -> str:
     goal = str(topic.metadata.get("goal") or "")
     template_units = topic.metadata.get("template_units")
     template_hint = ""
@@ -2091,26 +2155,41 @@ def course_outline_prompt(topic: Topic, feedback: str = "", rejected_outline: st
         )
         if rejected_outline:
             revision_text += f"\nRejected outline:\n{rejected_outline}"
+    unit_guidance = (
+        "Create 2-6 ordered units with short titles and one-line outcomes. "
+        if quick_learn
+        else "Create 4-8 ordered units with short titles and one-line outcomes. "
+    )
+    quick_guidance = (
+        "This is Quick Learn. Cover only material grounded in the imported source summaries. "
+        "Do not invent missing coverage. Prioritize assessment concepts, definitions, formulas, "
+        "processes, comparisons, and likely practice questions. Compress administrative text "
+        "and repetition. "
+        if quick_learn
+        else ""
+    )
+    placement_block = "" if quick_learn else f"Placement context:\n{placement_context or '(none)'}"
     return (
         "Create a concise course plan before teaching. "
         "Do not recap. Do not ask what the learner wants unless required "
         "details are missing. "
         "If the learner already knows basics, compress basics into assumptions "
         "or a quick diagnostic instead of making them standalone units. "
+        f"{quick_guidance}"
         "Use exactly these plain-text labels: Scope:, Excludes:, Assumptions:, Units:. "
-        "Create 4-8 ordered units with short titles and one-line outcomes. "
+        f"{unit_guidance}"
         "For each unit, include a planned slide count in parentheses, for example "
         "1.2 Insert mode in Vim (3 slides, difficulty 4/10) - Outcome. "
         "After each unit, add a Concepts: line with 2-4 key concepts for that unit, "
         "separated by semicolons, for example Concepts: Normal mode; Insert mode; Mode switching. "
         "Assign each unit an initial difficulty from 1-10 where 1 is very easy "
         "and 10 is very hard. "
-        f"{_slide_count_guidance(topic.slug)}"
+        f"{_slide_count_guidance(topic.slug, quick_learn=quick_learn)}"
         f"{'Keep the outline under 600 words.' if _context_file_count(topic.slug) >= 20 else 'Keep it under 300 words.'}\n"
         f"Course name: {topic.metadata.get('topic', topic.slug)}\n"
         f"Goal: {goal}\n"
         f"{template_hint}"
-        f"Placement context:\n{placement_context or '(none)'}"
+        f"{placement_block}"
         f"{revision_text}"
     )
 
@@ -2596,6 +2675,39 @@ def prune_slide_contents(
     }
 
 
+def unit_concept_labels(unit: dict[str, object] | None) -> list[str]:
+    if not unit or not isinstance(unit.get("concepts"), list):
+        return []
+    labels: list[str] = []
+    for concept in unit["concepts"]:
+        if isinstance(concept, dict):
+            label = concept.get("label")
+            if isinstance(label, str) and label.strip():
+                labels.append(label.strip())
+    return labels
+
+
+def course_coverage_ledger(metadata: dict[str, object], current_unit: int) -> list[str]:
+    """Concept labels taught in earlier units, so a slide does not re-teach them."""
+    units = metadata.get("course_units")
+    if not isinstance(units, list):
+        return []
+    covered: list[str] = []
+    seen: set[str] = set()
+    for unit in units:
+        if not isinstance(unit, dict):
+            continue
+        number = unit.get("unit")
+        if not isinstance(number, int) or number >= current_unit:
+            continue
+        for label in unit_concept_labels(unit):
+            key = label.lower()
+            if key not in seen:
+                seen.add(key)
+                covered.append(label)
+    return covered
+
+
 def current_lesson_prompt(topic: Topic) -> str:
     metadata = topic.metadata
     unit = metadata.get("current_unit")
@@ -2628,6 +2740,20 @@ def current_lesson_prompt(topic: Topic) -> str:
     focus = metadata.get("current_focus")
     if isinstance(focus, str) and focus.strip():
         lines.append(f"Current focus: {one_line(focus)}")
+    target_concepts = unit_concept_labels(current)
+    if target_concepts:
+        lines.append(
+            "Concepts this unit must cover: "
+            + "; ".join(target_concepts)
+            + ". Teach a concept from this unit that earlier slides have not covered yet. "
+            "Do not repeat a concept already taught."
+        )
+    covered = course_coverage_ledger(metadata, unit)
+    if covered:
+        lines.append(
+            "Already taught in earlier units (do not re-teach; reference only if briefly needed): "
+            + "; ".join(covered)
+        )
     saved = slide_content_prompt(topic)
     if saved:
         lines.append(saved)
@@ -3793,6 +3919,8 @@ def cmd_status(args: argparse.Namespace) -> int:
     print_status_bar(topic)
     print_section("Status")
     print(f"Topic: {metadata.get('topic', topic.slug)}")
+    if metadata.get("learning_mode") == "quick":
+        print(f"Mode: Quick Learn ({metadata.get('quick_source_type', 'source')})")
     print(f"Goal: {metadata.get('goal', '')}")
     structured_progress = structured_progress_line(topic)
     if structured_progress:
@@ -3915,6 +4043,352 @@ def cmd_edit(args: argparse.Namespace) -> int:
     return 0
 
 
+QUICK_LEARN_TEXT_SUFFIXES = {
+    ".c",
+    ".cc",
+    ".cpp",
+    ".cs",
+    ".css",
+    ".go",
+    ".h",
+    ".hpp",
+    ".html",
+    ".java",
+    ".js",
+    ".json",
+    ".jsx",
+    ".kt",
+    ".lua",
+    ".md",
+    ".php",
+    ".py",
+    ".rb",
+    ".rs",
+    ".sh",
+    ".sql",
+    ".swift",
+    ".toml",
+    ".ts",
+    ".tsx",
+    ".txt",
+    ".yaml",
+    ".yml",
+}
+QUICK_LEARN_DOCUMENT_SUFFIXES = {".docx", ".pdf"}
+QUICK_LEARN_SPECIAL_FILES = {"dockerfile", "gemfile", "makefile", "procfile"}
+QUICK_LEARN_IGNORED_DIRS = {
+    ".git",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".tox",
+    ".venv",
+    "__pycache__",
+    "build",
+    "coverage",
+    "dist",
+    "node_modules",
+    "target",
+    "vendor",
+    "venv",
+}
+QUICK_LEARN_SECRET_NAMES = {
+    ".env",
+    ".env.local",
+    "credentials",
+    "credentials.json",
+    "id_dsa",
+    "id_ed25519",
+    "id_rsa",
+    "secrets.json",
+}
+
+
+def github_repository_parts(value: str) -> tuple[str, str] | None:
+    parsed = urlparse(value)
+    if parsed.scheme != "https" or parsed.netloc.lower() != "github.com":
+        return None
+    parts = [part for part in parsed.path.strip("/").split("/") if part]
+    if len(parts) != 2 or parsed.query or parsed.fragment:
+        return None
+    owner, repository = parts
+    repository = repository[:-4] if repository.endswith(".git") else repository
+    valid = r"[A-Za-z0-9_.-]+"
+    if not re.fullmatch(valid, owner) or not re.fullmatch(valid, repository):
+        return None
+    return owner, repository
+
+
+def quick_source_kind_and_label(value: str) -> tuple[str, str]:
+    github_parts = github_repository_parts(value)
+    if github_parts:
+        return "github", f"{github_parts[0]}-{github_parts[1]}"
+    if value.startswith(("http://", "https://")):
+        raise OpenLearnError(
+            "Quick Learn accepts public GitHub repository URLs, not arbitrary web URLs"
+        )
+    source = Path(value).expanduser().resolve()
+    if not source.exists():
+        raise OpenLearnError(f"Quick Learn source not found: {source}")
+    if source.is_file():
+        return "file", source.stem
+    if source.is_dir():
+        return "folder", source.name
+    raise OpenLearnError(f"Quick Learn source must be a file or folder: {source}")
+
+
+def quick_source_file_allowed(path: Path, relative: Path) -> bool:
+    lowered_parts = [part.lower() for part in relative.parts]
+    if any(part.startswith(".") or part in QUICK_LEARN_IGNORED_DIRS for part in lowered_parts[:-1]):
+        return False
+    name = path.name.lower()
+    if (
+        name in QUICK_LEARN_SECRET_NAMES
+        or name.startswith(".env")
+        or path.suffix.lower() in {".key", ".p12", ".pem"}
+    ):
+        return False
+    return (
+        path.suffix.lower() in QUICK_LEARN_TEXT_SUFFIXES | QUICK_LEARN_DOCUMENT_SUFFIXES
+        or name in QUICK_LEARN_SPECIAL_FILES
+    )
+
+
+def quick_source_priority(relative: Path) -> tuple[int, str]:
+    lowered = relative.as_posix().lower()
+    name = relative.name.lower()
+    if name.startswith("readme"):
+        rank = 0
+    elif name in {
+        "cargo.toml",
+        "go.mod",
+        "package.json",
+        "pyproject.toml",
+        "requirements.txt",
+    }:
+        rank = 1
+    elif "docs/" in lowered or name.endswith((".md", ".txt")):
+        rank = 2
+    elif "test" not in lowered:
+        rank = 3
+    else:
+        rank = 4
+    return rank, lowered
+
+
+def quick_directory_contexts(directory: Path, output_func=print) -> list[PendingContext]:
+    candidates: list[tuple[Path, Path]] = []
+    for root, directories, filenames in os.walk(directory):
+        directories[:] = sorted(
+            name
+            for name in directories
+            if not name.startswith(".")
+            and name.lower() not in QUICK_LEARN_IGNORED_DIRS
+            and not (Path(root) / name).is_symlink()
+        )
+        for filename in sorted(filenames):
+            path = Path(root) / filename
+            relative = path.relative_to(directory)
+            if not path.is_symlink() and quick_source_file_allowed(path, relative):
+                candidates.append((path, relative))
+    candidates.sort(key=lambda item: quick_source_priority(item[1]))
+    contexts: list[PendingContext] = []
+    total_chars = 0
+    skipped: list[str] = []
+    for path, relative in candidates:
+        if len(contexts) >= QUICK_LEARN_MAX_FILES:
+            skipped.append(f"{relative.as_posix()}: file-count limit")
+            continue
+        try:
+            if path.stat().st_size > QUICK_LEARN_MAX_FILE_BYTES:
+                skipped.append(f"{relative.as_posix()}: file-size limit")
+                continue
+            if path.suffix.lower() in QUICK_LEARN_DOCUMENT_SUFFIXES:
+                text = read_pending_context(path, output_func).text
+            else:
+                raw = path.read_bytes()
+                if b"\x00" in raw:
+                    skipped.append(f"{relative.as_posix()}: binary")
+                    continue
+                text = raw.decode("utf-8")
+        except (OSError, UnicodeDecodeError, OpenLearnError):
+            skipped.append(f"{relative.as_posix()}: unreadable")
+            continue
+        remaining = QUICK_LEARN_MAX_TOTAL_CHARS - total_chars
+        if remaining <= 0:
+            skipped.append(f"{relative.as_posix()}: total-character limit")
+            continue
+        text = text[:remaining].strip()
+        if not text:
+            skipped.append(f"{relative.as_posix()}: empty")
+            continue
+        relative_name = relative.as_posix()
+        contexts.append(
+            PendingContext(
+                f"{slugify(relative_name)}.txt",
+                f"Source path: {relative_name}\n\n{text}\n",
+            )
+        )
+        total_chars += len(text)
+    if not contexts:
+        raise OpenLearnError("Quick Learn found no supported, readable source files")
+    selected_manifest = "\n".join(
+        f"- {context.text.splitlines()[0].removeprefix('Source path: ')}" for context in contexts
+    )
+    skipped_manifest = "\n".join(f"- {item}" for item in skipped) or "- none"
+    manifest = PendingContext(
+        "quick-selection-manifest.txt",
+        (
+            "Selected sources:\n"
+            f"{selected_manifest}\n\n"
+            "Skipped after candidate filtering:\n"
+            f"{skipped_manifest}\n"
+        ),
+    )
+    detail = f"; skipped {len(skipped)} by safety or size limits" if skipped else ""
+    output_func(f"Selected {len(contexts)} source files{detail}")
+    return [manifest, *contexts]
+
+
+def quick_source_bundle(contexts: list[PendingContext]) -> PendingContext:
+    per_file_limit = max(1000, QUICK_LEARN_BUNDLE_CHAR_LIMIT // max(1, len(contexts)))
+    manifest = "\n".join(f"- {context.filename}" for context in contexts)
+    sections = [f"Source manifest:\n{manifest}"]
+    sections.extend(
+        f"## {context.filename}\n{context.text[:per_file_limit].rstrip()}" for context in contexts
+    )
+    text = "\n\n".join(sections)[:QUICK_LEARN_BUNDLE_CHAR_LIMIT].rstrip() + "\n"
+    return PendingContext("quick-source-bundle.txt", text)
+
+
+def quick_source_contexts(value: str, source_kind: str, output_func=print) -> list[PendingContext]:
+    if source_kind == "file":
+        context = read_pending_context(Path(value), output_func)
+        if not context.text.strip():
+            raise OpenLearnError("Quick Learn source file is empty")
+        return [context]
+    if source_kind == "folder":
+        return quick_directory_contexts(Path(value).expanduser().resolve(), output_func)
+    with tempfile.TemporaryDirectory(prefix="openlearn-quick-") as temp_dir:
+        clone_dir = Path(temp_dir) / "repository"
+        env = dict(os.environ)
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        env["GIT_CONFIG_NOSYSTEM"] = "1"
+        env["GIT_CONFIG_GLOBAL"] = "/dev/null"
+        try:
+            subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    "clone",
+                    "--depth",
+                    "1",
+                    "--",
+                    value,
+                    str(clone_dir),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+        except (OSError, subprocess.CalledProcessError) as exc:
+            detail = (
+                exc.stderr.strip() if isinstance(exc, subprocess.CalledProcessError) else str(exc)
+            )
+            raise OpenLearnError(f"could not clone public GitHub repository: {detail}") from exc
+        return quick_directory_contexts(clone_dir, output_func)
+
+
+def save_quick_learn_metadata(slug: str, source_kind: str, source_label: str) -> None:
+    topic = read_topic(slug)
+    metadata = dict(topic.metadata)
+    metadata["learning_mode"] = "quick"
+    metadata["quick_source_type"] = source_kind
+    metadata["quick_source_label"] = source_label
+    write_topic(topic.path, metadata, topic.body)
+
+
+def quick_learn_from_source(
+    source: str,
+    *,
+    name: str | None,
+    goal: str | None,
+    model: str | None,
+    input_func=input,
+    output_func=print,
+    enter_repl: bool,
+) -> int:
+    source_kind, source_label = quick_source_kind_and_label(source)
+    contexts = quick_source_contexts(source, source_kind, output_func)
+    topic_name = (name or source_label.replace("-", " ")).strip()
+    if not topic_name:
+        raise OpenLearnError("Quick Learn topic name cannot be empty")
+    slug = slugify(topic_name)
+    if topic_path(slug).exists():
+        raise OpenLearnError(f"topic already exists: {slug}; choose another name with --name")
+    quick_goal = (goal or f"Prepare for an upcoming assessment using {source_label}.").strip()
+    cmd_new(
+        argparse.Namespace(
+            topic=topic_name,
+            goal=quick_goal,
+            mastery_profile="efficient",
+            template=None,
+        ),
+        output_func=output_func,
+    )
+    save_quick_learn_metadata(slug, source_kind, source_label)
+    saved_paths = [write_context_text(slug, context.filename, context.text) for context in contexts]
+    summary_source = saved_paths[0]
+    if len(contexts) > 1:
+        bundle = quick_source_bundle(contexts)
+        summary_source = write_context_text(slug, bundle.filename, bundle.text)
+    checksum = _text_checksum(
+        "\n".join(f"{context.filename}\n{context.text}" for context in contexts)
+    )
+    save_imported_checksum(slug, checksum)
+    selected_count = len(saved_paths) if source_kind == "file" else len(saved_paths) - 1
+    output_func(f"Saved {selected_count} selected source file(s)")
+    summary = summarize_context_file(slug, summary_source, model=model, output_func=output_func)
+    output_func(f"Saved source summary: {summary.name}")
+
+    topic = read_topic(slug)
+    selected_model = model or str(topic.metadata.get("model") or configured_model())
+    outline_prompt = course_outline_prompt(topic, quick_learn=True)
+    print_section("Quick Learn plan", output_func)
+    outline = call_openai_streaming(
+        selected_model,
+        generation_system_prompt(topic),
+        outline_prompt,
+        output_func=output_func,
+    )
+    output_func("")
+    save_course_started(topic, outline_prompt, outline)
+    teach_first_lesson(read_topic(slug), outline, selected_model, output_func)
+    if enter_repl:
+        run_repl(
+            topic_value=slug,
+            model=selected_model,
+            input_func=input_func,
+            output_func=output_func,
+            show_intro=False,
+        )
+    return 0
+
+
+def cmd_quick_learn(args: argparse.Namespace) -> int:
+    return quick_learn_from_source(
+        args.source,
+        name=args.name,
+        goal=args.goal,
+        model=args.model,
+        input_func=input,
+        output_func=print,
+        enter_repl=sys.stdin.isatty(),
+    )
+
+
 def cmd_import(args: argparse.Namespace) -> int:
     topic = read_topic(slugify(args.topic))
     set_active_topic(topic.slug)
@@ -4014,7 +4488,9 @@ def ask_topic(
         model=model, system=system_prompt(topic), user=prompt, output_func=output_func
     )
     answer = print_and_append_model_answer(topic, "chat", prompt, answer, output_func=output_func)
-    update_learning_metadata(topic, prompt, answer, model, is_review_session=is_review_session)
+    update_learning_metadata(
+        topic, prompt, answer, model, is_review_session=is_review_session
+    )
     maybe_suggest_videos(topic.slug, output_func)
     return answer
 
@@ -6610,6 +7086,20 @@ def system_prompt(topic: Topic) -> str:
     tier = difficulty_tier(topic.metadata)
     move_prompt = tier_move_prompt(topic.metadata, tier)
     quiz_prompt = cumulative_quiz_prompt(topic.metadata)
+    quick_learn_prompt = (
+        (
+            "Quick Learn mode — optimize for coverage per minute:\n"
+            "- Ask at most one check per slide. After a correct or adequate answer, "
+            "affirm in one sentence and recommend moving on (default to /done) instead "
+            "of offering more probes on the same concept.\n"
+            "- Do not re-teach a concept listed as already covered; if the current slide's "
+            "concepts are covered, advance to the next uncovered concept for this unit.\n"
+            "- Favor breadth: keep each concept brief and keep the course moving rather "
+            "than drilling one idea across several turns.\n"
+        )
+        if topic.metadata.get("learning_mode") == "quick"
+        else ""
+    )
     return textwrap.dedent(
         f"""
         You are openLearn, a local-first AI learning tutor.
@@ -6675,6 +7165,8 @@ def system_prompt(topic: Topic) -> str:
         {move_prompt}
 
         {quiz_prompt}
+
+        {quick_learn_prompt}
 
         Do not keep printing full progress summaries after every answer. Mention
         progress only when it helps the learner feel oriented or encouraged.
@@ -7100,6 +7592,10 @@ def _mock_openai_response(model: str, system: str, user: str) -> str:
     # Summarize context
     if "summarize this context file" in prompt or "summarize" in prompt and "context" in prompt:
         return "- Summary: mock summary of provided context.\n- Key points: concise bullets."
+    # First lesson must precede course-outline matching because its prompt embeds
+    # the accepted course plan.
+    if "start teaching unit 1" in prompt or "start teaching" in prompt or "first lesson" in prompt:
+        return "Lesson: Normal vs Insert.\nExample: Press i to enter Insert, Esc to return to Normal.\nCheck: Which mode runs commands like dd or /search? <!-- answer: B -->\nAction: Try switching modes in your editor."
     # Course outline
     if (
         "create a concise course plan" in prompt
@@ -7107,9 +7603,6 @@ def _mock_openai_response(model: str, system: str, user: str) -> str:
         or "create a concise course plan before teaching" in prompt
     ):
         return "Scope: Mock scope\nExcludes: None\nAssumptions: Beginner\nUnits:\n1. Modes (2 slides) - Understand insert vs normal.\n2. Movement (2 slides) - h j k l.\n3. Editing (2 slides) - x dd p.\n4. Save and quit (1 slide) - :wq"
-    # First lesson
-    if "start teaching unit 1" in prompt or "start teaching" in prompt or "first lesson" in prompt:
-        return "Lesson: Normal vs Insert.\nExample: Press i to enter Insert, Esc to return to Normal.\nCheck: Which mode runs commands like dd or /search? <!-- answer: B -->\nAction: Try switching modes in your editor."
     # Default small tutor response
     return "**Lesson:** Mock reply. Ask a focused question to continue."
 

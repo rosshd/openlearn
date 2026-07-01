@@ -67,6 +67,18 @@ openlearn new vim --goal "Use Vim comfortably for real editing"
 openlearn resume
 ```
 
+For assessment material, Quick Learn creates a separate focused topic and begins teaching without placement or outline approval:
+
+```bash
+openlearn quick ./midterm-review.pdf
+openlearn quick ./study-folder --name "Biology Midterm"
+openlearn quick https://github.com/owner/repository
+```
+
+Quick Learn accepts supported files, bounded local folders, and public GitHub repositories.
+It runs on the efficient mastery profile throughout, optimizing for coverage per minute rather than deep mastery, so a review session moves quickly across the material.
+Repository sources are treated as read-only text; openLearn never executes imported code.
+
 `resume` uses the active topic.
 If no active topic exists, it falls back to the most recently changed topic.
 Learning actions from the menu continue into the REPL automatically.
@@ -95,7 +107,7 @@ Use `/help --all` for the full REPL command list.
 | --- | --- |
 | Setup | `init`, `config show`, `config set-key`, `config set-model`, `config set-base-url`, `config clear-key` |
 | Topics | `new`, `delete`, `list`, `recent`, `active`, `edit`, `status`, `summary`, `stats`, `repair` |
-| Learning | `menu`, `repl`, `chat`, `resume`, `next`, `review`, `chapter`, `due` |
+| Learning | `menu`, `quick`, `repl`, `chat`, `resume`, `next`, `review`, `chapter`, `due` |
 | Sources | `import <topic> <file>`, `import <topic> --url <url>`, `import <topic> --scan <dir>`, `paste` |
 | Practice | `videos`, REPL `/drill`, REPL `/check` |
 | Utilities | `templates`, `test`, `tui` |
