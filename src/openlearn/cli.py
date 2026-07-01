@@ -1543,7 +1543,11 @@ def cmd_new(args: argparse.Namespace, output_func=print) -> int:
 
     title = args.topic.strip() or slug.replace("-", " ").title()
     explicit_profile = getattr(args, "mastery_profile", None)
-    inferred_profile = infer_mastery_profile_from_goal(args.goal, configured_model())
+    inferred_profile = (
+        infer_mastery_profile_from_goal(args.goal, configured_model())
+        if not explicit_profile
+        else None
+    )
     selected_profile = normalize_mastery_profile(explicit_profile or inferred_profile)
     metadata = {
         "topic": title,
@@ -2602,7 +2606,7 @@ def advance_slide(slug: str, output_func=print, force: bool = False) -> bool:
             metadata["review_session_active"] = False
             write_text_atomic(path, format_topic(stable_metadata_for_topic(metadata), body))
             output_func(
-                "Last answer is not fully clear yet. Answer the follow-up or use /done --force to advance anyway."
+                "Last answer is not fully clear yet. Answer the follow-up or use /done to advance anyway."
             )
             return False
         units = metadata.get("course_units")
@@ -3206,28 +3210,6 @@ def activate_cumulative_quiz_if_due(metadata: dict[str, object]) -> bool:
     return True
 
 
-def update_pending_chapter_quiz(
-    metadata: dict[str, object], previous_metadata: dict[str, object], update: dict[str, object]
-) -> None:
-    if update.get("chapter_complete") is not True:
-        return
-    if not course_options(metadata)["quiz_after_chapter"]:
-        return
-    previous_unit = previous_metadata.get("current_unit")
-    previous_slide = previous_metadata.get("current_slide")
-    if not isinstance(previous_unit, int) or not isinstance(previous_slide, int):
-        return
-    previous_course_unit = course_unit_at(previous_metadata, previous_unit)
-    if not previous_course_unit:
-        return
-    slide_count = previous_course_unit.get("slide_count")
-    if not isinstance(slide_count, int) or previous_slide < slide_count:
-        return
-    metadata["pending_chapter_quiz"] = True
-    chapter = previous_course_unit.get("chapter") or previous_unit
-    title = previous_course_unit.get("title") or f"Unit {chapter}"
-    metadata["pending_quiz_chapter"] = f"{chapter} {title}"
-
 
 def update_answer_status(metadata: dict[str, object], update: dict[str, object]) -> None:
     status = update.get("last_answer_status")
@@ -3601,12 +3583,15 @@ def update_quiz_history(
     metadata.pop("pending_cumulative_quiz", None)
     metadata["quiz_answers_since_last"] = 0
     metadata["quiz_practiced_since_last"] = []
-    return {
+    event: dict[str, object] = {
         "type": quiz_type,
         "score": score.strip() if isinstance(score, str) else "",
         "summary": summary.strip() if isinstance(summary, str) else "",
         "concepts": concept_values,
     }
+    if isinstance(results, list) and results:
+        event["results"] = results
+    return event
 
 
 def apply_cumulative_quiz_results(
@@ -4510,7 +4495,6 @@ def metadata_update_prompt(
           from the just-shown tutor text without understanding.
         - answer_hint: one Socratic guiding question to help without giving the answer,
           or null. Only when last_answer_status is needs_work.
-        - chapter_complete: true only when the learner demonstrated enough understanding to finish the current chapter.
         - quiz_score: short quiz score such as 3/4, only after evaluating a chapter or cumulative quiz.
         - quiz_summary: one-sentence quiz result summary, only after evaluating a chapter or cumulative quiz.
         - quiz_concepts: concepts tested by the quiz, only after evaluating a chapter or cumulative quiz.

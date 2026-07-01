@@ -80,7 +80,7 @@ PROFILES = {
 }
 PLACEMENT_CONTEXT_FILENAME = "placement-quiz.txt"
 COURSE_OPTION_LABELS = {
-    "quiz_after_chapter": "Quiz after finished chapter",
+    "quiz_after_chapter": "Cumulative quizzes (spaced)",
     "show_progress": "Show progress reminders",
     "review_weak_spots": "Review weak spots before new chapters",
     "hands_on_drills": "Prefer hands-on drills",
