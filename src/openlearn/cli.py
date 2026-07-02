@@ -1185,6 +1185,31 @@ def repl_prompt() -> str:
     return "Answer> " if topic.metadata.get("pending_question") else "openlearn> "
 
 
+def repl_prompt_for_answer(answer: str | None) -> str:
+    if answer is None:
+        return repl_prompt()
+    return "Answer> " if extract_pending_question_text(answer) else "openlearn> "
+
+
+class DeferredTurnUpdates:
+    def __init__(self) -> None:
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="openlearn-update")
+        self._pending = []
+
+    def submit(self, function, *args, **kwargs) -> None:
+        self._pending.append(self._executor.submit(function, *args, **kwargs))
+
+    def wait(self) -> None:
+        while self._pending:
+            self._pending.pop(0).result()
+
+    def close(self) -> None:
+        try:
+            self.wait()
+        finally:
+            self._executor.shutdown(wait=True)
+
+
 def read_repl_message(prompt: str, input_func=input) -> str:
     first_line = input_func(prompt)
     if input_func is not input or not sys.stdin.isatty():
@@ -1217,6 +1242,8 @@ def run_repl(
     show_intro: bool = True,
 ) -> int:
     _session_start = datetime.now(timezone.utc)
+    deferred_updates = DeferredTurnUpdates()
+    last_tutor_answer = None
     topic_slug = resolve_topic_slug(topic_value) if topic_value else None
     if topic_slug:
         set_active_topic(topic_slug)
@@ -1232,31 +1259,43 @@ def run_repl(
         except OpenLearnError:
             pass
 
-    while True:
-        try:
-            prompt = read_repl_message(repl_prompt(), input_func=input_func).strip()
-        except EOFError:
-            output_func("")
-            break
+    try:
+        while True:
+            try:
+                prompt = read_repl_message(
+                    repl_prompt_for_answer(last_tutor_answer), input_func=input_func
+                ).strip()
+            except EOFError:
+                output_func("")
+                break
 
-        if not prompt:
-            continue
-        if prompt.lower() in {"/q", "/quit", "/exit", "quit", "exit", "q"}:
-            break
-
-        try:
-            if prompt.startswith("/"):
-                handle_repl_command(
-                    prompt[1:], model=model, input_func=input_func, output_func=output_func
-                )
-            elif handle_natural_advance(prompt, model=model, output_func=output_func):
-                continue
-            else:
+            try:
+                deferred_updates.wait()
+                if not prompt:
+                    continue
+                if prompt.lower() in {"/q", "/quit", "/exit", "quit", "exit", "q"}:
+                    break
+                last_tutor_answer = None
+                if prompt.startswith("/"):
+                    handle_repl_command(
+                        prompt[1:], model=model, input_func=input_func, output_func=output_func
+                    )
+                elif handle_natural_advance(prompt, model=model, output_func=output_func):
+                    continue
+                else:
+                    print_active_status_bar()
+                    last_tutor_answer = ask_topic(
+                        None,
+                        prompt,
+                        model,
+                        output_func=output_func,
+                        deferred_updates=deferred_updates,
+                    )
+            except OpenLearnError as exc:
                 print_active_status_bar()
-                ask_topic(None, prompt, model, output_func=output_func)
-        except OpenLearnError as exc:
-            print_active_status_bar()
-            print_error(str(exc), output_func)
+                print_error(str(exc), output_func)
+    finally:
+        deferred_updates.close()
 
     try:
         _session_minutes = round(
@@ -4004,7 +4043,11 @@ def cmd_chat(args: argparse.Namespace) -> int:
 
 
 def ask_topic(
-    topic_value: str | None, prompt: str, model: str | None = None, output_func=print
+    topic_value: str | None,
+    prompt: str,
+    model: str | None = None,
+    output_func=print,
+    deferred_updates: DeferredTurnUpdates | None = None,
 ) -> str:
     topic = read_topic(
         resolve_topic_slug(topic_value) if topic_value is None else slugify(topic_value)
@@ -4016,9 +4059,31 @@ def ask_topic(
         model=model, system=system_prompt(topic), user=prompt, output_func=output_func
     )
     answer = print_and_append_model_answer(topic, "chat", prompt, answer, output_func=output_func)
+    if deferred_updates is None:
+        finish_turn_update(topic, prompt, answer, model, is_review_session, output_func)
+    else:
+        deferred_updates.submit(
+            finish_turn_update,
+            topic,
+            prompt,
+            answer,
+            model,
+            is_review_session,
+            output_func,
+        )
+    return answer
+
+
+def finish_turn_update(
+    topic: Topic,
+    prompt: str,
+    answer: str,
+    model: str,
+    is_review_session: bool,
+    output_func=print,
+) -> None:
     update_learning_metadata(topic, prompt, answer, model, is_review_session=is_review_session)
     maybe_suggest_videos(topic.slug, output_func)
-    return answer
 
 
 def cmd_drill(args: argparse.Namespace, output_func=print) -> int:
