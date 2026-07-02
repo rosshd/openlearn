@@ -101,6 +101,7 @@ Use `/help --all` for the full REPL command list.
 | Utilities | `templates`, `test`, `tui` |
 
 Model-backed commands require an API key unless `OPENLEARN_MOCK=1` is set for tests.
+`chat`, `resume`, `next`, and `review` accept `--dry-run` to print the rendered prompts instead of calling the model, leaving all local files untouched.
 `repl` also has the `shell` alias.
 
 ## Local Files

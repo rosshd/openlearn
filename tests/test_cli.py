@@ -6709,5 +6709,92 @@ def mark_course_started(slug: str) -> None:
     path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
 
 
+class DryRunTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.home = tempfile.TemporaryDirectory()
+        self.previous_env = {
+            name: os.environ.get(name)
+            for name in (
+                "OPENLEARN_HOME",
+                "OPENLEARN_MODEL",
+                "OPENLEARN_BASE_URL",
+                "OPENLEARN_MOCK",
+                "OPENAI_API_KEY",
+            )
+        }
+        os.environ["OPENLEARN_HOME"] = self.home.name
+        os.environ["OPENLEARN_MOCK"] = "1"
+        os.environ.pop("OPENLEARN_MODEL", None)
+        os.environ.pop("OPENLEARN_BASE_URL", None)
+        os.environ.pop("OPENAI_API_KEY", None)
+        cli._CONFIG_CACHE = None
+        cli.write_topic(
+            cli.topic_path("vim"),
+            {"topic": "Vim", "slug": "vim", "goal": "edit text fluently"},
+            "# Vim\n\n## Notes\n\nModes and motions.\n",
+        )
+
+        def fail_urlopen(*_args, **_kwargs):
+            raise AssertionError("dry run must not open a network connection")
+
+        self.original_urlopen = cli.urlopen
+        cli.urlopen = fail_urlopen
+
+    def tearDown(self) -> None:
+        cli.urlopen = self.original_urlopen
+        for name, value in self.previous_env.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+        cli._CONFIG_CACHE = None
+        self.home.cleanup()
+
+    def snapshot_home(self) -> dict[str, bytes]:
+        root = Path(self.home.name)
+        return {
+            str(path.relative_to(root)): path.read_bytes()
+            for path in sorted(root.rglob("*"))
+            if path.is_file()
+        }
+
+    def test_chat_dry_run_prints_prompts_without_mutating_home(self) -> None:
+        before = self.snapshot_home()
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            exit_code = cli.main(["chat", "vim", "What is normal mode?", "--dry-run"])
+
+        self.assertEqual(exit_code, 0)
+        rendered = output.getvalue()
+        self.assertIn("dry run: request not sent", rendered)
+        self.assertIn("--- system message ---", rendered)
+        self.assertIn("You are openLearn", rendered)
+        self.assertIn("--- user message ---", rendered)
+        self.assertIn("What is normal mode?", rendered)
+        self.assertEqual(self.snapshot_home(), before)
+
+    def test_resume_next_review_dry_run_exit_clean_without_mutating_home(self) -> None:
+        before = self.snapshot_home()
+
+        for command in ("resume", "next", "review"):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                exit_code = cli.main([command, "vim", "--dry-run"])
+
+            self.assertEqual(exit_code, 0, command)
+            self.assertIn("dry run: request not sent", output.getvalue())
+            self.assertEqual(self.snapshot_home(), before, command)
+
+    def test_dry_run_flag_does_not_leak_into_later_invocations(self) -> None:
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cli.main(["chat", "vim", "What is normal mode?", "--dry-run"]), 0)
+        self.assertFalse(cli._DRY_RUN)
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cli.main(["chat", "vim", "What is normal mode?"]), 0)
+        self.assertTrue(cli.state_path().exists())
+
+
 if __name__ == "__main__":
     unittest.main()
