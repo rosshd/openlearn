@@ -3042,6 +3042,62 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertTrue(update_finished.is_set())
 
+    def test_repl_joins_deferred_update_before_running_command(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
+        update_started = threading.Event()
+        allow_update = threading.Event()
+        update_finished = threading.Event()
+        command_known = []
+        original_stream = cli.call_openai_streaming
+        original_update = cli.update_learning_metadata
+        original_maybe = cli.maybe_suggest_videos
+        original_handle_command = cli.handle_repl_command
+
+        def slow_update(topic: cli.Topic, *_args, **_kwargs) -> None:
+            update_started.set()
+            self.assertTrue(allow_update.wait(timeout=2))
+            metadata, body = cli.parse_topic(topic.path.read_text(encoding="utf-8"))
+            metadata = dict(metadata)
+            metadata["known"] = ["joined before command"]
+            topic.path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
+            update_finished.set()
+
+        def handle_command(command: str, **kwargs) -> None:
+            self.assertTrue(update_finished.is_set())
+            command_known.extend(cli.read_topic("vim").metadata.get("known", []))
+            original_handle_command(command, **kwargs)
+
+        inputs = iter(["first", "/help", "/q"])
+
+        def input_func(_prompt: str = "") -> str:
+            value = next(inputs)
+            if value == "/help":
+                self.assertTrue(update_started.wait(timeout=2))
+                self.assertFalse(update_finished.is_set())
+                allow_update.set()
+            return value
+
+        cli.call_openai_streaming = lambda *_args, **_kwargs: "Tutor answer"
+        cli.update_learning_metadata = slow_update
+        cli.maybe_suggest_videos = lambda *_args, **_kwargs: None
+        cli.handle_repl_command = handle_command
+        try:
+            exit_code = call_silent(
+                cli.run_repl,
+                input_func=input_func,
+                output_func=lambda _text: None,
+                show_intro=False,
+            )
+        finally:
+            allow_update.set()
+            cli.call_openai_streaming = original_stream
+            cli.update_learning_metadata = original_update
+            cli.maybe_suggest_videos = original_maybe
+            cli.handle_repl_command = original_handle_command
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(command_known, ["joined before command"])
+
     def test_repl_prints_status_before_ai_response(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
         original_ask_topic = cli.ask_topic
