@@ -100,12 +100,14 @@ class CliStorageTests(unittest.TestCase):
             for name in (
                 "OPENLEARN_HOME",
                 "OPENLEARN_MODEL",
+                "OPENLEARN_EXTRACTOR_MODEL",
                 "OPENLEARN_BASE_URL",
                 "OPENAI_API_KEY",
             )
         }
         os.environ["OPENLEARN_HOME"] = self.home.name
         os.environ.pop("OPENLEARN_MODEL", None)
+        os.environ.pop("OPENLEARN_EXTRACTOR_MODEL", None)
         os.environ.pop("OPENLEARN_BASE_URL", None)
         os.environ.pop("OPENAI_API_KEY", None)
         cli._CONFIG_CACHE = None
@@ -1272,18 +1274,31 @@ class CliStorageTests(unittest.TestCase):
         call_silent(cli.cmd_config_set_model, Namespace(model="saved-model"))
         call_silent(cli.cmd_config_set_base_url, Namespace(base_url="https://example.test/v1/"))
         call_silent(cli.cmd_config_set_key, Namespace(api_key="sk-saved"))
+        config = cli.read_config()
+        config["extractor_model"] = "saved-extractor-model"
+        cli.write_config(config)
 
         self.assertEqual(cli.configured_model(), "saved-model")
+        self.assertEqual(
+            cli.configured_extractor_model("turn-model"), "saved-extractor-model"
+        )
         self.assertEqual(cli.configured_base_url(), "https://example.test/v1")
         self.assertEqual(cli.configured_openai_api_key(), "sk-saved")
 
         os.environ["OPENLEARN_MODEL"] = "env-model"
+        os.environ["OPENLEARN_EXTRACTOR_MODEL"] = "env-extractor-model"
         os.environ["OPENLEARN_BASE_URL"] = "https://env.example/v1/"
         os.environ["OPENAI_API_KEY"] = "sk-env"
 
         self.assertEqual(cli.configured_model(), "env-model")
+        self.assertEqual(
+            cli.configured_extractor_model("turn-model"), "env-extractor-model"
+        )
         self.assertEqual(cli.configured_base_url(), "https://env.example/v1")
         self.assertEqual(cli.configured_openai_api_key(), "sk-env")
+
+    def test_extractor_model_falls_back_to_tutor_model(self) -> None:
+        self.assertEqual(cli.configured_extractor_model("turn-model"), "turn-model")
 
     def test_config_show_masks_environment_api_key(self) -> None:
         os.environ["OPENAI_API_KEY"] = "sk-or-v1-test-secret-1234"
@@ -1658,9 +1673,11 @@ class InteractiveTests(unittest.TestCase):
     def setUp(self) -> None:
         self.home = tempfile.TemporaryDirectory()
         self.previous_env = {
-            name: os.environ.get(name) for name in ("OPENLEARN_HOME", "OPENAI_API_KEY")
+            name: os.environ.get(name)
+            for name in ("OPENLEARN_HOME", "OPENLEARN_EXTRACTOR_MODEL", "OPENAI_API_KEY")
         }
         os.environ["OPENLEARN_HOME"] = self.home.name
+        os.environ.pop("OPENLEARN_EXTRACTOR_MODEL", None)
         os.environ["OPENAI_API_KEY"] = "sk-test"
         cli._CONFIG_CACHE = None
 
@@ -3592,12 +3609,14 @@ class PromptInstructionTests(unittest.TestCase):
             for name in (
                 "OPENLEARN_HOME",
                 "OPENLEARN_MODEL",
+                "OPENLEARN_EXTRACTOR_MODEL",
                 "OPENLEARN_BASE_URL",
                 "OPENAI_API_KEY",
             )
         }
         os.environ["OPENLEARN_HOME"] = self.home.name
         os.environ.pop("OPENLEARN_MODEL", None)
+        os.environ.pop("OPENLEARN_EXTRACTOR_MODEL", None)
         os.environ.pop("OPENLEARN_BASE_URL", None)
         os.environ.pop("OPENAI_API_KEY", None)
         cli._CONFIG_CACHE = None
@@ -4075,6 +4094,7 @@ class PromptInstructionTests(unittest.TestCase):
 
         cli.call_openai = fake_call_openai
         try:
+            cli.write_config({"extractor_model": "fast-extractor-model"})
             call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
             path = cli.topic_path("vim")
             metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
@@ -4108,6 +4128,7 @@ class PromptInstructionTests(unittest.TestCase):
         self.assertEqual(updated.metadata["current_focus"], "Vim modes")
         self.assertIsNone(updated.metadata["last_video_focus"])
         self.assertEqual(updated.metadata["last_answer_status"], "")
+        self.assertEqual(calls[0][0], "fast-extractor-model")
         self.assertEqual(calls[0][1], cli.METADATA_EXTRACTOR_SYSTEM)
         self.assertIn("Current metadata JSON:", calls[0][2])
         self.assertNotIn("- current_unit:", calls[0][2])
@@ -6139,12 +6160,14 @@ class PromptContextTests(unittest.TestCase):
             for name in (
                 "OPENLEARN_HOME",
                 "OPENLEARN_MODEL",
+                "OPENLEARN_EXTRACTOR_MODEL",
                 "OPENLEARN_BASE_URL",
                 "OPENAI_API_KEY",
             )
         }
         os.environ["OPENLEARN_HOME"] = self.home.name
         os.environ.pop("OPENLEARN_MODEL", None)
+        os.environ.pop("OPENLEARN_EXTRACTOR_MODEL", None)
         os.environ.pop("OPENLEARN_BASE_URL", None)
         os.environ.pop("OPENAI_API_KEY", None)
         cli._CONFIG_CACHE = None

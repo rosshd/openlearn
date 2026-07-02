@@ -1518,9 +1518,11 @@ def cmd_config_show(_args: argparse.Namespace) -> int:
     env_key = os.environ.get("OPENAI_API_KEY")
     saved_key = config.get("openai_api_key") or config.get("api_key")
     model = configured_model(config)
+    extractor_model = configured_extractor_model(model, config)
     base_url = configured_base_url(config)
     print("Provider: openai")
     print(f"Model: {model}")
+    print(f"Extractor model: {extractor_model}")
     print(f"Base URL: {base_url}")
     if env_key:
         print(f"API key: set by OPENAI_API_KEY ({mask_key(env_key)})")
@@ -4586,7 +4588,9 @@ def update_learning_metadata(
     previously_shown_text = last_tutor_lesson_response(topic)
     update_prompt = metadata_update_prompt(topic.metadata, learner_prompt, tutor_answer)
     try:
-        raw_update = call_openai(model, METADATA_EXTRACTOR_SYSTEM, update_prompt)
+        raw_update = call_openai(
+            configured_extractor_model(model), METADATA_EXTRACTOR_SYSTEM, update_prompt
+        )
         update = parse_metadata_update(raw_update)
     except (OpenLearnError, ValueError, json.JSONDecodeError):
         return
@@ -5360,6 +5364,17 @@ def configured_model(config: dict[str, object] | None = None) -> str:
     config = read_config() if config is None else config
     model = config.get("model")
     return model if isinstance(model, str) and model else DEFAULT_MODEL
+
+
+def configured_extractor_model(
+    tutor_model: str, config: dict[str, object] | None = None
+) -> str:
+    env_model = os.environ.get("OPENLEARN_EXTRACTOR_MODEL")
+    if env_model:
+        return env_model
+    config = read_config() if config is None else config
+    model = config.get("extractor_model")
+    return model if isinstance(model, str) and model else tutor_model
 
 
 def configured_base_url(config: dict[str, object] | None = None) -> str:
