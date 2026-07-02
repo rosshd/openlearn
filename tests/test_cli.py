@@ -2999,6 +2999,49 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(system_known[0], [])
         self.assertEqual(system_known[1], ["joined metadata"])
 
+    def test_repl_joins_deferred_update_before_quit_returns(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
+        update_started = threading.Event()
+        allow_update = threading.Event()
+        update_finished = threading.Event()
+        original_stream = cli.call_openai_streaming
+        original_update = cli.update_learning_metadata
+        original_maybe = cli.maybe_suggest_videos
+
+        def slow_update(*_args, **_kwargs) -> None:
+            update_started.set()
+            self.assertTrue(allow_update.wait(timeout=2))
+            update_finished.set()
+
+        inputs = iter(["first", "/q"])
+
+        def input_func(_prompt: str = "") -> str:
+            value = next(inputs)
+            if value == "/q":
+                self.assertTrue(update_started.wait(timeout=2))
+                self.assertFalse(update_finished.is_set())
+                allow_update.set()
+            return value
+
+        cli.call_openai_streaming = lambda *_args, **_kwargs: "Check: What is a motion?"
+        cli.update_learning_metadata = slow_update
+        cli.maybe_suggest_videos = lambda *_args, **_kwargs: None
+        try:
+            exit_code = call_silent(
+                cli.run_repl,
+                input_func=input_func,
+                output_func=lambda _text: None,
+                show_intro=False,
+            )
+        finally:
+            allow_update.set()
+            cli.call_openai_streaming = original_stream
+            cli.update_learning_metadata = original_update
+            cli.maybe_suggest_videos = original_maybe
+
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(update_finished.is_set())
+
     def test_repl_prints_status_before_ai_response(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
         original_ask_topic = cli.ask_topic
