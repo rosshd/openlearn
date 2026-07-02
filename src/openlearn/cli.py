@@ -4508,7 +4508,17 @@ def extract_pending_question_text(text: str) -> str:
 def metadata_update_prompt(
     metadata: dict[str, object], learner_prompt: str, tutor_answer: str
 ) -> str:
-    metadata_snapshot = json.dumps(metadata, indent=2, sort_keys=True)
+    extractor_context_keys = (
+        "pending_question",
+        "current_focus",
+        "known",
+        "weak_spots",
+        "review_due",
+    )
+    extractor_context = {
+        key: metadata[key] for key in extractor_context_keys if key in metadata
+    }
+    metadata_snapshot = json.dumps(extractor_context, indent=2, sort_keys=True)
     return textwrap.dedent(
         f"""
         Update this learner's lightweight topic metadata from the latest exchange.

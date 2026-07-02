@@ -4029,6 +4029,31 @@ class PromptInstructionTests(unittest.TestCase):
         self.assertEqual(calls[0].topic, "active-topic")
         self.assertTrue(calls[0].due_only)
 
+    def test_metadata_update_prompt_excludes_unneeded_bookkeeping(self) -> None:
+        prompt = cli.metadata_update_prompt(
+            {
+                "pending_question": {"question": "What is normal mode?"},
+                "current_focus": "Vim modes",
+                "known": ["normal mode"],
+                "weak_spots": ["insert mode"],
+                "review_due": [{"concept": "mode switching", "due": cli.today()}],
+                "concept_attempts": {
+                    "normal-mode": {"attempts": 12, "correct_sum": 10.0}
+                },
+                "quiz_history": [{"score": "3/4"}],
+            },
+            "It is where commands run.",
+            "Correct.",
+        )
+
+        self.assertIn('"pending_question"', prompt)
+        self.assertIn('"current_focus"', prompt)
+        self.assertIn('"known"', prompt)
+        self.assertIn('"weak_spots"', prompt)
+        self.assertIn('"review_due"', prompt)
+        self.assertNotIn('"concept_attempts"', prompt)
+        self.assertNotIn('"quiz_history"', prompt)
+
     def test_learning_metadata_update_merges_known_and_weak_spots(self) -> None:
         home = tempfile.TemporaryDirectory()
         previous_home = os.environ.get("OPENLEARN_HOME")
