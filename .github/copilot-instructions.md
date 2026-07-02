@@ -17,6 +17,7 @@
 - Topic slugs are the stable file IDs; topic commands update `state.json` so `resume`, `next`, `edit`, `menu`, and `repl` can work without retyping the topic name.
 - Saved config lives in `config.json`; both `config.json` and `state.json` are local-only data.
 - Model-backed commands send only the selected topic’s metadata, a bounded notes excerpt, recent session history, and the current prompt.
+- `chat`, `resume`, `next`, and `review` support `--dry-run` to print rendered prompts without provider calls or local file mutation.
 - The REPL is thin: slash commands dispatch to the same handlers used by the non-interactive CLI.
 
 ## Conventions
