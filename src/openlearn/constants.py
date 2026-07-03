@@ -5,6 +5,15 @@ from pathlib import Path
 
 DEFAULT_MODEL = "gpt-4.1-mini"
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
+# Hosted provider defaults that always require an API key; local or custom
+# endpoints (for example Ollama) may be keyless.
+HOSTED_BASE_URLS = frozenset(
+    {
+        "https://api.openai.com/v1",
+        "https://openrouter.ai/api/v1",
+        "https://api.anthropic.com/v1",
+    }
+)
 DEFAULT_MAX_TOKENS = 1600
 STATE_FILE = "state.json"
 CONFIG_FILE = "config.json"

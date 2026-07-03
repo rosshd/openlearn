@@ -45,6 +45,7 @@ from openlearn.constants import (
     DEFAULT_MODEL,
     GAMING_MIN_ANSWER_TOKENS,
     GAMING_OVERLAP_TRIGRAM_JACCARD,
+    HOSTED_BASE_URLS,
     MANUAL_TEST_CONTEXT,
     MANUAL_TEST_CONTEXT_FILENAME,
     MANUAL_TEST_COURSE_GOAL,
@@ -555,7 +556,16 @@ def cmd_init(args: argparse.Namespace, output_func=print, input_func=input) -> i
         output_func(f"Initialized {topics_dir()}")
         return 0
     config = read_config()
-    if (config.get("api_key") or config.get("openai_api_key")) and not force:
+    saved_key = config.get("api_key") or config.get("openai_api_key")
+    saved_base_url = config.get("base_url")
+    keyless_local = (
+        isinstance(saved_base_url, str)
+        and saved_base_url
+        and not base_url_requires_api_key(saved_base_url)
+        and isinstance(config.get("model"), str)
+        and config.get("model")
+    )
+    if (saved_key or keyless_local) and not force:
         output_func("Already configured. Use 'openlearn init --force' to reconfigure.")
         return 0
 
@@ -1674,6 +1684,8 @@ def cmd_config_show(_args: argparse.Namespace) -> int:
         print(f"API key: set by OPENAI_API_KEY ({mask_key(env_key)})")
     elif isinstance(saved_key, str) and saved_key:
         print(f"API key: saved locally ({mask_key(saved_key)})")
+    elif not base_url_requires_api_key(base_url):
+        print("API key: not set (not required for this endpoint)")
     else:
         print("API key: not set")
     print(f"Config file: {config_path()}")
@@ -2503,7 +2515,7 @@ def infer_mastery_profile_from_goal(goal: str, model: str | None = None) -> str:
     lowered = goal_text.lower()
     if not goal_text:
         return "proficient"
-    if configured_openai_api_key() and os.environ.get("OPENLEARN_MOCK") not in {"1", "true", "yes"}:
+    if provider_is_configured() and os.environ.get("OPENLEARN_MOCK") not in {"1", "true", "yes"}:
         prompt = (
             "Classify this learning goal into exactly one mastery_profile: "
             'efficient, proficient, or deep. Return JSON like {"mastery_profile":"proficient"}.\n\n'
@@ -6277,6 +6289,18 @@ def configured_openai_api_key() -> str | None:
     return key if isinstance(key, str) and key else None
 
 
+def base_url_requires_api_key(base_url: str) -> bool:
+    return base_url.rstrip("/") in HOSTED_BASE_URLS
+
+
+def provider_is_configured(config: dict[str, object] | None = None) -> bool:
+    """Whether a model call can be attempted: a key is set, or the base URL is
+    a local/custom endpoint (for example Ollama) that may be keyless."""
+    if configured_openai_api_key():
+        return True
+    return not base_url_requires_api_key(configured_base_url(config))
+
+
 def topic_path(slug: str) -> Path:
     return topics_dir() / f"{slug}.md"
 
@@ -8157,8 +8181,9 @@ def call_openai(model: str, system: str, user: str) -> str:
         raw = _mock_openai_response(model, system, user)
         return raw.strip()
 
+    base_url = configured_base_url()
     api_key = configured_openai_api_key()
-    if not api_key:
+    if not api_key and base_url_requires_api_key(base_url):
         raise OpenLearnError("OpenAI API key is required. Run: openlearn config set-key")
 
     payload = {
@@ -8170,20 +8195,26 @@ def call_openai(model: str, system: str, user: str) -> str:
             {"role": "user", "content": user},
         ],
     }
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": f"openLearn/{__version__}",
+    }
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     request = Request(
-        f"{configured_base_url()}/chat/completions",
+        f"{base_url}/chat/completions",
         data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            "User-Agent": f"openLearn/{__version__}",
-        },
+        headers=headers,
         method="POST",
     )
     try:
         with urlopen(request, timeout=60) as response:
             data = json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
+        if exc.code == 401 and not api_key:
+            raise OpenLearnError(
+                "This endpoint requires an API key. Run: openlearn config set-key"
+            ) from exc
         detail = exc.read().decode("utf-8", errors="replace")
         raise OpenLearnError(f"OpenAI request failed: HTTP {exc.code}: {detail}") from exc
     except URLError as exc:
@@ -8241,8 +8272,9 @@ def call_openai_streaming(
         emit_tutor_output(text, output_func)
         return text.strip()
 
+    base_url = configured_base_url()
     api_key = configured_openai_api_key()
-    if not api_key:
+    if not api_key and base_url_requires_api_key(base_url):
         raise OpenLearnError("OpenAI API key is required. Run: openlearn config set-key")
 
     payload = {
@@ -8255,14 +8287,16 @@ def call_openai_streaming(
             {"role": "user", "content": user},
         ],
     }
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": f"openLearn/{__version__}",
+    }
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     request = Request(
-        f"{configured_base_url()}/chat/completions",
+        f"{base_url}/chat/completions",
         data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            "User-Agent": f"openLearn/{__version__}",
-        },
+        headers=headers,
         method="POST",
     )
     chunks: list[str] = []
@@ -8299,6 +8333,10 @@ def call_openai_streaming(
     except HTTPError as exc:
         if tutor_stream is not None:
             tutor_stream.abort()
+        if exc.code == 401 and not api_key:
+            raise OpenLearnError(
+                "This endpoint requires an API key. Run: openlearn config set-key"
+            ) from exc
         detail = exc.read().decode("utf-8", errors="replace")
         raise OpenLearnError(f"OpenAI request failed: HTTP {exc.code}: {detail}") from exc
     except URLError as exc:

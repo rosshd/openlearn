@@ -12,7 +12,7 @@ It stores curriculum, learner state, session notes, and context files locally wh
 ## Principles
 
 - Local-first: topics and learner state live under your openLearn home.
-- Bring your own API key: no required hosted account or subscription.
+- Bring your own model access: use a hosted API key or a local/custom keyless endpoint.
 - Transparent scope: model calls use the selected topic, bounded notes, recent context, and the current prompt.
 - Human-readable memory: topic files are Markdown with JSON metadata.
 - Open core: AGPLv3 keeps hosted modifications open.
@@ -62,6 +62,9 @@ openlearn config set-model gpt-4.1-mini
 openlearn config set-base-url https://api.openai.com/v1
 openlearn config show
 ```
+
+Choose the Ollama preset in `openlearn init`, or set `OPENLEARN_BASE_URL` / `base_url` to a local or custom OpenAI-compatible endpoint such as `http://localhost:11434/v1`, to use a provider that does not require an API key.
+Hosted defaults such as OpenAI, OpenRouter, and Anthropic still require `OPENAI_API_KEY` or a saved key.
 
 Environment variables override saved config:
 
@@ -132,7 +135,8 @@ Use `/help --all` for the full REPL command list.
 | Practice | `videos`, REPL `/drill`, REPL `/check` |
 | Utilities | `templates`, `test`, `tui` |
 
-Model-backed commands require an API key unless `OPENLEARN_MOCK=1` is set for tests.
+Model-backed commands require an API key for hosted defaults, but local/custom OpenAI-compatible endpoints such as Ollama may be used keylessly.
+`OPENLEARN_MOCK=1` runs model-backed tests without any provider call.
 `chat`, `resume`, `next`, and `review` accept `--dry-run` to print the rendered prompts instead of calling the model, leaving all local files untouched.
 `repl` also has the `shell` alias.
 
