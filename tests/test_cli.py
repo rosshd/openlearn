@@ -1726,6 +1726,107 @@ class ProviderResponseTests(unittest.TestCase):
         self.assertEqual(answer, "Hello there")
         self.assertEqual(output, ["", "Hello there", ""])
 
+    def test_call_openai_streaming_retries_transient_failures_then_succeeds(self) -> None:
+        previous_key = os.environ.get("OPENAI_API_KEY")
+        os.environ["OPENAI_API_KEY"] = "sk-test"
+        attempts = []
+        delays = []
+        statuses = []
+        original_urlopen = cli.urlopen
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def __iter__(self):
+                event = {"choices": [{"delta": {"content": "recovered"}}]}
+                yield f"data: {json.dumps(event)}\n".encode()
+                yield b"data: [DONE]\n"
+
+        failures = [
+            cli.HTTPError(
+                "https://example.test",
+                500,
+                "server error",
+                {},
+                io.BytesIO(b'{"error":"temporary"}'),
+            ),
+            TimeoutError("timed out"),
+        ]
+
+        def fake_urlopen(_request, timeout=0):
+            attempts.append(timeout)
+            if failures:
+                raise failures.pop(0)
+            return FakeResponse()
+
+        cli.urlopen = fake_urlopen
+        try:
+            output = []
+            answer = cli.call_openai_streaming(
+                "test-model",
+                "system",
+                "user",
+                output_func=output.append,
+                retry_sleep=delays.append,
+                retry_jitter=lambda _start, _end: 0.0,
+                retry_status=statuses.append,
+            )
+        finally:
+            cli.urlopen = original_urlopen
+            if previous_key is None:
+                os.environ.pop("OPENAI_API_KEY", None)
+            else:
+                os.environ["OPENAI_API_KEY"] = previous_key
+
+        self.assertEqual(answer, "recovered")
+        self.assertEqual(attempts, [60, 60, 60])
+        self.assertEqual(delays, [0.5, 1.0])
+        self.assertEqual(len(statuses), 2)
+        self.assertTrue(all("retrying" in status.lower() for status in statuses))
+
+    def test_call_openai_streaming_does_not_retry_non_transient_http_error(self) -> None:
+        previous_key = os.environ.get("OPENAI_API_KEY")
+        os.environ["OPENAI_API_KEY"] = "sk-test"
+        attempts = []
+        delays = []
+        original_urlopen = cli.urlopen
+
+        def fake_urlopen(_request, timeout=0):
+            attempts.append(timeout)
+            raise cli.HTTPError(
+                "https://example.test",
+                401,
+                "unauthorized",
+                {},
+                io.BytesIO(b'{"error":"invalid key"}'),
+            )
+
+        cli.urlopen = fake_urlopen
+        try:
+            with self.assertRaisesRegex(cli.OpenLearnError, "HTTP 401"):
+                cli.call_openai_streaming(
+                    "test-model",
+                    "system",
+                    "user",
+                    output_func=lambda _message: None,
+                    retry_sleep=delays.append,
+                    retry_jitter=lambda _start, _end: 0.0,
+                    retry_status=lambda _message: None,
+                )
+        finally:
+            cli.urlopen = original_urlopen
+            if previous_key is None:
+                os.environ.pop("OPENAI_API_KEY", None)
+            else:
+                os.environ["OPENAI_API_KEY"] = previous_key
+
+        self.assertEqual(attempts, [60])
+        self.assertEqual(delays, [])
+
     def test_call_openai_streaming_sanitizes_before_terminal_output(self) -> None:
         previous_key = os.environ.get("OPENAI_API_KEY")
         os.environ["OPENAI_API_KEY"] = "sk-test"

@@ -7306,6 +7306,9 @@ def call_openai_streaming(
     output_func=print,
     *,
     capture_answer_key: bool = True,
+    retry_sleep: Callable[[float], object] = time.sleep,
+    retry_jitter: Callable[[float, float], float] = random.uniform,
+    retry_status: Callable[[str], object] = print,
 ) -> str:
     global _LAST_RESPONSE_ANSWER_KEY
     if _DRY_RUN:
@@ -7363,33 +7366,47 @@ def call_openai_streaming(
         },
         method="POST",
     )
-    chunks: list[str] = []
     spinner_context = thinking_progress(output_func)
     spinner = spinner_context.__enter__()
     if spinner is not None:
         spinner.add_task("waiting", total=None)
     try:
-        with urlopen(request, timeout=60) as response:
-            for raw_line in response:
-                line = raw_line.decode("utf-8", errors="replace").strip()
-                if not line.startswith("data:"):
-                    continue
-                data = line.removeprefix("data:").strip()
-                if data == "[DONE]":
-                    break
-                try:
-                    event = json.loads(data)
-                except json.JSONDecodeError:
-                    continue
-                text = extract_stream_delta(event)
-                if not text:
-                    continue
-                chunks.append(text)
-    except HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise OpenLearnError(f"OpenAI request failed: HTTP {exc.code}: {detail}") from exc
-    except URLError as exc:
-        raise OpenLearnError(f"OpenAI request failed: {exc.reason}") from exc
+        for attempt in range(1, OPENAI_MAX_ATTEMPTS + 1):
+            chunks: list[str] = []
+            try:
+                with urlopen(request, timeout=60) as response:
+                    for raw_line in response:
+                        line = raw_line.decode("utf-8", errors="replace").strip()
+                        if not line.startswith("data:"):
+                            continue
+                        data = line.removeprefix("data:").strip()
+                        if data == "[DONE]":
+                            break
+                        try:
+                            event = json.loads(data)
+                        except json.JSONDecodeError:
+                            continue
+                        text = extract_stream_delta(event)
+                        if not text:
+                            continue
+                        chunks.append(text)
+                break
+            except (HTTPError, URLError, TimeoutError) as exc:
+                if not is_transient_openai_error(exc) or attempt == OPENAI_MAX_ATTEMPTS:
+                    if isinstance(exc, HTTPError):
+                        detail = exc.read().decode("utf-8", errors="replace")
+                        raise OpenLearnError(
+                            f"OpenAI request failed: HTTP {exc.code}: {detail}"
+                        ) from exc
+                    reason = exc.reason if isinstance(exc, URLError) else str(exc)
+                    raise OpenLearnError(f"OpenAI request failed: {reason}") from exc
+                delay = OPENAI_RETRY_BASE_DELAY_SECONDS * 2 ** (attempt - 1)
+                delay += retry_jitter(0.0, OPENAI_RETRY_JITTER_SECONDS)
+                retry_status(
+                    f"Temporary OpenAI failure; retrying in {delay:.1f}s "
+                    f"({attempt + 1}/{OPENAI_MAX_ATTEMPTS})..."
+                )
+                retry_sleep(delay)
     finally:
         spinner_context.__exit__(None, None, None)
 
