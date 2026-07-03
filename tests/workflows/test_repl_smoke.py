@@ -95,6 +95,30 @@ def test_repl_multiline_paste_is_one_learner_message(spawn_openlearn) -> None:
         proc.close()
 
 
+def test_quick_learn_file_reaches_repl(spawn_openlearn) -> None:
+    home = Path(spawn_openlearn.env["OPENLEARN_HOME"])
+    source = home / "midterm-review.md"
+    source.write_text(
+        "# Midterm review\n\n- Explain sorting complexity.\n- Trace binary search.\n",
+        encoding="utf-8",
+    )
+    proc = spawn_openlearn.spawn("quick", str(source), timeout=10)
+    try:
+        proc.expect("First lesson")
+        proc.expect("Normal vs Insert")
+        proc.expect("Answer> ")
+        assert "Quick Learn plan" in proc.clean_output
+        assert "Traceback" not in proc.clean_output
+        assert "\x1b[" not in proc.clean_output
+        proc.sendline("/q")
+        proc.expect(pexpect.EOF)
+        topic = home / "learning-topics" / "midterm-review.md"
+        assert topic.exists()
+        assert '"learning_mode": "quick"' in topic.read_text(encoding="utf-8")
+    finally:
+        proc.close()
+
+
 def test_videos_url_plaintext(spawn_openlearn) -> None:
     spawn_openlearn.create_topic()
     proc = spawn_openlearn.spawn("repl")
