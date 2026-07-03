@@ -208,6 +208,23 @@ class ProviderValidationTests(unittest.TestCase):
         self.assertEqual(request.get_header("Authorization"), "Bearer secret-key")
         self.assertEqual(timeout, 10)
 
+    def test_omits_authorization_header_when_optional_key_is_empty(self) -> None:
+        calls: list[tuple[object, int]] = []
+
+        def opener(request: object, timeout: int) -> FakeResponse:
+            calls.append((request, timeout))
+            return FakeResponse(200)
+
+        result = onboarding.validate_provider(
+            "http://localhost:11434/v1",
+            "",
+            opener=opener,
+        )
+
+        self.assertEqual(result.status, onboarding.ValidationStatus.VALID)
+        request, _timeout = calls[0]
+        self.assertIsNone(request.get_header("Authorization"))
+
     def test_maps_unauthorized_and_forbidden_to_rejected(self) -> None:
         for status in (401, 403):
             with self.subTest(status=status):

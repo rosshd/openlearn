@@ -1621,6 +1621,59 @@ class ProviderResponseTests(unittest.TestCase):
         self.assertEqual(payload["max_tokens"], cli.DEFAULT_MAX_TOKENS)
         self.assertIs(payload["include_reasoning"], False)
 
+    def test_call_openai_allows_local_keyless_provider(self) -> None:
+        previous_key = os.environ.pop("OPENAI_API_KEY", None)
+        previous_base_url = os.environ.get("OPENLEARN_BASE_URL")
+        os.environ["OPENLEARN_BASE_URL"] = "http://localhost:11434/v1"
+        requests = []
+        original_urlopen = cli.urlopen
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def read(self):
+                return json.dumps({"choices": [{"message": {"content": "local answer"}}]}).encode()
+
+        def fake_urlopen(request, timeout=0):
+            requests.append((request, timeout))
+            return FakeResponse()
+
+        cli.urlopen = fake_urlopen
+        try:
+            answer = cli.call_openai("llama3.1", "system", "user")
+        finally:
+            cli.urlopen = original_urlopen
+            if previous_key is not None:
+                os.environ["OPENAI_API_KEY"] = previous_key
+            if previous_base_url is None:
+                os.environ.pop("OPENLEARN_BASE_URL", None)
+            else:
+                os.environ["OPENLEARN_BASE_URL"] = previous_base_url
+
+        request, _timeout = requests[0]
+        self.assertEqual(answer, "local answer")
+        self.assertEqual(request.full_url, "http://localhost:11434/v1/chat/completions")
+        self.assertIsNone(request.get_header("Authorization"))
+
+    def test_call_openai_still_requires_key_for_nonlocal_provider(self) -> None:
+        previous_key = os.environ.pop("OPENAI_API_KEY", None)
+        previous_base_url = os.environ.get("OPENLEARN_BASE_URL")
+        os.environ["OPENLEARN_BASE_URL"] = "https://api.example.com/v1"
+        try:
+            with self.assertRaisesRegex(cli.OpenLearnError, "OpenAI API key is required"):
+                cli.call_openai("test-model", "system", "user")
+        finally:
+            if previous_key is not None:
+                os.environ["OPENAI_API_KEY"] = previous_key
+            if previous_base_url is None:
+                os.environ.pop("OPENLEARN_BASE_URL", None)
+            else:
+                os.environ["OPENLEARN_BASE_URL"] = previous_base_url
+
     def test_call_openai_streaming_prints_chunks_and_returns_text(self) -> None:
         previous_key = os.environ.get("OPENAI_API_KEY")
         os.environ["OPENAI_API_KEY"] = "sk-test"

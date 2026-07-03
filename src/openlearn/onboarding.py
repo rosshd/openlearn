@@ -167,9 +167,10 @@ def validate_provider(
     *,
     opener: UrlOpener = urlopen,
 ) -> ValidationResult:
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     request = Request(
         f"{base_url.rstrip('/')}/models",
-        headers={"Authorization": f"Bearer {api_key}"},
+        headers=headers,
         method="GET",
     )
     try:
