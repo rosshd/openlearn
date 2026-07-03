@@ -281,7 +281,7 @@ def main(argv: list[str] | None = None) -> int:
         if (
             not command_args
             and _configured_provider_needs_onboarding()
-            and "OPENLEARN_MOCK" not in os.environ
+            and not _openlearn_mock_enabled()
         ):
             from openlearn.onboarding import run_onboarding
 
@@ -2525,7 +2525,7 @@ def infer_mastery_profile_from_goal(goal: str, model: str | None = None) -> str:
     lowered = goal_text.lower()
     if not goal_text:
         return "proficient"
-    if provider_is_configured() and os.environ.get("OPENLEARN_MOCK") not in {"1", "true", "yes"}:
+    if provider_is_configured() and not _openlearn_mock_enabled():
         prompt = (
             "Classify this learning goal into exactly one mastery_profile: "
             'efficient, proficient, or deep. Return JSON like {"mastery_profile":"proficient"}.\n\n'
@@ -6315,6 +6315,10 @@ def _configured_provider_needs_onboarding() -> bool:
     return not provider_is_configured()
 
 
+def _openlearn_mock_enabled() -> bool:
+    return os.environ.get("OPENLEARN_MOCK") in {"1", "true", "yes"}
+
+
 def topic_path(slug: str) -> Path:
     return topics_dir() / f"{slug}.md"
 
@@ -6481,7 +6485,7 @@ def fetch_video_suggestions(query: str, limit: int = 3) -> list[dict[str, str]]:
     query = query.strip()
     if not query:
         return []
-    if os.environ.get("OPENLEARN_MOCK") in {"1", "true", "yes"}:
+    if _openlearn_mock_enabled():
         return [
             {
                 "title": "Mock study video",
@@ -8191,7 +8195,7 @@ def call_openai(model: str, system: str, user: str) -> str:
         raise DryRunPrompt(model, system, user)
 
     # Mock mode support for CI / offline testing
-    if os.environ.get("OPENLEARN_MOCK") in {"1", "true", "yes"}:
+    if _openlearn_mock_enabled():
         raw = _mock_openai_response(model, system, user)
         return raw.strip()
 
@@ -8273,7 +8277,7 @@ def call_openai_streaming(
         return text.strip()
 
     # Mock mode support: return a canned response without contacting the network.
-    if os.environ.get("OPENLEARN_MOCK") in {"1", "true", "yes"}:
+    if _openlearn_mock_enabled():
         raw = _mock_openai_response(model, system, user)
         _LAST_RESPONSE_COVERED_CONCEPTS = extract_covered_concepts(raw)
         if capture_answer_key:

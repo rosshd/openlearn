@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import getpass
+import os
 from argparse import Namespace
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from types import TracebackType
 from typing import Callable, Protocol, Self
+from urllib.parse import urlparse
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -102,6 +104,28 @@ def prompt_for_provider(
         if choice.isdigit() and 1 <= int(choice) <= len(presets):
             return presets[int(choice) - 1]
         output_func(f"Choose a provider from 1 to {len(presets)}.")
+
+
+def _normalize_base_url(base_url: str) -> str:
+    return base_url.strip().rstrip("/")
+
+
+def _base_url_allows_keyless_requests(base_url: str) -> bool:
+    parsed = urlparse(base_url)
+    return parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+
+
+def preset_for_base_url(base_url: str) -> ProviderPreset:
+    normalized = _normalize_base_url(base_url)
+    for preset in PROVIDER_PRESETS.values():
+        if preset.base_url and _normalize_base_url(preset.base_url) == normalized:
+            return preset
+    return ProviderPreset(
+        name="Environment-configured OpenAI-compatible provider",
+        base_url=normalized,
+        default_model=None,
+        key_required=not _base_url_allows_keyless_requests(normalized),
+    )
 
 
 def prompt_for_base_url(
@@ -318,12 +342,21 @@ def run_onboarding(
     output_func: OutputFunc = print,
 ) -> bool:
     output_func("Welcome to openlearn.")
-    preset = prompt_for_provider(input_func=input_func, output_func=output_func)
-    base_url = prompt_for_base_url(
-        preset,
-        input_func=input_func,
-        output_func=output_func,
-    )
+    env_base_url = os.environ.get("OPENLEARN_BASE_URL")
+    if env_base_url:
+        base_url = _normalize_base_url(env_base_url)
+        preset = preset_for_base_url(base_url)
+        output_func(
+            f"OPENLEARN_BASE_URL is set; using {preset.name} at {base_url}."
+        )
+        output_func("Provider selection is locked by the environment.")
+    else:
+        preset = prompt_for_provider(input_func=input_func, output_func=output_func)
+        base_url = prompt_for_base_url(
+            preset,
+            input_func=input_func,
+            output_func=output_func,
+        )
     api_key = prompt_for_validated_key(
         preset,
         base_url,

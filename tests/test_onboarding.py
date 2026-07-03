@@ -448,6 +448,66 @@ class OnboardingFlowTests(unittest.TestCase):
             ],
         )
 
+    def test_environment_base_url_locks_provider_before_validation(self) -> None:
+        calls: list[object] = []
+        output: list[str] = []
+
+        with (
+            patch.dict(
+                "os.environ", {"OPENLEARN_BASE_URL": "https://api.example.com/v1/"}, clear=True
+            ),
+            patch.object(onboarding, "prompt_for_provider") as prompt_for_provider,
+            patch.object(onboarding, "prompt_for_base_url") as prompt_for_base_url,
+            patch.object(
+                onboarding,
+                "prompt_for_validated_key",
+                side_effect=lambda selected, base_url, **_kwargs: (
+                    calls.append(("key", selected, base_url)) or "secret-key"
+                ),
+            ),
+            patch.object(
+                onboarding,
+                "prompt_for_model",
+                side_effect=lambda selected, **_kwargs: (
+                    calls.append(("model", selected)) or "example-model"
+                ),
+            ),
+            patch.object(
+                onboarding,
+                "persist_configuration",
+                side_effect=lambda key, model, base_url: calls.append(
+                    ("persist", key, model, base_url)
+                ),
+            ),
+            patch.object(
+                onboarding,
+                "prompt_for_destination",
+                return_value=onboarding.OnboardingDestination.MENU,
+            ),
+            patch.object(onboarding, "launch_destination"),
+        ):
+            ready = onboarding.run_onboarding(output_func=output.append)
+
+        self.assertTrue(ready)
+        prompt_for_provider.assert_not_called()
+        prompt_for_base_url.assert_not_called()
+        selected = calls[0][1]
+        self.assertEqual(selected.name, "Environment-configured OpenAI-compatible provider")
+        self.assertTrue(selected.key_required)
+        self.assertEqual(
+            calls,
+            [
+                ("key", selected, "https://api.example.com/v1"),
+                ("model", selected),
+                ("persist", "secret-key", "example-model", "https://api.example.com/v1"),
+            ],
+        )
+        self.assertIn(
+            "OPENLEARN_BASE_URL is set; using Environment-configured OpenAI-compatible provider at https://api.example.com/v1.",
+            output,
+        )
+        self.assertIn("Provider selection is locked by the environment.", output)
+
     def test_stops_without_model_or_persistence_when_validation_fails(self) -> None:
         preset = onboarding.PROVIDER_PRESETS["openai"]
 
@@ -559,6 +619,24 @@ class OnboardingTriggerTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         run_onboarding.assert_not_called()
+
+    def test_falsey_mock_environment_runs_onboarding_when_unconfigured(self) -> None:
+        calls: list[str] = []
+
+        with (
+            patch.dict("os.environ", {"OPENLEARN_MOCK": "false"}, clear=True),
+            patch.object(cli, "configured_openai_api_key", return_value=None),
+            patch.object(
+                onboarding,
+                "run_onboarding",
+                side_effect=lambda: calls.append("onboarding") or True,
+            ),
+            patch.object(cli, "run_menu", side_effect=lambda: calls.append("menu") or 0),
+        ):
+            exit_code = cli.main([])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(calls, ["onboarding", "menu"])
 
     def test_failed_onboarding_exits_before_menu(self) -> None:
         with (
