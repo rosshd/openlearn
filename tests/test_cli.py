@@ -3396,6 +3396,40 @@ class InteractiveTests(unittest.TestCase):
         self.assertLess(status_index, feedback_index)
         self.assertFalse(any("openlearn" in line for line in output[feedback_index + 1 :]))
 
+    def test_repl_keeps_failed_answer_and_enter_resubmits_it(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
+        original_ask_topic = cli.ask_topic
+        submitted = []
+        output = []
+        prompts = []
+        inputs = iter(["learner answer", "", "/q"])
+
+        def input_func(prompt: str = "") -> str:
+            prompts.append(prompt)
+            return next(inputs)
+
+        def fake_ask_topic(_topic, prompt, _model, **_kwargs) -> str:
+            submitted.append(prompt)
+            if len(submitted) == 1:
+                raise cli.OpenLearnError("network unavailable")
+            return "Tutor answer"
+
+        cli.ask_topic = fake_ask_topic
+        try:
+            exit_code = call_silent(
+                cli.run_repl,
+                input_func=input_func,
+                output_func=output.append,
+                show_intro=False,
+            )
+        finally:
+            cli.ask_topic = original_ask_topic
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(submitted, ["learner answer", "learner answer"])
+        self.assertTrue(any("answer was kept" in line.lower() for line in output))
+        self.assertIn("press Enter to resubmit", prompts[1])
+
     def test_repl_advance_intent_records_preference_and_skips_stale_question(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Mac Workflow", goal="Learn macOS"))
         path = cli.topic_path("mac-workflow")

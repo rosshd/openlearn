@@ -1195,6 +1195,12 @@ def repl_prompt_for_answer(answer: str | None) -> str:
     return "Answer> " if extract_pending_question_text(answer) else "openlearn> "
 
 
+def repl_prompt_for_preserved_answer(answer: str | None, preserved_prompt: str | None) -> str:
+    if preserved_prompt is not None:
+        return "Answer kept - press Enter to resubmit, or type a replacement> "
+    return repl_prompt_for_answer(answer)
+
+
 class DeferredTurnUpdates:
     def __init__(self, output_func=print) -> None:
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="openlearn-update")
@@ -1263,6 +1269,7 @@ def run_repl(
     _session_start = datetime.now(timezone.utc)
     deferred_updates = DeferredTurnUpdates(output_func)
     last_tutor_answer = None
+    preserved_prompt = None
     topic_slug = resolve_topic_slug(topic_value) if topic_value else None
     if topic_slug:
         set_active_topic(topic_slug)
@@ -1281,9 +1288,11 @@ def run_repl(
     try:
         while True:
             try:
-                prompt = read_repl_message(
-                    repl_prompt_for_answer(last_tutor_answer), input_func=input_func
+                entered_prompt = read_repl_message(
+                    repl_prompt_for_preserved_answer(last_tutor_answer, preserved_prompt),
+                    input_func=input_func,
                 ).strip()
+                prompt = entered_prompt or preserved_prompt or ""
             except EOFError:
                 output_func("")
                 break
@@ -1300,6 +1309,7 @@ def run_repl(
                         prompt[1:], model=model, input_func=input_func, output_func=output_func
                     )
                 elif handle_natural_advance(prompt, model=model, output_func=output_func):
+                    preserved_prompt = None
                     continue
                 else:
                     print_active_status_bar()
@@ -1310,7 +1320,13 @@ def run_repl(
                         output_func=output_func,
                         deferred_updates=deferred_updates,
                     )
+                    preserved_prompt = None
             except OpenLearnError as exc:
+                if prompt and not prompt.startswith("/"):
+                    preserved_prompt = prompt
+                    exc = OpenLearnError(
+                        f"{exc} Your answer was kept; press Enter to resubmit it."
+                    )
                 print_active_status_bar()
                 print_error(str(exc), output_func)
     finally:
