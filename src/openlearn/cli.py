@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import fcntl
 import getpass
 import hashlib
 import importlib
@@ -1228,6 +1227,10 @@ class DeferredTurnUpdates:
 def read_repl_message(prompt: str, input_func=input) -> str:
     first_line = input_func(prompt)
     if input_func is not input or not sys.stdin.isatty():
+        return first_line
+    if sys.platform == "win32":
+        # select.select only works on sockets on Windows, so the paste
+        # heuristics degrade to single-line input there.
         return first_line
 
     lines = [first_line]
@@ -6597,6 +6600,40 @@ def write_topic_backup(path: Path, text: str) -> None:
     write_text_atomic(topic_backup_path(path), text)
 
 
+def _select_lock_primitives(platform: str = sys.platform):
+    """Pick the exclusive-lock/unlock pair for this platform.
+
+    Returned as (_flock, _funlock), each taking an open file object. Kept
+    behind one function boundary so a future storage module can lift it.
+    """
+    if platform == "win32":
+        import msvcrt
+
+        def _flock(lock_file) -> None:
+            # msvcrt has no whole-file lock; locking the first byte (which may
+            # be past EOF on the empty lock file) is the standard equivalent.
+            lock_file.seek(0)
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+
+        def _funlock(lock_file) -> None:
+            lock_file.seek(0)
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+
+    else:
+        import fcntl
+
+        def _flock(lock_file) -> None:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+
+        def _funlock(lock_file) -> None:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+    return _flock, _funlock
+
+
+_flock, _funlock = _select_lock_primitives()
+
+
 @contextlib.contextmanager
 def file_lock(path: Path):
     if _DRY_RUN:
@@ -6606,11 +6643,11 @@ def file_lock(path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = path.with_name(f".{path.name}.lock")
     with lock_path.open("w", encoding="utf-8") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        _flock(lock_file)
         try:
             yield
         finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            _funlock(lock_file)
 
 
 def write_text_atomic(path: Path, text: str) -> None:
