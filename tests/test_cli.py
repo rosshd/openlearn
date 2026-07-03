@@ -192,7 +192,7 @@ class CliStorageTests(unittest.TestCase):
 
         self.assertIn("Existing data found", first)
         self.assertIn(str(old_home), first)
-        self.assertIn(str(new_home), first)
+        self.assertIn(str(new_home.resolve()), first)
         self.assertNotIn("Existing data found", second)
 
     def test_cmd_init_already_configured_skips_without_force(self) -> None:
