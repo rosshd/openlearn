@@ -62,6 +62,23 @@ jobs:
           [[ "$cli_output" == *"$package_version"* ]]
           [[ "$package_version" == "$tag_version" ]]
 
+      - name: Verify sdist version
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv .release-sdist-venv
+          .release-sdist-venv/bin/python -m pip install dist/*.tar.gz
+
+          package_version=$(
+            .release-sdist-venv/bin/python -c \
+              "import openlearn; print(openlearn.__version__)"
+          )
+          cli_output=$(.release-sdist-venv/bin/openlearn --version)
+          tag_version="${GITHUB_REF_NAME#v}"
+
+          [[ "$cli_output" == *"$package_version"* ]]
+          [[ "$package_version" == "$tag_version" ]]
+
   publish:
     needs: verify
     runs-on: ubuntu-latest
