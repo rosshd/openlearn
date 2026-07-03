@@ -6610,13 +6610,17 @@ def _select_lock_primitives(platform: str = sys.platform):
         import errno
         import msvcrt
 
+        locking = getattr(msvcrt, "locking")
+        lock_nonblocking = getattr(msvcrt, "LK_NBLCK")
+        unlock = getattr(msvcrt, "LK_UNLCK")
+
         def _flock(lock_file) -> None:
             # msvcrt has no whole-file lock; locking the first byte (which may
             # be past EOF on the empty lock file) is the standard equivalent.
             while True:
                 lock_file.seek(0)
                 try:
-                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+                    locking(lock_file.fileno(), lock_nonblocking, 1)
                     return
                 except OSError as exc:
                     if exc.errno not in (errno.EACCES, errno.EDEADLK) and getattr(
@@ -6627,7 +6631,7 @@ def _select_lock_primitives(platform: str = sys.platform):
 
         def _funlock(lock_file) -> None:
             lock_file.seek(0)
-            msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            locking(lock_file.fileno(), unlock, 1)
 
     else:
         import fcntl
