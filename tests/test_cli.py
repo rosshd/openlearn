@@ -1280,9 +1280,7 @@ class CliStorageTests(unittest.TestCase):
         cli.write_config(config)
 
         self.assertEqual(cli.configured_model(), "saved-model")
-        self.assertEqual(
-            cli.configured_extractor_model("turn-model"), "saved-extractor-model"
-        )
+        self.assertEqual(cli.configured_extractor_model("turn-model"), "saved-extractor-model")
         self.assertEqual(cli.configured_base_url(), "https://example.test/v1")
         self.assertEqual(cli.configured_openai_api_key(), "sk-saved")
 
@@ -1292,9 +1290,7 @@ class CliStorageTests(unittest.TestCase):
         os.environ["OPENAI_API_KEY"] = "sk-env"
 
         self.assertEqual(cli.configured_model(), "env-model")
-        self.assertEqual(
-            cli.configured_extractor_model("turn-model"), "env-extractor-model"
-        )
+        self.assertEqual(cli.configured_extractor_model("turn-model"), "env-extractor-model")
         self.assertEqual(cli.configured_base_url(), "https://env.example/v1")
         self.assertEqual(cli.configured_openai_api_key(), "sk-env")
 

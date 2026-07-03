@@ -4600,9 +4600,7 @@ def metadata_update_prompt(
         "weak_spots",
         "review_due",
     )
-    extractor_context = {
-        key: metadata[key] for key in extractor_context_keys if key in metadata
-    }
+    extractor_context = {key: metadata[key] for key in extractor_context_keys if key in metadata}
     metadata_snapshot = json.dumps(extractor_context, indent=2, sort_keys=True)
     return textwrap.dedent(
         f"""
@@ -5449,9 +5447,7 @@ def configured_model(config: dict[str, object] | None = None) -> str:
     return model if isinstance(model, str) and model else DEFAULT_MODEL
 
 
-def configured_extractor_model(
-    tutor_model: str, config: dict[str, object] | None = None
-) -> str:
+def configured_extractor_model(tutor_model: str, config: dict[str, object] | None = None) -> str:
     env_model = os.environ.get("OPENLEARN_EXTRACTOR_MODEL")
     if env_model:
         return env_model
