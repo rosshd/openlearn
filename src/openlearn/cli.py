@@ -20,6 +20,7 @@ import tempfile
 import textwrap
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -88,6 +89,9 @@ from openlearn.ui import (
 EVENT_SCHEMA_VERSION = 1
 REPL_PASTE_INITIAL_WAIT_SECONDS = 0.05
 REPL_PASTE_CONTINUATION_WAIT_SECONDS = 0.01
+OPENAI_MAX_ATTEMPTS = 3
+OPENAI_RETRY_BASE_DELAY_SECONDS = 0.5
+OPENAI_RETRY_JITTER_SECONDS = 0.25
 
 DYNAMIC_METADATA_KEYS = {
     "concept_attempts",
@@ -7218,7 +7222,21 @@ def _mock_openai_response(model: str, system: str, user: str) -> str:
     return "**Lesson:** Mock reply. Ask a focused question to continue."
 
 
-def call_openai(model: str, system: str, user: str) -> str:
+def is_transient_openai_error(exc: HTTPError | URLError | TimeoutError) -> bool:
+    if isinstance(exc, HTTPError):
+        return exc.code == 429 or 500 <= exc.code <= 599
+    return True
+
+
+def call_openai(
+    model: str,
+    system: str,
+    user: str,
+    *,
+    retry_sleep: Callable[[float], object] = time.sleep,
+    retry_jitter: Callable[[float, float], float] = random.uniform,
+    retry_status: Callable[[str], object] = print,
+) -> str:
     if _DRY_RUN:
         raise DryRunPrompt(model, system, user)
 
@@ -7250,14 +7268,27 @@ def call_openai(model: str, system: str, user: str) -> str:
         },
         method="POST",
     )
-    try:
-        with urlopen(request, timeout=60) as response:
-            data = json.loads(response.read().decode("utf-8"))
-    except HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise OpenLearnError(f"OpenAI request failed: HTTP {exc.code}: {detail}") from exc
-    except URLError as exc:
-        raise OpenLearnError(f"OpenAI request failed: {exc.reason}") from exc
+    for attempt in range(1, OPENAI_MAX_ATTEMPTS + 1):
+        try:
+            with urlopen(request, timeout=60) as response:
+                data = json.loads(response.read().decode("utf-8"))
+            break
+        except (HTTPError, URLError, TimeoutError) as exc:
+            if not is_transient_openai_error(exc) or attempt == OPENAI_MAX_ATTEMPTS:
+                if isinstance(exc, HTTPError):
+                    detail = exc.read().decode("utf-8", errors="replace")
+                    raise OpenLearnError(
+                        f"OpenAI request failed: HTTP {exc.code}: {detail}"
+                    ) from exc
+                reason = exc.reason if isinstance(exc, URLError) else str(exc)
+                raise OpenLearnError(f"OpenAI request failed: {reason}") from exc
+            delay = OPENAI_RETRY_BASE_DELAY_SECONDS * 2 ** (attempt - 1)
+            delay += retry_jitter(0.0, OPENAI_RETRY_JITTER_SECONDS)
+            retry_status(
+                f"Temporary OpenAI failure; retrying in {delay:.1f}s "
+                f"({attempt + 1}/{OPENAI_MAX_ATTEMPTS})..."
+            )
+            retry_sleep(delay)
 
     text = extract_response_text(data)
     text = sanitize_model_output(text)
