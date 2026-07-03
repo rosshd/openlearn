@@ -4592,6 +4592,9 @@ def metadata_update_prompt(
 ) -> str:
     extractor_context_keys = (
         "pending_question",
+        "pending_chapter_quiz",
+        "pending_quiz_chapter",
+        "pending_cumulative_quiz",
         "current_focus",
         "known",
         "weak_spots",

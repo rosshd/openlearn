@@ -4274,24 +4274,34 @@ class PromptInstructionTests(unittest.TestCase):
         prompt = cli.metadata_update_prompt(
             {
                 "pending_question": {"question": "What is normal mode?"},
+                "pending_chapter_quiz": True,
+                "pending_quiz_chapter": "1.1 Modes",
+                "pending_cumulative_quiz": {"kind": "cumulative"},
                 "current_focus": "Vim modes",
                 "known": ["normal mode"],
                 "weak_spots": ["insert mode"],
                 "review_due": [{"concept": "mode switching", "due": cli.today()}],
                 "concept_attempts": {"normal-mode": {"attempts": 12, "correct_sum": 10.0}},
                 "quiz_history": [{"score": "3/4"}],
+                "course_units": [{"unit": 1, "title": "Modes"}],
+                "slide_contents": {"1:1": "Modes intro"},
             },
             "It is where commands run.",
             "Correct.",
         )
 
         self.assertIn('"pending_question"', prompt)
+        self.assertIn('"pending_chapter_quiz"', prompt)
+        self.assertIn('"pending_quiz_chapter"', prompt)
+        self.assertIn('"pending_cumulative_quiz"', prompt)
         self.assertIn('"current_focus"', prompt)
         self.assertIn('"known"', prompt)
         self.assertIn('"weak_spots"', prompt)
         self.assertIn('"review_due"', prompt)
         self.assertNotIn('"concept_attempts"', prompt)
         self.assertNotIn('"quiz_history"', prompt)
+        self.assertNotIn('"course_units"', prompt)
+        self.assertNotIn('"slide_contents"', prompt)
 
     def test_learning_metadata_update_merges_known_and_weak_spots(self) -> None:
         home = tempfile.TemporaryDirectory()
