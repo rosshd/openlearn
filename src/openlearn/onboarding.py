@@ -150,11 +150,7 @@ def prompt_for_model(
     input_func: InputFunc = input,
     output_func: OutputFunc = print,
 ) -> str:
-    prompt = (
-        f"Model [{preset.default_model}]: "
-        if preset.default_model is not None
-        else "Model: "
-    )
+    prompt = f"Model [{preset.default_model}]: " if preset.default_model is not None else "Model: "
     while True:
         model = input_func(prompt).strip()
         if model:
@@ -346,9 +342,7 @@ def run_onboarding(
     if env_base_url:
         base_url = _normalize_base_url(env_base_url)
         preset = preset_for_base_url(base_url)
-        output_func(
-            f"OPENLEARN_BASE_URL is set; using {preset.name} at {base_url}."
-        )
+        output_func(f"OPENLEARN_BASE_URL is set; using {preset.name} at {base_url}.")
         output_func("Provider selection is locked by the environment.")
     else:
         preset = prompt_for_provider(input_func=input_func, output_func=output_func)

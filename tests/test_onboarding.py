@@ -382,8 +382,7 @@ class OnboardingFlowTests(unittest.TestCase):
                 onboarding,
                 "prompt_for_base_url",
                 side_effect=lambda selected, **_kwargs: (
-                    calls.append(("base_url", selected))
-                    or "https://api.openai.com/v1"
+                    calls.append(("base_url", selected)) or "https://api.openai.com/v1"
                 ),
             ),
             patch.object(
@@ -411,16 +410,13 @@ class OnboardingFlowTests(unittest.TestCase):
                 onboarding,
                 "prompt_for_destination",
                 side_effect=lambda **_kwargs: (
-                    calls.append("destination")
-                    or onboarding.OnboardingDestination.QUICK_LEARN
+                    calls.append("destination") or onboarding.OnboardingDestination.QUICK_LEARN
                 ),
             ),
             patch.object(
                 onboarding,
                 "launch_destination",
-                side_effect=lambda destination, **_kwargs: calls.append(
-                    ("launch", destination)
-                ),
+                side_effect=lambda destination, **_kwargs: calls.append(("launch", destination)),
             ),
         ):
             ready = onboarding.run_onboarding(
