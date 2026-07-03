@@ -115,6 +115,40 @@ DYNAMIC_METADATA_KEYS = {
 _LAST_RESPONSE_COVERED_CONCEPTS: list[str] = []
 
 
+def coerce_int(value: object, default: int = 0) -> int:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return default
+        try:
+            return int(value)
+        except ValueError:
+            return default
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+
+
+def coerce_float(value: object, default: float = 0.0) -> float:
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return default
+        try:
+            return float(value)
+        except ValueError:
+            return default
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+
+
 def is_dynamic_metadata_key(key: str) -> bool:
     return (
         key in DYNAMIC_METADATA_KEYS or key.startswith("last_answer_") or key.startswith("pending_")
@@ -1311,9 +1345,10 @@ def run_repl(
             if _slug:
                 _t = read_topic(_slug)
                 _meta = dict(_t.metadata)
-                _meta["session_count"] = int(_meta.get("session_count") or 0) + 1
+                _meta["session_count"] = coerce_int(_meta.get("session_count"), 0) + 1
                 _meta["total_study_minutes"] = round(
-                    float(_meta.get("total_study_minutes") or 0) + _session_minutes, 1
+                    coerce_float(_meta.get("total_study_minutes"), 0.0) + _session_minutes,
+                    1,
                 )
                 write_topic(_t.path, _meta, _t.body)
     except Exception:
@@ -2085,10 +2120,10 @@ def placement_level(results: list[dict[str, object]]) -> str:
     if not results:
         return "beginner"
     correct_count = sum(1 for item in results if item.get("correct") is True)
-    max_difficulty = max(
-        [item.get("difficulty") for item in results if isinstance(item.get("difficulty"), int)]
-        or [1]
-    )
+    difficulties = [
+        difficulty for item in results if isinstance((difficulty := item.get("difficulty")), int)
+    ]
+    max_difficulty = max(difficulties or [1])
     if correct_count >= 4 and max_difficulty >= 6:
         return "advanced"
     if correct_count >= 2 and max_difficulty >= 3:
@@ -2185,9 +2220,7 @@ def course_outline_prompt(
     )
     source_contract = context_summary_prompt(topic.slug) if quick_learn else ""
     source_contract_block = (
-        f"\nAssessment source coverage contract:\n{source_contract}\n"
-        if source_contract
-        else ""
+        f"\nAssessment source coverage contract:\n{source_contract}\n" if source_contract else ""
     )
     quick_guidance = (
         "This is Quick Learn. Cover only material grounded in the imported source summaries. "
@@ -2460,8 +2493,9 @@ def concept_id_for_focus(metadata: dict[str, object], focus: str) -> str:
     current_unit = metadata.get("current_unit")
     candidates: list[dict[str, object]] = []
     unit = course_unit_at(metadata, current_unit) if isinstance(current_unit, int) else None
-    if unit and isinstance(unit.get("concepts"), list):
-        candidates.extend(item for item in unit["concepts"] if isinstance(item, dict))
+    concepts = unit.get("concepts") if unit else None
+    if isinstance(concepts, list):
+        candidates.extend(item for item in concepts if isinstance(item, dict))
     units = metadata.get("course_units")
     if isinstance(units, list):
         for item in units:
@@ -2519,25 +2553,22 @@ def extract_unit_difficulty(text: str) -> int | None:
 
 
 def clamp_unit_difficulty(value: object) -> int:
-    try:
-        return max(1, min(10, int(value)))
-    except (TypeError, ValueError):
-        return 5
+    return max(1, min(10, coerce_int(value, 5)))
 
 
 def topic_progress_line(topic: Topic) -> str:
     metadata = topic.metadata
-    unit = metadata.get("current_unit")
+    current_unit = metadata.get("current_unit")
     slide = metadata.get("current_slide")
-    if not isinstance(unit, int) or unit < 1:
+    if not isinstance(current_unit, int) or current_unit < 1:
         return ""
     if not isinstance(slide, int) or slide < 1:
         slide = 1
 
-    current = course_unit_at(metadata, unit)
+    current = course_unit_at(metadata, current_unit)
     title = str(metadata.get("current_focus") or "").strip()
     slide_count = 1
-    chapter = str(unit)
+    chapter = str(current_unit)
     if current:
         unit_title = current.get("title")
         if isinstance(unit_title, str) and unit_title.strip():
@@ -2557,30 +2588,30 @@ def topic_progress_line(topic: Topic) -> str:
 def structured_progress_line(topic: Topic) -> str:
     metadata = topic.metadata
     units = metadata.get("course_units")
-    unit = metadata.get("current_unit")
+    current_unit = metadata.get("current_unit")
     slide = metadata.get("current_slide")
     if not isinstance(units, list) or not units:
         return ""
-    if not isinstance(unit, int) or unit < 1:
+    if not isinstance(current_unit, int) or current_unit < 1:
         return ""
     if not isinstance(slide, int) or slide < 1:
         slide = 1
 
     total_units = len(units)
     unit_numbers = [
-        item.get("unit")
+        unit_number
         for item in units
-        if isinstance(item, dict) and isinstance(item.get("unit"), int)
+        if isinstance(item, dict) and isinstance((unit_number := item.get("unit")), int)
     ]
     if unit_numbers:
         total_units = max(total_units, max(unit_numbers))
-    current = course_unit_at(metadata, unit)
+    current = course_unit_at(metadata, current_unit)
     slide_count = 1
     if current:
         raw_count = current.get("slide_count")
         if isinstance(raw_count, int) and raw_count > 0:
             slide_count = raw_count
-    return f"Unit {min(unit, total_units)}/{total_units} · Slide {min(slide, slide_count)}/{slide_count}"
+    return f"Unit {min(current_unit, total_units)}/{total_units} · Slide {min(slide, slide_count)}/{slide_count}"
 
 
 def course_unit_at(metadata: dict[str, object], unit_number: int) -> dict[str, object] | None:
@@ -2813,9 +2844,7 @@ def save_current_slide_coverage(
         return
     with file_lock(path):
         raw_metadata, body = parse_topic(path.read_text(encoding="utf-8"))
-        metadata = merge_topic_state(
-            normalize_topic_metadata(raw_metadata, slug), load_state(slug)
-        )
+        metadata = merge_topic_state(normalize_topic_metadata(raw_metadata, slug), load_state(slug))
         unit_number = metadata.get("current_unit")
         slide = metadata.get("current_slide")
         if not isinstance(unit_number, int) or not isinstance(slide, int):
@@ -2862,9 +2891,7 @@ def coverage_from_session_history(topic: Topic) -> dict[str, list[str]]:
             continue
         unit = course_unit_at(topic.metadata, unit_number)
         labels = [
-            label
-            for label in unit_concept_labels(unit)
-            if _answer_covers_concept(response, label)
+            label for label in unit_concept_labels(unit) if _answer_covers_concept(response, label)
         ]
         if labels:
             key = slide_content_key(unit_number, slide)
@@ -2938,9 +2965,7 @@ def current_lesson_prompt(topic: Topic) -> str:
     if target_concepts:
         covered_here = unit_covered_concepts(metadata, unit)
         remaining = unit_remaining_concepts(metadata, unit)
-        lines.append(
-            "Required concepts for this unit: " + "; ".join(target_concepts) + "."
-        )
+        lines.append("Required concepts for this unit: " + "; ".join(target_concepts) + ".")
         if covered_here:
             lines.append("Covered in earlier slides of this unit: " + "; ".join(covered_here))
         if remaining:
@@ -3016,9 +3041,7 @@ def advance_slide(slug: str, output_func=print, force: bool = False) -> bool:
         crossed_unit = False
         if slide < slide_count:
             slide += 1
-        elif metadata.get("coverage_contract") is True and unit_remaining_concepts(
-            metadata, unit
-        ):
+        elif metadata.get("coverage_contract") is True and unit_remaining_concepts(metadata, unit):
             expansions = current.get("coverage_expansions")
             expansions = expansions if isinstance(expansions, int) else 0
             if expansions < 2:
@@ -3057,9 +3080,7 @@ def advance_slide(slug: str, output_func=print, force: bool = False) -> bool:
                 if target is None:
                     raise OpenLearnError("course plan is missing unit metadata")
                 target_expansions = target.get("coverage_expansions")
-                target_expansions = (
-                    target_expansions if isinstance(target_expansions, int) else 0
-                )
+                target_expansions = target_expansions if isinstance(target_expansions, int) else 0
                 if target_expansions < 2:
                     target_count = target.get("slide_count")
                     if not isinstance(target_count, int) or target_count < 1:
@@ -3181,9 +3202,7 @@ def finish_pending_chapter_quiz(slug: str) -> bool:
     path = topic_path(slug)
     with file_lock(path):
         raw_metadata, body = parse_topic(path.read_text(encoding="utf-8"))
-        metadata = merge_topic_state(
-            normalize_topic_metadata(raw_metadata, slug), load_state(slug)
-        )
+        metadata = merge_topic_state(normalize_topic_metadata(raw_metadata, slug), load_state(slug))
         if metadata.get("pending_chapter_quiz") is not True:
             return False
         metadata.pop("pending_chapter_quiz", None)
@@ -3519,10 +3538,7 @@ def cumulative_quiz_due(metadata: dict[str, object]) -> bool:
     if isinstance(metadata.get("pending_cumulative_quiz"), dict):
         return False
     profile_name = normalize_mastery_profile(metadata.get("mastery_profile"))
-    try:
-        answers_since_last = int(metadata.get("quiz_answers_since_last") or 0)
-    except (TypeError, ValueError):
-        answers_since_last = 0
+    answers_since_last = coerce_int(metadata.get("quiz_answers_since_last"), 0)
     if answers_since_last < CUMULATIVE_QUIZ_MIN_ANSWERS[profile_name]:
         return False
     practiced = metadata.get("quiz_practiced_since_last")
@@ -3708,10 +3724,7 @@ def update_rolling_pass_rate(metadata: dict[str, object]) -> None:
 def update_cumulative_quiz_counters(metadata: dict[str, object], concept_id: str) -> None:
     if not concept_id:
         return
-    try:
-        metadata["quiz_answers_since_last"] = int(metadata.get("quiz_answers_since_last") or 0) + 1
-    except (TypeError, ValueError):
-        metadata["quiz_answers_since_last"] = 1
+    metadata["quiz_answers_since_last"] = coerce_int(metadata.get("quiz_answers_since_last"), 0) + 1
     practiced = metadata.get("quiz_practiced_since_last")
     values = (
         [item for item in practiced if isinstance(item, str) and item.strip()]
@@ -3725,14 +3738,8 @@ def update_cumulative_quiz_counters(metadata: dict[str, object], concept_id: str
 
 def difficulty_tier(metadata: dict[str, object]) -> str:
     """Returns 'struggling', 'on_track', or 'mastering'."""
-    try:
-        consecutive_correct = int(metadata.get("consecutive_correct") or 0)
-    except (TypeError, ValueError):
-        consecutive_correct = 0
-    try:
-        consecutive_misses = int(metadata.get("consecutive_misses") or 0)
-    except (TypeError, ValueError):
-        consecutive_misses = 0
+    consecutive_correct = coerce_int(metadata.get("consecutive_correct"), 0)
+    consecutive_misses = coerce_int(metadata.get("consecutive_misses"), 0)
     last_score = metadata.get("last_answer_score")
 
     if isinstance(last_score, (int, float)):
@@ -3821,7 +3828,9 @@ def trigram_jaccard(left: str, right: str) -> float:
 
 
 def normalized_answer_kind(value: object) -> str:
-    return value if value in {"recognition", "production"} else "production"
+    return (
+        value if isinstance(value, str) and value in {"recognition", "production"} else "production"
+    )
 
 
 def answer_eval_is_transfer(value: object) -> bool:
@@ -3854,13 +3863,13 @@ def concept_is_mastered(record: dict[str, object], profile: dict[str, object]) -
         return False
     if not isinstance(correct_sum, (int, float)):
         return False
-    mastery_rate = float(profile.get("mastery_rate") or 0.75)
+    mastery_rate = coerce_float(profile.get("mastery_rate"), 0.75)
     if float(correct_sum) / attempts < mastery_rate:
         return False
     last_score = record.get("last_score")
     if not isinstance(last_score, (int, float)):
         return False
-    if float(last_score) < float(profile.get("mastery_score") or 0.8):
+    if float(last_score) < coerce_float(profile.get("mastery_score"), 0.8):
         return False
     if profile.get("transfer_required") is True and record.get("passed_transfer") is not True:
         return False
@@ -3901,7 +3910,8 @@ def unit_is_complete(
             and record_unit != unit_number
         ):
             continue
-        practiced_ids.append(concept_id)
+        if isinstance(concept_id, str):
+            practiced_ids.append(concept_id)
     if not practiced_ids:
         return False
     mastered = 0
@@ -3910,7 +3920,7 @@ def unit_is_complete(
         if isinstance(record, dict) and concept_is_mastered(record, profile):
             mastered += 1
     fraction = mastered / len(practiced_ids)
-    return fraction >= float(profile.get("unit_mastery_fraction") or 0.8)
+    return fraction >= coerce_float(profile.get("unit_mastery_fraction"), 0.8)
 
 
 def current_unit_difficulty(metadata: dict[str, object]) -> int:
@@ -3962,7 +3972,7 @@ def apply_pending_question_answer_key(metadata: dict[str, object], learner_promp
 
 def due_review_matches_answer(
     metadata: dict[str, object],
-    due_items: list[dict[str, str]],
+    due_items: list[dict[str, object]],
     concept_id: str,
     focus: object,
 ) -> bool:
@@ -4237,7 +4247,7 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def cmd_stats(args: argparse.Namespace, output_func=print) -> int:
-    import plotext as plt
+    import plotext as plt  # type: ignore[reportMissingImports]
 
     topic_arg = getattr(args, "topic", None)
     if topic_arg:
@@ -4262,9 +4272,10 @@ def cmd_stats(args: argparse.Namespace, output_func=print) -> int:
             output_func(str(exc))
             return 1
         meta = topic.metadata
-        session_count = int(meta.get("session_count") or 0)
-        total_mins = float(meta.get("total_study_minutes") or 0)
-        attempts: dict = meta.get("concept_attempts") or {}
+        session_count = coerce_int(meta.get("session_count"), 0)
+        total_mins = coerce_float(meta.get("total_study_minutes"), 0.0)
+        attempts_value = meta.get("concept_attempts")
+        attempts = attempts_value if isinstance(attempts_value, dict) else {}
 
         output_func(f"Topic: {slug}")
         output_func(f"Sessions: {session_count}  |  Study time: {total_mins:.0f} min")
@@ -4273,14 +4284,18 @@ def cmd_stats(args: argparse.Namespace, output_func=print) -> int:
         if isinstance(attempts, dict) and attempts:
             items = sorted(
                 attempts.items(),
-                key=lambda kv: int(kv[1].get("attempts") or 0),
+                key=lambda kv: (
+                    coerce_int(kv[1].get("attempts"), 0) if isinstance(kv[1], dict) else 0
+                ),
                 reverse=True,
             )[:10]
             concepts = [k for k, _ in items]
             accuracies = []
             for _, rec in items:
-                a = max(int(rec.get("attempts") or 1), 1)
-                s = float(rec.get("correct_sum") or 0)
+                if not isinstance(rec, dict):
+                    continue
+                a = max(coerce_int(rec.get("attempts"), 1), 1)
+                s = coerce_float(rec.get("correct_sum"), 0.0)
                 accuracies.append(round(s / a * 100))
 
             plt.clf()
@@ -4294,8 +4309,8 @@ def cmd_stats(args: argparse.Namespace, output_func=print) -> int:
         for t in list_topics():
             try:
                 m = read_topic(t.slug).metadata
-                sc = int(m.get("session_count") or 0)
-                tm = float(m.get("total_study_minutes") or 0)
+                sc = coerce_int(m.get("session_count"), 0)
+                tm = coerce_float(m.get("total_study_minutes"), 0.0)
                 if sc:
                     output_func(f"  {t.slug:<24} {sc} session(s), {tm:.0f} min")
             except Exception:
@@ -4783,9 +4798,7 @@ def ask_topic(
         model=model, system=system_prompt(topic), user=prompt, output_func=output_func
     )
     answer = print_and_append_model_answer(topic, "chat", prompt, answer, output_func=output_func)
-    update_learning_metadata(
-        topic, prompt, answer, model, is_review_session=is_review_session
-    )
+    update_learning_metadata(topic, prompt, answer, model, is_review_session=is_review_session)
     maybe_suggest_videos(topic.slug, output_func)
     return answer
 
@@ -4961,7 +4974,10 @@ def render_drill_file(drill: dict[str, object]) -> str:
         "",
         "if False:",
     ]
-    for index, case in enumerate(cases, start=1):
+    case_items = cases if isinstance(cases, list) else []
+    for index, case in enumerate(case_items, start=1):
+        if not isinstance(case, dict):
+            continue
         call = drill_call_expression(function_name, case["input"])
         expected = repr(case["expected"])
         lines.extend(
@@ -5079,7 +5095,7 @@ def cmd_review(args: argparse.Namespace, input_func=None, output_func=print) -> 
 
 def maybe_prompt_review_result(
     slug: str,
-    due_items: list[dict[str, str]],
+    due_items: list[dict[str, object]],
     input_func=None,
     output_func=print,
 ) -> None:
@@ -5093,7 +5109,7 @@ def maybe_prompt_review_result(
     output_func(f"Scheduled {len(due_items)} review item(s) as {result}.")
 
 
-def schedule_review_results(slug: str, due_items: list[dict[str, str]], difficulty: str) -> None:
+def schedule_review_results(slug: str, due_items: list[dict[str, object]], difficulty: str) -> None:
     path = topic_path(slug)
     with file_lock(path):
         metadata, body = parse_topic(path.read_text(encoding="utf-8"))
@@ -5369,7 +5385,8 @@ def update_learning_metadata(
         )
         metadata = dict(metadata)
         previous_metadata = dict(metadata)
-        known_before_update = list(metadata.get("known") or [])
+        known_value = metadata.get("known")
+        known_before_update = list(known_value) if isinstance(known_value, list) else []
         merge_metadata_list(metadata, "weak_spots", update.get("weak_spots_add"))
         normalize_review_due_metadata(metadata)
         due_review_items_at_answer = due_review_items(metadata)
@@ -5392,7 +5409,7 @@ def update_learning_metadata(
         score = update.get("answer_score")
         fresh_score = isinstance(score, (int, float)) and 0.0 <= float(score) <= 1.0
         if fresh_score:
-            metadata["last_answer_score"] = round(float(score), 3)
+            metadata["last_answer_score"] = round(coerce_float(score), 3)
         focus = metadata.get("current_focus")
         score_val = metadata.get("last_answer_score")
         answer_kind = normalized_answer_kind(update.get("answer_kind")) if fresh_score else ""
@@ -5691,7 +5708,7 @@ def normalize_review_due_metadata(metadata: dict[str, object]) -> None:
         metadata["review_due"] = []
         return
 
-    normalized: list[dict[str, str]] = []
+    normalized: list[dict[str, object]] = []
     seen: set[str] = set()
     for item in items:
         if isinstance(item, str):
@@ -5723,7 +5740,11 @@ def normalize_review_due_metadata(metadata: dict[str, object]) -> None:
         key = concept_key(concept)
         if not concept or key in seen:
             continue
-        normalized_item = {"concept": concept, "due": due, "difficulty": difficulty}
+        normalized_item: dict[str, object] = {
+            "concept": concept,
+            "due": due,
+            "difficulty": difficulty,
+        }
         if isinstance(item, dict) and ebisu_model is not None:
             normalized_item["ebisu_model"] = ebisu_model
         if last_reviewed is not None:
@@ -5844,7 +5865,7 @@ def schedule_review_item(
                 item["last_reviewed"] = today()
             metadata["review_due"] = items
             return
-    new_item = {"concept": concept, "due": due, "difficulty": difficulty}
+    new_item: dict[str, object] = {"concept": concept, "due": due, "difficulty": difficulty}
     if model_state is not None:
         new_item["ebisu_model"] = model_state
     if update_ebisu:
@@ -5987,12 +6008,13 @@ def valid_due_date(value: str) -> bool:
 
 def due_review_items(
     metadata: dict[str, object], today_value: str | None = None
-) -> list[dict[str, str]]:
+) -> list[dict[str, object]]:
     today_value = today_value or today()
     data = dict(metadata)
     normalize_review_due_metadata(data)
-    due_items = []
-    for item in data.get("review_due", []):
+    due_items: list[dict[str, object]] = []
+    review_due = data.get("review_due")
+    for item in review_due if isinstance(review_due, list) else []:
         if not isinstance(item, dict):
             continue
         concept = item.get("concept")
@@ -6258,7 +6280,7 @@ def _extract_docx_text(path: Path) -> str:
     except ImportError as exc:
         raise OpenLearnError("DOCX import requires python-docx") from exc
     try:
-        document = Document(path)
+        document = Document(str(path))
         text = "\n".join(paragraph.text for paragraph in document.paragraphs)
     except Exception as exc:
         raise OpenLearnError(f"could not extract DOCX text from {path.name}: {exc}") from exc
@@ -6726,8 +6748,8 @@ def set_active_topic(slug: str) -> None:
             except Exception:
                 pass
         last_date = existing.get("last_study_date")
-        streak = int(existing.get("study_streak") or 0)
-        longest = int(existing.get("longest_streak") or 0)
+        streak = coerce_int(existing.get("study_streak"), 0)
+        longest = coerce_int(existing.get("longest_streak"), 0)
         if last_date == today:
             pass
         elif last_date == yesterday:
@@ -7145,10 +7167,12 @@ def migrate_topic_state_if_needed(
                 existing_state.get("unit_state"), dict
             ):
                 merged_units: dict[str, object] = {}
-                if isinstance(existing_state.get("unit_state"), dict):
-                    merged_units.update(existing_state["unit_state"])
-                if isinstance(dynamic_state.get("unit_state"), dict):
-                    merged_units.update(dynamic_state["unit_state"])
+                existing_unit_state = existing_state.get("unit_state")
+                if isinstance(existing_unit_state, dict):
+                    merged_units.update(existing_unit_state)
+                dynamic_unit_state = dynamic_state.get("unit_state")
+                if isinstance(dynamic_unit_state, dict):
+                    merged_units.update(dynamic_unit_state)
                 merged_state["unit_state"] = merged_units
         else:
             merged_state = merge_migrated_state(dynamic_state, existing_state)
@@ -7264,6 +7288,8 @@ def repair_topic_metadata(slug: str) -> bool:
             if reparsed:
                 for unit in reparsed:
                     unit_number = unit.get("unit")
+                    if not isinstance(unit_number, int):
+                        continue
                     existing = existing_by_number.get(unit_number)
                     concepts = unit_concept_labels(unit)
                     minimum_slides = max(1, (len(concepts) + 1) // 2)
@@ -7866,7 +7892,10 @@ def print_resume_context(topic: Topic, context: str, output_func=print) -> None:
 
     progress = structured_progress_line(topic)
     if progress:
-        unit_data = course_unit_at(metadata, metadata.get("current_unit"))
+        current_unit = metadata.get("current_unit")
+        unit_data = (
+            course_unit_at(metadata, current_unit) if isinstance(current_unit, int) else None
+        )
         unit_title = unit_data.get("title", "") if isinstance(unit_data, dict) else ""
         line = f"Position: {progress}"
         if unit_title:
@@ -8189,10 +8218,12 @@ def extract_response_text(data: dict[str, object]) -> str:
         return direct
 
     chunks: list[str] = []
-    for item in data.get("output", []) if isinstance(data.get("output"), list) else []:
+    output = data.get("output")
+    for item in output if isinstance(output, list) else []:
         if not isinstance(item, dict):
             continue
-        for content in item.get("content", []) if isinstance(item.get("content"), list) else []:
+        content_items = item.get("content")
+        for content in content_items if isinstance(content_items, list) else []:
             if isinstance(content, dict) and content.get("type") in {
                 "output_text",
                 "text",

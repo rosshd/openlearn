@@ -1535,13 +1535,10 @@ class ProviderResponseTests(unittest.TestCase):
 
     def test_coverage_marker_is_extracted_and_hidden(self) -> None:
         raw = (
-            "Lesson: Mutexes protect critical sections.\n"
-            "<!-- covered: Mutex; Critical section -->"
+            "Lesson: Mutexes protect critical sections.\n<!-- covered: Mutex; Critical section -->"
         )
 
-        self.assertEqual(
-            cli.extract_covered_concepts(raw), ["Mutex", "Critical section"]
-        )
+        self.assertEqual(cli.extract_covered_concepts(raw), ["Mutex", "Critical section"])
         self.assertNotIn("covered", cli.sanitize_model_output(raw).lower())
 
     def test_sanitize_model_output_hides_plain_correct_answer_line(self) -> None:
@@ -1568,9 +1565,7 @@ class ProviderResponseTests(unittest.TestCase):
         )
 
     def test_stream_preview_hides_incomplete_answer_metadata(self) -> None:
-        text = cli.sanitize_stream_preview(
-            "Check: Choose one.\nA) One\nB) Two\n<!-- answer: "
-        )
+        text = cli.sanitize_stream_preview("Check: Choose one.\nA) One\nB) Two\n<!-- answer: ")
 
         self.assertEqual(text, "Check: Choose one.\nA) One\nB) Two")
 
@@ -1732,9 +1727,7 @@ class ProviderResponseTests(unittest.TestCase):
         cli.TutorResponseStream = FakeTutorStream
         cli.thinking_progress = lambda _output_func=print: contextlib.nullcontext()
         try:
-            answer = cli.call_openai_streaming(
-                "test-model", "system", "user", output_func=print
-            )
+            answer = cli.call_openai_streaming("test-model", "system", "user", output_func=print)
         finally:
             cli.urlopen = original_urlopen
             cli.TutorResponseStream = original_stream
@@ -3342,9 +3335,7 @@ class InteractiveTests(unittest.TestCase):
     def test_model_answer_saves_multiple_choice_without_hidden_key(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
         topic = cli.read_topic("vim")
-        answer = cli.sanitize_model_output(
-            "Check: Which key moves down? A) h B) k C) j D) l"
-        )
+        answer = cli.sanitize_model_output("Check: Which key moves down? A) h B) k C) j D) l")
 
         cli.print_and_append_model_answer(topic, "chat", "try again", answer)
 
@@ -4664,9 +4655,7 @@ class PromptInstructionTests(unittest.TestCase):
         changed = cli.repair_topic_metadata("os")
 
         repaired = cli.read_topic("os")
-        labels = [
-            concept["label"] for concept in repaired.metadata["course_units"][0]["concepts"]
-        ]
+        labels = [concept["label"] for concept in repaired.metadata["course_units"][0]["concepts"]]
         self.assertTrue(changed)
         self.assertEqual(
             labels,
