@@ -7773,5 +7773,194 @@ class PlatformGuardTests(unittest.TestCase):
         fake_stdin.readline.assert_not_called()
 
 
+class KeylessProviderTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.home = tempfile.TemporaryDirectory()
+        self.previous_env = {
+            name: os.environ.get(name)
+            for name in (
+                "OPENLEARN_HOME",
+                "OPENLEARN_MODEL",
+                "OPENLEARN_BASE_URL",
+                "OPENLEARN_MOCK",
+                "OPENAI_API_KEY",
+            )
+        }
+        os.environ["OPENLEARN_HOME"] = self.home.name
+        for name in ("OPENLEARN_MODEL", "OPENLEARN_BASE_URL", "OPENLEARN_MOCK", "OPENAI_API_KEY"):
+            os.environ.pop(name, None)
+        cli._CONFIG_CACHE = None
+
+    def tearDown(self) -> None:
+        for name, value in self.previous_env.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+        cli._CONFIG_CACHE = None
+        self.home.cleanup()
+
+    def write_keyless_local_config(self) -> None:
+        cli.config_path().parent.mkdir(parents=True, exist_ok=True)
+        cli.config_path().write_text(
+            json.dumps({"base_url": "http://localhost:11434/v1", "model": "ollama/llama3.2"}),
+            encoding="utf-8",
+        )
+        cli._CONFIG_CACHE = None
+
+    def test_call_openai_keyless_local_sends_request_without_authorization(self) -> None:
+        self.write_keyless_local_config()
+        requests = []
+        original_urlopen = cli.urlopen
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def read(self):
+                return json.dumps({"choices": [{"message": {"content": "local answer"}}]}).encode()
+
+        def fake_urlopen(request, timeout=0):
+            requests.append(request)
+            return FakeResponse()
+
+        cli.urlopen = fake_urlopen
+        try:
+            answer = cli.call_openai("ollama/llama3.2", "system", "user")
+        finally:
+            cli.urlopen = original_urlopen
+
+        self.assertEqual(answer, "local answer")
+        self.assertTrue(requests[0].full_url.startswith("http://localhost:11434/v1"))
+        self.assertFalse(requests[0].has_header("Authorization"))
+
+    def test_call_openai_streaming_keyless_local_sends_request_without_authorization(self) -> None:
+        self.write_keyless_local_config()
+        requests = []
+        original_urlopen = cli.urlopen
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def __iter__(self):
+                event = {"choices": [{"delta": {"content": "local stream"}}]}
+                yield f"data: {json.dumps(event)}\n".encode()
+                yield b"data: [DONE]\n"
+
+        def fake_urlopen(request, timeout=0):
+            requests.append(request)
+            return FakeResponse()
+
+        cli.urlopen = fake_urlopen
+        try:
+            output = []
+            answer = cli.call_openai_streaming(
+                "ollama/llama3.2", "system", "user", output_func=output.append
+            )
+        finally:
+            cli.urlopen = original_urlopen
+
+        self.assertEqual(answer, "local stream")
+        self.assertFalse(requests[0].has_header("Authorization"))
+
+    def test_call_openai_hosted_without_key_still_raises(self) -> None:
+        for base_url in (
+            "https://api.openai.com/v1",
+            "https://openrouter.ai/api/v1",
+            "https://api.anthropic.com/v1",
+        ):
+            cli.config_path().parent.mkdir(parents=True, exist_ok=True)
+            cli.config_path().write_text(
+                json.dumps({"base_url": base_url, "model": "test-model"}),
+                encoding="utf-8",
+            )
+            cli._CONFIG_CACHE = None
+            with self.assertRaises(cli.OpenLearnError) as ctx:
+                cli.call_openai("test-model", "system", "user")
+            self.assertIn("API key is required", str(ctx.exception))
+
+    def test_call_openai_default_base_url_without_key_still_raises(self) -> None:
+        with self.assertRaises(cli.OpenLearnError) as ctx:
+            cli.call_openai("test-model", "system", "user")
+        self.assertIn("API key is required", str(ctx.exception))
+
+    def test_call_openai_keyless_401_reports_key_required(self) -> None:
+        from urllib.error import HTTPError
+
+        self.write_keyless_local_config()
+        original_urlopen = cli.urlopen
+
+        def fake_urlopen(request, timeout=0):
+            raise HTTPError(request.full_url, 401, "Unauthorized", hdrs=None, fp=io.BytesIO(b""))
+
+        cli.urlopen = fake_urlopen
+        try:
+            with self.assertRaises(cli.OpenLearnError) as ctx:
+                cli.call_openai("ollama/llama3.2", "system", "user")
+        finally:
+            cli.urlopen = original_urlopen
+
+        self.assertIn("requires an API key", str(ctx.exception))
+
+    def test_infer_mastery_profile_keyless_local_attempts_model_call(self) -> None:
+        self.write_keyless_local_config()
+        calls = []
+        original_call_openai = cli.call_openai
+
+        def stub_call_openai(model, system, user):
+            calls.append((model, system, user))
+            return '{"mastery_profile": "deep"}'
+
+        cli.call_openai = stub_call_openai
+        try:
+            profile = cli.infer_mastery_profile_from_goal("understand compilers deeply")
+        finally:
+            cli.call_openai = original_call_openai
+
+        self.assertEqual(profile, "deep")
+        self.assertEqual(len(calls), 1)
+
+    def test_infer_mastery_profile_unconfigured_skips_model_call(self) -> None:
+        original_call_openai = cli.call_openai
+
+        def stub_call_openai(model, system, user):
+            self.fail("should not call the model without a configured provider")
+
+        cli.call_openai = stub_call_openai
+        try:
+            profile = cli.infer_mastery_profile_from_goal("cram for the exam")
+        finally:
+            cli.call_openai = original_call_openai
+
+        self.assertEqual(profile, "efficient")
+
+    def test_cmd_init_keyless_local_reports_already_configured(self) -> None:
+        self.write_keyless_local_config()
+        output = []
+
+        result = cli.cmd_init(
+            Namespace(force=False),
+            output_func=output.append,
+            input_func=lambda _prompt="": self.fail("should not prompt"),
+        )
+
+        self.assertEqual(result, 0)
+        self.assertTrue(any("Already configured" in line for line in output))
+
+    def test_config_show_keyless_local_notes_key_not_required(self) -> None:
+        self.write_keyless_local_config()
+
+        output = capture_stdout(cli.cmd_config_show, Namespace())
+
+        self.assertIn("not required", output)
+
+
 if __name__ == "__main__":
     unittest.main()
