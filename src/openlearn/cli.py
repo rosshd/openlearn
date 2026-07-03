@@ -3965,9 +3965,9 @@ def cmd_summary(args: argparse.Namespace) -> int:
 
 
 def cmd_repair(args: argparse.Namespace) -> int:
-    topic = read_topic(resolve_topic_slug(args.topic))
-    changed = repair_topic_metadata(topic.slug)
-    print(f"Metadata {'repaired' if changed else 'already complete'}: {topic.slug}")
+    slug = resolve_topic_slug(args.topic)
+    changed = repair_topic_metadata(slug)
+    print(f"Metadata {'repaired' if changed else 'already complete'}: {slug}")
     return 0
 
 
@@ -6589,14 +6589,95 @@ def repair_topic_metadata(slug: str) -> bool:
     path = topic_path(slug)
     with file_lock(path):
         current_text = path.read_text(encoding="utf-8")
-        metadata, body = parse_topic(current_text)
+        try:
+            metadata, body = parse_topic(current_text)
+            repaired_frontmatter = False
+        except OpenLearnError:
+            metadata, body = repair_topic_frontmatter(current_text)
+            repaired_frontmatter = True
         normalized = normalize_topic_metadata(metadata, slug)
-        if normalized == metadata:
+        if normalized == metadata and not repaired_frontmatter:
             return False
         write_topic_backup(path, current_text)
         save_state(slug, state_from_metadata(normalized))
         write_text_atomic(path, format_topic(stable_metadata_for_topic(normalized), body))
         return True
+
+
+def repair_topic_frontmatter(text: str) -> tuple[dict[str, object], str]:
+    if not text.startswith("---\n"):
+        raise OpenLearnError("invalid topic metadata: missing opening delimiter")
+    remainder = text[len("---\n") :]
+    if "---\n" in remainder:
+        raw_metadata, body = remainder.split("---\n", 1)
+        body = body.lstrip()
+    else:
+        raw_metadata = remainder
+        body = ""
+    repaired_json = repair_json_object(raw_metadata)
+    try:
+        metadata = json.loads(repaired_json)
+    except json.JSONDecodeError as exc:
+        raise OpenLearnError(f"invalid topic metadata: unrepairable JSON: {exc}") from exc
+    if not isinstance(metadata, dict):
+        raise OpenLearnError("invalid topic metadata: expected object")
+    return metadata, body
+
+
+def repair_json_object(raw: str) -> str:
+    stack: list[str] = []
+    in_string = False
+    escaped = False
+    for char in raw:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char in "{[":
+            stack.append(char)
+        elif char in "}]":
+            expected = "{" if char == "}" else "["
+            if not stack or stack.pop() != expected:
+                raise OpenLearnError("invalid topic metadata: unrepairable JSON structure")
+    if in_string or escaped:
+        raise OpenLearnError("invalid topic metadata: unrepairable truncated string")
+    closers = "".join("}" if char == "{" else "]" for char in reversed(stack))
+    candidate = raw.rstrip() + closers
+    return remove_json_trailing_commas(candidate)
+
+
+def remove_json_trailing_commas(raw: str) -> str:
+    output: list[str] = []
+    in_string = False
+    escaped = False
+    for index, char in enumerate(raw):
+        if in_string:
+            output.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+            output.append(char)
+            continue
+        if char == ",":
+            next_index = index + 1
+            while next_index < len(raw) and raw[next_index].isspace():
+                next_index += 1
+            if next_index < len(raw) and raw[next_index] in "}]":
+                continue
+        output.append(char)
+    return "".join(output)
 
 
 def format_topic(metadata: dict[str, object], body: str) -> str:

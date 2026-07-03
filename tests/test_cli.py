@@ -4638,6 +4638,26 @@ class PromptInstructionTests(unittest.TestCase):
         self.assertTrue(changed)
         self.assertEqual(cli.topic_backup_path(path).read_text(encoding="utf-8"), broken_text)
 
+    def test_repair_topic_metadata_recovers_corrupt_json_frontmatter(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
+        path = cli.topic_path("vim")
+        original_text = path.read_text(encoding="utf-8")
+        metadata, original_body = cli.parse_topic(original_text)
+        corrupt_text = original_text.replace("\n}\n---\n", ",\n---\n", 1)
+        path.write_text(corrupt_text, encoding="utf-8")
+
+        output = capture_stdout(cli.cmd_repair, Namespace(topic="vim"))
+
+        repaired_metadata, repaired_body = cli.parse_topic(path.read_text(encoding="utf-8"))
+        self.assertIn("Metadata repaired: vim", output)
+        self.assertEqual(repaired_metadata["topic"], metadata["topic"])
+        self.assertEqual(repaired_metadata["goal"], metadata["goal"])
+        self.assertEqual(repaired_body, original_body)
+        self.assertEqual(
+            cli.topic_backup_path(path).read_text(encoding="utf-8"),
+            corrupt_text,
+        )
+
     def test_learning_metadata_reschedules_review_by_difficulty(self) -> None:
         home = tempfile.TemporaryDirectory()
         previous_home = os.environ.get("OPENLEARN_HOME")
