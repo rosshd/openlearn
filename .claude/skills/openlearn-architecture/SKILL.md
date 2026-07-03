@@ -28,7 +28,9 @@ description: >
 
 - Configuration precedence is environment variables, then `config.json`, then built-in defaults.
 - Provider calls target OpenAI-compatible chat completions at `{base_url}/chat/completions`.
-- Keep model-backed commands bounded to the selected topic, relevant metadata, bounded notes, recent session context, and the current prompt.
+- Learner-metadata extraction can use `OPENLEARN_EXTRACTOR_MODEL` or `extractor_model`; otherwise it uses the tutor model.
+- Keep model-backed tutor commands bounded to the selected topic, relevant metadata, bounded notes, recent session context, and the current prompt.
+- Keep learner-metadata extraction bounded to the small state snapshot needed to judge the latest exchange.
 - Do not send all topics or a global learner database.
 
 ## Imports
@@ -40,6 +42,7 @@ description: >
 ## Interactive UI
 
 - The REPL coalesces quick multiline paste into a single learner message.
+- After a tutor response, learner-state extraction is deferred so the next prompt appears immediately.
 - Natural `continue`, `move on`, and `skip` wording advances the slide instead of going through answer grading.
 
 ## Tests

@@ -18,13 +18,14 @@
 - Saved config lives in `config.json`; both `config.json` and `state.json` are local-only data.
 - Model-backed commands send only the selected topic’s metadata, a bounded notes excerpt, recent session history, and the current prompt.
 - `chat`, `resume`, `next`, and `review` support `--dry-run` to print rendered prompts without provider calls or local file mutation.
+- Learner-metadata extraction sends a smaller state snapshot.
 - The REPL is thin: slash commands dispatch to the same handlers used by the non-interactive CLI.
 
 ## Conventions
 
 - Keep the project local-first: do not commit topic Markdown files, context files, `config.json`, `state.json`, API keys, or `.env` files.
 - Preserve the Markdown + JSON topic format; use `repair`/metadata normalization patterns when filling missing fields.
-- Environment precedence is `OPENAI_API_KEY`, `OPENLEARN_MODEL`, and `OPENLEARN_BASE_URL` first, then `config.json`, then defaults.
+- Environment precedence is `OPENAI_API_KEY`, `OPENLEARN_MODEL`, `OPENLEARN_EXTRACTOR_MODEL`, and `OPENLEARN_BASE_URL` first, then `config.json`, then defaults.
 - Topic commands should leave the active-topic state consistent with the file they operate on.
 - Context imports are `.txt` files only; imported context and summaries live under each topic’s `learning-topics/<slug>/context/` directory.
 - Tests isolate data by setting `OPENLEARN_HOME` to a temporary directory; follow that pattern for new tests.
