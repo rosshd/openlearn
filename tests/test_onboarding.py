@@ -563,11 +563,37 @@ class OnboardingTriggerTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         run_onboarding.assert_not_called()
 
-    def test_keyless_local_environment_skips_onboarding(self) -> None:
+    def test_keyless_local_environment_without_model_runs_onboarding(self) -> None:
+        calls: list[str] = []
+
         with (
             patch.dict(
                 "os.environ", {"OPENLEARN_BASE_URL": "http://localhost:11434/v1"}, clear=True
             ),
+            patch.object(cli, "read_config", return_value={}),
+            patch.object(
+                onboarding,
+                "run_onboarding",
+                side_effect=lambda: calls.append("onboarding") or True,
+            ),
+            patch.object(cli, "run_menu", side_effect=lambda: calls.append("menu") or 0),
+        ):
+            exit_code = cli.main([])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(calls, ["onboarding", "menu"])
+
+    def test_keyless_local_environment_with_model_skips_onboarding(self) -> None:
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "OPENLEARN_BASE_URL": "http://localhost:11434/v1",
+                    "OPENLEARN_MODEL": "llama3.1",
+                },
+                clear=True,
+            ),
+            patch.object(cli, "read_config", return_value={}),
             patch.object(onboarding, "run_onboarding") as run_onboarding,
             patch.object(cli, "run_menu", return_value=0),
         ):
@@ -576,11 +602,32 @@ class OnboardingTriggerTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         run_onboarding.assert_not_called()
 
-    def test_keyless_local_config_skips_onboarding(self) -> None:
+    def test_keyless_local_config_without_model_runs_onboarding(self) -> None:
+        calls: list[str] = []
+
         with (
             patch.dict("os.environ", {}, clear=True),
-            patch.object(cli, "configured_openai_api_key", return_value=None),
+            patch.object(cli, "read_config", return_value={}),
             patch.object(cli, "configured_base_url", return_value="http://localhost:11434/v1"),
+            patch.object(cli, "_has_configured_model", return_value=False),
+            patch.object(
+                onboarding,
+                "run_onboarding",
+                side_effect=lambda: calls.append("onboarding") or True,
+            ),
+            patch.object(cli, "run_menu", side_effect=lambda: calls.append("menu") or 0),
+        ):
+            exit_code = cli.main([])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(calls, ["onboarding", "menu"])
+
+    def test_keyless_local_config_with_model_skips_onboarding(self) -> None:
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            patch.object(cli, "read_config", return_value={}),
+            patch.object(cli, "configured_base_url", return_value="http://localhost:11434/v1"),
+            patch.object(cli, "_has_configured_model", return_value=True),
             patch.object(onboarding, "run_onboarding") as run_onboarding,
             patch.object(cli, "run_menu", return_value=0),
         ):

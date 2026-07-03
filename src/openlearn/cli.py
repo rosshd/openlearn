@@ -6281,6 +6281,15 @@ def configured_extractor_model(tutor_model: str, config: dict[str, object] | Non
     return model if isinstance(model, str) and model else tutor_model
 
 
+def _has_configured_model(config: dict[str, object] | None = None) -> bool:
+    env_model = os.environ.get("OPENLEARN_MODEL")
+    if env_model:
+        return True
+    config = read_config() if config is None else config
+    model = config.get("model")
+    return isinstance(model, str) and bool(model)
+
+
 def configured_base_url(config: dict[str, object] | None = None) -> str:
     env_base_url = os.environ.get("OPENLEARN_BASE_URL")
     if env_base_url:
@@ -6303,6 +6312,11 @@ def base_url_requires_api_key(base_url: str) -> bool:
     return base_url.rstrip("/") in HOSTED_BASE_URLS
 
 
+def _base_url_allows_keyless_requests(base_url: str) -> bool:
+    parsed = urlparse(base_url)
+    return parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+
+
 def provider_is_configured(config: dict[str, object] | None = None) -> bool:
     """Whether a model call can be attempted: a key is set, or the base URL is
     a local/custom endpoint (for example Ollama) that may be keyless."""
@@ -6312,7 +6326,16 @@ def provider_is_configured(config: dict[str, object] | None = None) -> bool:
 
 
 def _configured_provider_needs_onboarding() -> bool:
-    return not provider_is_configured()
+    if os.environ.get("OPENAI_API_KEY"):
+        return False
+    config = read_config()
+    key = config.get("openai_api_key") or config.get("api_key")
+    if isinstance(key, str) and key:
+        return False
+    base_url = configured_base_url(config)
+    if not _base_url_allows_keyless_requests(base_url):
+        return True
+    return not _has_configured_model(config)
 
 
 def _openlearn_mock_enabled() -> bool:
