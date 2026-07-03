@@ -31,6 +31,8 @@ source .venv/bin/activate
 pip install -e .
 ```
 
+On Windows, activate the virtual environment with `.venv\Scripts\Activate.ps1` before installing.
+
 Run the app:
 
 ```bash
@@ -46,6 +48,7 @@ make check
 ### Platform support
 
 openLearn supports Linux, macOS, and Windows on Python 3.11 and newer.
+Topic file locking works on all supported platforms.
 Multiline paste detection requires a POSIX terminal; on Windows, the REPL accepts pasted input one line at a time.
 
 ## Configuration
@@ -85,7 +88,8 @@ openlearn resume
 `resume` uses the active topic.
 If no active topic exists, it falls back to the most recently changed topic.
 Learning actions from the menu continue into the REPL automatically.
-Interactive sessions support multiline paste as one learner message.
+Interactive sessions support multiline paste as one learner message on POSIX terminals.
+On Windows, paste multiple lines one at a time.
 Plain requests such as "continue", "move on", or "skip" advance the current slide; if the wording includes a preference such as "I don't need this", openLearn stores it as a learner preference.
 
 Inside the REPL:

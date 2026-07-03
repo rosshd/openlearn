@@ -34,6 +34,7 @@ JSON avoids a YAML dependency and keeps the file editable.
 The slug is the stable file identifier at `learning-topics/<slug>.md`.
 Runtime state can also live in `<slug>.state.json`, `<slug>.events.jsonl`, `state.json`, imported context directories, and drill directories.
 Event logs are append-only.
+Writes use per-topic lock files with `fcntl.flock` on POSIX and `msvcrt.locking` on Windows.
 
 Important dynamic metadata includes pending questions, answer status, concept attempts, rolling pass rate, quiz state, active drill path, imported checksums, and learner preferences.
 Pending questions may be multiple choice with an answer key, multiple choice without a stored key, or free response.
@@ -56,7 +57,8 @@ Extractor calls send a reduced metadata snapshot limited to pending checks, focu
 
 ## Interactive UI
 
-The REPL is line-oriented but coalesces quick multiline paste into one learner message.
+The REPL is line-oriented but coalesces quick multiline paste into one learner message on POSIX terminals.
+Windows does not support `select.select` on stdin, so the same input path falls back to one line per learner message.
 After a tutor response, learner-metadata extraction is deferred so the next prompt appears immediately.
 Natural navigation phrases such as `continue`, `move on`, and `skip` advance the current slide instead of being graded as answers.
 
@@ -64,3 +66,5 @@ Natural navigation phrases such as `continue`, `move on`, and `skip` advance the
 
 `make check` is the gate.
 Tests use temporary `OPENLEARN_HOME` directories and mock mode where needed so they do not touch real user data.
+GitHub Actions also runs `python -m unittest` on Ubuntu, Windows, and macOS for Python 3.11 and 3.13.
+Workflow tests that require `pexpect` and a POSIX pty are skipped on Windows with explicit reasons.
