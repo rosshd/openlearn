@@ -53,6 +53,12 @@ class ValidationStatus(Enum):
     HTTP_ERROR = "http_error"
 
 
+class OnboardingDestination(Enum):
+    QUICK_LEARN = "quick_learn"
+    VIM_STARTER = "vim_starter"
+    MENU = "menu"
+
+
 @dataclass(frozen=True)
 class ValidationResult:
     status: ValidationStatus
@@ -131,6 +137,27 @@ def prompt_for_model(
         if preset.default_model is not None:
             return preset.default_model
         output_func("Model is required.")
+
+
+def prompt_for_destination(
+    *,
+    input_func: InputFunc = input,
+    output_func: OutputFunc = print,
+) -> OnboardingDestination:
+    destinations = (
+        ("Quick Learn a file", OnboardingDestination.QUICK_LEARN),
+        ("Start the vim starter course", OnboardingDestination.VIM_STARTER),
+        ("Open the menu", OnboardingDestination.MENU),
+    )
+    output_func("What would you like to do first?")
+    for index, (label, _destination) in enumerate(destinations, start=1):
+        output_func(f"  {index}. {label}")
+
+    while True:
+        choice = input_func("Choose [1]: ").strip() or "1"
+        if choice.isdigit() and 1 <= int(choice) <= len(destinations):
+            return destinations[int(choice) - 1][1]
+        output_func(f"Choose an option from 1 to {len(destinations)}.")
 
 
 def validate_provider(

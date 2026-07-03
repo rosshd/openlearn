@@ -103,6 +103,33 @@ class ProviderPromptTests(unittest.TestCase):
         self.assertIn("Model is required.", output)
 
 
+class DestinationPromptTests(unittest.TestCase):
+    def test_defaults_to_quick_learn_and_lists_all_destinations(self) -> None:
+        output: list[str] = []
+
+        destination = onboarding.prompt_for_destination(
+            input_func=lambda _prompt: "",
+            output_func=output.append,
+        )
+
+        self.assertIs(destination, onboarding.OnboardingDestination.QUICK_LEARN)
+        self.assertIn("  1. Quick Learn a file", output)
+        self.assertIn("  2. Start the vim starter course", output)
+        self.assertIn("  3. Open the menu", output)
+
+    def test_reprompts_invalid_destination_choice(self) -> None:
+        choices = iter(["4", "2"])
+        output: list[str] = []
+
+        destination = onboarding.prompt_for_destination(
+            input_func=lambda _prompt: next(choices),
+            output_func=output.append,
+        )
+
+        self.assertIs(destination, onboarding.OnboardingDestination.VIM_STARTER)
+        self.assertIn("Choose an option from 1 to 3.", output)
+
+
 class ProviderValidationTests(unittest.TestCase):
     def test_gets_models_with_bearer_key_and_ten_second_timeout(self) -> None:
         calls: list[tuple[object, int]] = []
