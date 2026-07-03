@@ -53,8 +53,8 @@ Multiline paste detection requires a POSIX terminal; on Windows, the REPL accept
 
 ## Configuration
 
-On the first bare `openlearn` run without a configured API key, openLearn guides you through provider selection, live key validation, model selection, and a first learning activity.
-Set `OPENAI_API_KEY` to skip this onboarding flow and use environment-based configuration.
+On the first bare `openlearn` run without a usable provider configuration, openLearn guides you through provider selection, live key validation, model selection, and a first learning activity.
+Set `OPENAI_API_KEY` to skip this onboarding flow and use environment-based configuration; valid keyless localhost providers such as Ollama are already configured when their base URL is set.
 
 Interactive setup:
 

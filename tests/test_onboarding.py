@@ -611,7 +611,11 @@ class OnboardingTriggerTests(unittest.TestCase):
     def test_mock_environment_skips_onboarding(self) -> None:
         with (
             patch.dict("os.environ", {"OPENLEARN_MOCK": "1"}, clear=True),
-            patch.object(cli, "configured_openai_api_key", return_value=None),
+            patch.object(
+                cli,
+                "_configured_provider_needs_onboarding",
+                side_effect=AssertionError("mock mode should not read provider config"),
+            ),
             patch.object(onboarding, "run_onboarding") as run_onboarding,
             patch.object(cli, "run_menu", return_value=0),
         ):

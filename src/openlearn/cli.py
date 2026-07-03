@@ -280,8 +280,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if (
             not command_args
-            and _configured_provider_needs_onboarding()
             and not _openlearn_mock_enabled()
+            and _configured_provider_needs_onboarding()
         ):
             from openlearn.onboarding import run_onboarding
 
