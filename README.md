@@ -20,6 +20,12 @@ It stores curriculum, learner state, session notes, and context files locally wh
 ## Install
 
 ```bash
+pipx install openlearn
+```
+
+From source:
+
+```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -e .
