@@ -11,6 +11,7 @@ The product promise is simple: bring your own model access, keep your learning f
 - Markdown topic files with JSON metadata.
 - Local learner state, event logs, and source summaries.
 - OpenAI-compatible provider calls with configurable base URL and model.
+- First-run onboarding that can configure OpenAI, Anthropic-compatible APIs, Ollama, or a custom OpenAI-compatible provider.
 - Mockable tests and smoke flows.
 
 ## User Workflow

@@ -54,7 +54,9 @@ Multiline paste detection requires a POSIX terminal; on Windows, the REPL accept
 ## Configuration
 
 On the first bare `openlearn` run without a usable provider configuration, openLearn guides you through provider selection, live key validation, model selection, and a first learning activity.
-Set `OPENAI_API_KEY` to skip this onboarding flow and use environment-based configuration; valid keyless localhost providers such as Ollama are already configured when their base URL is set.
+The built-in presets cover OpenAI, Anthropic-compatible APIs, Ollama, and custom OpenAI-compatible providers.
+Set `OPENAI_API_KEY` to skip this onboarding flow and use environment-based configuration; valid keyless localhost providers such as Ollama are already configured when their base URL and model are set.
+The final onboarding step can start Quick Learn from a file, start the Vim starter course, or open the menu.
 
 Interactive setup:
 
