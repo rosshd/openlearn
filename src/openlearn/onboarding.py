@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import getpass
 from dataclasses import dataclass
 from enum import Enum
 from types import TracebackType
@@ -71,6 +72,10 @@ class UrlResponse(Protocol):
 
 
 UrlOpener = Callable[..., UrlResponse]
+InputFunc = Callable[[str], str]
+OutputFunc = Callable[[str], None]
+KeyInputFunc = Callable[[str], str]
+ProviderValidator = Callable[[str, str], ValidationResult]
 
 
 def validate_provider(
@@ -100,3 +105,50 @@ def validate_provider(
     if status in {401, 403}:
         return ValidationResult(ValidationStatus.REJECTED)
     return ValidationResult(ValidationStatus.HTTP_ERROR, f"HTTP {status}")
+
+
+def prompt_for_validated_key(
+    preset: ProviderPreset,
+    base_url: str,
+    *,
+    input_func: InputFunc = input,
+    output_func: OutputFunc = print,
+    key_input_func: KeyInputFunc | None = None,
+    validator: ProviderValidator = validate_provider,
+) -> str | None:
+    key_input = key_input_func or getpass.getpass
+    prompt = "API key (hidden): " if preset.key_required else "API key (optional, hidden): "
+
+    for attempt in range(1, 4):
+        api_key = key_input(prompt).strip()
+        if not api_key and preset.key_required:
+            output_func("API key is required.")
+            continue
+
+        output_func("Testing connection...")
+        result = validator(base_url, api_key)
+        if result.status is ValidationStatus.VALID:
+            output_func("Connection successful.")
+            return api_key
+        if result.status is ValidationStatus.REJECTED:
+            output_func("Key rejected by provider.")
+            if attempt < 3:
+                output_func("Please try again.")
+            continue
+        if result.status is ValidationStatus.NETWORK_ERROR:
+            detail = f" ({result.detail})" if result.detail else ""
+            output_func(f"Could not reach the provider{detail}.")
+            save_anyway = input_func("Save this configuration anyway? [y/N]: ").strip().lower()
+            if save_anyway in {"y", "yes"}:
+                return api_key
+            output_func("Configuration not saved.")
+            return None
+
+        detail = f": {result.detail}" if result.detail else ""
+        output_func(f"Provider validation failed{detail}.")
+        return None
+
+    output_func(
+        "Key rejected after 3 attempts. Run 'openlearn config set-key' when you have a valid key."
+    )
+    return None
