@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
+
+import pytest
+
+if sys.platform == "win32":
+    pytest.skip("pexpect.spawn requires a POSIX pty", allow_module_level=True)
 
 import pexpect
 

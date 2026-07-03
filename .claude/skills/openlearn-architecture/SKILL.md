@@ -22,6 +22,7 @@ description: >
 - Dynamic metadata includes pending questions, learner preferences, active drills, concept attempts, quiz state, imported checksums, and answer status.
 - Pending questions can be free response or multiple choice, with or without a stored answer key.
 - Learner preferences are durable constraints extracted from explicit navigation such as skipped material.
+- Topic writes use the shared file-lock interface, backed by `fcntl` on POSIX and `msvcrt` on Windows.
 - Never mutate or commit real user topics, imported context, `state.json`, `config.json`, API keys, or `.env`.
 
 ## Config And Providers
@@ -41,7 +42,7 @@ description: >
 
 ## Interactive UI
 
-- The REPL coalesces quick multiline paste into a single learner message.
+- The REPL coalesces quick multiline paste into a single learner message only on POSIX terminals; Windows stdin falls back to one line per message.
 - After a tutor response, learner-state extraction is deferred so the next prompt appears immediately.
 - Natural `continue`, `move on`, and `skip` wording advances the slide instead of going through answer grading.
 

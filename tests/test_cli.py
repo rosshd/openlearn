@@ -1,14 +1,17 @@
+import builtins
 import contextlib
 import io
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import textwrap
 import threading
 import types
 import unittest
+from unittest import mock
 from argparse import Namespace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -64,8 +67,10 @@ class UiFormattingTests(unittest.TestCase):
 
         rendered = styled_output.getvalue()
         self.assertIn("Tutor", rendered)
-        self.assertIn("╭", rendered)
-        self.assertIn("╰", rendered)
+        # Rich downgrades rounded box corners to square ones on legacy
+        # Windows consoles, so accept either glyph set.
+        self.assertTrue({"╭", "┌"} & set(rendered))
+        self.assertTrue({"╰", "└"} & set(rendered))
         self.assertIn("\x1b[1;36mFeedback:\x1b[0m", rendered)
         self.assertIn("\x1b[1;36mNext:\x1b[0m", rendered)
 
@@ -192,7 +197,7 @@ class CliStorageTests(unittest.TestCase):
 
         self.assertIn("Existing data found", first)
         self.assertIn(str(old_home), first)
-        self.assertIn(str(new_home), first)
+        self.assertIn(str(new_home.resolve()), first)
         self.assertNotIn("Existing data found", second)
 
     def test_cmd_init_already_configured_skips_without_force(self) -> None:
@@ -7671,6 +7676,101 @@ class DryRunTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(cli.main(["chat", "vim", "What is normal mode?"]), 0)
         self.assertTrue(cli.state_path().exists())
+
+
+class PlatformGuardTests(unittest.TestCase):
+    @unittest.skipIf(sys.platform == "win32", "POSIX flock semantics")
+    def test_file_lock_mutual_exclusion_posix(self) -> None:
+        import fcntl
+
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "topic.md"
+            lock_path = target.with_name(".topic.md.lock")
+            with cli.file_lock(target):
+                with lock_path.open("w", encoding="utf-8") as probe:
+                    with self.assertRaises(OSError):
+                        fcntl.flock(probe.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with lock_path.open("w", encoding="utf-8") as probe:
+                fcntl.flock(probe.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(probe.fileno(), fcntl.LOCK_UN)
+
+    def test_select_lock_primitives_win32_uses_msvcrt(self) -> None:
+        calls: list[tuple[int, str, int]] = []
+        fake_msvcrt = types.SimpleNamespace(
+            LK_NBLCK="LK_NBLCK",
+            LK_UNLCK="LK_UNLCK",
+            locking=lambda fd, mode, nbytes: calls.append((fd, mode, nbytes)),
+        )
+        fake_file = mock.Mock()
+        fake_file.fileno.return_value = 7
+        with mock.patch.dict(sys.modules, {"msvcrt": fake_msvcrt}):
+            flock, funlock = cli._select_lock_primitives("win32")
+            flock(fake_file)
+            funlock(fake_file)
+        self.assertEqual(calls, [(7, "LK_NBLCK", 1), (7, "LK_UNLCK", 1)])
+        fake_file.seek.assert_called_with(0)
+
+    def test_select_lock_primitives_win32_retries_busy_lock(self) -> None:
+        calls: list[tuple[int, str, int]] = []
+        attempts = 0
+
+        def locking(fd, mode, nbytes):
+            nonlocal attempts
+            attempts += 1
+            calls.append((fd, mode, nbytes))
+            if attempts == 1:
+                raise OSError(13, "busy")
+
+        fake_msvcrt = types.SimpleNamespace(
+            LK_NBLCK="LK_NBLCK", LK_UNLCK="LK_UNLCK", locking=locking
+        )
+        fake_file = mock.Mock()
+        fake_file.fileno.return_value = 7
+        with (
+            mock.patch.dict(sys.modules, {"msvcrt": fake_msvcrt}),
+            mock.patch.object(cli.time, "sleep") as sleep,
+        ):
+            flock, _ = cli._select_lock_primitives("win32")
+            flock(fake_file)
+        self.assertEqual(calls, [(7, "LK_NBLCK", 1), (7, "LK_NBLCK", 1)])
+        sleep.assert_called_once_with(0.05)
+
+    def test_cli_module_imports_on_simulated_windows(self) -> None:
+        code = (
+            # Preload cli.py's dependencies so flipping sys.platform below only
+            # affects the guarded import inside openlearn.cli itself.
+            "import openlearn.constants, openlearn.models, openlearn.text, openlearn.ui\n"
+            "import platformdirs\n"
+            "import argparse, concurrent.futures, getpass, importlib.resources, select\n"
+            "import shlex, subprocess, tempfile, threading, urllib.request\n"
+            "import sys, types\n"
+            "sys.platform = 'win32'\n"
+            "sys.modules['fcntl'] = None\n"
+            "sys.modules['msvcrt'] = types.SimpleNamespace("
+            "LK_NBLCK=0, LK_UNLCK=1, locking=lambda *args: None)\n"
+            "import openlearn.cli\n"
+            "print('import ok')\n"
+        )
+        env = dict(os.environ)
+        env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+        result = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True, env=env
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("import ok", result.stdout)
+
+    def test_read_repl_message_returns_single_line_on_win32(self) -> None:
+        fake_stdin = mock.Mock()
+        fake_stdin.isatty.return_value = True
+        fake_input = lambda prompt: "first line"  # noqa: E731
+        with (
+            mock.patch.object(builtins, "input", fake_input),
+            mock.patch.object(sys, "stdin", fake_stdin),
+            mock.patch.object(sys, "platform", "win32"),
+        ):
+            result = cli.read_repl_message("> ", input_func=fake_input)
+        self.assertEqual(result, "first line")
+        fake_stdin.readline.assert_not_called()
 
 
 if __name__ == "__main__":

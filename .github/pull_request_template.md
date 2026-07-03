@@ -4,7 +4,8 @@
 
 ## Testing
 
-- [ ] `python -m unittest`
+- [ ] `make check`
+- [ ] Cross-platform CI is expected to pass on Ubuntu, Windows, and macOS where applicable.
 
 ## Privacy And Data
 
