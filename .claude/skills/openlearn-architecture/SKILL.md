@@ -29,6 +29,7 @@ description: >
 
 - Configuration precedence is environment variables, then `config.json`, then built-in defaults.
 - Provider calls target OpenAI-compatible chat completions at `{base_url}/chat/completions`.
+- Hosted defaults require an API key; local or custom OpenAI-compatible endpoints may be keyless and omit the `Authorization` header.
 - Learner-metadata extraction can use `OPENLEARN_EXTRACTOR_MODEL` or `extractor_model`; otherwise it uses the tutor model.
 - Keep model-backed tutor commands bounded to the selected topic, relevant metadata, bounded notes, recent session context, and the current prompt.
 - Keep learner-metadata extraction bounded to the small state snapshot needed to judge the latest exchange.

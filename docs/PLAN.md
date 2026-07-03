@@ -3,7 +3,7 @@
 ## Positioning
 
 openLearn is a local-first AI tutor for people who want durable learning, not answer delivery.
-The product promise is simple: bring your own model key, keep your learning files, and let the tutor adapt from your actual answers.
+The product promise is simple: bring your own model access, keep your learning files, and let the tutor adapt from your actual answers.
 
 ## MVP Scope
 
@@ -78,7 +78,7 @@ Design requirements:
 ## Differentiators
 
 - Own your learning data.
-- Bring your own model.
+- Bring your own model, whether hosted with a key or local/custom and keyless.
 - Transparent local memory.
 - Tutor behavior optimized for retrieval, transfer, and mastery.
 - No subscription required for the core local workflow.
