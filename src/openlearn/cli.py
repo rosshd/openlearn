@@ -6587,6 +6587,8 @@ def normalize_topic_metadata(metadata: dict[str, object], slug: str) -> dict[str
 
 def repair_topic_metadata(slug: str) -> bool:
     path = topic_path(slug)
+    if not path.exists():
+        raise OpenLearnError(f"topic not found: {slug}")
     with file_lock(path):
         current_text = path.read_text(encoding="utf-8")
         try:
@@ -7405,7 +7407,7 @@ def call_openai_streaming(
     capture_answer_key: bool = True,
     retry_sleep: Callable[[float], object] = time.sleep,
     retry_jitter: Callable[[float, float], float] = random.uniform,
-    retry_status: Callable[[str], object] = print,
+    retry_status: Callable[[str], object] | None = None,
 ) -> str:
     global _LAST_RESPONSE_ANSWER_KEY
     if _DRY_RUN:
@@ -7464,6 +7466,7 @@ def call_openai_streaming(
         method="POST",
     )
     spinner_context = thinking_progress(output_func)
+    retry_status_func = retry_status or output_func
     spinner = spinner_context.__enter__()
     if spinner is not None:
         spinner.add_task("waiting", total=None)
@@ -7499,7 +7502,7 @@ def call_openai_streaming(
                     raise OpenLearnError(f"OpenAI request failed: {reason}") from exc
                 delay = OPENAI_RETRY_BASE_DELAY_SECONDS * 2 ** (attempt - 1)
                 delay += retry_jitter(0.0, OPENAI_RETRY_JITTER_SECONDS)
-                retry_status(
+                retry_status_func(
                     f"Temporary OpenAI failure; retrying in {delay:.1f}s "
                     f"({attempt + 1}/{OPENAI_MAX_ATTEMPTS})..."
                 )
