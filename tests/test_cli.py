@@ -62,6 +62,9 @@ class UiFormattingTests(unittest.TestCase):
             ui.console = original_console
 
         rendered = styled_output.getvalue()
+        self.assertIn("Tutor", rendered)
+        self.assertIn("╭", rendered)
+        self.assertIn("╰", rendered)
         self.assertIn("\x1b[1;36mFeedback:\x1b[0m", rendered)
         self.assertIn("\x1b[1;36mNext:\x1b[0m", rendered)
 
@@ -1530,6 +1533,17 @@ class ProviderResponseTests(unittest.TestCase):
         self.assertEqual(text, "Check: Choose one.\nA) One\nB) Two")
         self.assertEqual(cli.extract_answer_key("Check\n<!-- answer: B -->"), "B")
 
+    def test_coverage_marker_is_extracted_and_hidden(self) -> None:
+        raw = (
+            "Lesson: Mutexes protect critical sections.\n"
+            "<!-- covered: Mutex; Critical section -->"
+        )
+
+        self.assertEqual(
+            cli.extract_covered_concepts(raw), ["Mutex", "Critical section"]
+        )
+        self.assertNotIn("covered", cli.sanitize_model_output(raw).lower())
+
     def test_sanitize_model_output_hides_plain_correct_answer_line(self) -> None:
         text = cli.sanitize_model_output(
             "Check: Choose one.\nA) One\nB) Two\nCorrect answer: A) One"
@@ -1537,6 +1551,28 @@ class ProviderResponseTests(unittest.TestCase):
 
         self.assertEqual(text, "Check: Choose one.\nA) One\nB) Two")
         self.assertEqual(cli.extract_answer_key("Check\nCorrect answer: A) One"), "A")
+
+    def test_sanitize_model_output_splits_inline_multiple_choice_options(self) -> None:
+        text = cli.sanitize_model_output(
+            "Check: Which is not a workflow principle? "
+            "A. Reproduce bugs B. Plan to risk C. Upgrade everything D. Preserve changes"
+        )
+
+        self.assertEqual(
+            text,
+            "Check: Which is not a workflow principle?\n"
+            "A) Reproduce bugs\n"
+            "B) Plan to risk\n"
+            "C) Upgrade everything\n"
+            "D) Preserve changes",
+        )
+
+    def test_stream_preview_hides_incomplete_answer_metadata(self) -> None:
+        text = cli.sanitize_stream_preview(
+            "Check: Choose one.\nA) One\nB) Two\n<!-- answer: "
+        )
+
+        self.assertEqual(text, "Check: Choose one.\nA) One\nB) Two")
 
     def test_call_openai_sends_completion_limit(self) -> None:
         previous_key = os.environ.get("OPENAI_API_KEY")
@@ -1616,7 +1652,7 @@ class ProviderResponseTests(unittest.TestCase):
 
         self.assertIs(payload["stream"], True)
         self.assertEqual(answer, "Hello there")
-        self.assertEqual(output, ["", "Hello there", ""])
+        self.assertEqual(output, ["", "Tutor", "Hello there", "End tutor response", ""])
 
     def test_call_openai_streaming_sanitizes_before_terminal_output(self) -> None:
         previous_key = os.environ.get("OPENAI_API_KEY")
@@ -1650,8 +1686,67 @@ class ProviderResponseTests(unittest.TestCase):
             else:
                 os.environ["OPENAI_API_KEY"] = previous_key
 
-        self.assertEqual(output.strip(), "Visible.")
+        self.assertIn("Visible.", output)
+        self.assertIn("Tutor", output)
         self.assertNotIn("system-reminder", output)
+
+    def test_call_openai_streaming_updates_live_panel_for_each_chunk(self) -> None:
+        previous_key = os.environ.get("OPENAI_API_KEY")
+        os.environ["OPENAI_API_KEY"] = "sk-test"
+        original_urlopen = cli.urlopen
+        original_stream = cli.TutorResponseStream
+        original_progress = cli.thinking_progress
+        updates = []
+        lifecycle = []
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def __iter__(self):
+                events = [
+                    {"choices": [{"delta": {"content": "Hello "}}]},
+                    {"choices": [{"delta": {"content": "there"}}]},
+                ]
+                for event in events:
+                    yield f"data: {json.dumps(event)}\n".encode()
+                yield b"data: [DONE]\n"
+
+        class FakeTutorStream:
+            def start(self):
+                lifecycle.append("start")
+
+            def update(self, text):
+                updates.append(text)
+
+            def finish(self, text):
+                lifecycle.append(("finish", text))
+
+            def abort(self):
+                lifecycle.append("abort")
+
+        cli.urlopen = lambda _request, timeout=0: FakeResponse()
+        cli.TutorResponseStream = FakeTutorStream
+        cli.thinking_progress = lambda _output_func=print: contextlib.nullcontext()
+        try:
+            answer = cli.call_openai_streaming(
+                "test-model", "system", "user", output_func=print
+            )
+        finally:
+            cli.urlopen = original_urlopen
+            cli.TutorResponseStream = original_stream
+            cli.thinking_progress = original_progress
+            if previous_key is None:
+                os.environ.pop("OPENAI_API_KEY", None)
+            else:
+                os.environ["OPENAI_API_KEY"] = previous_key
+
+        self.assertEqual(answer, "Hello there")
+        self.assertEqual(updates, ["Hello", "Hello there"])
+        self.assertEqual(lifecycle, ["start", ("finish", "Hello there")])
 
 
 class InteractiveTests(unittest.TestCase):
@@ -3244,6 +3339,23 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(topic.metadata["pending_question"]["answer_key"], "B")
         self.assertNotIn("answer:", topic.body)
 
+    def test_model_answer_saves_multiple_choice_without_hidden_key(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
+        topic = cli.read_topic("vim")
+        answer = cli.sanitize_model_output(
+            "Check: Which key moves down? A) h B) k C) j D) l"
+        )
+
+        cli.print_and_append_model_answer(topic, "chat", "try again", answer)
+
+        pending = cli.read_topic("vim").metadata["pending_question"]
+        self.assertEqual(pending["kind"], "multiple_choice")
+        self.assertEqual(
+            pending["question"],
+            "Check: Which key moves down?\nA) h\nB) k\nC) j\nD) l",
+        )
+        self.assertNotIn("answer_key", pending)
+
     def test_repl_short_quit_command_exits(self) -> None:
         exit_code = call_silent(
             cli.run_repl,
@@ -3406,6 +3518,37 @@ class InteractiveTests(unittest.TestCase):
         self.assertLess(advanced_index, loading_index)
         self.assertLess(loading_index, quiz_index)
 
+    def test_repl_done_after_chapter_quiz_teaches_new_unit_slide_one(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
+        path = cli.topic_path("vim")
+        metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+        metadata = dict(metadata)
+        metadata["current_unit"] = 2
+        metadata["current_slide"] = 1
+        metadata["pending_chapter_quiz"] = True
+        metadata["pending_quiz_chapter"] = "1 Modes"
+        metadata["course_units"] = [
+            {"unit": 1, "chapter": "1", "title": "Modes", "slide_count": 2},
+            {"unit": 2, "chapter": "2", "title": "Search", "slide_count": 3},
+        ]
+        cli.write_topic(path, metadata, body)
+        output = []
+        calls = []
+        original_cmd_next = cli.cmd_next
+        cli.cmd_next = lambda _args, **_kwargs: calls.append("next") or 0
+        try:
+            cli.handle_repl_command("done", output_func=output.append)
+        finally:
+            cli.cmd_next = original_cmd_next
+
+        topic = cli.read_topic("vim")
+        self.assertEqual(topic.metadata["current_unit"], 2)
+        self.assertEqual(topic.metadata["current_slide"], 1)
+        self.assertNotIn("pending_chapter_quiz", topic.metadata)
+        self.assertEqual(calls, ["next"])
+        self.assertIn("Loading first slide of the new unit...", output)
+        self.assertFalse(any(line.startswith("Advanced to") for line in output))
+
     def test_repl_done_persists_completed_slide_content(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
         path = cli.topic_path("vim")
@@ -3475,7 +3618,7 @@ class InteractiveTests(unittest.TestCase):
         ]
         path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
         prompt = cli.current_lesson_prompt(cli.read_topic("os"))
-        self.assertIn("Concepts this unit must cover: Fork system call", prompt)
+        self.assertIn("Required concepts for this unit: Fork system call", prompt)
         self.assertIn("Already taught in earlier units", prompt)
         self.assertIn("Cache locality", prompt)
 
@@ -3484,8 +3627,75 @@ class InteractiveTests(unittest.TestCase):
         normal = cli._slide_count_guidance("os")
         quick = cli._slide_count_guidance("os", quick_learn=True)
         self.assertIn("Quick Learn", quick)
-        self.assertIn("2-4 slides per unit", quick)
+        self.assertIn("one slide for every one or two tightly related concepts", quick)
+        self.assertIn("no arbitrary four-slide cap", quick)
         self.assertNotEqual(normal, quick)
+
+    def test_course_parser_preserves_every_concept_on_a_unit(self) -> None:
+        units = cli.parse_course_units(
+            "1. Synchronization (3 slides, difficulty 5/10) - Cover locks.\n"
+            "Concepts: Spinlock; Mutex; Condition variable; Barrier; Semaphore; Deadlock"
+        )
+
+        labels = [concept["label"] for concept in units[0]["concepts"]]
+        self.assertEqual(
+            labels,
+            ["Spinlock", "Mutex", "Condition variable", "Barrier", "Semaphore", "Deadlock"],
+        )
+
+    def test_coverage_can_be_rebuilt_from_saved_session_responses(self) -> None:
+        topic = cli.Topic(
+            slug="os",
+            path=Path("os.md"),
+            metadata={
+                "course_units": [
+                    {
+                        "unit": 1,
+                        "chapter": "1",
+                        "title": "Interrupts",
+                        "slide_count": 2,
+                        "concepts": [
+                            {"id": "apic", "label": "APIC"},
+                            {"id": "fcfs", "label": "FCFS"},
+                        ],
+                    }
+                ]
+            },
+            body=textwrap.dedent(
+                """\
+                # OS
+
+                ## Session Log
+
+                ### 2026-07-01 10:00 UTC - next
+
+                **Prompt**
+
+                Current structured lesson: Unit 1/1 · Slide 1/2
+
+                **Response**
+
+                Lesson: APIC routes interrupts across CPU cores.
+                """
+            ),
+        )
+
+        self.assertEqual(cli.coverage_from_session_history(topic), {"1:1": ["APIC"]})
+
+    def test_quick_learn_outline_includes_source_coverage_contract(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="OS", goal="midterm review"))
+        context_dir = cli.topic_context_dir("os")
+        context_dir.mkdir(parents=True, exist_ok=True)
+        (context_dir / "review.summary.txt").write_text(
+            "- Scheduling: FCFS, SJF, RR, Priority\n", encoding="utf-8"
+        )
+
+        prompt = cli.course_outline_prompt(cli.read_topic("os"), quick_learn=True)
+
+        self.assertIn("Create 3-12 ordered units", prompt)
+        self.assertIn("Assessment source coverage contract", prompt)
+        self.assertIn("Scheduling: FCFS, SJF, RR, Priority", prompt)
+        self.assertIn("Place every required item on exactly one Concepts: line", prompt)
 
     def test_repl_done_advances_despite_stale_needs_work_status(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
@@ -3613,7 +3823,73 @@ class InteractiveTests(unittest.TestCase):
         topic = cli.read_topic("vim")
         self.assertEqual(topic.metadata["current_slide"], 2)
         self.assertIs(topic.metadata["review_session_active"], False)
+        self.assertIn("Advanced to Unit 1/1 · Slide 2/2", output)
+
+    def test_repl_done_completes_only_after_finishing_final_slide(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
+        path = cli.topic_path("vim")
+        metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+        metadata = dict(metadata)
+        metadata["current_unit"] = 1
+        metadata["current_slide"] = 2
+        metadata["course_units"] = [
+            {"unit": 1, "chapter": "1.1", "title": "Modes", "slide_count": 2},
+        ]
+        path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
+        output = []
+        calls = []
+        original_cmd_next = cli.cmd_next
+        cli.cmd_next = lambda _args, **_kwargs: calls.append("next") or 0
+        try:
+            cli.handle_repl_command("done", output_func=output.append)
+        finally:
+            cli.cmd_next = original_cmd_next
+
+        topic = cli.read_topic("vim")
+        self.assertIs(topic.metadata["course_completed"], True)
+        self.assertEqual(calls, [])
         self.assertIn("Course complete: Unit 1/1 · Slide 2/2", output)
+        self.assertNotIn("Loading next slide...", output)
+
+    def test_quick_learn_extends_unit_until_required_concepts_are_covered(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="OS", goal="midterm"))
+        path = cli.topic_path("os")
+        metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+        metadata = dict(metadata)
+        metadata["learning_mode"] = "quick"
+        metadata["coverage_contract"] = True
+        metadata["current_unit"] = 1
+        metadata["current_slide"] = 1
+        metadata["slide_coverage"] = {"1:1": ["Mutex"]}
+        metadata["course_units"] = [
+            {
+                "unit": 1,
+                "chapter": "1",
+                "title": "Synchronization",
+                "slide_count": 1,
+                "concepts": [
+                    {"id": "mutex", "label": "Mutex"},
+                    {"id": "barrier", "label": "Barrier"},
+                    {"id": "semaphore", "label": "Semaphore"},
+                ],
+            }
+        ]
+        cli.write_topic(path, metadata, body)
+        output = []
+        calls = []
+        original_cmd_next = cli.cmd_next
+        cli.cmd_next = lambda _args, **_kwargs: calls.append("next") or 0
+        try:
+            cli.handle_repl_command("done", output_func=output.append)
+        finally:
+            cli.cmd_next = original_cmd_next
+
+        topic = cli.read_topic("os")
+        unit = cli.course_unit_at(topic.metadata, 1)
+        self.assertEqual(topic.metadata["current_slide"], 2)
+        self.assertEqual(unit["slide_count"], 2)
+        self.assertEqual(calls, ["next"])
+        self.assertTrue(any("Coverage check added 1 slide" in line for line in output))
 
     def test_drill_command_generates_file_opens_vscode_and_saves_metadata(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Python", goal="practice functions"))
@@ -3758,6 +4034,7 @@ class InteractiveTests(unittest.TestCase):
         metadata["course_started"] = True
         metadata["current_unit"] = 1
         metadata["current_slide"] = 2
+        metadata["course_completed"] = True
         metadata["last_answer_status"] = "partial"
         metadata["weak_spots"] = ["normal mode"]
         metadata["course_units"] = [
@@ -4360,6 +4637,43 @@ class PromptInstructionTests(unittest.TestCase):
 
         self.assertTrue(changed)
         self.assertEqual(cli.topic_backup_path(path).read_text(encoding="utf-8"), broken_text)
+
+    def test_repair_quick_course_restores_concepts_from_accepted_plan(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="OS", goal="midterm"))
+        topic = cli.read_topic("os")
+        metadata = dict(topic.metadata)
+        metadata["learning_mode"] = "quick"
+        metadata["course_completed"] = True
+        metadata["course_units"] = [
+            {
+                "unit": 1,
+                "chapter": "1",
+                "title": "Synchronization",
+                "slide_count": 2,
+                "concepts": [{"id": "mutex", "label": "Mutex"}],
+            }
+        ]
+        cli.write_topic(topic.path, metadata, topic.body)
+        outline = (
+            "Scope: Midterm\nUnits:\n"
+            "1. Synchronization (3 slides, difficulty 5/10) - Cover locks.\n"
+            "Concepts: Spinlock; Mutex; Condition variable; Barrier; Semaphore; Deadlock"
+        )
+        cli.append_session(cli.read_topic("os"), "course_plan", "plan", outline)
+
+        changed = cli.repair_topic_metadata("os")
+
+        repaired = cli.read_topic("os")
+        labels = [
+            concept["label"] for concept in repaired.metadata["course_units"][0]["concepts"]
+        ]
+        self.assertTrue(changed)
+        self.assertEqual(
+            labels,
+            ["Spinlock", "Mutex", "Condition variable", "Barrier", "Semaphore", "Deadlock"],
+        )
+        self.assertIs(repaired.metadata["course_completed"], False)
+        self.assertIs(repaired.metadata["coverage_contract"], True)
 
     def test_learning_metadata_reschedules_review_by_difficulty(self) -> None:
         home = tempfile.TemporaryDirectory()
@@ -5925,6 +6239,7 @@ class PromptInstructionTests(unittest.TestCase):
         self.assertIn('Avoid multiple choice for "why" questions', rules)
         self.assertIn("Use hands-on checks when the concept is a keybinding", rules)
         self.assertIn("Skip the check when the slide is only orientation", rules)
+        self.assertIn("Avoid NOT and EXCEPT questions", rules)
 
     def test_system_prompt_includes_exact_pending_question_to_grade(self) -> None:
         topic = cli.Topic(
@@ -6292,7 +6607,8 @@ class PromptInstructionTests(unittest.TestCase):
             cli.set_review_session_active = original_set_review_session_active
 
         self.assertIn("Where you left off", output)
-        self.assertTrue(output.strip().endswith("Recall question?"))
+        self.assertIn("Recall question?", output)
+        self.assertNotIn("operational mode", output)
         self.assertEqual(appended[0][3], "Recall question?")
 
     def test_resume_context_includes_last_learner_message_and_question(self) -> None:
@@ -6708,7 +7024,10 @@ class PromptContextTests(unittest.TestCase):
         clean = list(output)
         self.assertEqual(clean[0], "")
         self.assertEqual(clean[-1], "")
-        self.assertIn("Lesson: Short answer.", clean[1])
+        text = "\n".join(clean)
+        self.assertIn("Tutor", text)
+        self.assertIn("End tutor response", text)
+        self.assertIn("Lesson: Short answer.", text)
 
     def test_emit_tutor_output_renders_full_markdown_document(self) -> None:
         output = []

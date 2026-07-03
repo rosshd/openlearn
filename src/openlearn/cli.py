@@ -66,12 +66,14 @@ from openlearn.constants import (
 from openlearn.models import PendingContext, Topic, TopicSummary
 from openlearn.text import (
     extract_answer_key,
+    extract_covered_concepts,
     first_lines,
     last_lines,
     last_question,
     one_line,
     parse_metadata_update,
     sanitize_model_output,
+    sanitize_stream_preview,
     snippet,
 )
 from openlearn.ui import (
@@ -80,6 +82,7 @@ from openlearn.ui import (
     emit,
     emit_resume_line,
     emit_tutor_markdown,
+    emit_tutor_response,
     format_action,
     print_error,
     print_menu,
@@ -87,6 +90,7 @@ from openlearn.ui import (
     review_due_table,
     status_bar,
     thinking_progress,
+    TutorResponseStream,
 )
 
 EVENT_SCHEMA_VERSION = 1
@@ -104,7 +108,11 @@ DYNAMIC_METADATA_KEYS = {
     "quiz_practiced_since_last",
     "recent_answer_results",
     "rolling_pass_rate",
+    "course_completed",
+    "slide_coverage",
 }
+
+_LAST_RESPONSE_COVERED_CONCEPTS: list[str] = []
 
 
 def is_dynamic_metadata_key(key: str) -> bool:
@@ -191,6 +199,8 @@ and transition. Do not skip the label — it is required on every response.
 - Use numbered lists for sequential steps and bullet lists for sets of
   parallel ideas. Avoid nesting more than one level deep.
 - For multiple choice, use exactly A), B), C), D) on separate lines.
+- Phrase multiple-choice stems positively. Avoid NOT and EXCEPT questions unless
+  identifying an exception is itself the learning objective.
 - When asking multiple choice, put the correct choice in a hidden HTML comment
   at the end, like <!-- answer: C -->. The CLI removes this before showing the
   learner and stores it for reliable grading.
@@ -1400,6 +1410,11 @@ def handle_natural_advance(prompt: str, model: str | None = None, output_func=pr
     slug = resolve_topic_slug(None)
     topic = read_topic(slug)
     save_learner_navigation_preference(topic, prompt)
+    if finish_pending_chapter_quiz(slug):
+        output_func("")
+        output_func("Loading first slide of the new unit...")
+        cmd_next(argparse.Namespace(topic=slug, model=model), output_func=output_func)
+        return True
     if not advance_slide(slug, output_func, force=True):
         return True
     output_func("")
@@ -1437,6 +1452,11 @@ def handle_repl_command(
         topic_args = [arg for arg in args if arg not in {"--force", "force", "yes"}]
         topic_value = topic_args[0] if topic_args else None
         slug = resolve_topic_slug(topic_value)
+        if finish_pending_chapter_quiz(slug):
+            output_func("")
+            output_func("Loading first slide of the new unit...")
+            cmd_next(argparse.Namespace(topic=slug, model=model), output_func=output_func)
+            return
         if advance_slide(slug, output_func, force=True):
             updated = read_topic(slug)
             output_func("")
@@ -1786,11 +1806,13 @@ def teach_first_lesson(topic: Topic, outline: str, model: str, output_func=print
         lesson_prompt,
     )
     _LAST_RESPONSE_ANSWER_KEY = extract_answer_key(raw_lesson)
+    covered_concepts = extract_covered_concepts(raw_lesson)
     raw_lesson_for_question = sanitize_model_output(raw_lesson)
     pending_question_text = extract_pending_question_text(raw_lesson_for_question)
     lesson = trim_words(raw_lesson_for_question, FIRST_LESSON_WORD_LIMIT)
     emit_tutor_output(lesson, output_func)
     append_session(read_topic(topic.slug), "lesson", lesson_prompt, lesson)
+    save_current_slide_coverage(topic.slug, lesson, covered_concepts)
     save_pending_question(
         read_topic(topic.slug),
         lesson,
@@ -2106,9 +2128,10 @@ def _slide_count_guidance(slug: str, quick_learn: bool = False) -> str:
     if quick_learn:
         return (
             "This is Quick Learn: optimize for coverage per minute, not depth. "
-            "Use 2-4 slides per unit, packing several related concepts into each slide "
-            "rather than spreading one idea across many slides. Never split a single "
-            "definition, comparison, or example across multiple slides. "
+            "Choose the slide count from the number of assessment concepts. "
+            "Plan one slide for every one or two tightly related concepts, with no "
+            "arbitrary four-slide cap. Never split one definition, comparison, or "
+            "example across multiple slides. "
         )
     n = _context_file_count(slug)
     if n >= 20:
@@ -2156,15 +2179,23 @@ def course_outline_prompt(
         if rejected_outline:
             revision_text += f"\nRejected outline:\n{rejected_outline}"
     unit_guidance = (
-        "Create 2-6 ordered units with short titles and one-line outcomes. "
+        "Create 3-12 ordered units with short titles and one-line outcomes. "
         if quick_learn
         else "Create 4-8 ordered units with short titles and one-line outcomes. "
     )
+    source_contract = context_summary_prompt(topic.slug) if quick_learn else ""
+    source_contract_block = (
+        f"\nAssessment source coverage contract:\n{source_contract}\n"
+        if source_contract
+        else ""
+    )
     quick_guidance = (
         "This is Quick Learn. Cover only material grounded in the imported source summaries. "
-        "Do not invent missing coverage. Prioritize assessment concepts, definitions, formulas, "
-        "processes, comparisons, and likely practice questions. Compress administrative text "
-        "and repetition. "
+        "Treat every distinct assessment item in the source coverage contract as required. "
+        "Place every required item on exactly one Concepts: line; do not omit an item to keep "
+        "the plan short. Do not invent missing coverage. Prioritize assessment concepts, "
+        "definitions, formulas, processes, comparisons, and likely practice questions. "
+        "Compress administrative text and repetition. "
         if quick_learn
         else ""
     )
@@ -2180,16 +2211,17 @@ def course_outline_prompt(
         f"{unit_guidance}"
         "For each unit, include a planned slide count in parentheses, for example "
         "1.2 Insert mode in Vim (3 slides, difficulty 4/10) - Outcome. "
-        "After each unit, add a Concepts: line with 2-4 key concepts for that unit, "
+        "After each unit, add a Concepts: line with every required concept for that unit, "
         "separated by semicolons, for example Concepts: Normal mode; Insert mode; Mode switching. "
         "Assign each unit an initial difficulty from 1-10 where 1 is very easy "
         "and 10 is very hard. "
         f"{_slide_count_guidance(topic.slug, quick_learn=quick_learn)}"
-        f"{'Keep the outline under 600 words.' if _context_file_count(topic.slug) >= 20 else 'Keep it under 300 words.'}\n"
+        f"{'Keep the outline under 900 words.' if quick_learn else ('Keep the outline under 600 words.' if _context_file_count(topic.slug) >= 20 else 'Keep it under 300 words.')}\n"
         f"Course name: {topic.metadata.get('topic', topic.slug)}\n"
         f"Goal: {goal}\n"
         f"{template_hint}"
         f"{placement_block}"
+        f"{source_contract_block}"
         f"{revision_text}"
     )
 
@@ -2218,7 +2250,10 @@ def first_lesson_prompt(outline: str) -> str:
         f"to ask one. Hard limit: {FIRST_LESSON_WORD_LIMIT} words.\n"
         "If the Check is multiple choice, append exactly this on its own line at the end: "
         "<!-- answer: X --> where X is the correct letter. The CLI strips it before display "
-        "and uses it for grading — do not omit it.\n\n"
+        "and uses it for grading — do not omit it. "
+        "After the answer marker, append <!-- covered: Exact concept label --> using one or "
+        "two exact labels from the current unit's Concepts: line. This marker is hidden from "
+        "the learner and is required for coverage tracking.\n\n"
         f"Accepted course plan:\n{outline}"
     )
 
@@ -2240,7 +2275,7 @@ def parse_concept_labels(text: str) -> list[str]:
             continue
         seen.add(key)
         labels.append(value)
-    return labels[:4]
+    return labels
 
 
 def concepts_from_labels(labels: list[str], fallback_title: str) -> list[dict[str, str]]:
@@ -2676,15 +2711,168 @@ def prune_slide_contents(
 
 
 def unit_concept_labels(unit: dict[str, object] | None) -> list[str]:
-    if not unit or not isinstance(unit.get("concepts"), list):
+    if not unit:
+        return []
+    concepts = unit.get("concepts")
+    if not isinstance(concepts, list):
         return []
     labels: list[str] = []
-    for concept in unit["concepts"]:
+    for concept in concepts:
         if isinstance(concept, dict):
             label = concept.get("label")
             if isinstance(label, str) and label.strip():
                 labels.append(label.strip())
     return labels
+
+
+def _coverage_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
+
+
+def _answer_covers_concept(answer: str, label: str) -> bool:
+    answer_key = _coverage_key(answer)
+    label_tokens = [
+        token
+        for token in _coverage_key(label).split()
+        if token
+        not in {
+            "a",
+            "an",
+            "and",
+            "basics",
+            "behavior",
+            "code",
+            "differences",
+            "examples",
+            "fundamentals",
+            "how",
+            "of",
+            "overview",
+            "structure",
+            "the",
+            "to",
+            "types",
+            "usage",
+            "vs",
+            "what",
+            "why",
+            "with",
+        }
+    ]
+    return bool(label_tokens) and all(token in answer_key.split() for token in label_tokens)
+
+
+def unit_covered_concepts(metadata: dict[str, object], unit_number: int) -> list[str]:
+    unit = course_unit_at(metadata, unit_number)
+    labels = unit_concept_labels(unit)
+    if not labels:
+        return []
+    valid = {label.casefold(): label for label in labels}
+    covered: list[str] = []
+    seen: set[str] = set()
+    coverage = metadata.get("slide_coverage")
+    if isinstance(coverage, dict):
+        prefix = f"{unit_number}:"
+        for key, values in coverage.items():
+            if not str(key).startswith(prefix) or not isinstance(values, list):
+                continue
+            for value in values:
+                if not isinstance(value, str):
+                    continue
+                canonical = valid.get(value.casefold())
+                if canonical and canonical.casefold() not in seen:
+                    seen.add(canonical.casefold())
+                    covered.append(canonical)
+    contents = metadata.get("slide_contents")
+    if isinstance(contents, dict):
+        prefix = f"{unit_number}:"
+        unit_text = "\n".join(
+            str(item.get("content") or "")
+            for key, item in contents.items()
+            if str(key).startswith(prefix) and isinstance(item, dict)
+        )
+        for label in labels:
+            if label.casefold() not in seen and _answer_covers_concept(unit_text, label):
+                seen.add(label.casefold())
+                covered.append(label)
+    return covered
+
+
+def unit_remaining_concepts(metadata: dict[str, object], unit_number: int) -> list[str]:
+    unit = course_unit_at(metadata, unit_number)
+    labels = unit_concept_labels(unit)
+    covered = {label.casefold() for label in unit_covered_concepts(metadata, unit_number)}
+    return [label for label in labels if label.casefold() not in covered]
+
+
+def save_current_slide_coverage(
+    slug: str, answer: str, declared_concepts: list[str] | None = None
+) -> None:
+    path = topic_path(slug)
+    if not path.exists():
+        return
+    with file_lock(path):
+        raw_metadata, body = parse_topic(path.read_text(encoding="utf-8"))
+        metadata = merge_topic_state(
+            normalize_topic_metadata(raw_metadata, slug), load_state(slug)
+        )
+        unit_number = metadata.get("current_unit")
+        slide = metadata.get("current_slide")
+        if not isinstance(unit_number, int) or not isinstance(slide, int):
+            return
+        unit = course_unit_at(metadata, unit_number)
+        labels = unit_concept_labels(unit)
+        canonical = {label.casefold(): label for label in labels}
+        covered: list[str] = []
+        for label in declared_concepts or []:
+            matched = canonical.get(label.casefold())
+            if matched and matched not in covered:
+                covered.append(matched)
+        for label in labels:
+            if label not in covered and _answer_covers_concept(answer, label):
+                covered.append(label)
+        if not covered:
+            return
+        coverage = metadata.get("slide_coverage")
+        coverage = dict(coverage) if isinstance(coverage, dict) else {}
+        coverage[slide_content_key(unit_number, slide)] = covered
+        metadata["slide_coverage"] = coverage
+        save_state(slug, state_from_metadata(metadata))
+        write_text_atomic(path, format_topic(stable_metadata_for_topic(metadata), body))
+
+
+def coverage_from_session_history(topic: Topic) -> dict[str, list[str]]:
+    _topic_body, session_log = split_session_log(topic.body)
+    coverage: dict[str, list[str]] = {}
+    for entry in session_entries(session_log):
+        prompt = entry["prompt"]
+        response = entry["response"]
+        position = re.search(
+            r"Current structured lesson:\s*Unit\s+(\d+)/\d+\s*[·-]\s*Slide\s+(\d+)/\d+",
+            prompt,
+            flags=re.IGNORECASE,
+        )
+        if position:
+            unit_number = int(position.group(1))
+            slide = int(position.group(2))
+        elif entry["kind"] == "lesson":
+            unit_number = 1
+            slide = 1
+        else:
+            continue
+        unit = course_unit_at(topic.metadata, unit_number)
+        labels = [
+            label
+            for label in unit_concept_labels(unit)
+            if _answer_covers_concept(response, label)
+        ]
+        if labels:
+            key = slide_content_key(unit_number, slide)
+            existing = coverage.setdefault(key, [])
+            for label in labels:
+                if label not in existing:
+                    existing.append(label)
+    return coverage
 
 
 def course_coverage_ledger(metadata: dict[str, object], current_unit: int) -> list[str]:
@@ -2700,7 +2888,12 @@ def course_coverage_ledger(metadata: dict[str, object], current_unit: int) -> li
         number = unit.get("unit")
         if not isinstance(number, int) or number >= current_unit:
             continue
-        for label in unit_concept_labels(unit):
+        labels = (
+            unit_covered_concepts(metadata, number)
+            if metadata.get("coverage_contract") is True
+            else unit_concept_labels(unit)
+        )
+        for label in labels:
             key = label.lower()
             if key not in seen:
                 seen.add(key)
@@ -2718,6 +2911,7 @@ def current_lesson_prompt(topic: Topic) -> str:
             "No structured course position is set yet. Use the topic goal and notes, "
             "but do not invent a course sequence."
         )
+    assert isinstance(unit, int)
 
     title = str(current.get("title") or f"Unit {unit}").strip()
     chapter = str(current.get("chapter") or unit).strip()
@@ -2742,11 +2936,23 @@ def current_lesson_prompt(topic: Topic) -> str:
         lines.append(f"Current focus: {one_line(focus)}")
     target_concepts = unit_concept_labels(current)
     if target_concepts:
+        covered_here = unit_covered_concepts(metadata, unit)
+        remaining = unit_remaining_concepts(metadata, unit)
         lines.append(
-            "Concepts this unit must cover: "
-            + "; ".join(target_concepts)
-            + ". Teach a concept from this unit that earlier slides have not covered yet. "
-            "Do not repeat a concept already taught."
+            "Required concepts for this unit: " + "; ".join(target_concepts) + "."
+        )
+        if covered_here:
+            lines.append("Covered in earlier slides of this unit: " + "; ".join(covered_here))
+        if remaining:
+            lines.append(
+                "Still uncovered in this unit: "
+                + "; ".join(remaining)
+                + ". Teach one or two tightly related uncovered concepts now. "
+                "Do not repeat a covered concept."
+            )
+        lines.append(
+            "Append a hidden marker using the exact labels taught: "
+            "<!-- covered: Exact concept label; Optional second label -->"
         )
     covered = course_coverage_ledger(metadata, unit)
     if covered:
@@ -2763,7 +2969,14 @@ def current_lesson_prompt(topic: Topic) -> str:
 def advance_slide(slug: str, output_func=print, force: bool = False) -> bool:
     path = topic_path(slug)
     topic = read_topic(slug)
+    if topic.metadata.get("course_completed") is True:
+        line = structured_progress_line(topic) or topic_progress_line(topic)
+        output_func(f"Course already complete: {line}")
+        output_func("Use /review for retrieval practice or /progress to revisit a unit.")
+        return False
     last_lesson_response = last_tutor_lesson_response(topic)
+    coverage_message = ""
+    completed_course = False
     with file_lock(path):
         raw_metadata, body = parse_topic(path.read_text(encoding="utf-8"))
         metadata = merge_topic_state(normalize_topic_metadata(raw_metadata, slug), load_state(slug))
@@ -2803,16 +3016,74 @@ def advance_slide(slug: str, output_func=print, force: bool = False) -> bool:
         crossed_unit = False
         if slide < slide_count:
             slide += 1
+        elif metadata.get("coverage_contract") is True and unit_remaining_concepts(
+            metadata, unit
+        ):
+            expansions = current.get("coverage_expansions")
+            expansions = expansions if isinstance(expansions, int) else 0
+            if expansions < 2:
+                remaining = unit_remaining_concepts(metadata, unit)
+                added_slides = max(1, (len(remaining) + 1) // 2)
+                current["slide_count"] = slide_count + added_slides
+                current["coverage_expansions"] = expansions + 1
+                slide += 1
+                coverage_message = (
+                    f"Coverage check added {added_slides} slide(s) to Unit {unit} for: "
+                    + "; ".join(remaining)
+                )
+            elif unit < len(units):
+                crossed_unit = True
+                unit += 1
+                slide = 1
+                current = course_unit_at(metadata, unit)
+            else:
+                slide = slide_count
+                completed_course = True
         elif unit < len(units):
             crossed_unit = True
             unit += 1
             slide = 1
             current = course_unit_at(metadata, unit)
         else:
-            slide = slide_count
+            gap_unit = None
+            if metadata.get("coverage_contract") is True:
+                for candidate in range(1, len(units) + 1):
+                    if unit_remaining_concepts(metadata, candidate):
+                        gap_unit = candidate
+                        break
+            if gap_unit is not None:
+                remaining = unit_remaining_concepts(metadata, gap_unit)
+                target = course_unit_at(metadata, gap_unit)
+                if target is None:
+                    raise OpenLearnError("course plan is missing unit metadata")
+                target_expansions = target.get("coverage_expansions")
+                target_expansions = (
+                    target_expansions if isinstance(target_expansions, int) else 0
+                )
+                if target_expansions < 2:
+                    target_count = target.get("slide_count")
+                    if not isinstance(target_count, int) or target_count < 1:
+                        target_count = 1
+                    added_slides = max(1, (len(remaining) + 1) // 2)
+                    target["slide_count"] = target_count + added_slides
+                    target["coverage_expansions"] = target_expansions + 1
+                    unit = gap_unit
+                    slide = target_count + 1
+                    current = target
+                    coverage_message = (
+                        f"Coverage check reopened Unit {unit} with {added_slides} slide(s) for: "
+                        + "; ".join(remaining)
+                    )
+                else:
+                    slide = slide_count
+                    completed_course = True
+            else:
+                slide = slide_count
+                completed_course = True
 
         metadata["current_unit"] = unit
         metadata["current_slide"] = slide
+        metadata["course_completed"] = completed_course
         metadata["review_session_active"] = False
         clear_learning_gate(metadata)
         if current:
@@ -2846,10 +3117,15 @@ def advance_slide(slug: str, output_func=print, force: bool = False) -> bool:
         raw_count = current.get("slide_count")
         if isinstance(raw_count, int) and raw_count > 0:
             slide_count = raw_count
-    if unit >= len(units) and slide >= slide_count:
+    if completed_course:
         output_func(f"Course complete: {line}")
-    else:
-        output_func(f"Advanced to {line}")
+        detail = topic_progress_line(updated)
+        if detail:
+            output_func(detail)
+        return False
+    if coverage_message:
+        output_func(coverage_message)
+    output_func(f"Advanced to {line}")
     detail = topic_progress_line(updated)
     if detail:
         output_func(detail)
@@ -2893,11 +3169,29 @@ def set_course_progress(slug: str, unit_value: str, slide_value: str) -> None:
                 metadata["current_focus"] = title.strip()
         metadata["current_unit"] = unit
         metadata["current_slide"] = slide
+        metadata["course_completed"] = False
         metadata["last_video_focus"] = None
         metadata.pop("pending_chapter_quiz", None)
         metadata.pop("pending_quiz_chapter", None)
         save_state(slug, state_from_metadata(metadata))
         write_text_atomic(path, format_topic(stable_metadata_for_topic(metadata), body))
+
+
+def finish_pending_chapter_quiz(slug: str) -> bool:
+    path = topic_path(slug)
+    with file_lock(path):
+        raw_metadata, body = parse_topic(path.read_text(encoding="utf-8"))
+        metadata = merge_topic_state(
+            normalize_topic_metadata(raw_metadata, slug), load_state(slug)
+        )
+        if metadata.get("pending_chapter_quiz") is not True:
+            return False
+        metadata.pop("pending_chapter_quiz", None)
+        metadata.pop("pending_quiz_chapter", None)
+        clear_learning_gate(metadata)
+        save_state(slug, state_from_metadata(metadata))
+        write_text_atomic(path, format_topic(stable_metadata_for_topic(metadata), body))
+        return True
 
 
 def set_review_session_active(slug: str, active: bool) -> None:
@@ -3018,15 +3312,11 @@ def course_completion_counts(metadata: dict[str, object]) -> tuple[int, int]:
     if not isinstance(units, list) or not units:
         return 0, 0
     current_unit = metadata.get("current_unit")
-    current_slide = metadata.get("current_slide")
     if not isinstance(current_unit, int):
         return 0, len(units)
     completed = max(0, min(current_unit - 1, len(units)))
-    current = course_unit_at(metadata, current_unit)
-    if current and isinstance(current_slide, int):
-        slide_count = current.get("slide_count")
-        if isinstance(slide_count, int) and current_slide >= slide_count:
-            completed = max(completed, min(current_unit, len(units)))
+    if metadata.get("course_completed") is True:
+        completed = len(units)
     return completed, len(units)
 
 
@@ -3041,6 +3331,8 @@ def next_course_action(topic: Topic) -> str:
         return "review the current weak spot before moving on"
     if status == "partial":
         return "try one smaller follow-up question"
+    if metadata.get("course_completed") is True:
+        return "review completed material or revisit a unit"
     if metadata.get("current_unit"):
         return "continue the current lesson"
     if metadata.get("course_started"):
@@ -3831,6 +4123,8 @@ def save_course_started(topic: Topic, outline_prompt: str, outline: str) -> None
         )
         metadata = dict(metadata)
         metadata["course_started"] = True
+        metadata["course_completed"] = False
+        metadata["slide_coverage"] = {}
         units = parse_course_units(outline)
         if units:
             metadata["course_units"] = units
@@ -4307,6 +4601,7 @@ def save_quick_learn_metadata(slug: str, source_kind: str, source_label: str) ->
     metadata["learning_mode"] = "quick"
     metadata["quick_source_type"] = source_kind
     metadata["quick_source_label"] = source_label
+    metadata["coverage_contract"] = True
     write_topic(topic.path, metadata, topic.body)
 
 
@@ -4871,6 +5166,9 @@ def cmd_next(args: argparse.Namespace, output_func=print) -> int:
     set_active_topic(topic.slug)
     set_review_session_active(topic.slug, False)
     print_status_bar(topic, output_func)
+    if topic.metadata.get("course_completed") is True:
+        output_func("Course complete. Use /review for retrieval practice or /progress to revisit.")
+        return 0
     model = args.model or str(topic.metadata.get("model") or configured_model())
     lesson_context = current_lesson_prompt(topic)
     user = (
@@ -4879,9 +5177,10 @@ def cmd_next(args: argparse.Namespace, output_func=print) -> int:
         "or restart the course. Use the current goal, known concepts, weak spots, "
         "and notes. "
         "Use exactly this structure: Lesson, Example, Check. Teach one small idea, "
-        "give one concrete example or mini-drill, then ask one check-for-understanding "
-        "question. End by telling the learner to type /done when they have answered "
-        "and feel ready to move on."
+        "or at most two tightly related uncovered ideas, give one concrete example "
+        "or mini-drill, then ask one check-for-understanding question. End by telling "
+        "the learner to type /done when they have answered and feel ready to move on. "
+        "Append the required hidden <!-- covered: ... --> marker from the structured lesson."
         f"\n\nStructured lesson:\n{lesson_context}"
     )
     answer = call_openai_streaming(
@@ -4917,9 +5216,12 @@ def print_and_append_model_answer(
     mark_reviewed: bool = False,
     output_func=print,
 ) -> str:
-    global _LAST_RESPONSE_ANSWER_KEY
+    global _LAST_RESPONSE_ANSWER_KEY, _LAST_RESPONSE_COVERED_CONCEPTS
     answer = sanitize_model_output(answer)
     append_session(topic, kind, prompt, answer, mark_reviewed=mark_reviewed)
+    if kind in {"next", "lesson"}:
+        save_current_slide_coverage(topic.slug, answer, _LAST_RESPONSE_COVERED_CONCEPTS)
+        _LAST_RESPONSE_COVERED_CONCEPTS = []
     if kind in {"chat", "resume", "next", "lesson", "review"}:
         save_pending_question(topic, answer, _LAST_RESPONSE_ANSWER_KEY)
         _LAST_RESPONSE_ANSWER_KEY = ""
@@ -4930,12 +5232,12 @@ def save_pending_question(
     topic: Topic, answer: str, answer_key: str, question_text: str | None = None
 ) -> None:
     has_answer_key = answer_key in {"A", "B", "C", "D"}
-    if not has_answer_key and question_text is None:
-        return
     question = (
         question_text or extract_pending_question_text(answer) or last_question(answer)
     ).strip()
     if not question:
+        return
+    if not topic.path.exists():
         return
     is_multiple_choice = has_answer_key or any(
         re.match(r"(?i)^[A-D][\).:-]\s+", line.strip()) for line in question.splitlines()
@@ -6727,6 +7029,10 @@ def normalize_dynamic_state_defaults(metadata: dict[str, object]) -> dict[str, o
         value = normalized.get(key)
         if not isinstance(value, int) or value < 0:
             normalized[key] = 0
+    if not isinstance(normalized.get("course_completed"), bool):
+        normalized["course_completed"] = False
+    if not isinstance(normalized.get("slide_coverage"), dict):
+        normalized["slide_coverage"] = {}
     return normalized
 
 
@@ -6867,6 +7173,7 @@ def normalize_topic_metadata(metadata: dict[str, object], slug: str) -> dict[str
     normalized.setdefault("slug", slug)
     normalized.setdefault("current_focus", "")
     normalized.setdefault("course_started", False)
+    normalized.setdefault("coverage_contract", normalized.get("learning_mode") == "quick")
     normalized.setdefault("level", "beginner")
     normalized.setdefault("model", configured_model())
     normalized.setdefault("created", today())
@@ -6942,8 +7249,58 @@ def repair_topic_metadata(slug: str) -> bool:
     with file_lock(path):
         current_text = path.read_text(encoding="utf-8")
         metadata, body = parse_topic(current_text)
-        normalized = normalize_topic_metadata(metadata, slug)
-        if normalized == metadata:
+        normalized = merge_topic_state(normalize_topic_metadata(metadata, slug), load_state(slug))
+        if normalized.get("learning_mode") == "quick":
+            plan_topic = Topic(slug=slug, path=path, metadata=normalized, body=body)
+            reparsed = parse_course_units(accepted_course_plan(plan_topic))
+            existing_units = normalized.get("course_units")
+            existing_by_number: dict[int, dict[str, object]] = {}
+            if isinstance(existing_units, list):
+                existing_by_number = {
+                    unit["unit"]: unit
+                    for unit in existing_units
+                    if isinstance(unit, dict) and isinstance(unit.get("unit"), int)
+                }
+            if reparsed:
+                for unit in reparsed:
+                    unit_number = unit.get("unit")
+                    existing = existing_by_number.get(unit_number)
+                    concepts = unit_concept_labels(unit)
+                    minimum_slides = max(1, (len(concepts) + 1) // 2)
+                    planned_count = unit.get("slide_count")
+                    planned_count = (
+                        planned_count if isinstance(planned_count, int) else minimum_slides
+                    )
+                    existing_count = existing.get("slide_count") if existing else 0
+                    existing_count = existing_count if isinstance(existing_count, int) else 0
+                    unit["slide_count"] = max(minimum_slides, planned_count, existing_count)
+                    if existing and "difficulty" in existing:
+                        unit["difficulty"] = existing["difficulty"]
+                if reparsed != existing_units:
+                    normalized["course_units"] = reparsed
+                    normalized["course_completed"] = False
+                normalized["coverage_contract"] = True
+                history_topic = Topic(slug=slug, path=path, metadata=normalized, body=body)
+                history_coverage = coverage_from_session_history(history_topic)
+                existing_coverage = normalized.get("slide_coverage")
+                merged_coverage = (
+                    dict(existing_coverage) if isinstance(existing_coverage, dict) else {}
+                )
+                for key, labels in history_coverage.items():
+                    existing_labels = merged_coverage.get(key)
+                    combined = (
+                        [item for item in existing_labels if isinstance(item, str)]
+                        if isinstance(existing_labels, list)
+                        else []
+                    )
+                    for label in labels:
+                        if label not in combined:
+                            combined.append(label)
+                    merged_coverage[key] = combined
+                normalized["slide_coverage"] = merged_coverage
+        if stable_metadata_for_topic(normalized) == metadata and state_from_metadata(
+            normalized
+        ) == load_state(slug):
             return False
         write_topic_backup(path, current_text)
         save_state(slug, state_from_metadata(normalized))
@@ -7665,15 +8022,17 @@ def call_openai_streaming(
     *,
     capture_answer_key: bool = True,
 ) -> str:
-    global _LAST_RESPONSE_ANSWER_KEY
+    global _LAST_RESPONSE_ANSWER_KEY, _LAST_RESPONSE_COVERED_CONCEPTS
     if _DRY_RUN:
         raise DryRunPrompt(model, system, user)
     if capture_answer_key:
         _LAST_RESPONSE_ANSWER_KEY = ""
+    _LAST_RESPONSE_COVERED_CONCEPTS = []
 
     # If call_openai has been monkeypatched, prefer it (test hook).
     if call_openai.__name__ != "call_openai":
         raw_text = call_openai(model, system, user)
+        _LAST_RESPONSE_COVERED_CONCEPTS = extract_covered_concepts(raw_text)
         if capture_answer_key:
             _LAST_RESPONSE_ANSWER_KEY = extract_answer_key(raw_text)
         text = sanitize_model_output(raw_text)
@@ -7687,6 +8046,7 @@ def call_openai_streaming(
     # Mock mode support: return a canned response without contacting the network.
     if os.environ.get("OPENLEARN_MOCK") in {"1", "true", "yes"}:
         raw = _mock_openai_response(model, system, user)
+        _LAST_RESPONSE_COVERED_CONCEPTS = extract_covered_concepts(raw)
         if capture_answer_key:
             _LAST_RESPONSE_ANSWER_KEY = extract_answer_key(raw)
         text = sanitize_model_output(raw)
@@ -7724,6 +8084,8 @@ def call_openai_streaming(
     chunks: list[str] = []
     spinner_context = thinking_progress(output_func)
     spinner = spinner_context.__enter__()
+    spinner_active = True
+    tutor_stream: TutorResponseStream | None = None
     if spinner is not None:
         spinner.add_task("waiting", total=None)
     try:
@@ -7743,15 +8105,32 @@ def call_openai_streaming(
                 if not text:
                     continue
                 chunks.append(text)
+                if output_func is print:
+                    if tutor_stream is None:
+                        spinner_context.__exit__(None, None, None)
+                        spinner_active = False
+                        tutor_stream = TutorResponseStream()
+                        tutor_stream.start()
+                    tutor_stream.update(sanitize_stream_preview("".join(chunks)))
     except HTTPError as exc:
+        if tutor_stream is not None:
+            tutor_stream.abort()
         detail = exc.read().decode("utf-8", errors="replace")
         raise OpenLearnError(f"OpenAI request failed: HTTP {exc.code}: {detail}") from exc
     except URLError as exc:
+        if tutor_stream is not None:
+            tutor_stream.abort()
         raise OpenLearnError(f"OpenAI request failed: {exc.reason}") from exc
+    except Exception:
+        if tutor_stream is not None:
+            tutor_stream.abort()
+        raise
     finally:
-        spinner_context.__exit__(None, None, None)
+        if spinner_active:
+            spinner_context.__exit__(None, None, None)
 
     raw_text = "".join(chunks)
+    _LAST_RESPONSE_COVERED_CONCEPTS = extract_covered_concepts(raw_text)
     if capture_answer_key:
         _LAST_RESPONSE_ANSWER_KEY = extract_answer_key(raw_text)
     text = sanitize_model_output(raw_text)
@@ -7760,14 +8139,17 @@ def call_openai_streaming(
             "OpenAI response did not contain output text; try a faster non-reasoning model or increase the token limit."
         )
 
-    emit_tutor_output(text, output_func)
+    if tutor_stream is not None:
+        tutor_stream.finish(text)
+    else:
+        emit_tutor_output(text, output_func)
     return text.strip()
 
 
 def emit_tutor_output(text: str, output_func=print) -> None:
     if text:
         output_func("")
-        emit_tutor_markdown(text, output_func)
+        emit_tutor_response(text, output_func)
         output_func("")
 
 
