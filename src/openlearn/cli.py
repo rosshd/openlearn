@@ -280,7 +280,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if (
             not command_args
-            and configured_openai_api_key() is None
+            and _configured_provider_needs_onboarding()
             and "OPENLEARN_MOCK" not in os.environ
         ):
             from openlearn.onboarding import run_onboarding
@@ -6309,6 +6309,10 @@ def provider_is_configured(config: dict[str, object] | None = None) -> bool:
     if configured_openai_api_key():
         return True
     return not base_url_requires_api_key(configured_base_url(config))
+
+
+def _configured_provider_needs_onboarding() -> bool:
+    return not provider_is_configured()
 
 
 def topic_path(slug: str) -> Path:

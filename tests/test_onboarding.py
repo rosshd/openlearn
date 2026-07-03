@@ -503,6 +503,51 @@ class OnboardingTriggerTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         run_onboarding.assert_not_called()
 
+    def test_keyless_local_environment_skips_onboarding(self) -> None:
+        with (
+            patch.dict(
+                "os.environ", {"OPENLEARN_BASE_URL": "http://localhost:11434/v1"}, clear=True
+            ),
+            patch.object(onboarding, "run_onboarding") as run_onboarding,
+            patch.object(cli, "run_menu", return_value=0),
+        ):
+            exit_code = cli.main([])
+
+        self.assertEqual(exit_code, 0)
+        run_onboarding.assert_not_called()
+
+    def test_keyless_local_config_skips_onboarding(self) -> None:
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            patch.object(cli, "configured_openai_api_key", return_value=None),
+            patch.object(cli, "configured_base_url", return_value="http://localhost:11434/v1"),
+            patch.object(onboarding, "run_onboarding") as run_onboarding,
+            patch.object(cli, "run_menu", return_value=0),
+        ):
+            exit_code = cli.main([])
+
+        self.assertEqual(exit_code, 0)
+        run_onboarding.assert_not_called()
+
+    def test_remote_environment_without_key_runs_onboarding(self) -> None:
+        calls: list[str] = []
+
+        with (
+            patch.dict(
+                "os.environ", {"OPENLEARN_BASE_URL": "https://api.example.com/v1"}, clear=True
+            ),
+            patch.object(
+                onboarding,
+                "run_onboarding",
+                side_effect=lambda: calls.append("onboarding") or True,
+            ),
+            patch.object(cli, "run_menu", side_effect=lambda: calls.append("menu") or 0),
+        ):
+            exit_code = cli.main([])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(calls, ["onboarding", "menu"])
+
     def test_mock_environment_skips_onboarding(self) -> None:
         with (
             patch.dict("os.environ", {"OPENLEARN_MOCK": "1"}, clear=True),
