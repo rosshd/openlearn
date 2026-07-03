@@ -80,6 +80,59 @@ ProviderValidator = Callable[[str, str], ValidationResult]
 ConfigCommand = Callable[[object], int]
 
 
+def prompt_for_provider(
+    *,
+    input_func: InputFunc = input,
+    output_func: OutputFunc = print,
+) -> ProviderPreset:
+    presets = list(PROVIDER_PRESETS.values())
+    output_func("Provider:")
+    for index, preset in enumerate(presets, start=1):
+        output_func(f"  {index}. {preset.name}")
+
+    while True:
+        choice = input_func("Provider [1]: ").strip() or "1"
+        if choice.isdigit() and 1 <= int(choice) <= len(presets):
+            return presets[int(choice) - 1]
+        output_func(f"Choose a provider from 1 to {len(presets)}.")
+
+
+def prompt_for_base_url(
+    preset: ProviderPreset,
+    *,
+    input_func: InputFunc = input,
+    output_func: OutputFunc = print,
+) -> str:
+    if preset.base_url is not None:
+        return preset.base_url
+
+    while True:
+        base_url = input_func("Base URL: ").strip().rstrip("/")
+        if base_url.startswith(("https://", "http://")):
+            return base_url
+        output_func("Base URL must start with https:// or http://.")
+
+
+def prompt_for_model(
+    preset: ProviderPreset,
+    *,
+    input_func: InputFunc = input,
+    output_func: OutputFunc = print,
+) -> str:
+    prompt = (
+        f"Model [{preset.default_model}]: "
+        if preset.default_model is not None
+        else "Model: "
+    )
+    while True:
+        model = input_func(prompt).strip()
+        if model:
+            return model
+        if preset.default_model is not None:
+            return preset.default_model
+        output_func("Model is required.")
+
+
 def validate_provider(
     base_url: str,
     api_key: str,

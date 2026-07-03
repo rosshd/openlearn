@@ -49,6 +49,60 @@ class ProviderPresetTests(unittest.TestCase):
         self.assertIsNone(onboarding.PROVIDER_PRESETS["custom"].default_model)
 
 
+class ProviderPromptTests(unittest.TestCase):
+    def test_defaults_to_openai_and_uses_its_declared_settings(self) -> None:
+        output: list[str] = []
+        preset = onboarding.prompt_for_provider(
+            input_func=lambda _prompt: "",
+            output_func=output.append,
+        )
+
+        self.assertIs(preset, onboarding.PROVIDER_PRESETS["openai"])
+        self.assertTrue(any("Anthropic-compatible" in line for line in output))
+        self.assertEqual(
+            onboarding.prompt_for_base_url(preset),
+            "https://api.openai.com/v1",
+        )
+        self.assertEqual(
+            onboarding.prompt_for_model(preset, input_func=lambda _prompt: ""),
+            "gpt-4.1-mini",
+        )
+
+    def test_reprompts_invalid_provider_choice(self) -> None:
+        choices = iter(["9", "3"])
+        output: list[str] = []
+
+        preset = onboarding.prompt_for_provider(
+            input_func=lambda _prompt: next(choices),
+            output_func=output.append,
+        )
+
+        self.assertIs(preset, onboarding.PROVIDER_PRESETS["ollama"])
+        self.assertIn("Choose a provider from 1 to 4.", output)
+
+    def test_custom_provider_requires_valid_base_url_and_model(self) -> None:
+        base_urls = iter(["example.com/v1", " https://api.example.com/v1/ "])
+        models = iter(["", "example-model"])
+        output: list[str] = []
+        preset = onboarding.PROVIDER_PRESETS["custom"]
+
+        base_url = onboarding.prompt_for_base_url(
+            preset,
+            input_func=lambda _prompt: next(base_urls),
+            output_func=output.append,
+        )
+        model = onboarding.prompt_for_model(
+            preset,
+            input_func=lambda _prompt: next(models),
+            output_func=output.append,
+        )
+
+        self.assertEqual(base_url, "https://api.example.com/v1")
+        self.assertEqual(model, "example-model")
+        self.assertIn("Base URL must start with https:// or http://.", output)
+        self.assertIn("Model is required.", output)
+
+
 class ProviderValidationTests(unittest.TestCase):
     def test_gets_models_with_bearer_key_and_ten_second_timeout(self) -> None:
         calls: list[tuple[object, int]] = []
