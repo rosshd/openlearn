@@ -273,10 +273,20 @@ Output boundaries:
 
 def main(argv: list[str] | None = None) -> int:
     global _DRY_RUN
+    command_args = sys.argv[1:] if argv is None else argv
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(command_args)
     _DRY_RUN = bool(getattr(args, "dry_run", False))
     try:
+        if (
+            not command_args
+            and configured_openai_api_key() is None
+            and "OPENLEARN_MOCK" not in os.environ
+        ):
+            from openlearn.onboarding import run_onboarding
+
+            if not run_onboarding():
+                return 1
         if args.func is cmd_review:
             return cmd_review(args, input_func=input if sys.stdin.isatty() else None)
         return args.func(args)

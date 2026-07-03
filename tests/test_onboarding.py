@@ -8,7 +8,7 @@ from urllib.error import HTTPError, URLError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from openlearn import onboarding
+from openlearn import cli, onboarding
 
 
 class FakeResponse:
@@ -376,6 +376,61 @@ class OnboardingFlowTests(unittest.TestCase):
         self.assertFalse(ready)
         prompt_for_model.assert_not_called()
         persist_configuration.assert_not_called()
+
+
+class OnboardingTriggerTests(unittest.TestCase):
+    def test_bare_invocation_runs_onboarding_before_menu_when_unconfigured(self) -> None:
+        calls: list[str] = []
+
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            patch.object(cli, "configured_openai_api_key", return_value=None),
+            patch.object(
+                onboarding,
+                "run_onboarding",
+                side_effect=lambda: calls.append("onboarding") or True,
+            ),
+            patch.object(cli, "run_menu", side_effect=lambda: calls.append("menu") or 0),
+        ):
+            exit_code = cli.main([])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(calls, ["onboarding", "menu"])
+
+    def test_configured_environment_skips_onboarding(self) -> None:
+        with (
+            patch.dict("os.environ", {"OPENAI_API_KEY": "env-key"}, clear=True),
+            patch.object(onboarding, "run_onboarding") as run_onboarding,
+            patch.object(cli, "run_menu", return_value=0),
+        ):
+            exit_code = cli.main([])
+
+        self.assertEqual(exit_code, 0)
+        run_onboarding.assert_not_called()
+
+    def test_mock_environment_skips_onboarding(self) -> None:
+        with (
+            patch.dict("os.environ", {"OPENLEARN_MOCK": "1"}, clear=True),
+            patch.object(cli, "configured_openai_api_key", return_value=None),
+            patch.object(onboarding, "run_onboarding") as run_onboarding,
+            patch.object(cli, "run_menu", return_value=0),
+        ):
+            exit_code = cli.main([])
+
+        self.assertEqual(exit_code, 0)
+        run_onboarding.assert_not_called()
+
+    def test_failed_onboarding_exits_before_menu(self) -> None:
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            patch.object(cli, "configured_openai_api_key", return_value=None),
+            patch.object(onboarding, "run_onboarding", return_value=False),
+            patch.object(cli, "run_menu") as run_menu,
+        ):
+            exit_code = cli.main([])
+
+        self.assertEqual(exit_code, 1)
+        run_menu.assert_not_called()
 
 
 if __name__ == "__main__":
