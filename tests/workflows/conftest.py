@@ -9,8 +9,12 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-import pexpect
 import pytest
+
+if sys.platform == "win32":
+    pexpect = None
+else:
+    import pexpect
 
 
 ANSI_RE = re.compile(r"(?:\x1b\][^\x07]*(?:\x07|\x1b\\)|\x1b\[[0-?]*[ -/]*[@-~])")
@@ -62,6 +66,8 @@ class OpenLearnRunner:
         )
 
     def spawn(self, *args: str, timeout: int | float = 5) -> OpenLearnProcess:
+        if pexpect is None:
+            pytest.skip("pexpect.spawn requires a POSIX pty")
         log = io.StringIO()
         child = pexpect.spawn(
             self.command,

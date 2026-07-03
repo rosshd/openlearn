@@ -6607,13 +6607,23 @@ def _select_lock_primitives(platform: str = sys.platform):
     behind one function boundary so a future storage module can lift it.
     """
     if platform == "win32":
+        import errno
         import msvcrt
 
         def _flock(lock_file) -> None:
             # msvcrt has no whole-file lock; locking the first byte (which may
             # be past EOF on the empty lock file) is the standard equivalent.
-            lock_file.seek(0)
-            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+            while True:
+                lock_file.seek(0)
+                try:
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+                    return
+                except OSError as exc:
+                    if exc.errno not in (errno.EACCES, errno.EDEADLK) and getattr(
+                        exc, "winerror", None
+                    ) not in (33, 36):
+                        raise
+                    time.sleep(0.05)
 
         def _funlock(lock_file) -> None:
             lock_file.seek(0)

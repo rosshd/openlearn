@@ -7092,7 +7092,7 @@ class PlatformGuardTests(unittest.TestCase):
     def test_select_lock_primitives_win32_uses_msvcrt(self) -> None:
         calls: list[tuple[int, str, int]] = []
         fake_msvcrt = types.SimpleNamespace(
-            LK_LOCK="LK_LOCK",
+            LK_NBLCK="LK_NBLCK",
             LK_UNLCK="LK_UNLCK",
             locking=lambda fd, mode, nbytes: calls.append((fd, mode, nbytes)),
         )
@@ -7102,8 +7102,33 @@ class PlatformGuardTests(unittest.TestCase):
             flock, funlock = cli._select_lock_primitives("win32")
             flock(fake_file)
             funlock(fake_file)
-        self.assertEqual(calls, [(7, "LK_LOCK", 1), (7, "LK_UNLCK", 1)])
+        self.assertEqual(calls, [(7, "LK_NBLCK", 1), (7, "LK_UNLCK", 1)])
         fake_file.seek.assert_called_with(0)
+
+    def test_select_lock_primitives_win32_retries_busy_lock(self) -> None:
+        calls: list[tuple[int, str, int]] = []
+        attempts = 0
+
+        def locking(fd, mode, nbytes):
+            nonlocal attempts
+            attempts += 1
+            calls.append((fd, mode, nbytes))
+            if attempts == 1:
+                raise OSError(13, "busy")
+
+        fake_msvcrt = types.SimpleNamespace(
+            LK_NBLCK="LK_NBLCK", LK_UNLCK="LK_UNLCK", locking=locking
+        )
+        fake_file = mock.Mock()
+        fake_file.fileno.return_value = 7
+        with (
+            mock.patch.dict(sys.modules, {"msvcrt": fake_msvcrt}),
+            mock.patch.object(cli.time, "sleep") as sleep,
+        ):
+            flock, _ = cli._select_lock_primitives("win32")
+            flock(fake_file)
+        self.assertEqual(calls, [(7, "LK_NBLCK", 1), (7, "LK_NBLCK", 1)])
+        sleep.assert_called_once_with(0.05)
 
     def test_cli_module_imports_on_simulated_windows(self) -> None:
         code = (
@@ -7117,7 +7142,7 @@ class PlatformGuardTests(unittest.TestCase):
             "sys.platform = 'win32'\n"
             "sys.modules['fcntl'] = None\n"
             "sys.modules['msvcrt'] = types.SimpleNamespace("
-            "LK_LOCK=0, LK_UNLCK=1, locking=lambda *args: None)\n"
+            "LK_NBLCK=0, LK_UNLCK=1, locking=lambda *args: None)\n"
             "import openlearn.cli\n"
             "print('import ok')\n"
         )
