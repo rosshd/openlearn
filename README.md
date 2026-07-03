@@ -43,6 +43,11 @@ Run the project gate:
 make check
 ```
 
+### Platform support
+
+openLearn supports Linux, macOS, and Windows on Python 3.11 and newer.
+Multiline paste detection requires a POSIX terminal; on Windows, the REPL accepts pasted input one line at a time.
+
 ## Configuration
 
 Interactive setup:
