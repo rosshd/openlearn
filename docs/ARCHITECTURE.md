@@ -51,10 +51,13 @@ Model-backed commands send only selected-topic context:
 Configuration precedence is environment variables, then `config.json`, then defaults.
 Provider calls target OpenAI-compatible chat completions at `{base_url}/chat/completions`.
 For `chat`, `resume`, `next`, and `review`, `--dry-run` prints the rendered system and user messages instead of calling the provider or mutating local files.
+Learner-metadata extraction can use `OPENLEARN_EXTRACTOR_MODEL` or `extractor_model`; otherwise it uses the tutor model.
+Extractor calls send a reduced metadata snapshot limited to pending checks, focus, known concepts, weak spots, and review due items.
 
 ## Interactive UI
 
 The REPL is line-oriented but coalesces quick multiline paste into one learner message.
+After a tutor response, learner-metadata extraction is deferred so the next prompt appears immediately.
 Natural navigation phrases such as `continue`, `move on`, and `skip` advance the current slide instead of being graded as answers.
 
 ## Tests

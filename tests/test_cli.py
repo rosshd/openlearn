@@ -6,6 +6,7 @@ import re
 import sys
 import tempfile
 import textwrap
+import threading
 import types
 import unittest
 from argparse import Namespace
@@ -100,12 +101,14 @@ class CliStorageTests(unittest.TestCase):
             for name in (
                 "OPENLEARN_HOME",
                 "OPENLEARN_MODEL",
+                "OPENLEARN_EXTRACTOR_MODEL",
                 "OPENLEARN_BASE_URL",
                 "OPENAI_API_KEY",
             )
         }
         os.environ["OPENLEARN_HOME"] = self.home.name
         os.environ.pop("OPENLEARN_MODEL", None)
+        os.environ.pop("OPENLEARN_EXTRACTOR_MODEL", None)
         os.environ.pop("OPENLEARN_BASE_URL", None)
         os.environ.pop("OPENAI_API_KEY", None)
         cli._CONFIG_CACHE = None
@@ -1272,18 +1275,27 @@ class CliStorageTests(unittest.TestCase):
         call_silent(cli.cmd_config_set_model, Namespace(model="saved-model"))
         call_silent(cli.cmd_config_set_base_url, Namespace(base_url="https://example.test/v1/"))
         call_silent(cli.cmd_config_set_key, Namespace(api_key="sk-saved"))
+        config = cli.read_config()
+        config["extractor_model"] = "saved-extractor-model"
+        cli.write_config(config)
 
         self.assertEqual(cli.configured_model(), "saved-model")
+        self.assertEqual(cli.configured_extractor_model("turn-model"), "saved-extractor-model")
         self.assertEqual(cli.configured_base_url(), "https://example.test/v1")
         self.assertEqual(cli.configured_openai_api_key(), "sk-saved")
 
         os.environ["OPENLEARN_MODEL"] = "env-model"
+        os.environ["OPENLEARN_EXTRACTOR_MODEL"] = "env-extractor-model"
         os.environ["OPENLEARN_BASE_URL"] = "https://env.example/v1/"
         os.environ["OPENAI_API_KEY"] = "sk-env"
 
         self.assertEqual(cli.configured_model(), "env-model")
+        self.assertEqual(cli.configured_extractor_model("turn-model"), "env-extractor-model")
         self.assertEqual(cli.configured_base_url(), "https://env.example/v1")
         self.assertEqual(cli.configured_openai_api_key(), "sk-env")
+
+    def test_extractor_model_falls_back_to_tutor_model(self) -> None:
+        self.assertEqual(cli.configured_extractor_model("turn-model"), "turn-model")
 
     def test_config_show_masks_environment_api_key(self) -> None:
         os.environ["OPENAI_API_KEY"] = "sk-or-v1-test-secret-1234"
@@ -1658,9 +1670,11 @@ class InteractiveTests(unittest.TestCase):
     def setUp(self) -> None:
         self.home = tempfile.TemporaryDirectory()
         self.previous_env = {
-            name: os.environ.get(name) for name in ("OPENLEARN_HOME", "OPENAI_API_KEY")
+            name: os.environ.get(name)
+            for name in ("OPENLEARN_HOME", "OPENLEARN_EXTRACTOR_MODEL", "OPENAI_API_KEY")
         }
         os.environ["OPENLEARN_HOME"] = self.home.name
+        os.environ.pop("OPENLEARN_EXTRACTOR_MODEL", None)
         os.environ["OPENAI_API_KEY"] = "sk-test"
         cli._CONFIG_CACHE = None
 
@@ -2909,6 +2923,227 @@ class InteractiveTests(unittest.TestCase):
         self.assertIn("How do I move?", topic.body)
         self.assertIn("Use h j k l for movement.", topic.body)
 
+    def test_repl_prompts_before_metadata_update_finishes_and_joins_before_next_turn(
+        self,
+    ) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
+        update_started = threading.Event()
+        allow_update = threading.Event()
+        update_finished = threading.Event()
+        prompt_states = []
+        system_known = []
+        original_stream = cli.call_openai_streaming
+        original_system_prompt = cli.system_prompt
+        original_update = cli.update_learning_metadata
+        original_maybe = cli.maybe_suggest_videos
+
+        def fake_stream(*_args, user: str, **_kwargs) -> str:
+            return f"Check: What follows {user}?"
+
+        def fake_system_prompt(topic: cli.Topic) -> str:
+            system_known.append(list(topic.metadata.get("known", [])))
+            return "Tutor system prompt"
+
+        def slow_update(
+            topic: cli.Topic,
+            learner_prompt: str,
+            *_args,
+            **_kwargs,
+        ) -> None:
+            if learner_prompt != "first":
+                return
+            update_started.set()
+            self.assertTrue(allow_update.wait(timeout=2))
+            path = topic.path
+            metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+            metadata = dict(metadata)
+            metadata["known"] = ["joined metadata"]
+            path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
+            update_finished.set()
+
+        inputs = iter(["first", "second", "/q"])
+
+        def input_func(prompt: str = "") -> str:
+            if len(prompt_states) == 1:
+                self.assertTrue(update_started.wait(timeout=2))
+                prompt_states.append((prompt, update_finished.is_set()))
+                allow_update.set()
+            else:
+                prompt_states.append((prompt, update_finished.is_set()))
+            return next(inputs)
+
+        cli.call_openai_streaming = fake_stream
+        cli.system_prompt = fake_system_prompt
+        cli.update_learning_metadata = slow_update
+        cli.maybe_suggest_videos = lambda *_args, **_kwargs: None
+        try:
+            exit_code = call_silent(
+                cli.run_repl,
+                input_func=input_func,
+                output_func=lambda _text: None,
+                show_intro=False,
+            )
+        finally:
+            allow_update.set()
+            cli.call_openai_streaming = original_stream
+            cli.system_prompt = original_system_prompt
+            cli.update_learning_metadata = original_update
+            cli.maybe_suggest_videos = original_maybe
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(prompt_states[1], ("Answer> ", False))
+        self.assertEqual(system_known[0], [])
+        self.assertEqual(system_known[1], ["joined metadata"])
+
+    def test_repl_joins_deferred_update_before_quit_returns(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
+        update_started = threading.Event()
+        allow_update = threading.Event()
+        update_finished = threading.Event()
+        original_stream = cli.call_openai_streaming
+        original_update = cli.update_learning_metadata
+        original_maybe = cli.maybe_suggest_videos
+
+        def slow_update(*_args, **_kwargs) -> None:
+            update_started.set()
+            self.assertTrue(allow_update.wait(timeout=2))
+            update_finished.set()
+
+        inputs = iter(["first", "/q"])
+
+        def input_func(_prompt: str = "") -> str:
+            value = next(inputs)
+            if value == "/q":
+                self.assertTrue(update_started.wait(timeout=2))
+                self.assertFalse(update_finished.is_set())
+                allow_update.set()
+            return value
+
+        cli.call_openai_streaming = lambda *_args, **_kwargs: "Check: What is a motion?"
+        cli.update_learning_metadata = slow_update
+        cli.maybe_suggest_videos = lambda *_args, **_kwargs: None
+        try:
+            exit_code = call_silent(
+                cli.run_repl,
+                input_func=input_func,
+                output_func=lambda _text: None,
+                show_intro=False,
+            )
+        finally:
+            allow_update.set()
+            cli.call_openai_streaming = original_stream
+            cli.update_learning_metadata = original_update
+            cli.maybe_suggest_videos = original_maybe
+
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(update_finished.is_set())
+
+    def test_repl_joins_deferred_update_before_running_command(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
+        update_started = threading.Event()
+        allow_update = threading.Event()
+        update_finished = threading.Event()
+        command_known = []
+        original_stream = cli.call_openai_streaming
+        original_update = cli.update_learning_metadata
+        original_maybe = cli.maybe_suggest_videos
+        original_handle_command = cli.handle_repl_command
+
+        def slow_update(topic: cli.Topic, *_args, **_kwargs) -> None:
+            update_started.set()
+            self.assertTrue(allow_update.wait(timeout=2))
+            metadata, body = cli.parse_topic(topic.path.read_text(encoding="utf-8"))
+            metadata = dict(metadata)
+            metadata["known"] = ["joined before command"]
+            topic.path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
+            update_finished.set()
+
+        def handle_command(command: str, **kwargs) -> None:
+            self.assertTrue(update_finished.is_set())
+            command_known.extend(cli.read_topic("vim").metadata.get("known", []))
+            original_handle_command(command, **kwargs)
+
+        inputs = iter(["first", "/help", "/q"])
+
+        def input_func(_prompt: str = "") -> str:
+            value = next(inputs)
+            if value == "/help":
+                self.assertTrue(update_started.wait(timeout=2))
+                self.assertFalse(update_finished.is_set())
+                allow_update.set()
+            return value
+
+        cli.call_openai_streaming = lambda *_args, **_kwargs: "Tutor answer"
+        cli.update_learning_metadata = slow_update
+        cli.maybe_suggest_videos = lambda *_args, **_kwargs: None
+        cli.handle_repl_command = handle_command
+        try:
+            exit_code = call_silent(
+                cli.run_repl,
+                input_func=input_func,
+                output_func=lambda _text: None,
+                show_intro=False,
+            )
+        finally:
+            allow_update.set()
+            cli.call_openai_streaming = original_stream
+            cli.update_learning_metadata = original_update
+            cli.maybe_suggest_videos = original_maybe
+            cli.handle_repl_command = original_handle_command
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(command_known, ["joined before command"])
+
+    def test_repl_queues_deferred_video_output_until_next_input_returns(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
+        maybe_started = threading.Event()
+        maybe_finished = threading.Event()
+        output = []
+        prompt_snapshots = []
+        original_stream = cli.call_openai_streaming
+        original_update = cli.update_learning_metadata
+        original_maybe = cli.maybe_suggest_videos
+
+        def fake_stream(*_args, user: str, output_func=print, **_kwargs) -> str:
+            output_func(f"tutor response for {user}")
+            return f"Check: What follows {user}?"
+
+        cli.call_openai_streaming = fake_stream
+        cli.update_learning_metadata = lambda *_args, **_kwargs: None
+
+        def fake_maybe(_slug, output_func=print):
+            maybe_started.set()
+            output_func("video suggestion")
+            maybe_finished.set()
+
+        cli.maybe_suggest_videos = fake_maybe
+        inputs = iter(["first", "second", "/q"])
+
+        def input_func(prompt: str = "") -> str:
+            if len(prompt_snapshots) == 1:
+                self.assertTrue(maybe_started.wait(timeout=2))
+                self.assertTrue(maybe_finished.wait(timeout=2))
+                self.assertNotIn("video suggestion", output)
+            prompt_snapshots.append((prompt, list(output)))
+            return next(inputs)
+
+        try:
+            exit_code = call_silent(
+                cli.run_repl,
+                input_func=input_func,
+                output_func=output.append,
+                show_intro=False,
+            )
+        finally:
+            cli.call_openai_streaming = original_stream
+            cli.update_learning_metadata = original_update
+            cli.maybe_suggest_videos = original_maybe
+
+        self.assertEqual(exit_code, 0)
+        self.assertNotIn("video suggestion", prompt_snapshots[1][1])
+        self.assertIn("video suggestion", output)
+        self.assertLess(output.index("video suggestion"), output.index("tutor response for second"))
+
     def test_repl_prints_status_before_ai_response(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
         original_ask_topic = cli.ask_topic
@@ -3592,12 +3827,14 @@ class PromptInstructionTests(unittest.TestCase):
             for name in (
                 "OPENLEARN_HOME",
                 "OPENLEARN_MODEL",
+                "OPENLEARN_EXTRACTOR_MODEL",
                 "OPENLEARN_BASE_URL",
                 "OPENAI_API_KEY",
             )
         }
         os.environ["OPENLEARN_HOME"] = self.home.name
         os.environ.pop("OPENLEARN_MODEL", None)
+        os.environ.pop("OPENLEARN_EXTRACTOR_MODEL", None)
         os.environ.pop("OPENLEARN_BASE_URL", None)
         os.environ.pop("OPENAI_API_KEY", None)
         cli._CONFIG_CACHE = None
@@ -4029,6 +4266,39 @@ class PromptInstructionTests(unittest.TestCase):
         self.assertEqual(calls[0].topic, "active-topic")
         self.assertTrue(calls[0].due_only)
 
+    def test_metadata_update_prompt_excludes_unneeded_bookkeeping(self) -> None:
+        prompt = cli.metadata_update_prompt(
+            {
+                "pending_question": {"question": "What is normal mode?"},
+                "pending_chapter_quiz": True,
+                "pending_quiz_chapter": "1.1 Modes",
+                "pending_cumulative_quiz": {"kind": "cumulative"},
+                "current_focus": "Vim modes",
+                "known": ["normal mode"],
+                "weak_spots": ["insert mode"],
+                "review_due": [{"concept": "mode switching", "due": cli.today()}],
+                "concept_attempts": {"normal-mode": {"attempts": 12, "correct_sum": 10.0}},
+                "quiz_history": [{"score": "3/4"}],
+                "course_units": [{"unit": 1, "title": "Modes"}],
+                "slide_contents": {"1:1": "Modes intro"},
+            },
+            "It is where commands run.",
+            "Correct.",
+        )
+
+        self.assertIn('"pending_question"', prompt)
+        self.assertIn('"pending_chapter_quiz"', prompt)
+        self.assertIn('"pending_quiz_chapter"', prompt)
+        self.assertIn('"pending_cumulative_quiz"', prompt)
+        self.assertIn('"current_focus"', prompt)
+        self.assertIn('"known"', prompt)
+        self.assertIn('"weak_spots"', prompt)
+        self.assertIn('"review_due"', prompt)
+        self.assertNotIn('"concept_attempts"', prompt)
+        self.assertNotIn('"quiz_history"', prompt)
+        self.assertNotIn('"course_units"', prompt)
+        self.assertNotIn('"slide_contents"', prompt)
+
     def test_learning_metadata_update_merges_known_and_weak_spots(self) -> None:
         home = tempfile.TemporaryDirectory()
         previous_home = os.environ.get("OPENLEARN_HOME")
@@ -4050,6 +4320,7 @@ class PromptInstructionTests(unittest.TestCase):
 
         cli.call_openai = fake_call_openai
         try:
+            cli.write_config({"extractor_model": "fast-extractor-model"})
             call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
             path = cli.topic_path("vim")
             metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
@@ -4083,6 +4354,7 @@ class PromptInstructionTests(unittest.TestCase):
         self.assertEqual(updated.metadata["current_focus"], "Vim modes")
         self.assertIsNone(updated.metadata["last_video_focus"])
         self.assertEqual(updated.metadata["last_answer_status"], "")
+        self.assertEqual(calls[0][0], "fast-extractor-model")
         self.assertEqual(calls[0][1], cli.METADATA_EXTRACTOR_SYSTEM)
         self.assertIn("Current metadata JSON:", calls[0][2])
         self.assertNotIn("- current_unit:", calls[0][2])
@@ -6114,12 +6386,14 @@ class PromptContextTests(unittest.TestCase):
             for name in (
                 "OPENLEARN_HOME",
                 "OPENLEARN_MODEL",
+                "OPENLEARN_EXTRACTOR_MODEL",
                 "OPENLEARN_BASE_URL",
                 "OPENAI_API_KEY",
             )
         }
         os.environ["OPENLEARN_HOME"] = self.home.name
         os.environ.pop("OPENLEARN_MODEL", None)
+        os.environ.pop("OPENLEARN_EXTRACTOR_MODEL", None)
         os.environ.pop("OPENLEARN_BASE_URL", None)
         os.environ.pop("OPENAI_API_KEY", None)
         cli._CONFIG_CACHE = None

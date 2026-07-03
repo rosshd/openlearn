@@ -60,9 +60,13 @@ Environment variables override saved config:
 ```bash
 export OPENAI_API_KEY="your-key"
 export OPENLEARN_MODEL="gpt-4.1-mini"
+export OPENLEARN_EXTRACTOR_MODEL="gpt-4.1-mini"
 export OPENLEARN_BASE_URL="https://api.openai.com/v1"
 export OPENLEARN_HOME="/path/to/openlearn-data"
 ```
+
+`OPENLEARN_EXTRACTOR_MODEL` overrides the model used for learner-metadata extraction.
+The equivalent `config.json` key is `extractor_model`; when neither is set, extraction uses the tutor model.
 
 If `OPENLEARN_HOME` is unset, openLearn uses the current directory when it contains `learning-topics/`; otherwise it uses the platform data directory.
 
