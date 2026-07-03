@@ -1192,9 +1192,16 @@ def repl_prompt_for_answer(answer: str | None) -> str:
 
 
 class DeferredTurnUpdates:
-    def __init__(self) -> None:
+    def __init__(self, output_func=print) -> None:
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="openlearn-update")
         self._pending = []
+        self._output_func = output_func
+        self._output_lock = threading.Lock()
+        self._queued_output: list[str] = []
+
+    def output_func(self, text: str = "") -> None:
+        with self._output_lock:
+            self._queued_output.append(text)
 
     def submit(self, function, *args, **kwargs) -> None:
         self._pending.append(self._executor.submit(function, *args, **kwargs))
@@ -1202,6 +1209,14 @@ class DeferredTurnUpdates:
     def wait(self) -> None:
         while self._pending:
             self._pending.pop(0).result()
+        self.flush_output()
+
+    def flush_output(self) -> None:
+        with self._output_lock:
+            queued = list(self._queued_output)
+            self._queued_output.clear()
+        for text in queued:
+            self._output_func(text)
 
     def close(self) -> None:
         try:
@@ -1242,7 +1257,7 @@ def run_repl(
     show_intro: bool = True,
 ) -> int:
     _session_start = datetime.now(timezone.utc)
-    deferred_updates = DeferredTurnUpdates()
+    deferred_updates = DeferredTurnUpdates(output_func)
     last_tutor_answer = None
     topic_slug = resolve_topic_slug(topic_value) if topic_value else None
     if topic_slug:
@@ -4069,7 +4084,7 @@ def ask_topic(
             answer,
             model,
             is_review_session,
-            output_func,
+            deferred_updates.output_func,
         )
     return answer
 

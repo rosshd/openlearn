@@ -3098,6 +3098,56 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(command_known, ["joined before command"])
 
+    def test_repl_queues_deferred_video_output_until_next_input_returns(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
+        maybe_started = threading.Event()
+        maybe_finished = threading.Event()
+        output = []
+        prompt_snapshots = []
+        original_stream = cli.call_openai_streaming
+        original_update = cli.update_learning_metadata
+        original_maybe = cli.maybe_suggest_videos
+
+        def fake_stream(*_args, user: str, output_func=print, **_kwargs) -> str:
+            output_func(f"tutor response for {user}")
+            return f"Check: What follows {user}?"
+
+        cli.call_openai_streaming = fake_stream
+        cli.update_learning_metadata = lambda *_args, **_kwargs: None
+
+        def fake_maybe(_slug, output_func=print):
+            maybe_started.set()
+            output_func("video suggestion")
+            maybe_finished.set()
+
+        cli.maybe_suggest_videos = fake_maybe
+        inputs = iter(["first", "second", "/q"])
+
+        def input_func(prompt: str = "") -> str:
+            if len(prompt_snapshots) == 1:
+                self.assertTrue(maybe_started.wait(timeout=2))
+                self.assertTrue(maybe_finished.wait(timeout=2))
+                self.assertNotIn("video suggestion", output)
+            prompt_snapshots.append((prompt, list(output)))
+            return next(inputs)
+
+        try:
+            exit_code = call_silent(
+                cli.run_repl,
+                input_func=input_func,
+                output_func=output.append,
+                show_intro=False,
+            )
+        finally:
+            cli.call_openai_streaming = original_stream
+            cli.update_learning_metadata = original_update
+            cli.maybe_suggest_videos = original_maybe
+
+        self.assertEqual(exit_code, 0)
+        self.assertNotIn("video suggestion", prompt_snapshots[1][1])
+        self.assertIn("video suggestion", output)
+        self.assertLess(output.index("video suggestion"), output.index("tutor response for second"))
+
     def test_repl_prints_status_before_ai_response(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
         original_ask_topic = cli.ask_topic
