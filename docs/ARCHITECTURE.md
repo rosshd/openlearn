@@ -50,6 +50,7 @@ Model-backed commands send only selected-topic context:
 
 Configuration precedence is environment variables, then `config.json`, then defaults.
 Provider calls target OpenAI-compatible chat completions at `{base_url}/chat/completions`.
+For `chat`, `resume`, `next`, and `review`, `--dry-run` prints the rendered system and user messages instead of calling the provider or mutating local files.
 
 ## Interactive UI
 

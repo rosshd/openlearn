@@ -134,6 +134,19 @@ configure_readline()
 
 _CONFIG_CACHE: dict[str, object] | None = None
 _LAST_RESPONSE_ANSWER_KEY = ""
+_DRY_RUN = False
+
+
+class DryRunPrompt(Exception):
+    """Carries the fully rendered request that --dry-run intercepted."""
+
+    def __init__(self, model: str, system: str, user: str) -> None:
+        super().__init__("dry run: model request intercepted")
+        self.model = model
+        self.system = system
+        self.user = user
+
+
 IMPORT_SCAN_MAX_WORKERS = 4
 REPL_HELP_LINES = [
     "Common commands:",
@@ -211,18 +224,42 @@ Output boundaries:
 
 
 def main(argv: list[str] | None = None) -> int:
+    global _DRY_RUN
     parser = build_parser()
     args = parser.parse_args(argv)
+    _DRY_RUN = bool(getattr(args, "dry_run", False))
     try:
         if args.func is cmd_review:
             return cmd_review(args, input_func=input if sys.stdin.isatty() else None)
         return args.func(args)
+    except DryRunPrompt as request:
+        print_dry_run_prompt(request)
+        return 0
     except OpenLearnError as exc:
         print_error(str(exc), output_func=lambda text: print(text, file=sys.stderr))
         return 1
     except KeyboardInterrupt:
         print("", file=sys.stderr)
         return 130
+    finally:
+        _DRY_RUN = False
+
+
+def print_dry_run_prompt(request: DryRunPrompt, output_func=print) -> None:
+    output_func("--- dry run: request not sent ---")
+    output_func(f"model: {request.model}")
+    output_func("--- system message ---")
+    output_func(request.system)
+    output_func("--- user message ---")
+    output_func(request.user)
+
+
+def add_dry_run_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the rendered prompts instead of calling the model; changes nothing",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -399,11 +436,13 @@ def build_parser() -> argparse.ArgumentParser:
     chat_parser.add_argument("topic", help="Topic slug")
     chat_parser.add_argument("prompt", help="Question or request")
     chat_parser.add_argument("--model", default=None, help="Override model for this request")
+    add_dry_run_argument(chat_parser)
     chat_parser.set_defaults(func=cmd_chat)
 
     review_parser = sub.add_parser("review", help="Generate a focused review session")
     review_parser.add_argument("topic", help="Topic slug")
     review_parser.add_argument("--model", default=None, help="Override model for this request")
+    add_dry_run_argument(review_parser)
     review_parser.add_argument(
         "--due",
         action="store_true",
@@ -428,11 +467,13 @@ def build_parser() -> argparse.ArgumentParser:
     resume_parser = sub.add_parser("resume", help="Resume the active or selected topic")
     resume_parser.add_argument("topic", nargs="?", help="Topic slug, defaults to active/recent")
     resume_parser.add_argument("--model", default=None, help="Override model for this request")
+    add_dry_run_argument(resume_parser)
     resume_parser.set_defaults(func=cmd_resume)
 
     next_parser = sub.add_parser("next", help="Generate the next short learning step")
     next_parser.add_argument("topic", nargs="?", help="Topic slug, defaults to active/recent")
     next_parser.add_argument("--model", default=None, help="Override model for this request")
+    add_dry_run_argument(next_parser)
     next_parser.set_defaults(func=cmd_next)
 
     chapter_parser = sub.add_parser("chapter", help="Jump to a specific course chapter")
@@ -5893,6 +5934,8 @@ def get_active_topic() -> str | None:
 
 
 def set_active_topic(slug: str) -> None:
+    if _DRY_RUN:
+        return
     project_home().mkdir(parents=True, exist_ok=True)
     path = state_path()
     today = datetime.now(timezone.utc).date().isoformat()
@@ -5954,6 +5997,8 @@ def save_state(slug: str, state: dict[str, object]) -> None:
 
 
 def log_event(slug: str, event_type: str, data: dict[str, object]) -> None:
+    if _DRY_RUN:
+        return
     path = topic_events_path(slug)
     event = {
         "schema_version": EVENT_SCHEMA_VERSION,
@@ -6450,6 +6495,10 @@ def write_topic_backup(path: Path, text: str) -> None:
 
 @contextlib.contextmanager
 def file_lock(path: Path):
+    if _DRY_RUN:
+        # Dry-run mode never writes, so skip creating lock files on disk.
+        yield
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = path.with_name(f".{path.name}.lock")
     with lock_path.open("w", encoding="utf-8") as lock_file:
@@ -6461,6 +6510,8 @@ def file_lock(path: Path):
 
 
 def write_text_atomic(path: Path, text: str) -> None:
+    if _DRY_RUN:
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_name = ""
     try:
@@ -7064,6 +7115,9 @@ def _mock_openai_response(model: str, system: str, user: str) -> str:
 
 
 def call_openai(model: str, system: str, user: str) -> str:
+    if _DRY_RUN:
+        raise DryRunPrompt(model, system, user)
+
     # Mock mode support for CI / offline testing
     if os.environ.get("OPENLEARN_MOCK") in {"1", "true", "yes"}:
         raw = _mock_openai_response(model, system, user)
@@ -7119,6 +7173,8 @@ def call_openai_streaming(
     capture_answer_key: bool = True,
 ) -> str:
     global _LAST_RESPONSE_ANSWER_KEY
+    if _DRY_RUN:
+        raise DryRunPrompt(model, system, user)
     if capture_answer_key:
         _LAST_RESPONSE_ANSWER_KEY = ""
 
