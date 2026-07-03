@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pexpect
+import pytest
+
+# pexpect.spawn drives the CLI through a POSIX pty, which does not exist on Windows.
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32", reason="pexpect.spawn requires a POSIX pty"
+)
 
 
 def test_menu_quit(spawn_openlearn) -> None:
