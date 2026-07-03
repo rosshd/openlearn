@@ -25,6 +25,15 @@ pip install -e .[dev]
 | `make e2e` | Full mocked manual smoke flow |
 | `make typecheck` | Pyright, useful but non-blocking |
 
+## Releases
+
+`src/openlearn/__init__.py` is the single source for the package version.
+`pyproject.toml` reads that value through setuptools dynamic metadata.
+
+To publish a release, update `__version__`, merge the release commit, then push a matching `vX.Y.Z` tag.
+The release workflow builds the sdist and wheel, verifies both distributions report the tag version through `openlearn.__version__` and `openlearn --version`, publishes to PyPI with trusted publishing, and creates or updates the GitHub release with the built artifacts.
+The PyPI project and its trusted-publishing settings must exist before the first automated publish.
+
 ## Safety
 
 - Use `OPENLEARN_MOCK=1` for model-free CLI smoke.
