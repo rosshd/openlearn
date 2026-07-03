@@ -265,5 +265,91 @@ class ConfigurationPersistenceTests(unittest.TestCase):
         self.assertEqual(calls, ["model", "base_url"])
 
 
+class OnboardingFlowTests(unittest.TestCase):
+    def test_configures_selected_provider_in_step_order(self) -> None:
+        calls: list[object] = []
+        output: list[str] = []
+        preset = onboarding.PROVIDER_PRESETS["openai"]
+
+        with (
+            patch.object(
+                onboarding,
+                "prompt_for_provider",
+                side_effect=lambda **_kwargs: calls.append("provider") or preset,
+            ),
+            patch.object(
+                onboarding,
+                "prompt_for_base_url",
+                side_effect=lambda selected, **_kwargs: (
+                    calls.append(("base_url", selected))
+                    or "https://api.openai.com/v1"
+                ),
+            ),
+            patch.object(
+                onboarding,
+                "prompt_for_validated_key",
+                side_effect=lambda selected, base_url, **_kwargs: (
+                    calls.append(("key", selected, base_url)) or "secret-key"
+                ),
+            ),
+            patch.object(
+                onboarding,
+                "prompt_for_model",
+                side_effect=lambda selected, **_kwargs: (
+                    calls.append(("model", selected)) or "gpt-4.1-mini"
+                ),
+            ),
+            patch.object(
+                onboarding,
+                "persist_configuration",
+                side_effect=lambda key, model, base_url: calls.append(
+                    ("persist", key, model, base_url)
+                ),
+            ),
+        ):
+            ready = onboarding.run_onboarding(
+                input_func=lambda _prompt: "",
+                output_func=output.append,
+            )
+
+        self.assertTrue(ready)
+        self.assertEqual(output, ["Welcome to openlearn."])
+        self.assertEqual(
+            calls,
+            [
+                "provider",
+                ("base_url", preset),
+                ("key", preset, "https://api.openai.com/v1"),
+                ("model", preset),
+                (
+                    "persist",
+                    "secret-key",
+                    "gpt-4.1-mini",
+                    "https://api.openai.com/v1",
+                ),
+            ],
+        )
+
+    def test_stops_without_model_or_persistence_when_validation_fails(self) -> None:
+        preset = onboarding.PROVIDER_PRESETS["openai"]
+
+        with (
+            patch.object(onboarding, "prompt_for_provider", return_value=preset),
+            patch.object(
+                onboarding,
+                "prompt_for_base_url",
+                return_value="https://api.openai.com/v1",
+            ),
+            patch.object(onboarding, "prompt_for_validated_key", return_value=None),
+            patch.object(onboarding, "prompt_for_model") as prompt_for_model,
+            patch.object(onboarding, "persist_configuration") as persist_configuration,
+        ):
+            ready = onboarding.run_onboarding(output_func=lambda _text: None)
+
+        self.assertFalse(ready)
+        prompt_for_model.assert_not_called()
+        persist_configuration.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

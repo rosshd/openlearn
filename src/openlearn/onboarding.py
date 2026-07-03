@@ -229,3 +229,32 @@ def persist_configuration(
         set_key_func(SimpleNamespace(api_key=api_key))
     set_model_func(SimpleNamespace(model=model))
     set_base_url_func(SimpleNamespace(base_url=base_url))
+
+
+def run_onboarding(
+    input_func: InputFunc = input,
+    output_func: OutputFunc = print,
+) -> bool:
+    output_func("Welcome to openlearn.")
+    preset = prompt_for_provider(input_func=input_func, output_func=output_func)
+    base_url = prompt_for_base_url(
+        preset,
+        input_func=input_func,
+        output_func=output_func,
+    )
+    api_key = prompt_for_validated_key(
+        preset,
+        base_url,
+        input_func=input_func,
+        output_func=output_func,
+    )
+    if api_key is None:
+        return False
+
+    model = prompt_for_model(
+        preset,
+        input_func=input_func,
+        output_func=output_func,
+    )
+    persist_configuration(api_key, model, base_url)
+    return True
