@@ -10,6 +10,7 @@ Agents changing this behavior should read `.claude/skills/openlearn-tutor-policy
 - Treat production and transfer as stronger evidence than recognition.
 - Do not advance from one fast correct answer or self-reported confidence.
 - Do obey explicit navigation requests such as skip, continue, or move on.
+- In Quick Learn, optimize for coverage per minute: ask at most one check per slide and recommend `/done` after a correct or adequate answer instead of probing the same concept repeatedly.
 - Detect shallow copying with deterministic signals where possible.
 - Tune toward delayed retrieval, not in-session smoothness.
 - Keep all learner state local and inspectable.
@@ -46,6 +47,7 @@ Agents changing this behavior should read `.claude/skills/openlearn-tutor-policy
 | Suspected gaming | Ask an immediate transfer check and withhold advancement |
 | Explicit skip or move on | Clear stale learning gates, advance, and remember durable preferences |
 | Ready to advance | Require passed production or transfer evidence |
+| Quick Learn adequate answer | Affirm briefly and move toward the next uncovered concept |
 
 ## Judge Requirements
 
@@ -55,6 +57,12 @@ Agents changing this behavior should read `.claude/skills/openlearn-tutor-policy
 - Misconceptions should be specific enough to change the next tutor move.
 - Recognition, recall, explanation, transfer, and hands-on production are not equivalent.
 - Fast high-overlap answers can be correct but should not count as mastery evidence.
+
+## Quick Learn Coverage
+
+Quick Learn plans must stay grounded in imported source summaries.
+Each unit has a `Concepts:` contract, each lesson response hides an exact `<!-- covered: ... -->` marker, and openLearn stores per-slide coverage so later prompts avoid re-teaching covered concepts.
+When a unit or course would otherwise end with uncovered concepts, openLearn can add bounded make-up slides before marking the course complete.
 
 ## Context Fidelity
 

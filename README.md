@@ -75,9 +75,10 @@ openlearn quick ./study-folder --name "Biology Midterm"
 openlearn quick https://github.com/owner/repository
 ```
 
-Quick Learn accepts supported files, bounded local folders, and public GitHub repositories.
+Quick Learn accepts text/code files, PDFs, DOCX files, bounded local folders, and public GitHub repositories.
 It runs on the efficient mastery profile throughout, optimizing for coverage per minute rather than deep mastery, so a review session moves quickly across the material.
-Repository sources are treated as read-only text; openLearn never executes imported code.
+Folder and repository imports select up to 32 supported files, skip hidden directories, generated folders, secret-like names, symlinks, binaries, and oversized files, then save a manifest and source bundle under local context.
+Repository sources are cloned with prompts and hooks disabled, treated as read-only text, and never executed.
 
 `resume` uses the active topic.
 If no active topic exists, it falls back to the most recently changed topic.
@@ -121,7 +122,7 @@ Model-backed commands require an API key unless `OPENLEARN_MOCK=1` is set for te
 - `learning-topics/*.md`: user-owned topic notes, course plan, metadata, and session log.
 - `learning-topics/<slug>.state.json`: dynamic learner model.
 - `learning-topics/<slug>.events.jsonl`: append-only learning events.
-- `learning-topics/context/<slug>/`: imported source summaries.
+- `learning-topics/context/<slug>/`: imported source text, manifests, bundles, and summaries.
 - `learning-topics/drills/<slug>/`: generated drill files.
 - `state.json`: active-topic state.
 - `config.json`: saved provider settings and optional API key.
