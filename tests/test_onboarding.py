@@ -130,6 +130,63 @@ class DestinationPromptTests(unittest.TestCase):
         self.assertIn("Choose an option from 1 to 3.", output)
 
 
+class DestinationLaunchTests(unittest.TestCase):
+    def test_quick_learn_imports_file_and_starts_lesson(self) -> None:
+        context = cli.PendingContext("guide.md", "Guide contents\n")
+        saved = Path("/tmp/guide.md")
+
+        with (
+            patch.object(cli, "read_pending_context", return_value=context) as read_context,
+            patch.object(cli, "cmd_new") as cmd_new,
+            patch.object(cli, "get_active_topic", return_value="guide"),
+            patch.object(cli, "write_context_text", return_value=saved) as write_context,
+            patch.object(cli, "summarize_pending_contexts") as summarize_contexts,
+            patch.object(cli, "start_course") as start_course,
+            patch.object(cli, "active_topic_needs_course_start", return_value=False),
+            patch.object(cli, "run_repl") as run_repl,
+        ):
+            onboarding.launch_destination(
+                onboarding.OnboardingDestination.QUICK_LEARN,
+                input_func=lambda _prompt: "/tmp/guide.md",
+                output_func=lambda _text: None,
+            )
+
+        read_context.assert_called_once_with(Path("/tmp/guide.md"), unittest.mock.ANY)
+        new_args = cmd_new.call_args.args[0]
+        self.assertEqual(new_args.topic, "guide")
+        self.assertEqual(new_args.goal, "Learn from guide.md")
+        write_context.assert_called_once_with("guide", "guide.md", "Guide contents\n")
+        summarize_contexts.assert_called_once_with("guide", [saved], unittest.mock.ANY)
+        start_course.assert_called_once()
+        run_repl.assert_called_once()
+
+    def test_vim_starter_uses_template_and_starts_lesson(self) -> None:
+        with (
+            patch.object(cli, "cmd_new") as cmd_new,
+            patch.object(cli, "start_course") as start_course,
+            patch.object(cli, "get_active_topic", return_value="vim"),
+            patch.object(cli, "active_topic_needs_course_start", return_value=False),
+            patch.object(cli, "run_repl") as run_repl,
+        ):
+            onboarding.launch_destination(
+                onboarding.OnboardingDestination.VIM_STARTER,
+                input_func=lambda _prompt: "",
+                output_func=lambda _text: None,
+            )
+
+        new_args = cmd_new.call_args.args[0]
+        self.assertEqual(new_args.topic, "Vim")
+        self.assertEqual(new_args.template, "vim")
+        start_course.assert_called_once()
+        run_repl.assert_called_once()
+
+    def test_menu_destination_defers_to_main_menu(self) -> None:
+        with patch.object(cli, "cmd_new") as cmd_new:
+            onboarding.launch_destination(onboarding.OnboardingDestination.MENU)
+
+        cmd_new.assert_not_called()
+
+
 class ProviderValidationTests(unittest.TestCase):
     def test_gets_models_with_bearer_key_and_ten_second_timeout(self) -> None:
         calls: list[tuple[object, int]] = []
@@ -333,6 +390,21 @@ class OnboardingFlowTests(unittest.TestCase):
                     ("persist", key, model, base_url)
                 ),
             ),
+            patch.object(
+                onboarding,
+                "prompt_for_destination",
+                side_effect=lambda **_kwargs: (
+                    calls.append("destination")
+                    or onboarding.OnboardingDestination.QUICK_LEARN
+                ),
+            ),
+            patch.object(
+                onboarding,
+                "launch_destination",
+                side_effect=lambda destination, **_kwargs: calls.append(
+                    ("launch", destination)
+                ),
+            ),
         ):
             ready = onboarding.run_onboarding(
                 input_func=lambda _prompt: "",
@@ -354,6 +426,8 @@ class OnboardingFlowTests(unittest.TestCase):
                     "gpt-4.1-mini",
                     "https://api.openai.com/v1",
                 ),
+                "destination",
+                ("launch", onboarding.OnboardingDestination.QUICK_LEARN),
             ],
         )
 
@@ -370,12 +444,16 @@ class OnboardingFlowTests(unittest.TestCase):
             patch.object(onboarding, "prompt_for_validated_key", return_value=None),
             patch.object(onboarding, "prompt_for_model") as prompt_for_model,
             patch.object(onboarding, "persist_configuration") as persist_configuration,
+            patch.object(onboarding, "prompt_for_destination") as prompt_for_destination,
+            patch.object(onboarding, "launch_destination") as launch_destination,
         ):
             ready = onboarding.run_onboarding(output_func=lambda _text: None)
 
         self.assertFalse(ready)
         prompt_for_model.assert_not_called()
         persist_configuration.assert_not_called()
+        prompt_for_destination.assert_not_called()
+        launch_destination.assert_not_called()
 
 
 class OnboardingTriggerTests(unittest.TestCase):

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import getpass
+from argparse import Namespace
 from dataclasses import dataclass
 from enum import Enum
-from types import SimpleNamespace
+from pathlib import Path
 from types import TracebackType
 from typing import Callable, Protocol, Self
 from urllib.error import HTTPError, URLError
@@ -83,7 +84,7 @@ InputFunc = Callable[[str], str]
 OutputFunc = Callable[[str], None]
 KeyInputFunc = Callable[[str], str]
 ProviderValidator = Callable[[str, str], ValidationResult]
-ConfigCommand = Callable[[object], int]
+ConfigCommand = Callable[[Namespace], int]
 
 
 def prompt_for_provider(
@@ -253,9 +254,62 @@ def persist_configuration(
         set_base_url_func = set_base_url_func or cli.cmd_config_set_base_url
 
     if api_key:
-        set_key_func(SimpleNamespace(api_key=api_key))
-    set_model_func(SimpleNamespace(model=model))
-    set_base_url_func(SimpleNamespace(base_url=base_url))
+        set_key_func(Namespace(api_key=api_key))
+    set_model_func(Namespace(model=model))
+    set_base_url_func(Namespace(base_url=base_url))
+
+
+def launch_destination(
+    destination: OnboardingDestination,
+    *,
+    input_func: InputFunc = input,
+    output_func: OutputFunc = print,
+) -> None:
+    if destination is OnboardingDestination.MENU:
+        return
+
+    from openlearn import cli
+
+    if destination is OnboardingDestination.QUICK_LEARN:
+        source = input_func("File to learn: ").strip()
+        if not source:
+            output_func("No file selected. Opening the menu.")
+            return
+        context = cli.read_pending_context(Path(source), output_func)
+        topic_name = Path(context.filename).stem.replace("-", " ").replace("_", " ").strip()
+        cli.cmd_new(
+            Namespace(
+                topic=topic_name or "Quick Learn",
+                goal=f"Learn from {context.filename}",
+                mastery_profile=None,
+                template=None,
+            ),
+            output_func=output_func,
+        )
+        active_topic = cli.get_active_topic()
+        if active_topic is None:
+            output_func("Could not create the Quick Learn course.")
+            return
+        saved = cli.write_context_text(
+            active_topic,
+            context.filename,
+            context.text,
+        )
+        cli.summarize_pending_contexts(active_topic, [saved], output_func)
+    else:
+        cli.cmd_new(
+            Namespace(
+                topic="Vim",
+                goal="",
+                mastery_profile=None,
+                template="vim",
+            ),
+            output_func=output_func,
+        )
+
+    cli.start_course(input_func=input_func, output_func=output_func)
+    if not cli.active_topic_needs_course_start(cli.get_active_topic()):
+        cli.run_repl(input_func=input_func, output_func=output_func, show_intro=False)
 
 
 def run_onboarding(
@@ -284,4 +338,13 @@ def run_onboarding(
         output_func=output_func,
     )
     persist_configuration(api_key, model, base_url)
+    destination = prompt_for_destination(
+        input_func=input_func,
+        output_func=output_func,
+    )
+    launch_destination(
+        destination,
+        input_func=input_func,
+        output_func=output_func,
+    )
     return True
