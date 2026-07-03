@@ -85,6 +85,19 @@ openlearn new vim --goal "Use Vim comfortably for real editing"
 openlearn resume
 ```
 
+For assessment material, Quick Learn creates a separate focused topic and begins teaching without placement or outline approval:
+
+```bash
+openlearn quick ./midterm-review.pdf
+openlearn quick ./study-folder --name "Biology Midterm"
+openlearn quick https://github.com/owner/repository
+```
+
+Quick Learn accepts text/code files, PDFs, DOCX files, bounded local folders, and public GitHub repositories.
+It runs on the efficient mastery profile throughout, optimizing for coverage per minute rather than deep mastery, so a review session moves quickly across the material.
+Folder and repository imports select up to 32 supported files, skip hidden directories, generated folders, secret-like names, symlinks, binaries, and oversized files, then save a manifest and source bundle under local context.
+Repository sources are cloned with prompts and hooks disabled, treated as read-only text, and never executed.
+
 `resume` uses the active topic.
 If no active topic exists, it falls back to the most recently changed topic.
 Learning actions from the menu continue into the REPL automatically.
@@ -114,7 +127,7 @@ Use `/help --all` for the full REPL command list.
 | --- | --- |
 | Setup | `init`, `config show`, `config set-key`, `config set-model`, `config set-base-url`, `config clear-key` |
 | Topics | `new`, `delete`, `list`, `recent`, `active`, `edit`, `status`, `summary`, `stats`, `repair` |
-| Learning | `menu`, `repl`, `chat`, `resume`, `next`, `review`, `chapter`, `due` |
+| Learning | `menu`, `quick`, `repl`, `chat`, `resume`, `next`, `review`, `chapter`, `due` |
 | Sources | `import <topic> <file>`, `import <topic> --url <url>`, `import <topic> --scan <dir>`, `paste` |
 | Practice | `videos`, REPL `/drill`, REPL `/check` |
 | Utilities | `templates`, `test`, `tui` |
@@ -128,7 +141,7 @@ Model-backed commands require an API key unless `OPENLEARN_MOCK=1` is set for te
 - `learning-topics/*.md`: user-owned topic notes, course plan, metadata, and session log.
 - `learning-topics/<slug>.state.json`: dynamic learner model.
 - `learning-topics/<slug>.events.jsonl`: append-only learning events.
-- `learning-topics/context/<slug>/`: imported source summaries.
+- `learning-topics/context/<slug>/`: imported source text, manifests, bundles, and summaries.
 - `learning-topics/drills/<slug>/`: generated drill files.
 - `state.json`: active-topic state.
 - `config.json`: saved provider settings and optional API key.

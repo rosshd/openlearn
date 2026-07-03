@@ -6,7 +6,9 @@ from contextlib import nullcontext
 from typing import ContextManager
 
 from rich.console import Console
+from rich.live import Live
 from rich.markdown import Markdown
+from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.rule import Rule
 from rich.table import Table
@@ -158,11 +160,72 @@ def tutor_markdown(text: str) -> Markdown:
         r"**\1:**",
         text,
     )
+    # Rich's Markdown collapses single \n to a space, so multiple-choice option
+    # lines need Markdown hard line breaks (two trailing spaces) to stay separate.
+    styled = re.sub(r"(?m)(\?)\n(?=[A-D]\) )", r"\1  \n", styled)
+    styled = re.sub(r"(?m)^([A-D]\) .+)$", r"\1  ", styled)
     return Markdown(styled)
 
 
 def emit_tutor_markdown(text: str, output_func=print) -> None:
     emit(tutor_markdown(text), output_func)
+
+
+def tutor_response_panel(text: str) -> Panel:
+    return Panel(
+        tutor_markdown(text),
+        title=Text("Tutor", style="bold cyan"),
+        title_align="left",
+        border_style="cyan",
+        padding=(1, 2),
+    )
+
+
+def emit_tutor_response(text: str, output_func=print) -> None:
+    if output_func is print:
+        emit(tutor_response_panel(text), output_func)
+        return
+    output_func("Tutor")
+    emit_tutor_markdown(text, output_func)
+    output_func("End tutor response")
+
+
+class TutorResponseStream:
+    """Incrementally redraw one tutor panel as model tokens arrive."""
+
+    def __init__(self) -> None:
+        self._live = Live(
+            tutor_response_panel(" "),
+            console=console,
+            refresh_per_second=12,
+            vertical_overflow="visible",
+        )
+        self._started = False
+
+    def start(self) -> None:
+        if self._started:
+            return
+        console.print()
+        self._live.start(refresh=True)
+        self._started = True
+
+    def update(self, text: str) -> None:
+        if text:
+            self._live.update(tutor_response_panel(text), refresh=False)
+
+    def finish(self, text: str) -> None:
+        self.update(text)
+        if self._started:
+            self._live.stop()
+            self._started = False
+        console.print()
+        _flush_console()
+
+    def abort(self) -> None:
+        if self._started:
+            self._live.stop()
+            self._started = False
+        _flush_console()
 
 
 def thinking_progress(output_func=print) -> ContextManager[Progress | None]:

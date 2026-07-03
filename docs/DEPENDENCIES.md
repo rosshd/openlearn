@@ -53,6 +53,7 @@ summary is saved under learning-topics/context/<slug>/
 
 File import uses format-specific parsers and the same source-summary path.
 Imports are deduplicated by checksum.
+Quick Learn repository import uses the system `git` executable for shallow public GitHub clones with prompts and hooks disabled; it adds no Python dependency and treats cloned files as inert text.
 
 ## External Resource Notes
 

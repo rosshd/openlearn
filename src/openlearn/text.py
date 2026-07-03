@@ -52,6 +52,7 @@ def last_lines(text: str, limit: int) -> str:
 def sanitize_model_output(text: str) -> str:
     text = re.sub(r"(?is)<system-reminder>.*?</system-reminder>", "", text)
     text = re.sub(r"(?is)<!--\s*answer\s*:\s*[A-D]\s*-->", "", text)
+    text = re.sub(r"(?is)<!--\s*covered\s*:\s*.*?-->", "", text)
     text = re.sub(r"(?im)^\s*answer\s*key\s*:\s*[A-D]\s*$", "", text)
     text = re.sub(r"(?im)^\s*correct\s+answer\s*:\s*[A-D]\s*[\).:-]?.*$", "", text)
     text = re.sub(r"(?im)^\s*\(?answer\s*:\s*[A-D]\)?.*$", "", text)
@@ -73,7 +74,42 @@ def sanitize_model_output(text: str) -> str:
         cleaned_lines.append(line)
     text = "\n".join(cleaned_lines)
     text = re.sub(r"(?m)^(\s*)\*\s+", r"\1- ", text)
-    return text.strip()
+    return normalize_multiple_choice_layout(text).strip()
+
+
+def normalize_multiple_choice_layout(text: str) -> str:
+    """Put inline A-D choices on separate lines for terminal rendering."""
+    normalized: list[str] = []
+    option_pattern = re.compile(r"(?<!\w)([A-D])[\).:-]\s+")
+    for line in text.splitlines():
+        matches = list(option_pattern.finditer(line))
+        should_split = len(matches) >= 2 or (
+            len(matches) == 1
+            and bool(line[: matches[0].start()].strip())
+            and (
+                "?" in line[: matches[0].start()]
+                or line[: matches[0].start()].strip().lower().startswith("check:")
+            )
+        )
+        if not should_split:
+            normalized.append(line)
+            continue
+
+        prefix = line[: matches[0].start()].rstrip()
+        if prefix:
+            normalized.append(prefix)
+        for index, match in enumerate(matches):
+            end = matches[index + 1].start() if index + 1 < len(matches) else len(line)
+            option = line[match.end() : end].strip()
+            normalized.append(f"{match.group(1).upper()}) {option}")
+    return "\n".join(normalized)
+
+
+def sanitize_stream_preview(text: str) -> str:
+    """Sanitize an incomplete streamed response without exposing hidden metadata."""
+    text = re.sub(r"(?is)<!--.*$", "", text)
+    text = re.sub(r"(?is)<system-reminder\b.*$", "", text)
+    return sanitize_model_output(text)
 
 
 def extract_answer_key(text: str) -> str:
@@ -88,3 +124,20 @@ def extract_answer_key(text: str) -> str:
         return match.group(1).upper()
     match = re.search(r"(?im)^\s*\(?answer\s*:\s*([A-D])\)?", text)
     return match.group(1).upper() if match else ""
+
+
+def extract_covered_concepts(text: str) -> list[str]:
+    match = re.search(r"(?is)<!--\s*covered\s*:\s*(.*?)\s*-->", text)
+    if not match:
+        return []
+    values = re.split(r"\s*;\s*|\s*,\s*", match.group(1))
+    covered: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        label = value.strip()
+        key = label.casefold()
+        if not label or key in seen:
+            continue
+        seen.add(key)
+        covered.append(label)
+    return covered

@@ -10,6 +10,7 @@ dist/
 build/
 *.egg-info/
 .artifacts/
+.lavish/
 
 # Local learning data is user-owned and may contain private notes.
 config.json
