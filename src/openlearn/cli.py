@@ -45,7 +45,6 @@ from openlearn.constants import (
     DEFAULT_MODEL,
     GAMING_MIN_ANSWER_TOKENS,
     GAMING_OVERLAP_TRIGRAM_JACCARD,
-    HOSTED_BASE_URLS,
     MANUAL_TEST_CONTEXT,
     MANUAL_TEST_CONTEXT_FILENAME,
     MANUAL_TEST_COURSE_GOAL,
@@ -6309,7 +6308,7 @@ def configured_openai_api_key() -> str | None:
 
 
 def base_url_requires_api_key(base_url: str) -> bool:
-    return base_url.rstrip("/") in HOSTED_BASE_URLS
+    return not _base_url_allows_keyless_requests(base_url)
 
 
 def _base_url_allows_keyless_requests(base_url: str) -> bool:

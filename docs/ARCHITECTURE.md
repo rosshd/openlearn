@@ -54,7 +54,7 @@ Model-backed commands send only selected-topic context:
 
 Configuration precedence is environment variables, then `config.json`, then defaults.
 Provider calls target OpenAI-compatible chat completions at `{base_url}/chat/completions`.
-Hosted default base URLs require an API key, while local or custom OpenAI-compatible endpoints may be keyless.
+Non-local provider base URLs require an API key, while localhost OpenAI-compatible endpoints may be keyless.
 When no key is configured for a keyless endpoint, requests omit the `Authorization` header; a 401 response is reported as an API-key-required endpoint.
 Bare `openlearn` skips first-run onboarding for saved keys, environment keys, `OPENLEARN_MOCK=1`, or keyless localhost providers with a configured model.
 For `chat`, `resume`, `next`, and `review`, `--dry-run` prints the rendered system and user messages instead of calling the provider or mutating local files.

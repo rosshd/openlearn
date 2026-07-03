@@ -12,7 +12,7 @@ It stores curriculum, learner state, session notes, and context files locally wh
 ## Principles
 
 - Local-first: topics and learner state live under your openLearn home.
-- Bring your own model access: use a hosted API key or a local/custom keyless endpoint.
+- Bring your own model access: use a hosted API key or a local keyless endpoint.
 - Transparent scope: model calls use the selected topic, bounded notes, recent context, and the current prompt.
 - Human-readable memory: topic files are Markdown with JSON metadata.
 - Open core: AGPLv3 keeps hosted modifications open.
@@ -140,7 +140,7 @@ Use `/help --all` for the full REPL command list.
 | Practice | `videos`, REPL `/drill`, REPL `/check` |
 | Utilities | `templates`, `test`, `tui` |
 
-Model-backed commands require an API key for hosted defaults, but local/custom OpenAI-compatible endpoints such as Ollama may be used keylessly.
+Model-backed commands require an API key for non-local providers, but localhost OpenAI-compatible endpoints such as Ollama may be used keylessly.
 `OPENLEARN_MOCK=1` runs model-backed tests without any provider call.
 `chat`, `resume`, `next`, and `review` accept `--dry-run` to print the rendered prompts instead of calling the model, leaving all local files untouched.
 `repl` also has the `shell` alias.

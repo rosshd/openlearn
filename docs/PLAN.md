@@ -79,7 +79,7 @@ Design requirements:
 ## Differentiators
 
 - Own your learning data.
-- Bring your own model, whether hosted with a key or local/custom and keyless.
+- Bring your own model, whether hosted with a key or local and keyless.
 - Transparent local memory.
 - Tutor behavior optimized for retrieval, transfer, and mastery.
 - No subscription required for the core local workflow.
