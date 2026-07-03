@@ -53,6 +53,9 @@ Multiline paste detection requires a POSIX terminal; on Windows, the REPL accept
 
 ## Configuration
 
+On the first bare `openlearn` run without a configured API key, openLearn guides you through provider selection, live key validation, model selection, and a first learning activity.
+Set `OPENAI_API_KEY` to skip this onboarding flow and use environment-based configuration.
+
 Interactive setup:
 
 ```bash
