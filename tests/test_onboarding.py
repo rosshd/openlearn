@@ -174,5 +174,42 @@ class ValidatedKeyPromptTests(unittest.TestCase):
         self.assertTrue(any("connection refused" in line for line in output))
 
 
+class ConfigurationPersistenceTests(unittest.TestCase):
+    def test_uses_existing_config_commands_for_validated_settings(self) -> None:
+        calls: list[tuple[str, object]] = []
+
+        onboarding.persist_configuration(
+            "secret-key",
+            "model-name",
+            "https://api.example.com/v1/",
+            set_key_func=lambda args: calls.append(("key", args.api_key)) or 0,
+            set_model_func=lambda args: calls.append(("model", args.model)) or 0,
+            set_base_url_func=lambda args: calls.append(("base_url", args.base_url)) or 0,
+        )
+
+        self.assertEqual(
+            calls,
+            [
+                ("key", "secret-key"),
+                ("model", "model-name"),
+                ("base_url", "https://api.example.com/v1/"),
+            ],
+        )
+
+    def test_skips_key_command_when_optional_key_is_empty(self) -> None:
+        calls: list[str] = []
+
+        onboarding.persist_configuration(
+            "",
+            "llama3.1",
+            "http://localhost:11434/v1",
+            set_key_func=lambda _args: calls.append("key") or 0,
+            set_model_func=lambda _args: calls.append("model") or 0,
+            set_base_url_func=lambda _args: calls.append("base_url") or 0,
+        )
+
+        self.assertEqual(calls, ["model", "base_url"])
+
+
 if __name__ == "__main__":
     unittest.main()

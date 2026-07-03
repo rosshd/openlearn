@@ -3,6 +3,7 @@ from __future__ import annotations
 import getpass
 from dataclasses import dataclass
 from enum import Enum
+from types import SimpleNamespace
 from types import TracebackType
 from typing import Callable, Protocol, Self
 from urllib.error import HTTPError, URLError
@@ -76,6 +77,7 @@ InputFunc = Callable[[str], str]
 OutputFunc = Callable[[str], None]
 KeyInputFunc = Callable[[str], str]
 ProviderValidator = Callable[[str, str], ValidationResult]
+ConfigCommand = Callable[[object], int]
 
 
 def validate_provider(
@@ -152,3 +154,25 @@ def prompt_for_validated_key(
         "Key rejected after 3 attempts. Run 'openlearn config set-key' when you have a valid key."
     )
     return None
+
+
+def persist_configuration(
+    api_key: str,
+    model: str,
+    base_url: str,
+    *,
+    set_key_func: ConfigCommand | None = None,
+    set_model_func: ConfigCommand | None = None,
+    set_base_url_func: ConfigCommand | None = None,
+) -> None:
+    if set_key_func is None or set_model_func is None or set_base_url_func is None:
+        from openlearn import cli
+
+        set_key_func = set_key_func or cli.cmd_config_set_key
+        set_model_func = set_model_func or cli.cmd_config_set_model
+        set_base_url_func = set_base_url_func or cli.cmd_config_set_base_url
+
+    if api_key:
+        set_key_func(SimpleNamespace(api_key=api_key))
+    set_model_func(SimpleNamespace(model=model))
+    set_base_url_func(SimpleNamespace(base_url=base_url))
