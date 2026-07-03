@@ -17,4 +17,5 @@ openLearn is designed to keep learning data local by default. Reports and exampl
 
 ## Supported Versions
 
-The project is pre-1.0. Security fixes are applied to the latest code on `main` until versioned releases are established.
+The project is pre-1.0.
+Security fixes are applied to the latest code on `main` and shipped in the next tagged release.
