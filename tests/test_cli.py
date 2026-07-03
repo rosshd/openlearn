@@ -67,8 +67,10 @@ class UiFormattingTests(unittest.TestCase):
 
         rendered = styled_output.getvalue()
         self.assertIn("Tutor", rendered)
-        self.assertIn("╭", rendered)
-        self.assertIn("╰", rendered)
+        # Rich downgrades rounded box corners to square ones on legacy
+        # Windows consoles, so accept either glyph set.
+        self.assertTrue({"╭", "┌"} & set(rendered))
+        self.assertTrue({"╰", "└"} & set(rendered))
         self.assertIn("\x1b[1;36mFeedback:\x1b[0m", rendered)
         self.assertIn("\x1b[1;36mNext:\x1b[0m", rendered)
 
