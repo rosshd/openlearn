@@ -24,6 +24,8 @@ Likely split points are provider calls, topic storage, import handling, and tuto
 
 Topic files are user-owned Markdown with JSON metadata between `---` separators.
 JSON avoids a YAML dependency and keeps the file editable.
+`repair` normalizes missing metadata defaults and can recover simple corrupt JSON frontmatter such as trailing commas or missing closing braces/brackets.
+When it rewrites a topic, it first writes the original text to `<slug>.md.bak`.
 
 ```md
 ---
@@ -54,6 +56,7 @@ Model-backed commands send only selected-topic context:
 
 Configuration precedence is environment variables, then `config.json`, then defaults.
 Provider calls target OpenAI-compatible chat completions at `{base_url}/chat/completions`.
+Transient provider failures, including HTTP 429, HTTP 5xx, URL errors, and timeouts, are retried up to three attempts with bounded exponential backoff and jitter.
 Non-local provider base URLs require an API key, while localhost OpenAI-compatible endpoints may be keyless.
 When no key is configured for a keyless endpoint, requests omit the `Authorization` header; a 401 response is reported as an API-key-required endpoint.
 Bare `openlearn` skips first-run onboarding for saved keys, environment keys, `OPENLEARN_MOCK=1`, or keyless localhost providers with a configured model.
@@ -80,6 +83,7 @@ Onboarding validates credentials with `{base_url}/models`, persists settings thr
 The REPL is line-oriented but coalesces quick multiline paste into one learner message on POSIX terminals.
 Windows does not support `select.select` on stdin, so the same input path falls back to one line per learner message.
 After a tutor response, learner-metadata extraction is deferred so the next prompt appears immediately.
+If a non-command learner message fails during model-backed handling, the REPL preserves the typed answer so Enter resubmits it and typing replaces it.
 Natural navigation phrases such as `continue`, `move on`, and `skip` advance the current slide instead of being graded as answers.
 Tutor output renders in a Rich panel for interactive terminal sessions, streaming updates redraw the same panel as tokens arrive, and hidden answer or coverage markers are stripped before display.
 Multiple-choice options are normalized onto separate lines before Rich Markdown rendering.

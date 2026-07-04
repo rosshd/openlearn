@@ -19,6 +19,7 @@ import tempfile
 import textwrap
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -95,6 +96,9 @@ from openlearn.ui import (
 EVENT_SCHEMA_VERSION = 1
 REPL_PASTE_INITIAL_WAIT_SECONDS = 0.05
 REPL_PASTE_CONTINUATION_WAIT_SECONDS = 0.01
+OPENAI_MAX_ATTEMPTS = 3
+OPENAI_RETRY_BASE_DELAY_SECONDS = 0.5
+OPENAI_RETRY_JITTER_SECONDS = 0.25
 
 DYNAMIC_METADATA_KEYS = {
     "concept_attempts",
@@ -628,7 +632,12 @@ def cmd_init(args: argparse.Namespace, output_func=print, input_func=input) -> i
     output_func("")
     output_func("Testing connection...")
     try:
-        result = call_openai(model, "You are a test assistant.", "Reply with exactly: ok")
+        result = call_openai_with_status(
+            model,
+            "You are a test assistant.",
+            "Reply with exactly: ok",
+            retry_status=output_func,
+        )
         if "ok" in result.lower():
             output_func("Connection successful.")
         else:
@@ -1287,6 +1296,12 @@ def repl_prompt_for_answer(answer: str | None) -> str:
     return "Answer> " if extract_pending_question_text(answer) else "openlearn> "
 
 
+def repl_prompt_for_preserved_answer(answer: str | None, preserved_prompt: str | None) -> str:
+    if preserved_prompt is not None:
+        return "Answer kept - press Enter to resubmit, or type a replacement> "
+    return repl_prompt_for_answer(answer)
+
+
 class DeferredTurnUpdates:
     def __init__(self, output_func=print) -> None:
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="openlearn-update")
@@ -1359,6 +1374,7 @@ def run_repl(
     _session_start = datetime.now(timezone.utc)
     deferred_updates = DeferredTurnUpdates(output_func)
     last_tutor_answer = None
+    preserved_prompt = None
     topic_slug = resolve_topic_slug(topic_value) if topic_value else None
     if topic_slug:
         set_active_topic(topic_slug)
@@ -1377,9 +1393,11 @@ def run_repl(
     try:
         while True:
             try:
-                prompt = read_repl_message(
-                    repl_prompt_for_answer(last_tutor_answer), input_func=input_func
+                entered_prompt = read_repl_message(
+                    repl_prompt_for_preserved_answer(last_tutor_answer, preserved_prompt),
+                    input_func=input_func,
                 ).strip()
+                prompt = entered_prompt or preserved_prompt or ""
             except EOFError:
                 output_func("")
                 break
@@ -1396,6 +1414,7 @@ def run_repl(
                         prompt[1:], model=model, input_func=input_func, output_func=output_func
                     )
                 elif handle_natural_advance(prompt, model=model, output_func=output_func):
+                    preserved_prompt = None
                     continue
                 else:
                     print_active_status_bar()
@@ -1406,7 +1425,11 @@ def run_repl(
                         output_func=output_func,
                         deferred_updates=deferred_updates,
                     )
+                    preserved_prompt = None
             except OpenLearnError as exc:
+                if prompt and not prompt.startswith("/"):
+                    preserved_prompt = prompt
+                    exc = OpenLearnError(f"{exc} Your answer was kept; press Enter to resubmit it.")
                 print_active_status_bar()
                 print_error(str(exc), output_func)
     finally:
@@ -1915,10 +1938,11 @@ def teach_first_lesson(topic: Topic, outline: str, model: str, output_func=print
     print_section("First lesson", output_func)
     lesson_prompt = first_lesson_prompt(outline)
     global _LAST_RESPONSE_ANSWER_KEY
-    raw_lesson = call_openai(
+    raw_lesson = call_openai_with_status(
         model,
         generation_system_prompt(topic, current_plan=outline),
         lesson_prompt,
+        retry_status=output_func,
     )
     _LAST_RESPONSE_ANSWER_KEY = extract_answer_key(raw_lesson)
     covered_concepts = extract_covered_concepts(raw_lesson)
@@ -1947,7 +1971,9 @@ def run_placement_quiz(topic: Topic, model: str, input_func=input, output_func=p
 
     while wrong_count < 2 and len(results) < 8:
         asked_difficulty = difficulty
-        question_data = placement_question(topic, model, asked_difficulty, results)
+        question_data = placement_question(
+            topic, model, asked_difficulty, results, retry_status=output_func
+        )
         question = str(question_data.get("question") or "").strip()
         output_func(question)
         output_func("")
@@ -1958,7 +1984,15 @@ def run_placement_quiz(topic: Topic, model: str, input_func=input, output_func=p
             output_func("Placement quiz stopped.")
             break
         evaluation = placement_evaluation(
-            topic, model, asked_difficulty, question, answer, results, answer_key, concept
+            topic,
+            model,
+            asked_difficulty,
+            question,
+            answer,
+            results,
+            answer_key,
+            concept,
+            retry_status=output_func,
         )
 
         is_correct = evaluation.get("correct") is True
@@ -1990,14 +2024,19 @@ def run_placement_quiz(topic: Topic, model: str, input_func=input, output_func=p
 
 
 def placement_question(
-    topic: Topic, model: str, difficulty: int, results: list[dict[str, object]]
+    topic: Topic,
+    model: str,
+    difficulty: int,
+    results: list[dict[str, object]],
+    retry_status: Callable[[str], object] | None = None,
 ) -> dict[str, object]:
     prompt = placement_question_prompt(topic, difficulty, results)
     for attempt in range(2):
-        raw = call_openai(
+        raw = call_openai_with_status(
             model,
             generation_system_prompt(topic),
             prompt,
+            retry_status=retry_status,
         )
         try:
             data = parse_metadata_update(raw)
@@ -2128,6 +2167,7 @@ def placement_evaluation(
     results: list[dict[str, object]],
     answer_key: str = "",
     concept: str = "",
+    retry_status: Callable[[str], object] | None = None,
 ) -> dict[str, object]:
     selected = answer.strip().upper()[:1]
     if answer_key in {"A", "B", "C", "D"} and selected in {"A", "B", "C", "D"}:
@@ -2160,7 +2200,11 @@ def placement_evaluation(
         """
     ).strip()
     try:
-        update = parse_metadata_update(call_openai(model, METADATA_EXTRACTOR_SYSTEM, prompt))
+        update = parse_metadata_update(
+            call_openai_with_status(
+                model, METADATA_EXTRACTOR_SYSTEM, prompt, retry_status=retry_status
+            )
+        )
     except (OpenLearnError, ValueError, json.JSONDecodeError):
         return {"correct": False, "concept": "unknown", "note": "Could not evaluate reliably."}
     return update
@@ -4406,9 +4450,9 @@ def cmd_summary(args: argparse.Namespace) -> int:
 
 
 def cmd_repair(args: argparse.Namespace) -> int:
-    topic = read_topic(resolve_topic_slug(args.topic))
-    changed = repair_topic_metadata(topic.slug)
-    print(f"Metadata {'repaired' if changed else 'already complete'}: {topic.slug}")
+    slug = resolve_topic_slug(args.topic)
+    changed = repair_topic_metadata(slug)
+    print(f"Metadata {'repaired' if changed else 'already complete'}: {slug}")
     return 0
 
 
@@ -4917,7 +4961,7 @@ def cmd_drill(args: argparse.Namespace, output_func=print) -> int:
     else:
         model = args.model or str(topic.metadata.get("model") or configured_model())
         user = drill_generation_prompt(topic)
-        raw = call_openai(model, system_prompt(topic), user)
+        raw = call_openai_with_status(model, system_prompt(topic), user, retry_status=output_func)
         drill = parse_drill_json(raw)
     path = write_drill_file(topic.slug, drill)
     save_active_drill(topic.slug, path)
@@ -7441,9 +7485,16 @@ def normalize_topic_metadata(metadata: dict[str, object], slug: str) -> dict[str
 
 def repair_topic_metadata(slug: str) -> bool:
     path = topic_path(slug)
+    if not path.exists():
+        raise OpenLearnError(f"topic not found: {slug}")
     with file_lock(path):
         current_text = path.read_text(encoding="utf-8")
-        metadata, body = parse_topic(current_text)
+        try:
+            metadata, body = parse_topic(current_text)
+            repaired_frontmatter = False
+        except OpenLearnError:
+            metadata, body = repair_topic_frontmatter(current_text)
+            repaired_frontmatter = True
         normalized = merge_topic_state(normalize_topic_metadata(metadata, slug), load_state(slug))
         if normalized.get("learning_mode") == "quick":
             plan_topic = Topic(slug=slug, path=path, metadata=normalized, body=body)
@@ -7495,14 +7546,92 @@ def repair_topic_metadata(slug: str) -> bool:
                             combined.append(label)
                     merged_coverage[key] = combined
                 normalized["slide_coverage"] = merged_coverage
-        if stable_metadata_for_topic(normalized) == metadata and state_from_metadata(
-            normalized
-        ) == load_state(slug):
+        if (
+            not repaired_frontmatter
+            and stable_metadata_for_topic(normalized) == metadata
+            and state_from_metadata(normalized) == load_state(slug)
+        ):
             return False
         write_topic_backup(path, current_text)
         save_state(slug, state_from_metadata(normalized))
         write_text_atomic(path, format_topic(stable_metadata_for_topic(normalized), body))
         return True
+
+
+def repair_topic_frontmatter(text: str) -> tuple[dict[str, object], str]:
+    if not text.startswith("---\n"):
+        raise OpenLearnError("invalid topic metadata: missing opening delimiter")
+    remainder = text[len("---\n") :]
+    if "---\n" in remainder:
+        raw_metadata, body = remainder.split("---\n", 1)
+        body = body.lstrip()
+    else:
+        raw_metadata = remainder
+        body = ""
+    repaired_json = repair_json_object(raw_metadata)
+    try:
+        metadata = json.loads(repaired_json)
+    except json.JSONDecodeError as exc:
+        raise OpenLearnError(f"invalid topic metadata: unrepairable JSON: {exc}") from exc
+    if not isinstance(metadata, dict):
+        raise OpenLearnError("invalid topic metadata: expected object")
+    return metadata, body
+
+
+def repair_json_object(raw: str) -> str:
+    stack: list[str] = []
+    in_string = False
+    escaped = False
+    for char in raw:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char in "{[":
+            stack.append(char)
+        elif char in "}]":
+            expected = "{" if char == "}" else "["
+            if not stack or stack.pop() != expected:
+                raise OpenLearnError("invalid topic metadata: unrepairable JSON structure")
+    if in_string or escaped:
+        raise OpenLearnError("invalid topic metadata: unrepairable truncated string")
+    closers = "".join("}" if char == "{" else "]" for char in reversed(stack))
+    candidate = raw.rstrip() + closers
+    return remove_json_trailing_commas(candidate)
+
+
+def remove_json_trailing_commas(raw: str) -> str:
+    output: list[str] = []
+    in_string = False
+    escaped = False
+    for index, char in enumerate(raw):
+        if in_string:
+            output.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+            output.append(char)
+            continue
+        if char == ",":
+            next_index = index + 1
+            while next_index < len(raw) and raw[next_index].isspace():
+                next_index += 1
+            if next_index < len(raw) and raw[next_index] in "}]":
+                continue
+        output.append(char)
+    return "".join(output)
 
 
 def format_topic(metadata: dict[str, object], body: str) -> str:
@@ -8212,7 +8341,21 @@ def _mock_openai_response(model: str, system: str, user: str) -> str:
     return "**Lesson:** Mock reply. Ask a focused question to continue."
 
 
-def call_openai(model: str, system: str, user: str) -> str:
+def is_transient_openai_error(exc: HTTPError | URLError | TimeoutError) -> bool:
+    if isinstance(exc, HTTPError):
+        return exc.code == 429 or 500 <= exc.code <= 599
+    return True
+
+
+def call_openai(
+    model: str,
+    system: str,
+    user: str,
+    *,
+    retry_sleep: Callable[[float], object] = time.sleep,
+    retry_jitter: Callable[[float, float], float] = random.uniform,
+    retry_status: Callable[[str], object] | None = None,
+) -> str:
     if _DRY_RUN:
         raise DryRunPrompt(model, system, user)
 
@@ -8247,18 +8390,32 @@ def call_openai(model: str, system: str, user: str) -> str:
         headers=headers,
         method="POST",
     )
-    try:
-        with urlopen(request, timeout=60) as response:
-            data = json.loads(response.read().decode("utf-8"))
-    except HTTPError as exc:
-        if exc.code == 401 and not api_key:
-            raise OpenLearnError(
-                "This endpoint requires an API key. Run: openlearn config set-key"
-            ) from exc
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise OpenLearnError(f"OpenAI request failed: HTTP {exc.code}: {detail}") from exc
-    except URLError as exc:
-        raise OpenLearnError(f"OpenAI request failed: {exc.reason}") from exc
+    for attempt in range(1, OPENAI_MAX_ATTEMPTS + 1):
+        try:
+            with urlopen(request, timeout=60) as response:
+                data = json.loads(response.read().decode("utf-8"))
+            break
+        except (HTTPError, URLError, TimeoutError) as exc:
+            if not is_transient_openai_error(exc) or attempt == OPENAI_MAX_ATTEMPTS:
+                if isinstance(exc, HTTPError):
+                    if exc.code == 401 and not api_key:
+                        raise OpenLearnError(
+                            "This endpoint requires an API key. Run: openlearn config set-key"
+                        ) from exc
+                    detail = exc.read().decode("utf-8", errors="replace")
+                    raise OpenLearnError(
+                        f"OpenAI request failed: HTTP {exc.code}: {detail}"
+                    ) from exc
+                reason = exc.reason if isinstance(exc, URLError) else str(exc)
+                raise OpenLearnError(f"OpenAI request failed: {reason}") from exc
+            delay = OPENAI_RETRY_BASE_DELAY_SECONDS * 2 ** (attempt - 1)
+            delay += retry_jitter(0.0, OPENAI_RETRY_JITTER_SECONDS)
+            if retry_status is not None:
+                retry_status(
+                    f"Temporary OpenAI failure; retrying in {delay:.1f}s "
+                    f"({attempt + 1}/{OPENAI_MAX_ATTEMPTS})..."
+                )
+            retry_sleep(delay)
 
     text = extract_response_text(data)
     text = sanitize_model_output(text)
@@ -8269,6 +8426,18 @@ def call_openai(model: str, system: str, user: str) -> str:
     return text.strip()
 
 
+def call_openai_with_status(
+    model: str,
+    system: str,
+    user: str,
+    *,
+    retry_status: Callable[[str], object] | None = None,
+) -> str:
+    if retry_status is None or call_openai.__name__ != "call_openai":
+        return call_openai(model, system, user)
+    return call_openai(model, system, user, retry_status=retry_status)
+
+
 def call_openai_streaming(
     model: str,
     system: str,
@@ -8276,6 +8445,9 @@ def call_openai_streaming(
     output_func=print,
     *,
     capture_answer_key: bool = True,
+    retry_sleep: Callable[[float], object] = time.sleep,
+    retry_jitter: Callable[[float, float], float] = random.uniform,
+    retry_status: Callable[[str], object] | None = None,
 ) -> str:
     global _LAST_RESPONSE_ANSWER_KEY, _LAST_RESPONSE_COVERED_CONCEPTS
     if _DRY_RUN:
@@ -8339,50 +8511,67 @@ def call_openai_streaming(
         headers=headers,
         method="POST",
     )
-    chunks: list[str] = []
     spinner_context = thinking_progress(output_func)
+    retry_status_func = retry_status or output_func
     spinner = spinner_context.__enter__()
     spinner_active = True
     tutor_stream: TutorResponseStream | None = None
     if spinner is not None:
         spinner.add_task("waiting", total=None)
     try:
-        with urlopen(request, timeout=60) as response:
-            for raw_line in response:
-                line = raw_line.decode("utf-8", errors="replace").strip()
-                if not line.startswith("data:"):
-                    continue
-                data = line.removeprefix("data:").strip()
-                if data == "[DONE]":
-                    break
-                try:
-                    event = json.loads(data)
-                except json.JSONDecodeError:
-                    continue
-                text = extract_stream_delta(event)
-                if not text:
-                    continue
-                chunks.append(text)
-                if output_func is print:
-                    if tutor_stream is None:
-                        spinner_context.__exit__(None, None, None)
-                        spinner_active = False
-                        tutor_stream = TutorResponseStream()
-                        tutor_stream.start()
-                    tutor_stream.update(sanitize_stream_preview("".join(chunks)))
-    except HTTPError as exc:
-        if tutor_stream is not None:
-            tutor_stream.abort()
-        if exc.code == 401 and not api_key:
-            raise OpenLearnError(
-                "This endpoint requires an API key. Run: openlearn config set-key"
-            ) from exc
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise OpenLearnError(f"OpenAI request failed: HTTP {exc.code}: {detail}") from exc
-    except URLError as exc:
-        if tutor_stream is not None:
-            tutor_stream.abort()
-        raise OpenLearnError(f"OpenAI request failed: {exc.reason}") from exc
+        for attempt in range(1, OPENAI_MAX_ATTEMPTS + 1):
+            chunks: list[str] = []
+            try:
+                with urlopen(request, timeout=60) as response:
+                    for raw_line in response:
+                        line = raw_line.decode("utf-8", errors="replace").strip()
+                        if not line.startswith("data:"):
+                            continue
+                        data = line.removeprefix("data:").strip()
+                        if data == "[DONE]":
+                            break
+                        try:
+                            event = json.loads(data)
+                        except json.JSONDecodeError:
+                            continue
+                        text = extract_stream_delta(event)
+                        if not text:
+                            continue
+                        chunks.append(text)
+                        if output_func is print:
+                            if tutor_stream is None:
+                                if spinner_active:
+                                    spinner_context.__exit__(None, None, None)
+                                    spinner_active = False
+                                tutor_stream = TutorResponseStream()
+                                tutor_stream.start()
+                            tutor_stream.update(sanitize_stream_preview("".join(chunks)))
+                break
+            except (HTTPError, URLError, TimeoutError) as exc:
+                if not is_transient_openai_error(exc) or attempt == OPENAI_MAX_ATTEMPTS:
+                    if tutor_stream is not None:
+                        tutor_stream.abort()
+                    if isinstance(exc, HTTPError):
+                        if exc.code == 401 and not api_key:
+                            raise OpenLearnError(
+                                "This endpoint requires an API key. Run: openlearn config set-key"
+                            ) from exc
+                        detail = exc.read().decode("utf-8", errors="replace")
+                        raise OpenLearnError(
+                            f"OpenAI request failed: HTTP {exc.code}: {detail}"
+                        ) from exc
+                    reason = exc.reason if isinstance(exc, URLError) else str(exc)
+                    raise OpenLearnError(f"OpenAI request failed: {reason}") from exc
+                if tutor_stream is not None:
+                    tutor_stream.abort()
+                    tutor_stream = None
+                delay = OPENAI_RETRY_BASE_DELAY_SECONDS * 2 ** (attempt - 1)
+                delay += retry_jitter(0.0, OPENAI_RETRY_JITTER_SECONDS)
+                retry_status_func(
+                    f"Temporary OpenAI failure; retrying in {delay:.1f}s "
+                    f"({attempt + 1}/{OPENAI_MAX_ATTEMPTS})..."
+                )
+                retry_sleep(delay)
     except Exception:
         if tutor_stream is not None:
             tutor_stream.abort()

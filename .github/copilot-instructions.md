@@ -18,15 +18,16 @@
 - Topic slugs are the stable file IDs; topic commands update `state.json` so `resume`, `next`, `edit`, `menu`, and `repl` can work without retyping the topic name.
 - Saved config lives in `config.json`; both `config.json` and `state.json` are local-only data.
 - Model-backed commands send only the selected topic’s metadata, a bounded notes excerpt, recent session history, and the current prompt.
+- Transient OpenAI-compatible provider failures retry with bounded backoff before surfacing an error.
 - `chat`, `resume`, `next`, and `review` support `--dry-run` to print rendered prompts without provider calls or local file mutation.
 - Learner-metadata extraction sends a smaller state snapshot.
-- The REPL is thin: slash commands dispatch to the same handlers used by the non-interactive CLI.
+- The REPL is thin: slash commands dispatch to the same handlers used by the non-interactive CLI, and failed non-command turns keep the typed answer for Enter resubmission or typed replacement.
 - Multiline paste coalescing is POSIX-only; Windows stdin falls back to one line per learner message.
 
 ## Conventions
 
 - Keep the project local-first: do not commit topic Markdown files, context files, `config.json`, `state.json`, API keys, or `.env` files.
-- Preserve the Markdown + JSON topic format; use `repair`/metadata normalization patterns when filling missing fields.
+- Preserve the Markdown + JSON topic format; use `repair`/metadata normalization patterns when filling missing fields or recovering simple corrupt JSON frontmatter.
 - Environment precedence is `OPENAI_API_KEY`, `OPENLEARN_MODEL`, `OPENLEARN_EXTRACTOR_MODEL`, and `OPENLEARN_BASE_URL` first, then `config.json`, then defaults.
 - Bare `openlearn` runs onboarding only when provider configuration is unusable; `OPENLEARN_MOCK=1`, saved keys, environment keys, and keyless localhost providers with a configured model skip it.
 - Topic commands should leave the active-topic state consistent with the file they operate on.

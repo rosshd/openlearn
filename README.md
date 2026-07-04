@@ -111,6 +111,7 @@ If no active topic exists, it falls back to the most recently changed topic.
 Learning actions from the menu continue into the REPL automatically.
 Interactive sessions support multiline paste as one learner message on POSIX terminals.
 On Windows, paste multiple lines one at a time.
+If a model-backed REPL turn fails after you type an answer, openLearn keeps that answer in the prompt so pressing Enter resubmits it, or typing replaces it.
 Plain requests such as "continue", "move on", or "skip" advance the current slide; if the wording includes a preference such as "I don't need this", openLearn stores it as a learner preference.
 
 Inside the REPL:
@@ -142,7 +143,9 @@ Use `/help --all` for the full REPL command list.
 
 Model-backed commands require an API key for non-local providers, but localhost OpenAI-compatible endpoints such as Ollama may be used keylessly.
 `OPENLEARN_MOCK=1` runs model-backed tests without any provider call.
+Transient provider failures such as rate limits, server errors, URL errors, and timeouts are retried up to three times with bounded backoff before surfacing an error.
 `chat`, `resume`, `next`, and `review` accept `--dry-run` to print the rendered prompts instead of calling the model, leaving all local files untouched.
+`repair` fills missing topic metadata defaults and can recover simple corrupt JSON frontmatter such as trailing commas or missing closing braces/brackets, writing a `.bak` file before rewriting the topic.
 `repl` also has the `shell` alias.
 
 ## Local Files

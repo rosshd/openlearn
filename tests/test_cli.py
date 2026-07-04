@@ -237,6 +237,12 @@ class CliStorageTests(unittest.TestCase):
         self.assertEqual(cli.read_topic("legacy").metadata["quiz_history"], [])
         self.assertEqual(state["quiz_history"], [])
 
+    def test_cmd_repair_reports_missing_topic_without_traceback(self) -> None:
+        call_silent(cli.cmd_init, Namespace())
+
+        with self.assertRaisesRegex(cli.OpenLearnError, "topic not found: missing"):
+            cli.cmd_repair(Namespace(topic="missing"))
+
     def test_new_topic_starts_unstarted(self) -> None:
         call_silent(
             cli.cmd_new,
@@ -1621,6 +1627,147 @@ class ProviderResponseTests(unittest.TestCase):
         self.assertEqual(payload["max_tokens"], cli.DEFAULT_MAX_TOKENS)
         self.assertIs(payload["include_reasoning"], False)
 
+    def test_call_openai_retries_transient_failures_then_succeeds(self) -> None:
+        previous_key = os.environ.get("OPENAI_API_KEY")
+        os.environ["OPENAI_API_KEY"] = "sk-test"
+        attempts = []
+        delays = []
+        statuses = []
+        original_urlopen = cli.urlopen
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def read(self):
+                return json.dumps({"choices": [{"message": {"content": "recovered"}}]}).encode()
+
+        failures = [
+            cli.HTTPError(
+                "https://example.test",
+                500,
+                "server error",
+                {},
+                io.BytesIO(b'{"error":"temporary"}'),
+            ),
+            TimeoutError("timed out"),
+        ]
+
+        def fake_urlopen(_request, timeout=0):
+            attempts.append(timeout)
+            if failures:
+                raise failures.pop(0)
+            return FakeResponse()
+
+        cli.urlopen = fake_urlopen
+        try:
+            answer = cli.call_openai(
+                "test-model",
+                "system",
+                "user",
+                retry_sleep=delays.append,
+                retry_jitter=lambda _start, _end: 0.0,
+                retry_status=statuses.append,
+            )
+        finally:
+            cli.urlopen = original_urlopen
+            if previous_key is None:
+                os.environ.pop("OPENAI_API_KEY", None)
+            else:
+                os.environ["OPENAI_API_KEY"] = previous_key
+
+        self.assertEqual(answer, "recovered")
+        self.assertEqual(attempts, [60, 60, 60])
+        self.assertEqual(delays, [0.5, 1.0])
+        self.assertEqual(len(statuses), 2)
+        self.assertTrue(all("retrying" in status.lower() for status in statuses))
+
+    def test_call_openai_default_retry_status_is_silent(self) -> None:
+        previous_key = os.environ.get("OPENAI_API_KEY")
+        os.environ["OPENAI_API_KEY"] = "sk-test"
+        delays = []
+        original_urlopen = cli.urlopen
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def read(self):
+                return json.dumps({"choices": [{"message": {"content": "recovered"}}]}).encode()
+
+        failures = [TimeoutError("timed out")]
+
+        def fake_urlopen(_request, timeout=0):
+            if failures:
+                raise failures.pop(0)
+            return FakeResponse()
+
+        cli.urlopen = fake_urlopen
+        output = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(output):
+                answer = cli.call_openai(
+                    "test-model",
+                    "system",
+                    "user",
+                    retry_sleep=delays.append,
+                    retry_jitter=lambda _start, _end: 0.0,
+                )
+        finally:
+            cli.urlopen = original_urlopen
+            if previous_key is None:
+                os.environ.pop("OPENAI_API_KEY", None)
+            else:
+                os.environ["OPENAI_API_KEY"] = previous_key
+
+        self.assertEqual(answer, "recovered")
+        self.assertEqual(delays, [0.5])
+        self.assertEqual(output.getvalue(), "")
+
+    def test_call_openai_does_not_retry_non_transient_http_error(self) -> None:
+        previous_key = os.environ.get("OPENAI_API_KEY")
+        os.environ["OPENAI_API_KEY"] = "sk-test"
+        attempts = []
+        delays = []
+        original_urlopen = cli.urlopen
+
+        def fake_urlopen(_request, timeout=0):
+            attempts.append(timeout)
+            raise cli.HTTPError(
+                "https://example.test",
+                401,
+                "unauthorized",
+                {},
+                io.BytesIO(b'{"error":"invalid key"}'),
+            )
+
+        cli.urlopen = fake_urlopen
+        try:
+            with self.assertRaisesRegex(cli.OpenLearnError, "HTTP 401"):
+                cli.call_openai(
+                    "test-model",
+                    "system",
+                    "user",
+                    retry_sleep=delays.append,
+                    retry_jitter=lambda _start, _end: 0.0,
+                    retry_status=lambda _message: None,
+                )
+        finally:
+            cli.urlopen = original_urlopen
+            if previous_key is None:
+                os.environ.pop("OPENAI_API_KEY", None)
+            else:
+                os.environ["OPENAI_API_KEY"] = previous_key
+
+        self.assertEqual(attempts, [60])
+        self.assertEqual(delays, [])
+
     def test_call_openai_allows_local_keyless_provider(self) -> None:
         previous_key = os.environ.pop("OPENAI_API_KEY", None)
         previous_base_url = os.environ.get("OPENLEARN_BASE_URL")
@@ -1718,6 +1865,154 @@ class ProviderResponseTests(unittest.TestCase):
         self.assertIs(payload["stream"], True)
         self.assertEqual(answer, "Hello there")
         self.assertEqual(output, ["", "Tutor", "Hello there", "End tutor response", ""])
+
+    def test_call_openai_streaming_retries_transient_failures_then_succeeds(self) -> None:
+        previous_key = os.environ.get("OPENAI_API_KEY")
+        os.environ["OPENAI_API_KEY"] = "sk-test"
+        attempts = []
+        delays = []
+        statuses = []
+        original_urlopen = cli.urlopen
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def __iter__(self):
+                event = {"choices": [{"delta": {"content": "recovered"}}]}
+                yield f"data: {json.dumps(event)}\n".encode()
+                yield b"data: [DONE]\n"
+
+        failures = [
+            cli.HTTPError(
+                "https://example.test",
+                500,
+                "server error",
+                {},
+                io.BytesIO(b'{"error":"temporary"}'),
+            ),
+            TimeoutError("timed out"),
+        ]
+
+        def fake_urlopen(_request, timeout=0):
+            attempts.append(timeout)
+            if failures:
+                raise failures.pop(0)
+            return FakeResponse()
+
+        cli.urlopen = fake_urlopen
+        try:
+            output = []
+            answer = cli.call_openai_streaming(
+                "test-model",
+                "system",
+                "user",
+                output_func=output.append,
+                retry_sleep=delays.append,
+                retry_jitter=lambda _start, _end: 0.0,
+                retry_status=statuses.append,
+            )
+        finally:
+            cli.urlopen = original_urlopen
+            if previous_key is None:
+                os.environ.pop("OPENAI_API_KEY", None)
+            else:
+                os.environ["OPENAI_API_KEY"] = previous_key
+
+        self.assertEqual(answer, "recovered")
+        self.assertEqual(attempts, [60, 60, 60])
+        self.assertEqual(delays, [0.5, 1.0])
+        self.assertEqual(len(statuses), 2)
+        self.assertTrue(all("retrying" in status.lower() for status in statuses))
+
+    def test_call_openai_streaming_routes_retry_status_to_output_func(self) -> None:
+        previous_key = os.environ.get("OPENAI_API_KEY")
+        os.environ["OPENAI_API_KEY"] = "sk-test"
+        delays = []
+        output = []
+        original_urlopen = cli.urlopen
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def __iter__(self):
+                event = {"choices": [{"delta": {"content": "recovered"}}]}
+                yield f"data: {json.dumps(event)}\n".encode()
+                yield b"data: [DONE]\n"
+
+        failures = [TimeoutError("timed out")]
+
+        def fake_urlopen(_request, timeout=0):
+            if failures:
+                raise failures.pop(0)
+            return FakeResponse()
+
+        cli.urlopen = fake_urlopen
+        try:
+            answer = cli.call_openai_streaming(
+                "test-model",
+                "system",
+                "user",
+                output_func=output.append,
+                retry_sleep=delays.append,
+                retry_jitter=lambda _start, _end: 0.0,
+            )
+        finally:
+            cli.urlopen = original_urlopen
+            if previous_key is None:
+                os.environ.pop("OPENAI_API_KEY", None)
+            else:
+                os.environ["OPENAI_API_KEY"] = previous_key
+
+        self.assertEqual(answer, "recovered")
+        self.assertEqual(delays, [0.5])
+        self.assertTrue(any("retrying" in line.lower() for line in output))
+
+    def test_call_openai_streaming_does_not_retry_non_transient_http_error(self) -> None:
+        previous_key = os.environ.get("OPENAI_API_KEY")
+        os.environ["OPENAI_API_KEY"] = "sk-test"
+        attempts = []
+        delays = []
+        original_urlopen = cli.urlopen
+
+        def fake_urlopen(_request, timeout=0):
+            attempts.append(timeout)
+            raise cli.HTTPError(
+                "https://example.test",
+                401,
+                "unauthorized",
+                {},
+                io.BytesIO(b'{"error":"invalid key"}'),
+            )
+
+        cli.urlopen = fake_urlopen
+        try:
+            with self.assertRaisesRegex(cli.OpenLearnError, "HTTP 401"):
+                cli.call_openai_streaming(
+                    "test-model",
+                    "system",
+                    "user",
+                    output_func=lambda _message: None,
+                    retry_sleep=delays.append,
+                    retry_jitter=lambda _start, _end: 0.0,
+                    retry_status=lambda _message: None,
+                )
+        finally:
+            cli.urlopen = original_urlopen
+            if previous_key is None:
+                os.environ.pop("OPENAI_API_KEY", None)
+            else:
+                os.environ["OPENAI_API_KEY"] = previous_key
+
+        self.assertEqual(attempts, [60])
+        self.assertEqual(delays, [])
 
     def test_call_openai_streaming_sanitizes_before_terminal_output(self) -> None:
         previous_key = os.environ.get("OPENAI_API_KEY")
@@ -3534,6 +3829,40 @@ class InteractiveTests(unittest.TestCase):
         self.assertLess(status_index, feedback_index)
         self.assertFalse(any("openlearn" in line for line in output[feedback_index + 1 :]))
 
+    def test_repl_keeps_failed_answer_and_enter_resubmits_it(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
+        original_ask_topic = cli.ask_topic
+        submitted = []
+        output = []
+        prompts = []
+        inputs = iter(["learner answer", "", "/q"])
+
+        def input_func(prompt: str = "") -> str:
+            prompts.append(prompt)
+            return next(inputs)
+
+        def fake_ask_topic(_topic, prompt, _model, **_kwargs) -> str:
+            submitted.append(prompt)
+            if len(submitted) == 1:
+                raise cli.OpenLearnError("network unavailable")
+            return "Tutor answer"
+
+        cli.ask_topic = fake_ask_topic
+        try:
+            exit_code = call_silent(
+                cli.run_repl,
+                input_func=input_func,
+                output_func=output.append,
+                show_intro=False,
+            )
+        finally:
+            cli.ask_topic = original_ask_topic
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(submitted, ["learner answer", "learner answer"])
+        self.assertTrue(any("answer was kept" in line.lower() for line in output))
+        self.assertIn("press Enter to resubmit", prompts[1])
+
     def test_repl_advance_intent_records_preference_and_skips_stale_question(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Mac Workflow", goal="Learn macOS"))
         path = cli.topic_path("mac-workflow")
@@ -4958,6 +5287,26 @@ class PromptInstructionTests(unittest.TestCase):
 
         self.assertTrue(changed)
         self.assertEqual(cli.topic_backup_path(path).read_text(encoding="utf-8"), broken_text)
+
+    def test_repair_topic_metadata_recovers_corrupt_json_frontmatter(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
+        path = cli.topic_path("vim")
+        original_text = path.read_text(encoding="utf-8")
+        metadata, original_body = cli.parse_topic(original_text)
+        corrupt_text = original_text.replace("\n}\n---\n", ",\n---\n", 1)
+        path.write_text(corrupt_text, encoding="utf-8")
+
+        output = capture_stdout(cli.cmd_repair, Namespace(topic="vim"))
+
+        repaired_metadata, repaired_body = cli.parse_topic(path.read_text(encoding="utf-8"))
+        self.assertIn("Metadata repaired: vim", output)
+        self.assertEqual(repaired_metadata["topic"], metadata["topic"])
+        self.assertEqual(repaired_metadata["goal"], metadata["goal"])
+        self.assertEqual(repaired_body, original_body)
+        self.assertEqual(
+            cli.topic_backup_path(path).read_text(encoding="utf-8"),
+            corrupt_text,
+        )
 
     def test_repair_quick_course_restores_concepts_from_accepted_plan(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="OS", goal="midterm"))
