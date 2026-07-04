@@ -11,6 +11,7 @@ The product promise is simple: bring your own model access, keep your learning f
 - Markdown topic files with JSON metadata.
 - Local learner state, event logs, and source summaries.
 - OpenAI-compatible provider calls with configurable base URL and model.
+- First-run onboarding that can configure OpenAI, Anthropic-compatible APIs, Ollama, or a custom OpenAI-compatible provider.
 - Mockable tests and smoke flows.
 
 ## User Workflow
@@ -78,7 +79,7 @@ Design requirements:
 ## Differentiators
 
 - Own your learning data.
-- Bring your own model, whether hosted with a key or local/custom and keyless.
+- Bring your own model, whether hosted with a key or local and keyless.
 - Transparent local memory.
 - Tutor behavior optimized for retrieval, transfer, and mastery.
 - No subscription required for the core local workflow.

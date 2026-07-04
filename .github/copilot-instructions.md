@@ -12,7 +12,7 @@
 
 ## Architecture
 
-- Single-package Python CLI in `src/openlearn/`; `openlearn.cli` owns the MVP’s storage, prompts, menu/REPL flow, config, and OpenAI-compatible provider calls.
+- Single-package Python CLI in `src/openlearn/`; `openlearn.cli` owns most storage, prompts, menu/REPL flow, config, and OpenAI-compatible provider calls, while `openlearn.onboarding` owns first-run provider setup.
 - The main entrypoint is `openlearn` / `python -m openlearn`.
 - Learning topics are user-owned Markdown files under `learning-topics/` with a JSON metadata block between `---` delimiters.
 - Topic slugs are the stable file IDs; topic commands update `state.json` so `resume`, `next`, `edit`, `menu`, and `repl` can work without retyping the topic name.
@@ -28,6 +28,7 @@
 - Keep the project local-first: do not commit topic Markdown files, context files, `config.json`, `state.json`, API keys, or `.env` files.
 - Preserve the Markdown + JSON topic format; use `repair`/metadata normalization patterns when filling missing fields.
 - Environment precedence is `OPENAI_API_KEY`, `OPENLEARN_MODEL`, `OPENLEARN_EXTRACTOR_MODEL`, and `OPENLEARN_BASE_URL` first, then `config.json`, then defaults.
+- Bare `openlearn` runs onboarding only when provider configuration is unusable; `OPENLEARN_MOCK=1`, saved keys, environment keys, and keyless localhost providers with a configured model skip it.
 - Topic commands should leave the active-topic state consistent with the file they operate on.
 - Topic writes must keep using the shared file-lock interface, which maps to `fcntl` on POSIX and `msvcrt` on Windows.
 - Context imports are `.txt` files only; imported context and summaries live under each topic’s `learning-topics/<slug>/context/` directory.

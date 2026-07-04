@@ -12,7 +12,7 @@ It stores curriculum, learner state, session notes, and context files locally wh
 ## Principles
 
 - Local-first: topics and learner state live under your openLearn home.
-- Bring your own model access: use a hosted API key or a local/custom keyless endpoint.
+- Bring your own model access: use a hosted API key or a local keyless endpoint.
 - Transparent scope: model calls use the selected topic, bounded notes, recent context, and the current prompt.
 - Human-readable memory: topic files are Markdown with JSON metadata.
 - Open core: AGPLv3 keeps hosted modifications open.
@@ -52,6 +52,11 @@ Topic file locking works on all supported platforms.
 Multiline paste detection requires a POSIX terminal; on Windows, the REPL accepts pasted input one line at a time.
 
 ## Configuration
+
+On the first bare `openlearn` run without a usable provider configuration, openLearn guides you through provider selection, live key validation, model selection, and a first learning activity.
+The built-in presets cover OpenAI, Anthropic-compatible APIs, Ollama, and custom OpenAI-compatible providers.
+Set `OPENAI_API_KEY` to skip this onboarding flow and use environment-based configuration; valid keyless localhost providers such as Ollama are already configured when their base URL and model are set.
+The final onboarding step can start Quick Learn from a file, start the Vim starter course, or open the menu.
 
 Interactive setup:
 
@@ -135,7 +140,7 @@ Use `/help --all` for the full REPL command list.
 | Practice | `videos`, REPL `/drill`, REPL `/check` |
 | Utilities | `templates`, `test`, `tui` |
 
-Model-backed commands require an API key for hosted defaults, but local/custom OpenAI-compatible endpoints such as Ollama may be used keylessly.
+Model-backed commands require an API key for non-local providers, but localhost OpenAI-compatible endpoints such as Ollama may be used keylessly.
 `OPENLEARN_MOCK=1` runs model-backed tests without any provider call.
 `chat`, `resume`, `next`, and `review` accept `--dry-run` to print the rendered prompts instead of calling the model, leaving all local files untouched.
 `repl` also has the `shell` alias.

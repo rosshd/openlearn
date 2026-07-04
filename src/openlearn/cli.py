@@ -45,7 +45,6 @@ from openlearn.constants import (
     DEFAULT_MODEL,
     GAMING_MIN_ANSWER_TOKENS,
     GAMING_OVERLAP_TRIGRAM_JACCARD,
-    HOSTED_BASE_URLS,
     MANUAL_TEST_CONTEXT,
     MANUAL_TEST_CONTEXT_FILENAME,
     MANUAL_TEST_COURSE_GOAL,
@@ -273,10 +272,20 @@ Output boundaries:
 
 def main(argv: list[str] | None = None) -> int:
     global _DRY_RUN
+    command_args = sys.argv[1:] if argv is None else argv
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(command_args)
     _DRY_RUN = bool(getattr(args, "dry_run", False))
     try:
+        if (
+            not command_args
+            and not _openlearn_mock_enabled()
+            and _configured_provider_needs_onboarding()
+        ):
+            from openlearn.onboarding import run_onboarding
+
+            if not run_onboarding():
+                return 1
         if args.func is cmd_review:
             return cmd_review(args, input_func=input if sys.stdin.isatty() else None)
         return args.func(args)
@@ -2515,7 +2524,7 @@ def infer_mastery_profile_from_goal(goal: str, model: str | None = None) -> str:
     lowered = goal_text.lower()
     if not goal_text:
         return "proficient"
-    if provider_is_configured() and os.environ.get("OPENLEARN_MOCK") not in {"1", "true", "yes"}:
+    if provider_is_configured() and not _openlearn_mock_enabled():
         prompt = (
             "Classify this learning goal into exactly one mastery_profile: "
             'efficient, proficient, or deep. Return JSON like {"mastery_profile":"proficient"}.\n\n'
@@ -6271,6 +6280,15 @@ def configured_extractor_model(tutor_model: str, config: dict[str, object] | Non
     return model if isinstance(model, str) and model else tutor_model
 
 
+def _has_configured_model(config: dict[str, object] | None = None) -> bool:
+    env_model = os.environ.get("OPENLEARN_MODEL")
+    if env_model:
+        return True
+    config = read_config() if config is None else config
+    model = config.get("model")
+    return isinstance(model, str) and bool(model)
+
+
 def configured_base_url(config: dict[str, object] | None = None) -> str:
     env_base_url = os.environ.get("OPENLEARN_BASE_URL")
     if env_base_url:
@@ -6290,7 +6308,12 @@ def configured_openai_api_key() -> str | None:
 
 
 def base_url_requires_api_key(base_url: str) -> bool:
-    return base_url.rstrip("/") in HOSTED_BASE_URLS
+    return not _base_url_allows_keyless_requests(base_url)
+
+
+def _base_url_allows_keyless_requests(base_url: str) -> bool:
+    parsed = urlparse(base_url)
+    return parsed.hostname in {"localhost", "127.0.0.1", "::1"}
 
 
 def provider_is_configured(config: dict[str, object] | None = None) -> bool:
@@ -6299,6 +6322,23 @@ def provider_is_configured(config: dict[str, object] | None = None) -> bool:
     if configured_openai_api_key():
         return True
     return not base_url_requires_api_key(configured_base_url(config))
+
+
+def _configured_provider_needs_onboarding() -> bool:
+    if os.environ.get("OPENAI_API_KEY"):
+        return False
+    config = read_config()
+    key = config.get("openai_api_key") or config.get("api_key")
+    if isinstance(key, str) and key:
+        return False
+    base_url = configured_base_url(config)
+    if not _base_url_allows_keyless_requests(base_url):
+        return True
+    return not _has_configured_model(config)
+
+
+def _openlearn_mock_enabled() -> bool:
+    return os.environ.get("OPENLEARN_MOCK") in {"1", "true", "yes"}
 
 
 def topic_path(slug: str) -> Path:
@@ -6467,7 +6507,7 @@ def fetch_video_suggestions(query: str, limit: int = 3) -> list[dict[str, str]]:
     query = query.strip()
     if not query:
         return []
-    if os.environ.get("OPENLEARN_MOCK") in {"1", "true", "yes"}:
+    if _openlearn_mock_enabled():
         return [
             {
                 "title": "Mock study video",
@@ -8177,7 +8217,7 @@ def call_openai(model: str, system: str, user: str) -> str:
         raise DryRunPrompt(model, system, user)
 
     # Mock mode support for CI / offline testing
-    if os.environ.get("OPENLEARN_MOCK") in {"1", "true", "yes"}:
+    if _openlearn_mock_enabled():
         raw = _mock_openai_response(model, system, user)
         return raw.strip()
 
@@ -8259,7 +8299,7 @@ def call_openai_streaming(
         return text.strip()
 
     # Mock mode support: return a canned response without contacting the network.
-    if os.environ.get("OPENLEARN_MOCK") in {"1", "true", "yes"}:
+    if _openlearn_mock_enabled():
         raw = _mock_openai_response(model, system, user)
         _LAST_RESPONSE_COVERED_CONCEPTS = extract_covered_concepts(raw)
         if capture_answer_key:
