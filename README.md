@@ -111,7 +111,7 @@ If no active topic exists, it falls back to the most recently changed topic.
 Learning actions from the menu continue into the REPL automatically.
 Interactive sessions support multiline paste as one learner message on POSIX terminals.
 On Windows, paste multiple lines one at a time.
-If a model-backed REPL turn fails after you type an answer, openLearn keeps that answer in the prompt so pressing Enter resubmits it.
+If a model-backed REPL turn fails after you type an answer, openLearn keeps that answer in the prompt so pressing Enter resubmits it, or typing replaces it.
 Plain requests such as "continue", "move on", or "skip" advance the current slide; if the wording includes a preference such as "I don't need this", openLearn stores it as a learner preference.
 
 Inside the REPL:

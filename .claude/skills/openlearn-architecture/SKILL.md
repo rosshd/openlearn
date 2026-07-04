@@ -47,7 +47,7 @@ description: >
 
 - The REPL coalesces quick multiline paste into a single learner message only on POSIX terminals; Windows stdin falls back to one line per message.
 - After a tutor response, learner-state extraction is deferred so the next prompt appears immediately.
-- If a non-command turn fails, the REPL preserves the typed answer for Enter resubmission.
+- If a non-command turn fails, the REPL preserves the typed answer for Enter resubmission or typed replacement.
 - Natural `continue`, `move on`, and `skip` wording advances the slide instead of going through answer grading.
 
 ## Tests

@@ -21,7 +21,7 @@
 - Transient OpenAI-compatible provider failures retry with bounded backoff before surfacing an error.
 - `chat`, `resume`, `next`, and `review` support `--dry-run` to print rendered prompts without provider calls or local file mutation.
 - Learner-metadata extraction sends a smaller state snapshot.
-- The REPL is thin: slash commands dispatch to the same handlers used by the non-interactive CLI, and failed non-command turns keep the typed answer for Enter resubmission.
+- The REPL is thin: slash commands dispatch to the same handlers used by the non-interactive CLI, and failed non-command turns keep the typed answer for Enter resubmission or typed replacement.
 - Multiline paste coalescing is POSIX-only; Windows stdin falls back to one line per learner message.
 
 ## Conventions

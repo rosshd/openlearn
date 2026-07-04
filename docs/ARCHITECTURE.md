@@ -83,7 +83,7 @@ Onboarding validates credentials with `{base_url}/models`, persists settings thr
 The REPL is line-oriented but coalesces quick multiline paste into one learner message on POSIX terminals.
 Windows does not support `select.select` on stdin, so the same input path falls back to one line per learner message.
 After a tutor response, learner-metadata extraction is deferred so the next prompt appears immediately.
-If a non-command learner message fails during model-backed handling, the REPL preserves the typed answer and lets Enter resubmit it.
+If a non-command learner message fails during model-backed handling, the REPL preserves the typed answer so Enter resubmits it and typing replaces it.
 Natural navigation phrases such as `continue`, `move on`, and `skip` advance the current slide instead of being graded as answers.
 Tutor output renders in a Rich panel for interactive terminal sessions, streaming updates redraw the same panel as tokens arrive, and hidden answer or coverage markers are stripped before display.
 Multiple-choice options are normalized onto separate lines before Rich Markdown rendering.

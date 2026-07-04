@@ -24,7 +24,7 @@
 - [x] **v0.5.0 test hardening** - pexpect workflow smoke tests + JSON tutor regression evals for observed REPL/tutor behavior failures
 - [x] **Menu import parity** - new-course + Context-files menus now offer file/URL/folder import via a shared import core; fixed mislabeled `.txt` options, version-tracked User-Agents, video-suggestion dedup on fetch failure
 - [x] **Dry-run prompt preview** - `chat`, `resume`, `next`, and `review` support `--dry-run` to print rendered prompts without calling the API or mutating local files
-- [x] **Session resilience** - transient provider failures retry with bounded backoff, failed REPL answers stay available for Enter resubmission, and `openlearn repair` fixes simple corrupt JSON frontmatter with `.bak` backup
+- [x] **Session resilience** - transient provider failures retry with bounded backoff, failed REPL answers stay available for Enter resubmission or typed replacement, and `openlearn repair` fixes simple corrupt JSON frontmatter with `.bak` backup
 - [x] **PyPI release automation** - `vX.Y.Z` tags build and verify distributions, publish through trusted publishing, and create GitHub releases with artifacts
 - [x] Phase 1-4 (v0.4.0): tutor correctness, system-prompt quality, session compression, test coverage
 - [x] v0.4.0: Answer evaluation loop, dynamic prompt, /done UX, review scheduling scaffold, Rich UI groundwork, version bump + tag
