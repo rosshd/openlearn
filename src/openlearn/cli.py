@@ -1429,9 +1429,7 @@ def run_repl(
             except OpenLearnError as exc:
                 if prompt and not prompt.startswith("/"):
                     preserved_prompt = prompt
-                    exc = OpenLearnError(
-                        f"{exc} Your answer was kept; press Enter to resubmit it."
-                    )
+                    exc = OpenLearnError(f"{exc} Your answer was kept; press Enter to resubmit it.")
                 print_active_status_bar()
                 print_error(str(exc), output_func)
     finally:
@@ -4963,9 +4961,7 @@ def cmd_drill(args: argparse.Namespace, output_func=print) -> int:
     else:
         model = args.model or str(topic.metadata.get("model") or configured_model())
         user = drill_generation_prompt(topic)
-        raw = call_openai_with_status(
-            model, system_prompt(topic), user, retry_status=output_func
-        )
+        raw = call_openai_with_status(model, system_prompt(topic), user, retry_status=output_func)
         drill = parse_drill_json(raw)
     path = write_drill_file(topic.slug, drill)
     save_active_drill(topic.slug, path)

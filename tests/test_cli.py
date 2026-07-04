@@ -1767,6 +1767,7 @@ class ProviderResponseTests(unittest.TestCase):
 
         self.assertEqual(attempts, [60])
         self.assertEqual(delays, [])
+
     def test_call_openai_allows_local_keyless_provider(self) -> None:
         previous_key = os.environ.pop("OPENAI_API_KEY", None)
         previous_base_url = os.environ.get("OPENLEARN_BASE_URL")
@@ -5306,6 +5307,7 @@ class PromptInstructionTests(unittest.TestCase):
             cli.topic_backup_path(path).read_text(encoding="utf-8"),
             corrupt_text,
         )
+
     def test_repair_quick_course_restores_concepts_from_accepted_plan(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="OS", goal="midterm"))
         topic = cli.read_topic("os")
