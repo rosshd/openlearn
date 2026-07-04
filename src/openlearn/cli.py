@@ -632,7 +632,12 @@ def cmd_init(args: argparse.Namespace, output_func=print, input_func=input) -> i
     output_func("")
     output_func("Testing connection...")
     try:
-        result = call_openai(model, "You are a test assistant.", "Reply with exactly: ok")
+        result = call_openai_with_status(
+            model,
+            "You are a test assistant.",
+            "Reply with exactly: ok",
+            retry_status=output_func,
+        )
         if "ok" in result.lower():
             output_func("Connection successful.")
         else:
@@ -1935,10 +1940,11 @@ def teach_first_lesson(topic: Topic, outline: str, model: str, output_func=print
     print_section("First lesson", output_func)
     lesson_prompt = first_lesson_prompt(outline)
     global _LAST_RESPONSE_ANSWER_KEY
-    raw_lesson = call_openai(
+    raw_lesson = call_openai_with_status(
         model,
         generation_system_prompt(topic, current_plan=outline),
         lesson_prompt,
+        retry_status=output_func,
     )
     _LAST_RESPONSE_ANSWER_KEY = extract_answer_key(raw_lesson)
     covered_concepts = extract_covered_concepts(raw_lesson)
@@ -1967,7 +1973,9 @@ def run_placement_quiz(topic: Topic, model: str, input_func=input, output_func=p
 
     while wrong_count < 2 and len(results) < 8:
         asked_difficulty = difficulty
-        question_data = placement_question(topic, model, asked_difficulty, results)
+        question_data = placement_question(
+            topic, model, asked_difficulty, results, retry_status=output_func
+        )
         question = str(question_data.get("question") or "").strip()
         output_func(question)
         output_func("")
@@ -1978,7 +1986,15 @@ def run_placement_quiz(topic: Topic, model: str, input_func=input, output_func=p
             output_func("Placement quiz stopped.")
             break
         evaluation = placement_evaluation(
-            topic, model, asked_difficulty, question, answer, results, answer_key, concept
+            topic,
+            model,
+            asked_difficulty,
+            question,
+            answer,
+            results,
+            answer_key,
+            concept,
+            retry_status=output_func,
         )
 
         is_correct = evaluation.get("correct") is True
@@ -2010,14 +2026,19 @@ def run_placement_quiz(topic: Topic, model: str, input_func=input, output_func=p
 
 
 def placement_question(
-    topic: Topic, model: str, difficulty: int, results: list[dict[str, object]]
+    topic: Topic,
+    model: str,
+    difficulty: int,
+    results: list[dict[str, object]],
+    retry_status: Callable[[str], object] | None = None,
 ) -> dict[str, object]:
     prompt = placement_question_prompt(topic, difficulty, results)
     for attempt in range(2):
-        raw = call_openai(
+        raw = call_openai_with_status(
             model,
             generation_system_prompt(topic),
             prompt,
+            retry_status=retry_status,
         )
         try:
             data = parse_metadata_update(raw)
@@ -2148,6 +2169,7 @@ def placement_evaluation(
     results: list[dict[str, object]],
     answer_key: str = "",
     concept: str = "",
+    retry_status: Callable[[str], object] | None = None,
 ) -> dict[str, object]:
     selected = answer.strip().upper()[:1]
     if answer_key in {"A", "B", "C", "D"} and selected in {"A", "B", "C", "D"}:
@@ -2180,7 +2202,11 @@ def placement_evaluation(
         """
     ).strip()
     try:
-        update = parse_metadata_update(call_openai(model, METADATA_EXTRACTOR_SYSTEM, prompt))
+        update = parse_metadata_update(
+            call_openai_with_status(
+                model, METADATA_EXTRACTOR_SYSTEM, prompt, retry_status=retry_status
+            )
+        )
     except (OpenLearnError, ValueError, json.JSONDecodeError):
         return {"correct": False, "concept": "unknown", "note": "Could not evaluate reliably."}
     return update
@@ -4937,7 +4963,9 @@ def cmd_drill(args: argparse.Namespace, output_func=print) -> int:
     else:
         model = args.model or str(topic.metadata.get("model") or configured_model())
         user = drill_generation_prompt(topic)
-        raw = call_openai(model, system_prompt(topic), user)
+        raw = call_openai_with_status(
+            model, system_prompt(topic), user, retry_status=output_func
+        )
         drill = parse_drill_json(raw)
     path = write_drill_file(topic.slug, drill)
     save_active_drill(topic.slug, path)
@@ -8330,7 +8358,7 @@ def call_openai(
     *,
     retry_sleep: Callable[[float], object] = time.sleep,
     retry_jitter: Callable[[float, float], float] = random.uniform,
-    retry_status: Callable[[str], object] = print,
+    retry_status: Callable[[str], object] | None = None,
 ) -> str:
     if _DRY_RUN:
         raise DryRunPrompt(model, system, user)
@@ -8386,10 +8414,11 @@ def call_openai(
                 raise OpenLearnError(f"OpenAI request failed: {reason}") from exc
             delay = OPENAI_RETRY_BASE_DELAY_SECONDS * 2 ** (attempt - 1)
             delay += retry_jitter(0.0, OPENAI_RETRY_JITTER_SECONDS)
-            retry_status(
-                f"Temporary OpenAI failure; retrying in {delay:.1f}s "
-                f"({attempt + 1}/{OPENAI_MAX_ATTEMPTS})..."
-            )
+            if retry_status is not None:
+                retry_status(
+                    f"Temporary OpenAI failure; retrying in {delay:.1f}s "
+                    f"({attempt + 1}/{OPENAI_MAX_ATTEMPTS})..."
+                )
             retry_sleep(delay)
 
     text = extract_response_text(data)
@@ -8399,6 +8428,18 @@ def call_openai(
             "OpenAI response did not contain output text; the model may have spent its output budget on reasoning. Try a faster non-reasoning model or increase the token limit."
         )
     return text.strip()
+
+
+def call_openai_with_status(
+    model: str,
+    system: str,
+    user: str,
+    *,
+    retry_status: Callable[[str], object] | None = None,
+) -> str:
+    if retry_status is None or call_openai.__name__ != "call_openai":
+        return call_openai(model, system, user)
+    return call_openai(model, system, user, retry_status=retry_status)
 
 
 def call_openai_streaming(

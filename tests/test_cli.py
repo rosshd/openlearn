@@ -1685,6 +1685,51 @@ class ProviderResponseTests(unittest.TestCase):
         self.assertEqual(len(statuses), 2)
         self.assertTrue(all("retrying" in status.lower() for status in statuses))
 
+    def test_call_openai_default_retry_status_is_silent(self) -> None:
+        previous_key = os.environ.get("OPENAI_API_KEY")
+        os.environ["OPENAI_API_KEY"] = "sk-test"
+        delays = []
+        original_urlopen = cli.urlopen
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def read(self):
+                return json.dumps({"choices": [{"message": {"content": "recovered"}}]}).encode()
+
+        failures = [TimeoutError("timed out")]
+
+        def fake_urlopen(_request, timeout=0):
+            if failures:
+                raise failures.pop(0)
+            return FakeResponse()
+
+        cli.urlopen = fake_urlopen
+        output = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(output):
+                answer = cli.call_openai(
+                    "test-model",
+                    "system",
+                    "user",
+                    retry_sleep=delays.append,
+                    retry_jitter=lambda _start, _end: 0.0,
+                )
+        finally:
+            cli.urlopen = original_urlopen
+            if previous_key is None:
+                os.environ.pop("OPENAI_API_KEY", None)
+            else:
+                os.environ["OPENAI_API_KEY"] = previous_key
+
+        self.assertEqual(answer, "recovered")
+        self.assertEqual(delays, [0.5])
+        self.assertEqual(output.getvalue(), "")
+
     def test_call_openai_does_not_retry_non_transient_http_error(self) -> None:
         previous_key = os.environ.get("OPENAI_API_KEY")
         os.environ["OPENAI_API_KEY"] = "sk-test"
