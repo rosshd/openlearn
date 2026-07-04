@@ -3,7 +3,7 @@
 ## Positioning
 
 openLearn is a local-first AI tutor for people who want durable learning, not answer delivery.
-The product promise is simple: bring your own model key, keep your learning files, and let the tutor adapt from your actual answers.
+The product promise is simple: bring your own model access, keep your learning files, and let the tutor adapt from your actual answers.
 
 ## MVP Scope
 
@@ -11,6 +11,7 @@ The product promise is simple: bring your own model key, keep your learning file
 - Markdown topic files with JSON metadata.
 - Local learner state, event logs, and source summaries.
 - OpenAI-compatible provider calls with configurable base URL and model.
+- First-run onboarding that can configure OpenAI, Anthropic-compatible APIs, Ollama, or a custom OpenAI-compatible provider.
 - Mockable tests and smoke flows.
 
 ## User Workflow
@@ -29,19 +30,19 @@ The tutor should then:
 5. Update local learner state.
 6. Schedule review or advance only when evidence supports it.
 
-## Fast Learn
+## Quick Learn
 
-Fast Learn is the next high-value workflow.
+Quick Learn is the shortest path from source material to active tutoring.
 It turns one file, one folder, a coding repository, a study guide PDF, or a command list into an immediate learning session.
 
 Target flow:
 
-1. Choose `Fast Learn` from the main menu.
-2. Pick a file or folder.
+1. Choose `Quick Learn` from the main menu.
+2. Pick a file, bounded folder, or public GitHub repository.
 3. openLearn imports and summarizes sources.
 4. For a new session, start teaching immediately with no course-outline confirmation.
-5. For an existing or resumed source set, optionally run a placement check to decide where to restart.
-6. Let the learner either follow the guided path or jump to the most relevant section.
+5. Run on the efficient mastery profile throughout, optimizing for coverage per minute over deep mastery.
+6. Use fewer, denser slides and a course-wide coverage ledger so concepts are not re-taught across units.
 
 Design requirements:
 
@@ -51,6 +52,8 @@ Design requirements:
 - Test guides should extract topics, formulas, definitions, weak spots, and likely practice questions.
 - Command lists should prioritize recall, usage context, and hands-on checks.
 - The flow should create normal local topic files and context summaries so it remains inspectable.
+- Quick Learn topics should remain visibly separate from normal courses.
+- Repository ingestion must be bounded, exclude secrets and generated files, and never execute imported code.
 
 ## Product Constraints
 
@@ -65,7 +68,7 @@ Design requirements:
 | Area | Direction |
 | --- | --- |
 | Course start | Faster templates, clearer options, better imported-context use |
-| Fast Learn | One-shot file or folder import that starts teaching immediately |
+| Quick Learn | File, folder, or public GitHub import that starts teaching immediately |
 | Learner state | Stronger concept identity, event log, mastery evidence, rolling pass rate |
 | Tutor quality | Calibrated judge, anti-gaming checks, explicit move policy |
 | Practice | Cumulative retrieval, coding drills, video suggestions, due reviews |
@@ -76,7 +79,7 @@ Design requirements:
 ## Differentiators
 
 - Own your learning data.
-- Bring your own model.
+- Bring your own model, whether hosted with a key or local and keyless.
 - Transparent local memory.
 - Tutor behavior optimized for retrieval, transfer, and mastery.
 - No subscription required for the core local workflow.

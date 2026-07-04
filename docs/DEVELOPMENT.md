@@ -25,6 +25,9 @@ pip install -e .[dev]
 | `make e2e` | Full mocked manual smoke flow |
 | `make typecheck` | Pyright, useful but non-blocking |
 
+GitHub Actions runs the unittest lane across Ubuntu, Windows, and macOS on Python 3.11 and 3.13.
+Local `pytest` workflow smoke tests use `pexpect`; POSIX pty tests are skipped on Windows.
+
 ## Releases
 
 `src/openlearn/__init__.py` is the single source for the package version.

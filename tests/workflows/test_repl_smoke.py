@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
+
+import pytest
+
+if sys.platform == "win32":
+    pytest.skip("pexpect.spawn requires a POSIX pty", allow_module_level=True)
 
 import pexpect
 
@@ -91,6 +97,30 @@ def test_repl_multiline_paste_is_one_learner_message(spawn_openlearn) -> None:
         assert topic_text.count(" - chat") == 1
         assert "This was our dialogue:\nLesson: First pasted line." in topic_text
         assert "Check: Second pasted line?" in topic_text
+    finally:
+        proc.close()
+
+
+def test_quick_learn_file_reaches_repl(spawn_openlearn) -> None:
+    home = Path(spawn_openlearn.env["OPENLEARN_HOME"])
+    source = home / "midterm-review.md"
+    source.write_text(
+        "# Midterm review\n\n- Explain sorting complexity.\n- Trace binary search.\n",
+        encoding="utf-8",
+    )
+    proc = spawn_openlearn.spawn("quick", str(source), timeout=10)
+    try:
+        proc.expect("First lesson")
+        proc.expect("Normal vs Insert")
+        proc.expect("Answer> ")
+        assert "Quick Learn plan" in proc.clean_output
+        assert "Traceback" not in proc.clean_output
+        assert "\x1b[" not in proc.clean_output
+        proc.sendline("/q")
+        proc.expect(pexpect.EOF)
+        topic = home / "learning-topics" / "midterm-review.md"
+        assert topic.exists()
+        assert '"learning_mode": "quick"' in topic.read_text(encoding="utf-8")
     finally:
         proc.close()
 

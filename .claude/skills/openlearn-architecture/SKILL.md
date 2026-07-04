@@ -23,6 +23,7 @@ description: >
 - Dynamic metadata includes pending questions, learner preferences, active drills, concept attempts, quiz state, imported checksums, and answer status.
 - Pending questions can be free response or multiple choice, with or without a stored answer key.
 - Learner preferences are durable constraints extracted from explicit navigation such as skipped material.
+- Topic writes use the shared file-lock interface, backed by `fcntl` on POSIX and `msvcrt` on Windows.
 - Never mutate or commit real user topics, imported context, `state.json`, `config.json`, API keys, or `.env`.
 
 ## Config And Providers
@@ -30,6 +31,7 @@ description: >
 - Configuration precedence is environment variables, then `config.json`, then built-in defaults.
 - Provider calls target OpenAI-compatible chat completions at `{base_url}/chat/completions`.
 - Transient provider failures retry with bounded backoff before surfacing an error.
+- Non-local providers require an API key; localhost OpenAI-compatible endpoints may be keyless and omit the `Authorization` header.
 - Learner-metadata extraction can use `OPENLEARN_EXTRACTOR_MODEL` or `extractor_model`; otherwise it uses the tutor model.
 - Keep model-backed tutor commands bounded to the selected topic, relevant metadata, bounded notes, recent session context, and the current prompt.
 - Keep learner-metadata extraction bounded to the small state snapshot needed to judge the latest exchange.
@@ -43,7 +45,7 @@ description: >
 
 ## Interactive UI
 
-- The REPL coalesces quick multiline paste into a single learner message.
+- The REPL coalesces quick multiline paste into a single learner message only on POSIX terminals; Windows stdin falls back to one line per message.
 - After a tutor response, learner-state extraction is deferred so the next prompt appears immediately.
 - If a non-command turn fails, the REPL preserves the typed answer for Enter resubmission.
 - Natural `continue`, `move on`, and `skip` wording advances the slide instead of going through answer grading.

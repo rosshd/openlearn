@@ -5,6 +5,15 @@ from pathlib import Path
 
 DEFAULT_MODEL = "gpt-4.1-mini"
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
+# Hosted provider defaults that always require an API key; local or custom
+# endpoints (for example Ollama) may be keyless.
+HOSTED_BASE_URLS = frozenset(
+    {
+        "https://api.openai.com/v1",
+        "https://openrouter.ai/api/v1",
+        "https://api.anthropic.com/v1",
+    }
+)
 DEFAULT_MAX_TOKENS = 1600
 STATE_FILE = "state.json"
 CONFIG_FILE = "config.json"
@@ -12,6 +21,10 @@ PROMPT_TOPIC_LINE_LIMIT = 120
 FIRST_LESSON_WORD_LIMIT = 220
 CONTEXT_SUMMARY_CHAR_LIMIT = 60000
 CONTEXT_SUMMARY_LINE_LIMIT = 120
+QUICK_LEARN_MAX_FILES = 32
+QUICK_LEARN_MAX_FILE_BYTES = 200000
+QUICK_LEARN_MAX_TOTAL_CHARS = 240000
+QUICK_LEARN_BUNDLE_CHAR_LIMIT = 60000
 MANUAL_TEST_HOME = Path("/tmp/openlearn-manual-vim")
 MANUAL_TEST_COURSE_NAME = "Practical Vim Foundations"
 MANUAL_TEST_COURSE_SLUG = "practical-vim-foundations"
