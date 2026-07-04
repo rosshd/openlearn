@@ -81,6 +81,7 @@ openlearn resume
 If no active topic exists, it falls back to the most recently changed topic.
 Learning actions from the menu continue into the REPL automatically.
 Interactive sessions support multiline paste as one learner message.
+If a model-backed REPL turn fails after you type an answer, openLearn keeps that answer in the prompt so pressing Enter resubmits it.
 Plain requests such as "continue", "move on", or "skip" advance the current slide; if the wording includes a preference such as "I don't need this", openLearn stores it as a learner preference.
 
 Inside the REPL:
@@ -111,7 +112,9 @@ Use `/help --all` for the full REPL command list.
 | Utilities | `templates`, `test`, `tui` |
 
 Model-backed commands require an API key unless `OPENLEARN_MOCK=1` is set for tests.
+Transient provider failures such as rate limits, server errors, URL errors, and timeouts are retried up to three times with bounded backoff before surfacing an error.
 `chat`, `resume`, `next`, and `review` accept `--dry-run` to print the rendered prompts instead of calling the model, leaving all local files untouched.
+`repair` fills missing topic metadata defaults and can recover simple corrupt JSON frontmatter such as trailing commas or missing closing braces/brackets, writing a `.bak` file before rewriting the topic.
 `repl` also has the `shell` alias.
 
 ## Local Files

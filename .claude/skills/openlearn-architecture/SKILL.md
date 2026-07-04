@@ -17,6 +17,7 @@ description: >
 
 - Topic files are user-owned Markdown with JSON metadata between `---` separators.
 - The topic slug is the stable file identifier under `learning-topics/<slug>.md`.
+- `repair` can normalize missing defaults and recover simple corrupt JSON frontmatter, writing `<slug>.md.bak` before a rewrite.
 - Dynamic learner state may live in metadata, `<slug>.state.json`, and `<slug>.events.jsonl`.
 - Event logs are append-only.
 - Dynamic metadata includes pending questions, learner preferences, active drills, concept attempts, quiz state, imported checksums, and answer status.
@@ -28,6 +29,7 @@ description: >
 
 - Configuration precedence is environment variables, then `config.json`, then built-in defaults.
 - Provider calls target OpenAI-compatible chat completions at `{base_url}/chat/completions`.
+- Transient provider failures retry with bounded backoff before surfacing an error.
 - Learner-metadata extraction can use `OPENLEARN_EXTRACTOR_MODEL` or `extractor_model`; otherwise it uses the tutor model.
 - Keep model-backed tutor commands bounded to the selected topic, relevant metadata, bounded notes, recent session context, and the current prompt.
 - Keep learner-metadata extraction bounded to the small state snapshot needed to judge the latest exchange.
@@ -43,6 +45,7 @@ description: >
 
 - The REPL coalesces quick multiline paste into a single learner message.
 - After a tutor response, learner-state extraction is deferred so the next prompt appears immediately.
+- If a non-command turn fails, the REPL preserves the typed answer for Enter resubmission.
 - Natural `continue`, `move on`, and `skip` wording advances the slide instead of going through answer grading.
 
 ## Tests

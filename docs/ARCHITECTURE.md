@@ -22,6 +22,8 @@ Likely split points are provider calls, topic storage, import handling, and tuto
 
 Topic files are user-owned Markdown with JSON metadata between `---` separators.
 JSON avoids a YAML dependency and keeps the file editable.
+`repair` normalizes missing metadata defaults and can recover simple corrupt JSON frontmatter such as trailing commas or missing closing braces/brackets.
+When it rewrites a topic, it first writes the original text to `<slug>.md.bak`.
 
 ```md
 ---
@@ -50,6 +52,7 @@ Model-backed commands send only selected-topic context:
 
 Configuration precedence is environment variables, then `config.json`, then defaults.
 Provider calls target OpenAI-compatible chat completions at `{base_url}/chat/completions`.
+Transient provider failures, including HTTP 429, HTTP 5xx, URL errors, and timeouts, are retried up to three attempts with bounded exponential backoff and jitter.
 For `chat`, `resume`, `next`, and `review`, `--dry-run` prints the rendered system and user messages instead of calling the provider or mutating local files.
 Learner-metadata extraction can use `OPENLEARN_EXTRACTOR_MODEL` or `extractor_model`; otherwise it uses the tutor model.
 Extractor calls send a reduced metadata snapshot limited to pending checks, focus, known concepts, weak spots, and review due items.
@@ -58,6 +61,7 @@ Extractor calls send a reduced metadata snapshot limited to pending checks, focu
 
 The REPL is line-oriented but coalesces quick multiline paste into one learner message.
 After a tutor response, learner-metadata extraction is deferred so the next prompt appears immediately.
+If a non-command learner message fails during model-backed handling, the REPL preserves the typed answer and lets Enter resubmit it.
 Natural navigation phrases such as `continue`, `move on`, and `skip` advance the current slide instead of being graded as answers.
 
 ## Tests
