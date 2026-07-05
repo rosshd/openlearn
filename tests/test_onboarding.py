@@ -530,6 +530,15 @@ class OnboardingFlowTests(unittest.TestCase):
 
 
 class OnboardingTriggerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.read_config_patcher = patch.object(cli, "read_config", return_value={})
+        self.read_config_patcher.start()
+        cli._CONFIG_CACHE = None
+
+    def tearDown(self) -> None:
+        self.read_config_patcher.stop()
+        cli._CONFIG_CACHE = None
+
     def test_bare_invocation_runs_onboarding_before_menu_when_unconfigured(self) -> None:
         calls: list[str] = []
 

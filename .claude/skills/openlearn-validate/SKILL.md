@@ -29,6 +29,7 @@ Report what changed, what ran, pass or fail status, risk, and any skipped covera
 
 - Use the Makefile lanes instead of ad-hoc equivalents.
 - CLI smoke must be mocked and isolated with `OPENLEARN_MOCK=1` and a temporary `OPENLEARN_HOME`.
+- Provider-configuration tests must clear provider env vars, mock saved config reads, and reset the config cache.
 - `make typecheck` is useful but non-blocking.
 - `make e2e` is for larger changes or version-boundary confidence.
 - Slow AI-judge evals are excluded by default; run them only for model-output quality work.

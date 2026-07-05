@@ -33,6 +33,6 @@
 - Topic commands should leave the active-topic state consistent with the file they operate on.
 - Topic writes must keep using the shared file-lock interface, which maps to `fcntl` on POSIX and `msvcrt` on Windows.
 - Context imports are `.txt` files only; imported context and summaries live under each topic’s `learning-topics/<slug>/context/` directory.
-- Tests isolate data by setting `OPENLEARN_HOME` to a temporary directory; follow that pattern for new tests.
+- Tests isolate data by setting `OPENLEARN_HOME` to a temporary directory; provider-configuration tests also clear provider env vars, mock saved config reads, and reset the config cache.
 - Skip tests on Windows only when they genuinely require a POSIX pty or TTY behavior, and include the reason in the skip message.
 - Read `README.md`, `CONTRIBUTING.md`, `docs/ARCHITECTURE.md`, and `manual-tests/README.txt` before changing CLI behavior, storage, or model prompts.
