@@ -1469,12 +1469,22 @@ class CliStorageTests(unittest.TestCase):
 
 class ProviderResponseTests(unittest.TestCase):
     def setUp(self) -> None:
+        self.env_patcher = mock.patch.dict(os.environ, {}, clear=False)
+        self.env_patcher.start()
+        for name in (
+            "OPENLEARN_MOCK",
+            "OPENLEARN_MODEL",
+            "OPENLEARN_BASE_URL",
+            "OPENAI_API_KEY",
+        ):
+            os.environ.pop(name, None)
         self.read_config_patcher = mock.patch.object(cli, "read_config", return_value={})
         self.read_config_patcher.start()
         cli._CONFIG_CACHE = None
 
     def tearDown(self) -> None:
         self.read_config_patcher.stop()
+        self.env_patcher.stop()
         cli._CONFIG_CACHE = None
 
     def test_extract_response_text_supports_chat_completion_shape(self) -> None:
