@@ -79,18 +79,18 @@ For a branch or worktree produced by a fleet:
 Do not continue a failed fleet just to "see if it finishes".
 If a previous run stopped after repeated agent exits, review the current diff manually before any restart.
 
-## Current Openlearn Fleet Review Commands
+## Current Checkout Review Commands
 
-For the current stats-dashboard fleet worktree:
+Run review commands from the checkout or worktree that the user gave you:
 
 ```bash
-cd /Users/ross/Developer/worktrees/openlearn/fleet-stats-dashboard
 git status --short
 git log --oneline main..HEAD
 git diff --stat main...HEAD
-sed -n '1,220p' .gnhf/runs/follow-the-brief-bel-6c22ab/notes.md
+if [ -d .gnhf/runs ]; then find .gnhf/runs -maxdepth 3 -path '*/notes.md' -type f -print; fi
 make check
 ```
 
-If those checks look good, review the uncommitted edits separately from commit `7680b84`.
-Do not restart the fleet until the dirty diff has been understood.
+If run notes exist, read only the notes for the run being reviewed.
+Review uncommitted edits separately from committed changes.
+Do not restart a fleet until the current diff has been understood.

@@ -4416,6 +4416,8 @@ def cmd_stats(args: argparse.Namespace, output_func=print) -> int:
     streak_dates = stats_metrics.activity_dates(timestamps)
     streak = stats_metrics.current_streak(streak_dates, now.date())
     longest = stats_metrics.longest_streak(streak_dates)
+    if streak == 0 and longest == 0:
+        streak, longest = global_streaks()
     weekly_minutes = stats_metrics.minutes_in_window(
         stats_metrics.session_spans(timestamps),
         week_start,
@@ -6972,6 +6974,22 @@ def get_active_topic() -> str | None:
         return None
     active = data.get("active_topic")
     return active if isinstance(active, str) and active else None
+
+
+def global_streaks() -> tuple[int, int]:
+    path = state_path()
+    if not path.exists():
+        return 0, 0
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return 0, 0
+    if not isinstance(data, dict):
+        return 0, 0
+    return (
+        max(0, coerce_int(data.get("study_streak"), 0)),
+        max(0, coerce_int(data.get("longest_streak"), 0)),
+    )
 
 
 def set_active_topic(slug: str) -> None:

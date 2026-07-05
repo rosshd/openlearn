@@ -6393,6 +6393,41 @@ class PromptInstructionTests(unittest.TestCase):
         self.assertIn("Mastery: 1/2 concepts (50%)", rendered)
         self.assertIn("Reviews: 1 due now", rendered)
 
+    def test_cmd_stats_falls_back_to_global_streak_without_events(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn"))
+        cli.state_path().write_text(
+            json.dumps({"study_streak": 4, "longest_streak": 9}),
+            encoding="utf-8",
+        )
+
+        output = []
+        code = cli.cmd_stats(
+            Namespace(topic="vim", text=True),
+            output_func=output.append,
+        )
+
+        self.assertEqual(code, 0)
+        rendered = "\n".join(output)
+        self.assertIn("Streak: 4 days current, 9 days longest", rendered)
+
+    def test_cmd_stats_prefers_event_streak_over_global_streak(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn"))
+        cli.state_path().write_text(
+            json.dumps({"study_streak": 4, "longest_streak": 9}),
+            encoding="utf-8",
+        )
+        cli.log_event("vim", "lesson", {})
+
+        output = []
+        code = cli.cmd_stats(
+            Namespace(topic="vim", text=True),
+            output_func=output.append,
+        )
+
+        self.assertEqual(code, 0)
+        rendered = "\n".join(output)
+        self.assertIn("Streak: 1 day current, 1 day longest", rendered)
+
     def test_cmd_stats_with_topic_ignores_unrelated_topics(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn"))
         cli.topic_path("broken").write_text(
