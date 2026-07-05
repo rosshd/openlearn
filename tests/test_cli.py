@@ -1468,6 +1468,15 @@ class CliStorageTests(unittest.TestCase):
 
 
 class ProviderResponseTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.read_config_patcher = mock.patch.object(cli, "read_config", return_value={})
+        self.read_config_patcher.start()
+        cli._CONFIG_CACHE = None
+
+    def tearDown(self) -> None:
+        self.read_config_patcher.stop()
+        cli._CONFIG_CACHE = None
+
     def test_extract_response_text_supports_chat_completion_shape(self) -> None:
         text = cli.extract_response_text(
             {
