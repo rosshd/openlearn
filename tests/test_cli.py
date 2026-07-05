@@ -6344,23 +6344,90 @@ class PromptInstructionTests(unittest.TestCase):
     def test_cmd_stats_no_crash_empty_topic(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Empty", goal="learn"))
         output = []
-        previous_plotext = sys.modules.get("plotext")
-        sys.modules["plotext"] = types.SimpleNamespace(
-            clf=lambda: None,
-            simple_bar=lambda *_args, **_kwargs: None,
-            show=lambda: None,
+        code = cli.cmd_stats(
+            Namespace(topic="empty", text=False),
+            output_func=output.append,
         )
-        try:
-            code = cli.cmd_stats(Namespace(topic="empty"), output_func=output.append)
-        finally:
-            if previous_plotext is None:
-                sys.modules.pop("plotext", None)
-            else:
-                sys.modules["plotext"] = previous_plotext
 
         self.assertEqual(code, 0)
-        self.assertIn("Topic: empty", output)
-        self.assertIn("No concept accuracy data yet.", output)
+        rendered = "\n".join(output)
+        self.assertIn("Study stats - Empty", rendered)
+        self.assertIn("Current streak", rendered)
+        self.assertIn("No structured course units", rendered)
+
+    def test_stats_parser_accepts_shareable_text_aliases(self) -> None:
+        parser = cli.build_parser()
+
+        self.assertTrue(parser.parse_args(["stats", "--text"]).text)
+        self.assertTrue(parser.parse_args(["stats", "--share"]).text)
+
+    def test_cmd_stats_text_is_shareable_and_aggregates_progress(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn"))
+        topic = cli.read_topic("vim")
+        metadata = dict(topic.metadata)
+        metadata["known"] = ["Normal mode"]
+        metadata["course_units"] = [
+            {
+                "unit": 1,
+                "title": "Modes",
+                "concepts": [
+                    {"id": "normal-mode", "label": "Normal mode"},
+                    {"id": "insert-mode", "label": "Insert mode"},
+                ],
+            }
+        ]
+        metadata["review_due"] = [{"concept": "Insert mode", "due": cli.today()}]
+        cli.write_topic(topic.path, metadata, topic.body)
+        cli.log_event("vim", "lesson", {})
+
+        output = []
+        code = cli.cmd_stats(
+            Namespace(topic="vim", text=True),
+            output_func=output.append,
+        )
+
+        self.assertEqual(code, 0)
+        rendered = "\n".join(output)
+        self.assertIn("openlearn progress - Vim", rendered)
+        self.assertIn("Study this week: 1 min", rendered)
+        self.assertIn("Mastery: 1/2 concepts (50%)", rendered)
+        self.assertIn("Reviews: 1 due now", rendered)
+
+    def test_cmd_stats_without_topic_reports_all_topics(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn"))
+        call_silent(cli.cmd_new, Namespace(topic="Git", goal="learn"))
+        vim = cli.read_topic("vim")
+        vim_metadata = dict(vim.metadata)
+        vim_metadata["known"] = ["Normal mode"]
+        vim_metadata["course_units"] = [
+            {
+                "unit": 1,
+                "title": "Modes",
+                "concepts": [{"id": "normal-mode", "label": "Normal mode"}],
+            }
+        ]
+        cli.write_topic(vim.path, vim_metadata, vim.body)
+        git = cli.read_topic("git")
+        git_metadata = dict(git.metadata)
+        git_metadata["course_units"] = [
+            {
+                "unit": 1,
+                "title": "Commits",
+                "concepts": [{"id": "commit", "label": "Commit"}],
+            }
+        ]
+        cli.write_topic(git.path, git_metadata, git.body)
+
+        output = []
+        code = cli.cmd_stats(
+            Namespace(topic=None, text=True),
+            output_func=output.append,
+        )
+
+        self.assertEqual(code, 0)
+        rendered = "\n".join(output)
+        self.assertIn("openlearn progress - All topics", rendered)
+        self.assertIn("Mastery: 1/2 concepts (50%)", rendered)
 
     def test_difficulty_tier_struggling_on_misses(self) -> None:
         self.assertEqual(

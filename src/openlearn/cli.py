@@ -30,6 +30,7 @@ from urllib.request import Request, urlopen
 from platformdirs import user_data_dir
 
 from openlearn import __version__
+from openlearn import stats as stats_metrics
 from openlearn.constants import (
     CONFIG_FILE,
     CONTEXT_SUMMARY_CHAR_LIMIT,
@@ -65,6 +66,7 @@ from openlearn.constants import (
 )
 from openlearn.models import PendingContext, Topic, TopicSummary
 from openlearn.text import (
+    concept_key,
     extract_answer_key,
     extract_covered_concepts,
     first_lines,
@@ -88,6 +90,7 @@ from openlearn.ui import (
     print_menu,
     print_section,
     review_due_table,
+    stats_dashboard,
     status_bar,
     thinking_progress,
     TutorResponseStream,
@@ -456,7 +459,14 @@ def build_parser() -> argparse.ArgumentParser:
     status_parser.set_defaults(func=cmd_status)
 
     stats_parser = sub.add_parser("stats", help="Show study progress")
-    stats_parser.add_argument("topic", nargs="?", help="Topic slug (default: active topic)")
+    stats_parser.add_argument("topic", nargs="?", help="Topic slug (default: all topics)")
+    stats_parser.add_argument(
+        "--text",
+        "--share",
+        dest="text",
+        action="store_true",
+        help="Print a compact shareable text summary",
+    )
     stats_parser.set_defaults(func=cmd_stats)
 
     summary_parser = sub.add_parser("summary", help="Show a course progress summary")
@@ -4371,74 +4381,87 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def cmd_stats(args: argparse.Namespace, output_func=print) -> int:
-    import plotext as plt  # type: ignore[reportMissingImports]
-
     topic_arg = getattr(args, "topic", None)
-    if topic_arg:
-        slug = slugify(topic_arg)
-    else:
+    topics: list[Topic] = []
+    for summary in list_topics():
         try:
-            slug = resolve_topic_slug(None)
+            topics.append(read_topic(summary.slug))
         except OpenLearnError:
-            slug = None
+            continue
 
-    try:
-        state = json.loads(state_path().read_text(encoding="utf-8"))
-        streak = int(state.get("study_streak") or 0)
-        longest = int(state.get("longest_streak") or 0)
-    except Exception:
-        streak = longest = 0
-
-    if slug:
+    selected: Topic | None = None
+    if topic_arg:
         try:
-            topic = read_topic(slug)
+            selected = read_topic(slugify(topic_arg))
         except OpenLearnError as exc:
             output_func(str(exc))
             return 1
-        meta = topic.metadata
-        session_count = coerce_int(meta.get("session_count"), 0)
-        total_mins = coerce_float(meta.get("total_study_minutes"), 0.0)
-        attempts_value = meta.get("concept_attempts")
-        attempts = attempts_value if isinstance(attempts_value, dict) else {}
-
-        output_func(f"Topic: {slug}")
-        output_func(f"Sessions: {session_count}  |  Study time: {total_mins:.0f} min")
-        output_func(f"Streak: {streak} day(s)  |  Longest: {longest}")
-
-        if isinstance(attempts, dict) and attempts:
-            items = sorted(
-                attempts.items(),
-                key=lambda kv: (
-                    coerce_int(kv[1].get("attempts"), 0) if isinstance(kv[1], dict) else 0
-                ),
-                reverse=True,
-            )[:10]
-            concepts = [k for k, _ in items]
-            accuracies = []
-            for _, rec in items:
-                if not isinstance(rec, dict):
-                    continue
-                a = max(coerce_int(rec.get("attempts"), 1), 1)
-                s = coerce_float(rec.get("correct_sum"), 0.0)
-                accuracies.append(round(s / a * 100))
-
-            plt.clf()
-            plt.simple_bar(concepts, accuracies, width=50, title="Concept accuracy (%)")
-            plt.show()
-        else:
-            output_func("No concept accuracy data yet.")
     else:
-        output_func(f"Streak: {streak} day(s)  |  Longest: {longest}")
-        output_func("")
-        for t in list_topics():
-            try:
-                m = read_topic(t.slug).metadata
-                sc = coerce_int(m.get("session_count"), 0)
-                tm = coerce_float(m.get("total_study_minutes"), 0.0)
-                if sc:
-                    output_func(f"  {t.slug:<24} {sc} session(s), {tm:.0f} min")
-            except Exception:
-                pass
+        active = get_active_topic()
+        if active:
+            selected = next((topic for topic in topics if topic.slug == active), None)
+        if selected is None and topics:
+            selected = topics[0]
+
+    scope_topics = [selected] if topic_arg and selected else topics
+    all_events = [
+        event
+        for topic in scope_topics
+        for event in load_event_log(topic_events_path(topic.slug))
+    ]
+    timestamps = stats_metrics.event_timestamps(all_events)
+    now = datetime.now(timezone.utc)
+    week_start, week_end = stats_metrics.week_window(now)
+    streak_dates = stats_metrics.activity_dates(timestamps)
+    streak = stats_metrics.current_streak(streak_dates, now.date())
+    longest = stats_metrics.longest_streak(streak_dates)
+    weekly_minutes = stats_metrics.minutes_in_window(
+        stats_metrics.session_spans(timestamps),
+        week_start,
+        week_end,
+    )
+    forecast = stats_metrics.combine_forecasts(
+        [stats_metrics.review_forecast(topic.metadata, now.date()) for topic in scope_topics]
+    )
+    mastery_rows: list[dict[str, object]] = []
+    for topic in scope_topics:
+        topic_label = str(topic.metadata.get("topic") or topic.slug)
+        for row in stats_metrics.unit_mastery(topic.metadata):
+            row = dict(row)
+            if not topic_arg:
+                fallback_title = "Unit " + str(row.get("unit", ""))
+                row["title"] = f"{topic_label}: {row.get('title') or fallback_title}"
+            mastery_rows.append(row)
+    label = (
+        str(selected.metadata.get("topic") or selected.slug)
+        if topic_arg and selected
+        else "All topics"
+    )
+
+    if getattr(args, "text", False):
+        summary = stats_metrics.shareable_summary(
+            label,
+            streak=streak,
+            longest_streak=longest,
+            weekly_minutes=weekly_minutes,
+            forecast=forecast,
+            mastery_rows=mastery_rows,
+        )
+        for line in summary.splitlines():
+            output_func(line)
+        return 0
+
+    emit(
+        stats_dashboard(
+            label,
+            streak=streak,
+            longest_streak=longest,
+            weekly_minutes=weekly_minutes,
+            forecast=forecast,
+            mastery_rows=mastery_rows,
+        ),
+        output_func,
+    )
     return 0
 
 
@@ -6229,10 +6252,6 @@ def remove_known_from_review_lists(metadata: dict[str, object]) -> None:
             )
             or (isinstance(item, str) and concept_key(item) not in known_values)
         ]
-
-
-def concept_key(value: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "", value.casefold())
 
 
 def project_home() -> Path:

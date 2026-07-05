@@ -5,7 +5,7 @@ import re
 from contextlib import nullcontext
 from typing import ContextManager
 
-from rich.console import Console
+from rich.console import Console, Group
 from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -105,6 +105,53 @@ def review_due_table(rows: list[tuple[str, str, str, str]]) -> Table:
     for topic, concept, due, difficulty in rows:
         table.add_row(topic, concept, due, difficulty)
     return table
+
+
+def stats_dashboard(
+    label: str,
+    *,
+    streak: int,
+    longest_streak: int,
+    weekly_minutes: float,
+    forecast: dict[str, int],
+    mastery_rows: list[dict[str, object]],
+) -> Panel:
+    def days(value: int) -> str:
+        return f"{value} {'day' if value == 1 else 'days'}"
+
+    overview = Table.grid(padding=(0, 2))
+    overview.add_column(style="dim")
+    overview.add_column(justify="right")
+    overview.add_row("Current streak", days(streak))
+    overview.add_row("Longest streak", days(longest_streak))
+    overview.add_row("Minutes this week", f"{weekly_minutes:g}")
+    overview.add_row("Reviews due now", str(forecast.get("due_today", 0)))
+    overview.add_row("Reviews next 7 days", str(forecast.get("due_this_week", 0)))
+    overview.add_row("Reviews later", str(forecast.get("due_later", 0)))
+
+    mastery = Table(title="Mastery by unit", header_style="bold cyan")
+    mastery.add_column("Unit", justify="right")
+    mastery.add_column("Title")
+    mastery.add_column("Concepts", justify="right")
+    mastery.add_column("Mastery", justify="right")
+    if mastery_rows:
+        for row in mastery_rows:
+            mastery.add_row(
+                str(row.get("unit", "")),
+                str(row.get("title", "")),
+                f"{row.get('known', 0)}/{row.get('total', 0)}",
+                f"{row.get('percent', 0)}%",
+            )
+    else:
+        mastery.add_row("", "No structured course units", "0/0", "0%")
+
+    return Panel(
+        Group(overview, Text(""), mastery),
+        title=Text(f"Study stats - {label}", style="bold cyan"),
+        title_align="left",
+        border_style="cyan",
+        padding=(1, 2),
+    )
 
 
 def print_error(message: str, output_func=print) -> None:

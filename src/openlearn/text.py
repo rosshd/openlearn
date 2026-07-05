@@ -37,6 +37,10 @@ def one_line(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def concept_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", value.casefold())
+
+
 def first_lines(text: str, limit: int) -> str:
     if limit <= 0:
         return ""

@@ -26,6 +26,14 @@ Keep this file short and route deeper context to skills only when needed.
 - Use `.claude/skills/openlearn-tutor-policy/` for tutor prompts, answer judging, mastery, anti-gaming, quiz, SRS, and learning-science decisions.
 - Use `.claude/skills/openlearn-phase-review/` when reviewing a phase implementation or writing the next phase prompt.
 
+## Agent Run Hygiene
+
+- Read `docs/AGENT_RUNS.md` before starting fleets, long autonomous runs, review passes, or PR shipping loops.
+- Do not spawn fleets, subagents, background loops, browser QA, no-mistakes, or PR automation unless the user explicitly asks for that mode.
+- For fleet prompts, keep the stop condition narrow: one scoped deliverable, one verification gate, one concise handoff.
+- Stop and report after the first repeated agent/tool failure instead of retrying through expensive context reloads.
+- Leave a status note with branch, worktree, commit, dirty files, verification, and next review command before handing off.
+
 ## Verification
 
 Green gate:
