@@ -4382,21 +4382,22 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 def cmd_stats(args: argparse.Namespace, output_func=print) -> int:
     topic_arg = getattr(args, "topic", None)
-    topics: list[Topic] = []
-    for summary in list_topics():
-        try:
-            topics.append(read_topic(summary.slug))
-        except OpenLearnError:
-            continue
 
     selected: Topic | None = None
     if topic_arg:
         try:
-            selected = read_topic(slugify(topic_arg))
+            selected = read_topic_stats(slugify(topic_arg))
         except OpenLearnError as exc:
             output_func(str(exc))
             return 1
+        topics = [selected]
     else:
+        topics: list[Topic] = []
+        for summary in list_topics():
+            try:
+                topics.append(read_topic_stats(summary.slug))
+            except OpenLearnError:
+                continue
         active = get_active_topic()
         if active:
             selected = next((topic for topic in topics if topic.slug == active), None)
@@ -6913,6 +6914,12 @@ def read_topic(slug: str) -> Topic:
     state = migrate_topic_state_if_needed(slug, path, text, raw_metadata, body)
     metadata = merge_topic_state(metadata, state)
     return Topic(slug=slug, path=path, metadata=metadata, body=body)
+
+
+def read_topic_stats(slug: str) -> Topic:
+    summary = read_topic_summary(topic_path(slug))
+    metadata = merge_topic_state(summary.metadata, load_state(slug))
+    return Topic(slug=summary.slug, path=summary.path, metadata=metadata, body="")
 
 
 def recent_topics() -> list[Topic]:

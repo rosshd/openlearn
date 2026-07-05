@@ -6393,6 +6393,23 @@ class PromptInstructionTests(unittest.TestCase):
         self.assertIn("Mastery: 1/2 concepts (50%)", rendered)
         self.assertIn("Reviews: 1 due now", rendered)
 
+    def test_cmd_stats_with_topic_ignores_unrelated_topics(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn"))
+        cli.topic_path("broken").write_text(
+            "---\nnot-json\n---\n# Broken\n",
+            encoding="utf-8",
+        )
+
+        output = []
+        code = cli.cmd_stats(
+            Namespace(topic="vim", text=True),
+            output_func=output.append,
+        )
+
+        self.assertEqual(code, 0)
+        rendered = "\n".join(output)
+        self.assertIn("openlearn progress - Vim", rendered)
+
     def test_cmd_stats_without_topic_reports_all_topics(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn"))
         call_silent(cli.cmd_new, Namespace(topic="Git", goal="learn"))
