@@ -92,5 +92,6 @@ Multiple-choice options are normalized onto separate lines before Rich Markdown 
 
 `make check` is the gate.
 Tests use temporary `OPENLEARN_HOME` directories and mock mode where needed so they do not touch real user data.
+Provider-configuration tests also clear provider environment variables, mock saved config reads, and reset the config cache.
 GitHub Actions also runs `python -m unittest` on Ubuntu, Windows, and macOS for Python 3.11 and 3.13.
 Workflow tests that require `pexpect` and a POSIX pty are skipped on Windows with explicit reasons.

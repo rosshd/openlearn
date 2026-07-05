@@ -54,3 +54,4 @@ description: >
 
 - Storage or provider changes need unit coverage plus `make check`.
 - Use mocked, isolated CLI flows with `OPENLEARN_MOCK=1` and temporary `OPENLEARN_HOME`.
+- Provider-configuration tests must clear provider env vars, mock saved config reads, and reset the config cache.

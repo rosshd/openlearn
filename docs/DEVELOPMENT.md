@@ -41,6 +41,7 @@ The PyPI project and its trusted-publishing settings must exist before the first
 
 - Use `OPENLEARN_MOCK=1` for model-free CLI smoke.
 - Use a temporary `OPENLEARN_HOME` for tests and manual flows.
+- For provider-configuration tests, clear provider environment variables, mock saved config reads, and reset the config cache.
 - Do not test against real topics, config, state, or API keys.
 - Do not weaken lint, tests, or smoke to make the gate pass.
 
