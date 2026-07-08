@@ -7,7 +7,9 @@ Nothing in this module reads or writes files.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import date, datetime, timedelta, timezone
+from typing import cast
 
 from openlearn.text import concept_key
 
@@ -29,10 +31,8 @@ def parse_event_timestamp(value: object) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
-def event_timestamps(events: list[object]) -> list[datetime]:
-    stamps = (
-        parse_event_timestamp(event.get("ts")) for event in events if isinstance(event, dict)
-    )
+def event_timestamps(events: Sequence[object]) -> list[datetime]:
+    stamps = (parse_event_timestamp(event.get("ts")) for event in events if isinstance(event, dict))
     return sorted(ts for ts in stamps if ts is not None)
 
 
@@ -197,8 +197,8 @@ def combine_forecasts(forecasts: list[dict[str, int]]) -> dict[str, int]:
 
 
 def total_mastery(rows: list[dict[str, object]]) -> tuple[int, int, int]:
-    known = sum(int(row.get("known", 0)) for row in rows)
-    total = sum(int(row.get("total", 0)) for row in rows)
+    known = sum(int(cast(int | str | float, row.get("known", 0))) for row in rows)
+    total = sum(int(cast(int | str | float, row.get("total", 0))) for row in rows)
     percent = round(known / total * 100) if total else 0
     return known, total, percent
 

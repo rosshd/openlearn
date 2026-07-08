@@ -4406,9 +4406,7 @@ def cmd_stats(args: argparse.Namespace, output_func=print) -> int:
 
     scope_topics = [selected] if topic_arg and selected else topics
     all_events = [
-        event
-        for topic in scope_topics
-        for event in load_event_log(topic_events_path(topic.slug))
+        event for topic in scope_topics for event in load_event_log(topic_events_path(topic.slug))
     ]
     timestamps = stats_metrics.event_timestamps(all_events)
     now = datetime.now(timezone.utc)
