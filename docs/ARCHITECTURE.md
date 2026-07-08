@@ -14,6 +14,7 @@ Supporting modules:
 - `constants.py`: prompt constants, defaults, limits, profile values, and option labels.
 - `models.py`: dataclasses for topic and pending-context state.
 - `onboarding.py`: provider presets, credential validation, first-run configuration persistence, and initial destination launch.
+- `stats.py`: read-only aggregation helpers for the stats dashboard.
 - `text.py`: parsing, trimming, metadata-update helpers, answer-key extraction, and context compaction.
 - `ui.py`: terminal formatting and Rich output helpers.
 
@@ -38,6 +39,7 @@ When it rewrites a topic, it first writes the original text to `<slug>.md.bak`.
 The slug is the stable file identifier at `learning-topics/<slug>.md`.
 Runtime state can also live in `<slug>.state.json`, `<slug>.events.jsonl`, `state.json`, imported context directories, and drill directories.
 Event logs are append-only.
+The stats dashboard reads event logs to derive activity dates, streaks, session spans, and current-week study minutes.
 Writes use per-topic lock files with `fcntl.flock` on POSIX and `msvcrt.locking` on Windows.
 
 Important dynamic metadata includes pending questions, answer status, concept attempts, rolling pass rate, quiz state, active drill path, imported checksums, learner preferences, structured course completion, and per-slide concept coverage.

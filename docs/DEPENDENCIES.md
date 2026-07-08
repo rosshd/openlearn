@@ -7,13 +7,12 @@ Prefer small direct libraries over broad orchestration frameworks.
 
 | Library | License | Use |
 | --- | --- | --- |
-| `rich` | MIT | Terminal formatting, Markdown-ish output, spinners |
+| `rich` | MIT | Terminal formatting, Markdown-ish output, spinners, stats dashboard |
 | `platformdirs` | MIT | Cross-platform config and data directories |
 | `pdfplumber` | MIT | PDF text extraction |
 | `requests` | Apache-2.0 | URL import and lightweight web fetches |
 | `trafilatura` | Apache-2.0 | Readable web-page extraction |
 | `python-docx` | MIT | DOCX import |
-| `plotext` | MIT | Terminal progress charts |
 | `ebisu` | Unlicense | Optional forgetting-curve SRS extra |
 
 ## Candidates

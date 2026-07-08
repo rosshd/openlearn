@@ -145,6 +145,7 @@ Model-backed commands require an API key for non-local providers, but localhost 
 `OPENLEARN_MOCK=1` runs model-backed tests without any provider call.
 Transient provider failures such as rate limits, server errors, URL errors, and timeouts are retried up to three times with bounded backoff before surfacing an error.
 `chat`, `resume`, `next`, and `review` accept `--dry-run` to print the rendered prompts instead of calling the model, leaving all local files untouched.
+`stats` defaults to an all-topic Rich dashboard with streaks, this week's study minutes, review forecast, and mastery by unit; pass a topic slug to focus on one topic, or `--text` / `--share` for a compact shareable summary.
 `repair` fills missing topic metadata defaults and can recover simple corrupt JSON frontmatter such as trailing commas or missing closing braces/brackets, writing a `.bak` file before rewriting the topic.
 `repl` also has the `shell` alias.
 

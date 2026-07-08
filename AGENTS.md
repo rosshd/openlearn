@@ -6,7 +6,7 @@ Keep this file short and route deeper context to skills only when needed.
 ## Fast Context
 
 - Entry point: `openlearn`, implemented mostly in `src/openlearn/cli.py`.
-- Core helpers: `src/openlearn/constants.py`, `src/openlearn/models.py`, `src/openlearn/text.py`, `src/openlearn/ui.py`.
+- Core helpers: `src/openlearn/constants.py`, `src/openlearn/models.py`, `src/openlearn/stats.py`, `src/openlearn/text.py`, `src/openlearn/ui.py`.
 - Tests: `tests/`, with human smoke flows in `manual-tests/`.
 - User-owned data: `learning-topics/*.md`, `*.state.json`, `*.events.jsonl`, `state.json`, `config.json`, and imported context files.
 
