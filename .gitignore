@@ -11,6 +11,7 @@ build/
 *.egg-info/
 .artifacts/
 .lavish/
+.worktrees/
 
 # Local learning data is user-owned and may contain private notes.
 config.json
