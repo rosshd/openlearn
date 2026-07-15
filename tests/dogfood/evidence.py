@@ -41,19 +41,8 @@ class EvidenceRecorder:
     def record_output(self, text: str) -> None:
         self._record("output", text)
 
-    def _record(self, event: str, text: str) -> None:
-        sanitized = self._sanitize(text)
-        payload = {
-            "schema_version": SCHEMA_VERSION,
-            "event": event,
-            "elapsed_seconds": round(max(0.0, self._clock() - self._started_at), 6),
-            "text": sanitized,
-        }
-        with self.path.open("a", encoding="utf-8") as stream:
-            stream.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
-            stream.write("\n")
-
-    def _sanitize(self, text: str) -> str:
+    def sanitize(self, text: str) -> str:
+        """Return text with the same redaction rules used for persisted events."""
         sanitized = text
         for value in self._sensitive_values:
             sanitized = sanitized.replace(value, REDACTION_MARKER)
@@ -63,3 +52,15 @@ class EvidenceRecorder:
             else:
                 sanitized = pattern.sub(REDACTION_MARKER, sanitized)
         return sanitized
+
+    def _record(self, event: str, text: str) -> None:
+        sanitized = self.sanitize(text)
+        payload = {
+            "schema_version": SCHEMA_VERSION,
+            "event": event,
+            "elapsed_seconds": round(max(0.0, self._clock() - self._started_at), 6),
+            "text": sanitized,
+        }
+        with self.path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+            stream.write("\n")
