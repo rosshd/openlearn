@@ -15,6 +15,7 @@ from tests.dogfood.pty_runner import PtyRunResult
 MANIFEST_NAME = "manifest.json"
 INTERACTIONS_NAME = "interactions.jsonl"
 FRAMES_DIRECTORY = "frames"
+FINAL_STATE_NAME = "final-state.json"
 
 
 @dataclass(frozen=True)
@@ -42,6 +43,7 @@ class EvidenceBundle:
         self.root = root
         self.root.mkdir(parents=True, exist_ok=True)
         self._now = now
+        self._openlearn_home = metadata.openlearn_home
         self.recorder = EvidenceRecorder(
             self.root / INTERACTIONS_NAME,
             sensitive_values=sensitive_values,
@@ -64,6 +66,7 @@ class EvidenceBundle:
             "artifacts": {
                 "interactions": INTERACTIONS_NAME,
                 "frames": self._frames,
+                "final_state": None,
             },
             "status": "running",
             "outcome": None,
@@ -101,6 +104,53 @@ class EvidenceBundle:
         )
         self._write_manifest()
         return frame_path
+
+    def capture_final_state(self) -> Path:
+        """Persist a sanitized inventory of the isolated home without file contents."""
+        if self._completed:
+            raise RuntimeError("cannot capture final state after bundle completion")
+        if not self._openlearn_home.is_dir():
+            raise RuntimeError("isolated OPENLEARN_HOME does not exist")
+
+        entries = []
+        for path in sorted(self._openlearn_home.rglob("*")):
+            relative_path = path.relative_to(self._openlearn_home).as_posix()
+            if path.is_symlink():
+                kind = "symlink"
+            elif path.is_dir():
+                kind = "directory"
+            elif path.is_file():
+                kind = "file"
+            else:
+                kind = "other"
+            entries.append(
+                {
+                    "path": self.recorder.sanitize(relative_path),
+                    "kind": kind,
+                }
+            )
+
+        final_state_path = self.root / FINAL_STATE_NAME
+        temporary_path = final_state_path.with_suffix(".json.tmp")
+        temporary_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "captured_at": _format_timestamp(self._now()),
+                    "entries": entries,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        temporary_path.replace(final_state_path)
+        artifacts = self._manifest["artifacts"]
+        assert isinstance(artifacts, dict)
+        artifacts["final_state"] = FINAL_STATE_NAME
+        self._write_manifest()
+        return final_state_path
 
     def complete(
         self,

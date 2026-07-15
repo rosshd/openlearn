@@ -32,11 +32,20 @@ def test_bundle_persists_sanitized_mission_manifest_and_outcome(
     assert initial_manifest["status"] == "running"
     assert (tmp_path / "evidence" / "interactions.jsonl").is_file()
 
+    private_topic = home / "learning-topics" / f"{secret}.md"
+    private_topic.parent.mkdir(parents=True)
+    private_topic.write_text(
+        f"Private contents: {secret}; credential: sk-test-12345678\n",
+        encoding="utf-8",
+    )
+    (home / "state.json").write_text(f'{{"private": "{secret}"}}\n', encoding="utf-8")
+
     bundle.recorder.record_input(f"typed {secret}")
     frame_path = bundle.capture_frame(
         "Course prompt / decision",
         f"Rendered terminal containing {secret} and sk-test-12345678",
     )
+    final_state_path = bundle.capture_final_state()
     bundle.complete(
         PtyRunResult(
             exit_status=0,
@@ -54,6 +63,7 @@ def test_bundle_persists_sanitized_mission_manifest_and_outcome(
     persisted = manifest_path.read_text(encoding="utf-8")
     persisted += interactions_path.read_text(encoding="utf-8")
     persisted += frame_path.read_text(encoding="utf-8")
+    persisted += final_state_path.read_text(encoding="utf-8")
 
     assert secret not in persisted
     assert "sk-test-12345678" not in persisted
@@ -84,6 +94,7 @@ def test_bundle_persists_sanitized_mission_manifest_and_outcome(
                     "captured_at": "2026-07-14T16:30:00Z",
                 }
             ],
+            "final_state": "final-state.json",
         },
         "status": "completed",
         "outcome": {
@@ -94,4 +105,13 @@ def test_bundle_persists_sanitized_mission_manifest_and_outcome(
             "interaction_count": 1,
             "elapsed_seconds": 1.25,
         },
+    }
+    assert json.loads(final_state_path.read_text(encoding="utf-8")) == {
+        "schema_version": 1,
+        "captured_at": "2026-07-14T16:30:00Z",
+        "entries": [
+            {"path": "learning-topics", "kind": "directory"},
+            {"path": "learning-topics/[REDACTED].md", "kind": "file"},
+            {"path": "state.json", "kind": "file"},
+        ],
     }
