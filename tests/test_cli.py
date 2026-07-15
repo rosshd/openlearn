@@ -3644,6 +3644,75 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(system_known[0], [])
         self.assertEqual(system_known[1], ["joined metadata"])
 
+    def test_repl_ask_command_defers_metadata_update(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
+        update_started = threading.Event()
+        allow_update = threading.Event()
+        update_finished = threading.Event()
+        prompt_states = []
+        system_known = []
+        original_stream = cli.call_openai_streaming
+        original_system_prompt = cli.system_prompt
+        original_update = cli.update_learning_metadata
+        original_maybe = cli.maybe_suggest_videos
+
+        def fake_stream(*_args, user: str, **_kwargs) -> str:
+            return f"Check: What follows {user}?"
+
+        def fake_system_prompt(topic: cli.Topic) -> str:
+            system_known.append(list(topic.metadata.get("known", [])))
+            return "Tutor system prompt"
+
+        def slow_update(
+            topic: cli.Topic,
+            learner_prompt: str,
+            *_args,
+            **_kwargs,
+        ) -> None:
+            if learner_prompt != "first":
+                return
+            update_started.set()
+            self.assertTrue(allow_update.wait(timeout=2))
+            metadata, body = cli.parse_topic(topic.path.read_text(encoding="utf-8"))
+            metadata = dict(metadata)
+            metadata["known"] = ["joined command metadata"]
+            topic.path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
+            update_finished.set()
+
+        inputs = iter(["/ask first", "second", "/q"])
+
+        def input_func(prompt: str = "") -> str:
+            if len(prompt_states) == 1:
+                self.assertTrue(update_started.wait(timeout=2))
+                prompt_states.append((prompt, update_finished.is_set()))
+                allow_update.set()
+            else:
+                prompt_states.append((prompt, update_finished.is_set()))
+            return next(inputs)
+
+        cli.call_openai_streaming = fake_stream
+        cli.system_prompt = fake_system_prompt
+        cli.update_learning_metadata = slow_update
+        cli.maybe_suggest_videos = lambda *_args, **_kwargs: None
+        try:
+            exit_code = call_silent(
+                cli.run_repl,
+                input_func=input_func,
+                output_func=lambda _text: None,
+                show_intro=False,
+            )
+        finally:
+            allow_update.set()
+            cli.call_openai_streaming = original_stream
+            cli.system_prompt = original_system_prompt
+            cli.update_learning_metadata = original_update
+            cli.maybe_suggest_videos = original_maybe
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(prompt_states[1], ("Answer> ", False))
+        self.assertEqual(system_known[0], [])
+        self.assertEqual(system_known[1], ["joined command metadata"])
+
     def test_repl_joins_deferred_update_before_quit_returns(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
         update_started = threading.Event()

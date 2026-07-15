@@ -1420,8 +1420,12 @@ def run_repl(
                     break
                 last_tutor_answer = None
                 if prompt.startswith("/"):
-                    handle_repl_command(
-                        prompt[1:], model=model, input_func=input_func, output_func=output_func
+                    last_tutor_answer = handle_repl_command(
+                        prompt[1:],
+                        model=model,
+                        input_func=input_func,
+                        output_func=output_func,
+                        deferred_updates=deferred_updates,
                     )
                 elif handle_natural_advance(prompt, model=model, output_func=output_func):
                     preserved_prompt = None
@@ -1568,8 +1572,12 @@ def handle_natural_advance(prompt: str, model: str | None = None, output_func=pr
 
 
 def handle_repl_command(
-    command: str, model: str | None = None, input_func=input, output_func=print
-) -> None:
+    command: str,
+    model: str | None = None,
+    input_func=input,
+    output_func=print,
+    deferred_updates: DeferredTurnUpdates | None = None,
+) -> str | None:
     try:
         parts = shlex.split(command)
     except ValueError as exc:
@@ -1706,9 +1714,16 @@ def handle_repl_command(
     elif name == "ask":
         if not args:
             raise OpenLearnError("usage: /ask <question>")
-        ask_topic(None, " ".join(args), model, output_func=output_func)
+        return ask_topic(
+            None,
+            " ".join(args),
+            model,
+            output_func=output_func,
+            deferred_updates=deferred_updates,
+        )
     else:
         raise OpenLearnError(f"unknown REPL command: /{name}")
+    return None
 
 
 def cmd_config_show(_args: argparse.Namespace) -> int:
