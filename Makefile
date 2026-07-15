@@ -1,8 +1,9 @@
 PYTHON ?= .venv/bin/python
 OPENLEARN ?= .venv/bin/openlearn
 REVIEW_DIR ?= .artifacts/review
+TYPE ?= feat
 
-.PHONY: test unit pytest lint typecheck smoke e2e diff validate check review
+.PHONY: test unit pytest lint typecheck smoke e2e diff validate check review repo-status worktree finish
 
 # --- Individual lanes ---------------------------------------------------------
 
@@ -33,6 +34,19 @@ e2e:
 diff:
 	git diff --stat
 	git diff
+
+# --- Repository workflow ------------------------------------------------------
+
+repo-status:
+	@./scripts/repo-workflow status
+
+worktree:
+	@test -n "$(NAME)" || { echo "usage: make worktree NAME=<task> [TYPE=feat]" >&2; exit 2; }
+	@./scripts/repo-workflow start "$(TYPE)" "$(NAME)"
+
+finish:
+	@test -n "$(NAME)" || { echo "usage: make finish NAME=<task>" >&2; exit 2; }
+	@./scripts/repo-workflow finish "$(NAME)"
 
 # Back-compat alias for the old umbrella target.
 validate: check

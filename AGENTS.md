@@ -28,6 +28,13 @@ Keep this file short and route deeper context to skills only when needed.
 
 ## Agent Run Hygiene
 
+- Treat `main` as the only integration source of truth and `origin/main` as its remote-tracking snapshot.
+- Keep the root checkout on `main`; do scoped implementation in a short-lived branch and matching `.worktrees/<task>` checkout.
+- Default to one active feature worktree and never exceed two without explicit user approval.
+- Finish the branch lifecycle in one handoff: verify, commit, ship only when authorized, then remove the merged worktree and local branch.
+- Use version branches only for active release preparation; normal v0.x work still belongs in short-lived task branches.
+- Use `make repo-status`, `make worktree NAME=<task> TYPE=<type>`, and `make finish NAME=<task>` for the repo-local lifecycle.
+- When Ross is using the captain workflow, remember that `captain status`, `captain watch`, and `captain done <path>` own cross-repo, fleet, and Treehouse operations.
 - Read `docs/AGENT_RUNS.md` before starting fleets, long autonomous runs, review passes, or PR shipping loops.
 - Do not spawn fleets, subagents, background loops, browser QA, no-mistakes, or PR automation unless the user explicitly asks for that mode.
 - For fleet prompts, keep the stop condition narrow: one scoped deliverable, one verification gate, one concise handoff.
