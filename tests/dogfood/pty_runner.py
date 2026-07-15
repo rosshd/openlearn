@@ -27,14 +27,20 @@ class _EvidenceLog:
 
     def __init__(self, recorder: EvidenceRecorder) -> None:
         self._recorder = recorder
+        self._rendered_chunks: list[str] = []
 
     def write(self, text: str) -> int:
         if text:
+            self._rendered_chunks.append(self._recorder.sanitize(text))
             self._recorder.record_output(text)
         return len(text)
 
     def flush(self) -> None:
         pass
+
+    @property
+    def rendered_output(self) -> str:
+        return "".join(self._rendered_chunks)
 
 
 class PtyMissionRunner:
@@ -62,6 +68,7 @@ class PtyMissionRunner:
         self._started_at: float | None = None
         self._interaction_count = 0
         self._result: PtyRunResult | None = None
+        self._evidence_log: _EvidenceLog | None = None
 
     def start(self) -> None:
         if self._child is not None or self._result is not None:
@@ -75,8 +82,17 @@ class PtyMissionRunner:
             encoding="utf-8",
             timeout=self._timeout,
         )
-        child.logfile_read = _EvidenceLog(self._recorder)
+        evidence_log = _EvidenceLog(self._recorder)
+        child.logfile_read = evidence_log
+        self._evidence_log = evidence_log
         self._child = child
+
+    @property
+    def rendered_output(self) -> str:
+        """Return the sanitized terminal output rendered so far."""
+        if self._evidence_log is None:
+            raise RuntimeError("mission runner has not started")
+        return self._evidence_log.rendered_output
 
     def expect(self, pattern: Any, *, timeout: int | float = -1) -> int:
         """Wait for a visible terminal pattern or ``pexpect.EOF``."""

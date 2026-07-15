@@ -36,8 +36,10 @@ def test_runner_drives_real_pty_and_persists_sanitized_interactions(
     try:
         runner.start()
         runner.expect("Prompt> ")
+        entry_frame = runner.rendered_output
         runner.sendline(private_input)
         runner.expect(pexpect.EOF)
+        completion_frame = runner.rendered_output
         result = runner.finish()
     finally:
         runner.close()
@@ -51,6 +53,10 @@ def test_runner_drives_real_pty_and_persists_sanitized_interactions(
     assert result.exit_status == 0
     assert result.signal_status is None
     assert result.interaction_count == 1
+    assert "PTY=True" in entry_frame
+    assert "Prompt> " in entry_frame
+    assert private_input not in completion_frame
+    assert "MATCH=True" in completion_frame
     assert "PTY=True" in rendered_output
     assert "MATCH=True" in rendered_output
     assert private_input not in persisted

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -13,6 +14,7 @@ from tests.dogfood.pty_runner import PtyRunResult
 
 MANIFEST_NAME = "manifest.json"
 INTERACTIONS_NAME = "interactions.jsonl"
+FRAMES_DIRECTORY = "frames"
 
 
 @dataclass(frozen=True)
@@ -39,15 +41,17 @@ class EvidenceBundle:
     ) -> None:
         self.root = root
         self.root.mkdir(parents=True, exist_ok=True)
+        self._now = now
         self.recorder = EvidenceRecorder(
             self.root / INTERACTIONS_NAME,
             sensitive_values=sensitive_values,
         )
         self.recorder.path.touch()
         self._manifest_path = self.root / MANIFEST_NAME
+        self._frames: list[dict[str, str]] = []
         self._manifest: dict[str, object] = {
             "schema_version": SCHEMA_VERSION,
-            "started_at": _format_timestamp(now()),
+            "started_at": _format_timestamp(self._now()),
             "mission": {
                 "persona": self.recorder.sanitize(metadata.persona),
                 "goal": self.recorder.sanitize(metadata.mission),
@@ -57,12 +61,46 @@ class EvidenceBundle:
                 "openlearn_home": self.recorder.sanitize(str(metadata.openlearn_home)),
                 "command": [self.recorder.sanitize(part) for part in metadata.command],
             },
-            "artifacts": {"interactions": INTERACTIONS_NAME},
+            "artifacts": {
+                "interactions": INTERACTIONS_NAME,
+                "frames": self._frames,
+            },
             "status": "running",
             "outcome": None,
         }
         self._completed = False
         self._write_manifest()
+
+    def capture_frame(self, label: str, rendered_output: str) -> Path:
+        """Persist a sanitized terminal checkpoint and register it in the manifest."""
+        if self._completed:
+            raise RuntimeError("cannot capture a frame after bundle completion")
+        sanitized_label = self.recorder.sanitize(label).strip()
+        if not sanitized_label:
+            raise ValueError("frame label must not be empty")
+
+        frame_number = len(self._frames) + 1
+        slug = re.sub(r"[^a-z0-9]+", "-", sanitized_label.lower()).strip("-")
+        slug = slug[:60].rstrip("-") or "checkpoint"
+        relative_path = Path(FRAMES_DIRECTORY) / f"{frame_number:03}-{slug}.txt"
+        frame_path = self.root / relative_path
+        frame_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = frame_path.with_suffix(".txt.tmp")
+        temporary_path.write_text(
+            self.recorder.sanitize(rendered_output),
+            encoding="utf-8",
+        )
+        temporary_path.replace(frame_path)
+
+        self._frames.append(
+            {
+                "label": sanitized_label,
+                "path": relative_path.as_posix(),
+                "captured_at": _format_timestamp(self._now()),
+            }
+        )
+        self._write_manifest()
+        return frame_path
 
     def complete(
         self,

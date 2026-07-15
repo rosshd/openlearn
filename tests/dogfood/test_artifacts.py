@@ -33,6 +33,10 @@ def test_bundle_persists_sanitized_mission_manifest_and_outcome(
     assert (tmp_path / "evidence" / "interactions.jsonl").is_file()
 
     bundle.recorder.record_input(f"typed {secret}")
+    frame_path = bundle.capture_frame(
+        "Course prompt / decision",
+        f"Rendered terminal containing {secret} and sk-test-12345678",
+    )
     bundle.complete(
         PtyRunResult(
             exit_status=0,
@@ -49,8 +53,16 @@ def test_bundle_persists_sanitized_mission_manifest_and_outcome(
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     persisted = manifest_path.read_text(encoding="utf-8")
     persisted += interactions_path.read_text(encoding="utf-8")
+    persisted += frame_path.read_text(encoding="utf-8")
 
     assert secret not in persisted
+    assert "sk-test-12345678" not in persisted
+    assert frame_path.relative_to(tmp_path / "evidence").as_posix() == (
+        "frames/001-course-prompt-decision.txt"
+    )
+    assert frame_path.read_text(encoding="utf-8") == (
+        "Rendered terminal containing [REDACTED] and [REDACTED]"
+    )
     assert manifest == {
         "schema_version": 1,
         "started_at": "2026-07-14T16:30:00Z",
@@ -63,7 +75,16 @@ def test_bundle_persists_sanitized_mission_manifest_and_outcome(
             "openlearn_home": str(home),
             "command": ["openlearn", "menu"],
         },
-        "artifacts": {"interactions": "interactions.jsonl"},
+        "artifacts": {
+            "interactions": "interactions.jsonl",
+            "frames": [
+                {
+                    "label": "Course prompt / decision",
+                    "path": "frames/001-course-prompt-decision.txt",
+                    "captured_at": "2026-07-14T16:30:00Z",
+                }
+            ],
+        },
         "status": "completed",
         "outcome": {
             "achieved": True,
