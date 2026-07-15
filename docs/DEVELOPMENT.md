@@ -45,6 +45,10 @@ The PyPI project and its trusted-publishing settings must exist before the first
 - Do not test against real topics, config, state, or API keys.
 - Do not weaken lint, tests, or smoke to make the gate pass.
 
+## Exploratory Dogfooding
+
+See [Exploratory Dogfood Evidence](DOGFOOD_EVIDENCE.md) for the real-PTY mock mission, evidence contract, and sanitization boundaries.
+
 ## Phase Work
 
 For phase implementation review or next-prompt writing, use `.claude/skills/openlearn-phase-review/`.
