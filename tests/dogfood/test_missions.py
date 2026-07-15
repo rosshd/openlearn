@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
 from pathlib import Path
 
-from tests.dogfood.missions import run_mock_draft_course_mission
+import pexpect
+import pytest
+
+from tests.dogfood.missions import _isolated_mock_environment, run_mock_draft_course_mission
 
 
 def _installed_openlearn() -> Path:
@@ -73,3 +78,75 @@ def test_mock_draft_course_mission_uses_public_cli_and_persists_evidence(
     assert "Save this course draft for later?" in output
     assert (run_root / "home" / "learning-topics" / "terminal-navigation-basics.md").is_file()
     assert not unrelated_home.exists()
+
+    topic_text = (
+        run_root / "home" / "learning-topics" / "terminal-navigation-basics.md"
+    ).read_text(encoding="utf-8")
+    metadata_text = topic_text[4:].split("\n---\n", 1)[0]
+    metadata = json.loads(metadata_text)
+    assert metadata["topic"] == "Terminal Navigation Basics"
+    assert metadata["slug"] == "terminal-navigation-basics"
+    assert metadata["goal"] == "Learn how to navigate a terminal confidently."
+
+
+def test_mock_mission_records_failed_outcome_and_final_state(tmp_path: Path) -> None:
+    run_root = tmp_path / "failed-mission"
+
+    with pytest.raises(pexpect.EOF):
+        run_mock_draft_course_mission(
+            run_root,
+            command=(sys.executable, "-c", "print('unexpected prompt')"),
+        )
+
+    manifest = json.loads(
+        (run_root / "evidence" / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["status"] == "failed"
+    assert manifest["outcome"]["achieved"] is False
+    assert manifest["outcome"]["summary"].startswith("EOF: mission failed")
+    assert manifest["artifacts"]["final_state"] == "final-state.json"
+    assert "unexpected prompt" in (
+        run_root / "evidence" / "interactions.jsonl"
+    ).read_text(encoding="utf-8")
+
+
+def test_mock_environment_imports_openlearn_from_active_worktree(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(("/existing/one", "/existing/two")))
+    monkeypatch.setenv("DATABASE_URL", "postgresql://user:password@example.invalid/db")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "example-access-key")
+
+    env = _isolated_mock_environment(tmp_path / "home")
+
+    source = Path(__file__).resolve().parents[2] / "src"
+    assert env["PYTHONPATH"] == str(source)
+    assert "DATABASE_URL" not in env
+    assert "AWS_ACCESS_KEY_ID" not in env
+
+
+def test_interrupted_mission_is_finalized_as_failed(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from tests.dogfood.pty_runner import PtyMissionRunner
+
+    def interrupt(_runner, _pattern, *, timeout=-1):
+        del timeout
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(PtyMissionRunner, "expect", interrupt)
+    run_root = tmp_path / "interrupted-mission"
+
+    with pytest.raises(KeyboardInterrupt):
+        run_mock_draft_course_mission(
+            run_root,
+            command=(sys.executable, "-c", "import time; time.sleep(30)"),
+        )
+
+    manifest = json.loads(
+        (run_root / "evidence" / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["status"] == "failed"
+    assert manifest["outcome"]["summary"].startswith("KeyboardInterrupt: mission failed")

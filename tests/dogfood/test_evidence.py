@@ -43,14 +43,18 @@ def test_recorder_sanitizes_input_and_echoed_terminal_output(tmp_path: Path) -> 
             "schema_version": 1,
             "event": "output",
             "elapsed_seconds": 0.5,
-            "text": "openlearn> import [REDACTED]\r\nImported",
+            "text": "openlearn> import [REDACTED]\nImported",
         },
     ]
 
 
 def test_recorder_redacts_credential_shapes_without_explicit_values(tmp_path: Path) -> None:
     evidence_path = tmp_path / "events.jsonl"
-    recorder = EvidenceRecorder(evidence_path, clock=FakeClock(2.0, 2.1))
+    recorder = EvidenceRecorder(
+        evidence_path,
+        sensitive_values=(),
+        clock=FakeClock(2.0, 2.1),
+    )
 
     recorder.record_output(
         "key=sk-or-v1-abcdefghijklmnopqrstuvwxyz Bearer abc.def-0123456789"
@@ -73,3 +77,27 @@ def test_recorder_ignores_empty_sensitive_values(tmp_path: Path) -> None:
     recorder.record_input("ordinary input with specific-secret")
 
     assert read_events(evidence_path)[0]["text"] == "ordinary input with [REDACTED]"
+
+
+def test_recorder_redacts_common_credentials_and_terminal_controls(tmp_path: Path) -> None:
+    evidence_path = tmp_path / "events.jsonl"
+    recorder = EvidenceRecorder(
+        evidence_path,
+        sensitive_values=(),
+        clock=FakeClock(1.0, 1.1),
+    )
+    github_token = "github_pat_abcdefghijklmnopqrstuvwxyz123456"
+    database_url = "postgresql://alice:private-password@database.example/openlearn"
+
+    recorder.record_output(
+        f"\x1b]52;c;copied-secret\x07\x1b[31m{github_token} {database_url}\x1b[0m"
+    )
+
+    persisted = evidence_path.read_text(encoding="utf-8")
+    assert github_token not in persisted
+    assert "private-password" not in persisted
+    assert "copied-secret" not in persisted
+    assert "\x1b" not in persisted
+    assert read_events(evidence_path)[0]["text"] == (
+        "[REDACTED] postgresql://[REDACTED]@database.example/openlearn"
+    )

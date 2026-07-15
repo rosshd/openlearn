@@ -57,7 +57,7 @@ Paths recorded in `manifest.json` are relative to the evidence directory except 
 - `mission`: the sanitized learner persona and user-level goal.
 - `environment`: mock-provider mode, isolated home, and public command.
 - `artifacts`: the interaction stream, ordered terminal frames with labels and UTC capture times, and final-state inventory.
-- `status`: `running` until finalization, then `completed`.
+- `status`: `running` until finalization, then `completed` or `failed`.
 - `outcome`: achieved flag, sanitized summary, exit or signal status, keyboard interaction count, and elapsed seconds.
 
 Each line of `interactions.jsonl` is an ordered JSON event with `schema_version`, `event` (`input` or `output`), mission-relative `elapsed_seconds`, and sanitized `text`.
@@ -74,8 +74,10 @@ It deliberately excludes file contents, hashes, sizes, timestamps, permissions, 
 - Never run a mission against a real `OPENLEARN_HOME`, learner topic, imported context, or credential.
 - Mission setup may create isolated fixtures directly, but all actions after mission start must use keyboard input through the public terminal interface.
 - Capture only allow-listed environment facts; never persist the full process environment.
-- Provide known private fixture values to `EvidenceBundle(..., sensitive_values=...)` so they are redacted from every artifact.
-- Credential-shaped OpenAI keys and bearer tokens are redacted at the capture layer, including terminal echo.
+- Every `EvidenceBundle` and `EvidenceRecorder` call must explicitly provide `sensitive_values`, even when an isolated fixture has none.
+- Provide known private fixture values through `sensitive_values` so they are redacted from every artifact.
+- Common OpenAI and GitHub token shapes, bearer tokens, and credential-bearing URLs are redacted at the capture layer, including terminal echo.
+- Terminal control sequences are removed before output or frame evidence is persisted.
 - Treat redaction as defense in depth, not permission to use real secrets or private learner material.
 - The final-state artifact is an inventory, not a backup of learner data.
 
@@ -89,4 +91,3 @@ Capture frames at entry, major decisions, friction or errors, and completion.
 Always close the runner in a `finally` block, inventory final state before completing the bundle, and determine achievement from visible process results plus isolated local state.
 
 Add integration coverage that proves the installed command saw a real TTY, actions went through keyboard input, the caller's home remained untouched, artifacts survived process exit, and private fixture values were absent from every persisted file.
-

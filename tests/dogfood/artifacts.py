@@ -37,7 +37,7 @@ class EvidenceBundle:
         root: Path,
         metadata: MissionMetadata,
         *,
-        sensitive_values: Iterable[str] = (),
+        sensitive_values: Iterable[str],
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self.root = root
@@ -90,7 +90,7 @@ class EvidenceBundle:
         frame_path.parent.mkdir(parents=True, exist_ok=True)
         temporary_path = frame_path.with_suffix(".txt.tmp")
         temporary_path.write_text(
-            self.recorder.sanitize(rendered_output),
+            self.recorder.sanitize_terminal(rendered_output),
             encoding="utf-8",
         )
         temporary_path.replace(frame_path)
@@ -170,6 +170,22 @@ class EvidenceBundle:
             "signal_status": result.signal_status,
             "interaction_count": result.interaction_count,
             "elapsed_seconds": result.elapsed_seconds,
+        }
+        self._write_manifest()
+        self._completed = True
+
+    def fail(self, summary: str) -> None:
+        """Finalize a mission that failed before a process result was available."""
+        if self._completed:
+            raise RuntimeError("evidence bundle is already complete")
+        self._manifest["status"] = "failed"
+        self._manifest["outcome"] = {
+            "achieved": False,
+            "summary": self.recorder.sanitize(summary),
+            "exit_status": None,
+            "signal_status": None,
+            "interaction_count": None,
+            "elapsed_seconds": None,
         }
         self._write_manifest()
         self._completed = True

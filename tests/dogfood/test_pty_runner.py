@@ -8,7 +8,7 @@ from pathlib import Path
 import pexpect
 
 from tests.dogfood.evidence import EvidenceRecorder
-from tests.dogfood.pty_runner import PtyMissionRunner
+from tests.dogfood.pty_runner import PtyMissionRunner, _EvidenceLog
 
 
 def read_events(path: Path) -> list[dict[str, object]]:
@@ -63,3 +63,17 @@ def test_runner_drives_real_pty_and_persists_sanitized_interactions(
     assert [event["text"] for event in events if event["event"] == "input"] == [
         "[REDACTED]"
     ]
+
+
+def test_output_redaction_crosses_pty_read_boundaries(tmp_path: Path) -> None:
+    evidence_path = tmp_path / "events.jsonl"
+    recorder = EvidenceRecorder(evidence_path, sensitive_values=())
+    log = _EvidenceLog(recorder)
+
+    log.write("credential=sk-test-")
+    log.write("12345678")
+    log.flush_output()
+
+    persisted = evidence_path.read_text(encoding="utf-8")
+    assert "sk-test-12345678" not in persisted
+    assert read_events(evidence_path)[0]["text"] == "credential=[REDACTED]"

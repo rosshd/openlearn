@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -15,6 +16,7 @@ from tests.dogfood.pty_runner import PtyMissionRunner, PtyRunResult
 COURSE_NAME = "Terminal Navigation Basics"
 COURSE_GOAL = "Learn how to navigate a terminal confidently."
 COURSE_SLUG = "terminal-navigation-basics"
+_ALLOWED_ENVIRONMENT_KEYS = ("LANG", "LC_ALL", "LC_CTYPE", "PATH", "TMPDIR")
 
 
 @dataclass(frozen=True)
@@ -51,6 +53,7 @@ def run_mock_draft_course_mission(
             openlearn_home=home,
             command=normalized_command,
         ),
+        sensitive_values=(),
     )
     runner = PtyMissionRunner(
         normalized_command,
@@ -84,11 +87,17 @@ def run_mock_draft_course_mission(
         runner.sendline("q")
         runner.expect(pexpect.EOF)
         result = runner.finish()
+    except (Exception, KeyboardInterrupt, SystemExit) as error:
+        runner.close()
+        if home.is_dir():
+            bundle.capture_final_state()
+        bundle.fail(f"{type(error).__name__}: mission failed before completion")
+        raise
     finally:
         runner.close()
 
     expected_topic = home / "learning-topics" / f"{COURSE_SLUG}.md"
-    achieved = result.exit_status == 0 and expected_topic.is_file()
+    achieved = result.exit_status == 0 and _saved_draft_matches(expected_topic)
     bundle.capture_final_state()
     bundle.complete(
         result,
@@ -110,9 +119,9 @@ def run_mock_draft_course_mission(
 
 def _isolated_mock_environment(home: Path) -> dict[str, str]:
     env = {
-        key: value
-        for key, value in os.environ.items()
-        if not _looks_sensitive_environment_key(key)
+        key: os.environ[key]
+        for key in _ALLOWED_ENVIRONMENT_KEYS
+        if key in os.environ
     }
     env.update(
         {
@@ -122,6 +131,7 @@ def _isolated_mock_environment(home: Path) -> dict[str, str]:
             "TERM": "xterm-256color",
             "COLUMNS": "120",
             "LINES": "24",
+            "PYTHONPATH": _worktree_pythonpath(),
         }
     )
     env.pop("OPENLEARN_BASE_URL", None)
@@ -129,9 +139,27 @@ def _isolated_mock_environment(home: Path) -> dict[str, str]:
     return env
 
 
-def _looks_sensitive_environment_key(key: str) -> bool:
-    normalized = key.upper()
-    return any(
-        marker in normalized
-        for marker in ("API_KEY", "CREDENTIAL", "PASSWORD", "SECRET", "TOKEN")
+def _worktree_pythonpath() -> str:
+    source = Path(__file__).resolve().parents[2] / "src"
+    return str(source)
+
+
+def _saved_draft_matches(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    text = path.read_text(encoding="utf-8")
+    if not text.startswith("---\n"):
+        return False
+    try:
+        metadata_text, body = text[4:].split("\n---\n", 1)
+        metadata = json.loads(metadata_text)
+    except (ValueError, json.JSONDecodeError):
+        return False
+    return (
+        metadata.get("topic") == COURSE_NAME
+        and metadata.get("slug") == COURSE_SLUG
+        and metadata.get("goal") == COURSE_GOAL
+        and metadata.get("course_started") is False
+        and f"# {COURSE_NAME}" in body
+        and f"## Current Goal\n\n{COURSE_GOAL}" in body
     )

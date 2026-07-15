@@ -27,12 +27,13 @@ class _EvidenceLog:
 
     def __init__(self, recorder: EvidenceRecorder) -> None:
         self._recorder = recorder
-        self._rendered_chunks: list[str] = []
+        self._raw_chunks: list[str] = []
+        self._pending_chunks: list[str] = []
 
     def write(self, text: str) -> int:
         if text:
-            self._rendered_chunks.append(self._recorder.sanitize(text))
-            self._recorder.record_output(text)
+            self._raw_chunks.append(text)
+            self._pending_chunks.append(text)
         return len(text)
 
     def flush(self) -> None:
@@ -40,7 +41,13 @@ class _EvidenceLog:
 
     @property
     def rendered_output(self) -> str:
-        return "".join(self._rendered_chunks)
+        return self._recorder.sanitize_terminal("".join(self._raw_chunks))
+
+    def flush_output(self) -> None:
+        """Persist complete output spans so redaction crosses PTY read boundaries."""
+        if self._pending_chunks:
+            self._recorder.record_output("".join(self._pending_chunks))
+            self._pending_chunks.clear()
 
 
 class PtyMissionRunner:
@@ -113,6 +120,7 @@ class PtyMissionRunner:
         child = self._require_child()
         if child.isalive():
             raise RuntimeError("mission process is still running")
+        self._flush_output()
         child.close()
         started_at = self._started_at
         if started_at is None:
@@ -130,6 +138,7 @@ class PtyMissionRunner:
         """Force-close a running child so callers can safely use ``finally`` blocks."""
         if self._child is None:
             return
+        self._flush_output()
         if self._child.isalive():
             self._child.close(force=True)
         else:
@@ -138,8 +147,13 @@ class PtyMissionRunner:
 
     def _record_input(self, text: str) -> None:
         self._require_child()
+        self._flush_output()
         self._recorder.record_input(text)
         self._interaction_count += 1
+
+    def _flush_output(self) -> None:
+        if self._evidence_log is not None:
+            self._evidence_log.flush_output()
 
     def _require_child(self) -> pexpect.spawn:
         if self._child is None:

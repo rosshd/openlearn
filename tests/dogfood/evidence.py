@@ -12,9 +12,24 @@ SCHEMA_VERSION = 1
 REDACTION_MARKER = "[REDACTED]"
 
 _CREDENTIAL_PATTERNS = (
-    re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b"),
-    re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}"),
+    (re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b"), REDACTION_MARKER),
+    (
+        re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}"),
+        f"Bearer {REDACTION_MARKER}",
+    ),
+    (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"), REDACTION_MARKER),
+    (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"), REDACTION_MARKER),
+    (
+        re.compile(
+            r"(?i)\b((?:https?|postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis)://)"
+            r"[^/@\s:]+:[^/@\s]+@"
+        ),
+        rf"\1{REDACTION_MARKER}@",
+    ),
 )
+_OSC_SEQUENCE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+_ANSI_SEQUENCE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|[@-_])")
+_UNSAFE_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 
 class EvidenceRecorder:
@@ -24,7 +39,7 @@ class EvidenceRecorder:
         self,
         path: Path,
         *,
-        sensitive_values: Iterable[str] = (),
+        sensitive_values: Iterable[str],
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.path = path
@@ -46,15 +61,20 @@ class EvidenceRecorder:
         sanitized = text
         for value in self._sensitive_values:
             sanitized = sanitized.replace(value, REDACTION_MARKER)
-        for pattern in _CREDENTIAL_PATTERNS:
-            if pattern.pattern.startswith("(?i)"):
-                sanitized = pattern.sub(f"Bearer {REDACTION_MARKER}", sanitized)
-            else:
-                sanitized = pattern.sub(REDACTION_MARKER, sanitized)
+        for pattern, replacement in _CREDENTIAL_PATTERNS:
+            sanitized = pattern.sub(replacement, sanitized)
         return sanitized
 
+    def sanitize_terminal(self, text: str) -> str:
+        """Redact secrets and remove terminal controls before persistence."""
+        sanitized = text.replace("\r\n", "\n").replace("\r", "\n")
+        sanitized = _OSC_SEQUENCE.sub("", sanitized)
+        sanitized = _ANSI_SEQUENCE.sub("", sanitized)
+        sanitized = _UNSAFE_CONTROL.sub("", sanitized)
+        return self.sanitize(sanitized)
+
     def _record(self, event: str, text: str) -> None:
-        sanitized = self.sanitize(text)
+        sanitized = self.sanitize_terminal(text) if event == "output" else self.sanitize(text)
         payload = {
             "schema_version": SCHEMA_VERSION,
             "event": event,
