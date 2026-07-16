@@ -24,6 +24,9 @@ pip install -e .[dev]
 | `make review` | Gate plus evidence bundle under `.artifacts/review/` |
 | `make e2e` | Full mocked manual smoke flow |
 | `make typecheck` | Pyright, useful but non-blocking |
+| `make repo-status` | Show local version, branch divergence, and worktree state |
+| `make worktree NAME=<task> TYPE=<type>` | Create a safe repo-local task worktree |
+| `make finish NAME=<task>` | Remove a clean, merged repo-local task worktree and branch |
 
 GitHub Actions runs the unittest lane across Ubuntu, Windows, and macOS on Python 3.11 and 3.13.
 Local `pytest` workflow smoke tests use `pexpect`; POSIX pty tests are skipped on Windows.

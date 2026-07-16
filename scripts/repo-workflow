@@ -1,0 +1,184 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+usage:
+  scripts/repo-workflow status
+  scripts/repo-workflow start <type> <name>
+  scripts/repo-workflow finish <name>
+
+Examples:
+  scripts/repo-workflow start feat quick-review
+  scripts/repo-workflow finish quick-review
+EOF
+}
+
+root_checkout() {
+  local common_dir
+  common_dir="$(git rev-parse --path-format=absolute --git-common-dir)"
+  if [ "$(basename "$common_dir")" != ".git" ]; then
+    echo "Cannot resolve the root checkout from $common_dir" >&2
+    exit 1
+  fi
+  dirname "$common_dir"
+}
+
+require_name() {
+  local value="$1"
+  local label="$2"
+  if [[ ! "$value" =~ ^[a-z0-9][a-z0-9._-]*$ ]]; then
+    echo "$label must start with a lowercase letter or digit and contain only lowercase letters, digits, dots, underscores, or hyphens: $value" >&2
+    exit 2
+  fi
+}
+
+require_root_checkout() {
+  local root current
+  root="$(cd "$(root_checkout)" && pwd -P)"
+  current="$(cd "$(git rev-parse --show-toplevel)" && pwd -P)"
+  if [ "$current" != "$root" ]; then
+    echo "Run this command from the root checkout: $root" >&2
+    exit 1
+  fi
+}
+
+status() {
+  local root
+  root="$(root_checkout)"
+
+  echo "Repository: $root"
+  printf 'Version: '
+  sed -n 's/^__version__ = "\([^"]*\)"/\1/p' "$root/src/openlearn/__init__.py"
+
+  if git -C "$root" rev-parse --verify origin/main >/dev/null 2>&1; then
+    local behind ahead
+    read -r behind ahead < <(git -C "$root" rev-list --left-right --count origin/main...main)
+    echo "Main divergence (cached origin/main): behind $behind, ahead $ahead"
+  else
+    echo "Main divergence: origin/main unavailable"
+  fi
+
+  echo
+  echo "Worktrees:"
+  while IFS= read -r path; do
+    local summary
+    summary="$(git -C "$path" status --short --branch | sed -n '1p')"
+    printf '  %s  %s\n' "$path" "$summary"
+    if [ -n "$(git -C "$path" status --porcelain)" ]; then
+      echo "    dirty"
+    fi
+  done < <(git -C "$root" worktree list --porcelain | sed -n 's/^worktree //p')
+
+  echo
+  echo "Branches not merged into main:"
+  local unmerged
+  unmerged="$(git -C "$root" branch --no-merged main --format='%(refname:short)' | sed '/^archive\//d')"
+  if [ -n "$unmerged" ]; then
+    printf '%s\n' "$unmerged" | sed 's/^/  /'
+  else
+    echo "  none"
+  fi
+}
+
+start_worktree() {
+  local type="$1"
+  local name="$2"
+  require_name "$type" "type"
+  require_name "$name" "name"
+  require_root_checkout
+
+  local root branch path linked_count behind ahead
+  root="$(root_checkout)"
+  branch="$type/$name"
+  path="$root/.worktrees/$name"
+
+  if [ "$(git -C "$root" branch --show-current)" != "main" ]; then
+    echo "The root checkout must be on main before creating a worktree." >&2
+    exit 1
+  fi
+  if [ -n "$(git -C "$root" status --porcelain)" ]; then
+    echo "The root checkout is dirty. Commit or restore it before creating a worktree." >&2
+    exit 1
+  fi
+
+  git -C "$root" fetch origin main
+  read -r behind ahead < <(git -C "$root" rev-list --left-right --count origin/main...main)
+  if [ "$behind" -ne 0 ] || [ "$ahead" -ne 0 ]; then
+    echo "main and origin/main must match before creating a worktree: behind $behind, ahead $ahead" >&2
+    exit 1
+  fi
+
+  linked_count="$(( $(git -C "$root" worktree list --porcelain | sed -n 's/^worktree //p' | wc -l) - 1 ))"
+  if [ "$linked_count" -ge 2 ]; then
+    echo "Two linked worktrees already exist. Finish one or get explicit approval before adding another." >&2
+    exit 1
+  fi
+  if git -C "$root" show-ref --verify --quiet "refs/heads/$branch"; then
+    echo "Branch already exists: $branch" >&2
+    exit 1
+  fi
+  if [ -e "$path" ]; then
+    echo "Worktree path already exists: $path" >&2
+    exit 1
+  fi
+
+  git -C "$root" worktree add -b "$branch" "$path" main
+  echo "$path"
+}
+
+finish_worktree() {
+  local name="$1"
+  require_name "$name" "name"
+  require_root_checkout
+
+  local root path branch
+  root="$(root_checkout)"
+  path="$root/.worktrees/$name"
+  if [ ! -d "$path" ]; then
+    echo "Worktree does not exist: $path" >&2
+    exit 1
+  fi
+
+  branch="$(git -C "$path" branch --show-current)"
+  if [ -z "$branch" ] || [ "$branch" = "main" ]; then
+    echo "Expected a feature branch in $path, found: ${branch:-detached HEAD}" >&2
+    exit 1
+  fi
+  if [ -n "$(git -C "$path" status --porcelain)" ]; then
+    echo "Worktree is dirty and will not be removed: $path" >&2
+    exit 1
+  fi
+  if ! git -C "$root" merge-base --is-ancestor "$branch" main; then
+    echo "Branch is not merged into main and will not be removed: $branch" >&2
+    exit 1
+  fi
+
+  git -C "$root" worktree remove "$path"
+  git -C "$root" branch -d "$branch"
+  echo "Removed $path and $branch"
+}
+
+cmd="${1:-status}"
+shift || true
+case "$cmd" in
+  status)
+    [ "$#" -eq 0 ] || { usage >&2; exit 2; }
+    status
+    ;;
+  start)
+    [ "$#" -eq 2 ] || { usage >&2; exit 2; }
+    start_worktree "$1" "$2"
+    ;;
+  finish)
+    [ "$#" -eq 1 ] || { usage >&2; exit 2; }
+    finish_worktree "$1"
+    ;;
+  -h|--help|help)
+    usage
+    ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+esac
