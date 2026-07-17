@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -20,6 +21,18 @@ class PtyRunResult:
     signal_status: int | None
     interaction_count: int
     elapsed_seconds: float
+
+
+@dataclass(frozen=True)
+class PtyObservation:
+    """One sanitized, route-free span drained from the PTY."""
+
+    text: str
+    settled_by: str
+    has_unsupported_controls: bool
+
+
+_UNSUPPORTED_CSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@A-HJ-LMPSTXbdfgrsu]")
 
 
 class _EvidenceLog:
@@ -76,6 +89,7 @@ class PtyMissionRunner:
         self._interaction_count = 0
         self._result: PtyRunResult | None = None
         self._evidence_log: _EvidenceLog | None = None
+        self._observation_raw_offset = 0
 
     def start(self) -> None:
         if self._child is not None or self._result is not None:
@@ -105,6 +119,45 @@ class PtyMissionRunner:
         """Wait for a visible terminal pattern or ``pexpect.EOF``."""
         return self._require_child().expect(pattern, timeout=timeout)
 
+    def observe(
+        self,
+        *,
+        quiet_interval: float,
+        timeout: float,
+    ) -> PtyObservation:
+        """Drain output until quiet, EOF, or a hard observation deadline."""
+        if quiet_interval <= 0 or timeout <= 0:
+            raise ValueError("observation intervals must be positive")
+        child = self._require_child()
+        evidence_log = self._evidence_log
+        if evidence_log is None:
+            raise RuntimeError("mission runner has not started")
+        started_at = self._clock()
+        settled_by = "timeout"
+        while True:
+            remaining = timeout - max(0.0, self._clock() - started_at)
+            if remaining <= 0:
+                break
+            read_timeout = min(quiet_interval, remaining)
+            try:
+                child.read_nonblocking(size=4096, timeout=read_timeout)
+            except pexpect.TIMEOUT:
+                settled_by = "quiet" if read_timeout == quiet_interval else "timeout"
+                break
+            except pexpect.EOF:
+                settled_by = "eof"
+                break
+
+        raw_output = "".join(evidence_log._raw_chunks)
+        raw_observation = raw_output[self._observation_raw_offset :]
+        self._observation_raw_offset = len(raw_output)
+        self._flush_output()
+        return PtyObservation(
+            text=self._recorder.sanitize_terminal(raw_observation),
+            settled_by=settled_by,
+            has_unsupported_controls=_has_unsupported_controls(raw_output),
+        )
+
     def send(self, text: str) -> None:
         """Send literal keyboard input and record it before delivery."""
         self._record_input(text)
@@ -122,6 +175,26 @@ class PtyMissionRunner:
             raise RuntimeError("mission process is still running")
         self._flush_output()
         child.close()
+        started_at = self._started_at
+        if started_at is None:
+            raise RuntimeError("mission runner has not started")
+        self._result = PtyRunResult(
+            exit_status=child.exitstatus,
+            signal_status=child.signalstatus,
+            interaction_count=self._interaction_count,
+            elapsed_seconds=round(max(0.0, self._clock() - started_at), 6),
+        )
+        self._child = None
+        return self._result
+
+    def terminate(self) -> PtyRunResult:
+        """Stop and reap the child, returning deterministic process metrics."""
+        child = self._require_child()
+        self._flush_output()
+        if child.isalive():
+            child.close(force=True)
+        else:
+            child.close()
         started_at = self._started_at
         if started_at is None:
             raise RuntimeError("mission runner has not started")
@@ -159,3 +232,10 @@ class PtyMissionRunner:
         if self._child is None:
             raise RuntimeError("mission runner is not running")
         return self._child
+
+
+def _has_unsupported_controls(text: str) -> bool:
+    if _UNSUPPORTED_CSI.search(text):
+        return True
+    normalized = text.replace("\r\n", "")
+    return "\r" in normalized or "\x08" in text

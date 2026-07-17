@@ -4,7 +4,10 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
-from tests.dogfood.artifacts import EvidenceBundle, MissionMetadata
+import pytest
+
+from tests.dogfood.artifacts import DECISIONS_NAME, EvidenceBundle, MissionMetadata
+from tests.dogfood.codex_driver import CodexDecision
 from tests.dogfood.pty_runner import PtyRunResult
 
 
@@ -87,6 +90,7 @@ def test_bundle_persists_sanitized_mission_manifest_and_outcome(
         },
         "artifacts": {
             "interactions": "interactions.jsonl",
+            "decisions": "decisions.jsonl",
             "frames": [
                 {
                     "label": "Course prompt / decision",
@@ -115,3 +119,102 @@ def test_bundle_persists_sanitized_mission_manifest_and_outcome(
             {"path": "state.json", "kind": "file"},
         ],
     }
+
+
+def test_bundle_records_exact_bounded_decision_evidence(tmp_path: Path) -> None:
+    secret = "do-not-persist"
+    bundle = EvidenceBundle(
+        tmp_path / "evidence",
+        MissionMetadata(
+            persona="Beginner",
+            mission="Reach the visible outcome",
+            provider_mode="mock",
+            openlearn_home=tmp_path / "home",
+            command=("openlearn", "menu"),
+        ),
+        sensitive_values=[secret],
+        now=lambda: datetime(2026, 7, 16, 12, 0, tzinfo=UTC),
+    )
+
+    bundle.record_decision(
+        observation_id="observation-0001",
+        observation=f"latest {secret}",
+        observation_truncated=True,
+        observation_original_chars=99,
+        decision=CodexDecision(
+            action="submit_text",
+            text="2",
+            commentary=f"reasoning-like {secret}",
+        ),
+        source_kind="fake",
+        turns_remaining=3,
+        seconds_remaining=4.5,
+        prior_actions=(),
+        elapsed_seconds=0.25,
+    )
+
+    manifest = json.loads((bundle.root / "manifest.json").read_text(encoding="utf-8"))
+    records = [
+        json.loads(line)
+        for line in (bundle.root / DECISIONS_NAME).read_text(encoding="utf-8").splitlines()
+    ]
+    persisted = (bundle.root / DECISIONS_NAME).read_text(encoding="utf-8")
+
+    assert manifest["artifacts"]["decisions"] == DECISIONS_NAME
+    assert records == [
+        {
+            "schema_version": 1,
+            "observation_id": "observation-0001",
+            "observation": "latest [REDACTED]",
+            "observation_truncated": True,
+            "observation_original_chars": 99,
+            "prior_actions": [],
+            "action": {"action": "submit_text", "text": "2"},
+            "source_kind": "fake",
+            "turns_remaining": 3,
+            "seconds_remaining": 4.5,
+            "elapsed_seconds": 0.25,
+        }
+    ]
+    assert secret not in persisted
+    assert "commentary" not in persisted
+    assert "prompt" not in persisted
+    assert "stderr" not in persisted
+
+
+def test_bundle_rejects_duplicate_observation_ids_and_invalid_source(tmp_path: Path) -> None:
+    bundle = EvidenceBundle(
+        tmp_path / "evidence",
+        MissionMetadata(
+            persona="Beginner",
+            mission="Goal",
+            provider_mode="mock",
+            openlearn_home=tmp_path / "home",
+            command=("openlearn",),
+        ),
+        sensitive_values=(),
+    )
+    kwargs = {
+        "observation_id": "observation-0001",
+        "observation": "menu",
+        "observation_truncated": False,
+        "observation_original_chars": 4,
+        "decision": CodexDecision(action="press_key", key="enter"),
+        "source_kind": "fake",
+        "turns_remaining": 1,
+        "seconds_remaining": 1.0,
+        "prior_actions": (),
+        "elapsed_seconds": 0.0,
+    }
+    bundle.record_decision(**kwargs)
+
+    with pytest.raises(ValueError, match="observation ID"):
+        bundle.record_decision(**kwargs)
+    with pytest.raises(ValueError, match="source kind"):
+        bundle.record_decision(
+            **{
+                **kwargs,
+                "observation_id": "observation-0002",
+                "source_kind": "heuristic",
+            }
+        )

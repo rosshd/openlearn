@@ -10,12 +10,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from tests.dogfood.evidence import SCHEMA_VERSION, EvidenceRecorder
+from tests.dogfood.codex_driver import CodexDecision
 from tests.dogfood.pty_runner import PtyRunResult
 
 MANIFEST_NAME = "manifest.json"
 INTERACTIONS_NAME = "interactions.jsonl"
 FRAMES_DIRECTORY = "frames"
 FINAL_STATE_NAME = "final-state.json"
+DECISIONS_NAME = "decisions.jsonl"
 
 
 @dataclass(frozen=True)
@@ -49,6 +51,9 @@ class EvidenceBundle:
             sensitive_values=sensitive_values,
         )
         self.recorder.path.touch()
+        self._decisions_path = self.root / DECISIONS_NAME
+        self._decisions_path.touch()
+        self._observation_ids: set[str] = set()
         self._manifest_path = self.root / MANIFEST_NAME
         self._frames: list[dict[str, str]] = []
         self._manifest: dict[str, object] = {
@@ -65,6 +70,7 @@ class EvidenceBundle:
             },
             "artifacts": {
                 "interactions": INTERACTIONS_NAME,
+                "decisions": DECISIONS_NAME,
                 "frames": self._frames,
                 "final_state": None,
             },
@@ -73,6 +79,50 @@ class EvidenceBundle:
         }
         self._completed = False
         self._write_manifest()
+
+    def record_decision(
+        self,
+        *,
+        observation_id: str,
+        observation: str,
+        observation_truncated: bool,
+        observation_original_chars: int,
+        decision: CodexDecision,
+        source_kind: str,
+        turns_remaining: int,
+        seconds_remaining: float,
+        prior_actions: tuple[str, ...],
+        elapsed_seconds: float,
+    ) -> None:
+        """Persist one concise action linked to its exact supplied observation."""
+        if self._completed:
+            raise RuntimeError("cannot record a decision after bundle completion")
+        if not re.fullmatch(r"observation-[0-9]{4}", observation_id):
+            raise ValueError("invalid observation ID")
+        if observation_id in self._observation_ids:
+            raise ValueError("observation ID must be immutable and unique")
+        if source_kind not in {"fake", "codex"}:
+            raise ValueError("decision source kind must be fake or codex")
+        if observation_original_chars < len(observation):
+            raise ValueError("original observation size is invalid")
+
+        payload = {
+            "schema_version": SCHEMA_VERSION,
+            "observation_id": observation_id,
+            "observation": self.recorder.sanitize_terminal(observation),
+            "observation_truncated": observation_truncated,
+            "observation_original_chars": observation_original_chars,
+            "prior_actions": [self.recorder.sanitize(action) for action in prior_actions],
+            "action": _decision_action(decision, self.recorder),
+            "source_kind": source_kind,
+            "turns_remaining": turns_remaining,
+            "seconds_remaining": round(max(0.0, seconds_remaining), 6),
+            "elapsed_seconds": round(max(0.0, elapsed_seconds), 6),
+        }
+        with self._decisions_path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+            stream.write("\n")
+        self._observation_ids.add(observation_id)
 
     def capture_frame(self, label: str, rendered_output: str) -> Path:
         """Persist a sanitized terminal checkpoint and register it in the manifest."""
@@ -203,3 +253,17 @@ def _format_timestamp(value: datetime) -> str:
     if value.tzinfo is None:
         raise ValueError("manifest timestamp must include a timezone")
     return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _decision_action(
+    decision: CodexDecision,
+    recorder: EvidenceRecorder,
+) -> dict[str, str]:
+    if decision.action == "submit_text":
+        assert decision.text is not None
+        return {"action": decision.action, "text": recorder.sanitize(decision.text)}
+    if decision.action == "press_key":
+        assert decision.key is not None
+        return {"action": decision.action, "key": decision.key}
+    assert decision.reason is not None
+    return {"action": decision.action, "reason": recorder.sanitize(decision.reason)}

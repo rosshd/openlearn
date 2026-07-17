@@ -77,3 +77,82 @@ def test_output_redaction_crosses_pty_read_boundaries(tmp_path: Path) -> None:
     persisted = evidence_path.read_text(encoding="utf-8")
     assert "sk-test-12345678" not in persisted
     assert read_events(evidence_path)[0]["text"] == "credential=[REDACTED]"
+
+
+def test_observe_settles_after_chunked_output_without_screen_pattern(
+    tmp_path: Path,
+) -> None:
+    recorder = EvidenceRecorder(tmp_path / "events.jsonl", sensitive_values=())
+    program = (
+        "import sys, time; "
+        "sys.stdout.write('first'); sys.stdout.flush(); "
+        "time.sleep(0.03); "
+        "sys.stdout.write(' second'); sys.stdout.flush(); "
+        "time.sleep(30)"
+    )
+    runner = PtyMissionRunner(
+        [sys.executable, "-c", program],
+        env={**os.environ, "TERM": "xterm-256color"},
+        recorder=recorder,
+    )
+
+    try:
+        runner.start()
+        observation = runner.observe(quiet_interval=0.06, timeout=0.5)
+    finally:
+        runner.close()
+
+    assert observation.text == "first second"
+    assert observation.settled_by == "quiet"
+    assert observation.has_unsupported_controls is False
+
+
+def test_observe_distinguishes_eof_and_hard_timeout(tmp_path: Path) -> None:
+    recorder = EvidenceRecorder(tmp_path / "eof.jsonl", sensitive_values=())
+    eof_runner = PtyMissionRunner(
+        [sys.executable, "-c", "print('done')"],
+        env=os.environ,
+        recorder=recorder,
+    )
+    try:
+        eof_runner.start()
+        eof_observation = eof_runner.observe(quiet_interval=0.2, timeout=0.5)
+        eof_runner.finish()
+    finally:
+        eof_runner.close()
+
+    timeout_recorder = EvidenceRecorder(tmp_path / "timeout.jsonl", sensitive_values=())
+    timeout_runner = PtyMissionRunner(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        env=os.environ,
+        recorder=timeout_recorder,
+    )
+    try:
+        timeout_runner.start()
+        timeout_observation = timeout_runner.observe(quiet_interval=1, timeout=0.02)
+    finally:
+        timeout_runner.close()
+
+    assert eof_observation.text == "done\n"
+    assert eof_observation.settled_by == "eof"
+    assert timeout_observation.text == ""
+    assert timeout_observation.settled_by == "timeout"
+
+
+def test_observe_marks_cursor_addressing_and_rewrite_controls(tmp_path: Path) -> None:
+    recorder = EvidenceRecorder(tmp_path / "events.jsonl", sensitive_values=())
+    program = "import sys; sys.stdout.write('safe\\x1b[2Jrewrite\\runsafe'); sys.stdout.flush()"
+    runner = PtyMissionRunner(
+        [sys.executable, "-c", program],
+        env=os.environ,
+        recorder=recorder,
+    )
+
+    try:
+        runner.start()
+        observation = runner.observe(quiet_interval=0.05, timeout=0.5)
+        runner.finish()
+    finally:
+        runner.close()
+
+    assert observation.has_unsupported_controls is True
