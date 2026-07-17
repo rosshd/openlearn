@@ -1388,6 +1388,10 @@ def run_repl(
     topic_slug = resolve_topic_slug(topic_value) if topic_value else None
     if topic_slug:
         set_active_topic(topic_slug)
+    try:
+        preserved_prompt = load_pending_learner_prompt(resolve_topic_slug(None))
+    except OpenLearnError:
+        pass
     if show_intro:
         print_section("Learning session", output_func)
         output_func(
@@ -1412,6 +1416,7 @@ def run_repl(
                 output_func("")
                 break
 
+            failure_prompt = prompt
             try:
                 deferred_updates.wait()
                 if not prompt:
@@ -1427,10 +1432,29 @@ def run_repl(
                         output_func=output_func,
                         deferred_updates=deferred_updates,
                     )
-                elif handle_natural_advance(prompt, model=model, output_func=output_func):
-                    preserved_prompt = None
-                    continue
+                    preserved_prompt = load_pending_learner_prompt(resolve_topic_slug(None))
                 else:
+                    advance_requested = learner_requests_advance(prompt)
+                    if advance_requested:
+                        failure_prompt = preserved_prompt
+                    if advance_requested and handle_natural_advance(
+                        prompt, model=model, output_func=output_func
+                    ):
+                        if preserved_prompt is not None:
+                            clear_pending_learner_prompt(
+                                resolve_topic_slug(None), expected_prompt=preserved_prompt
+                            )
+                        preserved_prompt = None
+                        continue
+                    failure_prompt = prompt
+                    active_slug = resolve_topic_slug(None)
+                    try:
+                        save_pending_learner_prompt(active_slug, prompt)
+                    except Exception as exc:
+                        raise OpenLearnError(
+                            f"could not save your answer before sending it: {exc}"
+                        ) from exc
+                    preserved_prompt = prompt
                     print_active_status_bar()
                     last_tutor_answer = ask_topic(
                         None,
@@ -1438,11 +1462,13 @@ def run_repl(
                         model,
                         output_func=output_func,
                         deferred_updates=deferred_updates,
+                        pending_learner_prompt=prompt,
                     )
+                    clear_pending_learner_prompt(active_slug, expected_prompt=prompt)
                     preserved_prompt = None
             except OpenLearnError as exc:
-                if prompt and not prompt.startswith("/"):
-                    preserved_prompt = prompt
+                if failure_prompt and not prompt.startswith("/"):
+                    preserved_prompt = failure_prompt
                     exc = OpenLearnError(f"{exc} Your answer was kept; press Enter to resubmit it.")
                 print_active_status_bar()
                 print_error(str(exc), output_func)
@@ -4954,6 +4980,7 @@ def ask_topic(
     model: str | None = None,
     output_func=print,
     deferred_updates: DeferredTurnUpdates | None = None,
+    pending_learner_prompt: str | None = None,
 ) -> str:
     topic = read_topic(
         resolve_topic_slug(topic_value) if topic_value is None else slugify(topic_value)
@@ -4965,6 +4992,10 @@ def ask_topic(
         model=model, system=system_prompt(topic), user=prompt, output_func=output_func
     )
     answer = print_and_append_model_answer(topic, "chat", prompt, answer, output_func=output_func)
+    if pending_learner_prompt is not None:
+        clear_pending_learner_prompt(
+            topic.slug, expected_prompt=pending_learner_prompt
+        )
     if deferred_updates is None:
         finish_turn_update(topic, prompt, answer, model, is_review_session, output_func)
     else:
@@ -7068,6 +7099,39 @@ def save_state(slug: str, state: dict[str, object]) -> None:
         write_text_atomic(path, json.dumps(state, indent=2, sort_keys=True) + "\n")
 
 
+def load_pending_learner_prompt(slug: str) -> str | None:
+    value = load_state(slug).get("pending_learner_prompt")
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value
+
+
+def save_pending_learner_prompt(slug: str, prompt: str) -> None:
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise OpenLearnError("pending learner prompt must be non-empty")
+    path = topic_state_path(slug)
+    with file_lock(path):
+        state = load_state(slug)
+        state["pending_learner_prompt"] = prompt
+        write_text_atomic(path, json.dumps(state, indent=2, sort_keys=True) + "\n")
+
+
+def clear_pending_learner_prompt(
+    slug: str, expected_prompt: str | None = None
+) -> bool:
+    path = topic_state_path(slug)
+    with file_lock(path):
+        state = load_state(slug)
+        current = state.get("pending_learner_prompt")
+        if expected_prompt is not None and current != expected_prompt:
+            return False
+        if "pending_learner_prompt" not in state:
+            return False
+        state.pop("pending_learner_prompt", None)
+        write_text_atomic(path, json.dumps(state, indent=2, sort_keys=True) + "\n")
+        return True
+
+
 def log_event(slug: str, event_type: str, data: dict[str, object]) -> None:
     if _DRY_RUN:
         return
@@ -7874,6 +7938,8 @@ def system_prompt(topic: Topic) -> str:
     tier = difficulty_tier(topic.metadata)
     move_prompt = tier_move_prompt(topic.metadata, tier)
     quiz_prompt = cumulative_quiz_prompt(topic.metadata)
+    model_metadata = dict(topic.metadata)
+    model_metadata.pop("pending_learner_prompt", None)
     quick_learn_prompt = (
         (
             "Quick Learn mode — optimize for coverage per minute:\n"
@@ -7978,7 +8044,7 @@ def system_prompt(topic: Topic) -> str:
 
         Current data:
         Topic metadata:
-        {json.dumps(topic.metadata, indent=2, sort_keys=True)}
+        {json.dumps(model_metadata, indent=2, sort_keys=True)}
 
         Course options:
         {options_prompt}

@@ -42,7 +42,9 @@ Event logs are append-only.
 The stats dashboard reads event logs to derive activity dates, streaks, session spans, and current-week study minutes.
 Writes use per-topic lock files with `fcntl.flock` on POSIX and `msvcrt.locking` on Windows.
 
-Important dynamic metadata includes pending questions, answer status, concept attempts, rolling pass rate, quiz state, active drill path, imported checksums, learner preferences, structured course completion, and per-slide concept coverage.
+Important dynamic metadata includes pending questions, an in-flight learner prompt, answer status, concept attempts, rolling pass rate, quiz state, active drill path, imported checksums, learner preferences, structured course completion, and per-slide concept coverage.
+The in-flight prompt is stored only in the selected topic's state file immediately before REPL provider dispatch and is removed after the complete tutor response is appended.
+Recovery is at least once: a process exit between transcript append and state cleanup can offer the prompt again.
 Pending questions may be multiple choice with an answer key, multiple choice without a stored key, or free response.
 Learner preferences capture explicit navigation choices such as skipped material and should constrain future tutor turns.
 Quick Learn topics also store `learning_mode`, `quick_source_type`, `quick_source_label`, and `coverage_contract` so they can remain visibly separate and enforce source-grounded concept coverage.
@@ -85,7 +87,8 @@ Onboarding validates credentials with `{base_url}/models`, persists settings thr
 The REPL is line-oriented but coalesces quick multiline paste into one learner message on POSIX terminals.
 Windows does not support `select.select` on stdin, so the same input path falls back to one line per learner message.
 After a tutor response, learner-metadata extraction is deferred so the next prompt appears immediately.
-If a non-command learner message fails during model-backed handling, the REPL preserves the typed answer so Enter resubmits it and typing replaces it.
+The REPL restores a topic's valid in-flight learner prompt after process restart so Enter resubmits it and typing replaces it.
+Provider and turn failures retain that prompt, while successful natural navigation clears it as intentionally abandoned.
 Natural navigation phrases such as `continue`, `move on`, and `skip` advance the current slide instead of being graded as answers.
 Tutor output renders in a Rich panel for interactive terminal sessions, streaming updates redraw the same panel as tokens arrive, and hidden answer or coverage markers are stripped before display.
 Multiple-choice options are normalized onto separate lines before Rich Markdown rendering.
