@@ -8,6 +8,7 @@ import unittest
 
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "repo-workflow"
+SCRIPT_CMD = ["bash", str(SCRIPT)] if os.name == "nt" else [str(SCRIPT)]
 
 
 class RepoWorkflowTests(unittest.TestCase):
@@ -48,7 +49,7 @@ class RepoWorkflowTests(unittest.TestCase):
         env = dict(os.environ)
         env["HOME"] = self.tempdir.name
         return subprocess.run(
-            [str(SCRIPT), *args],
+            [*SCRIPT_CMD, *args],
             cwd=self.repo,
             check=check,
             capture_output=True,
@@ -62,7 +63,7 @@ class RepoWorkflowTests(unittest.TestCase):
         env = dict(os.environ)
         env["HOME"] = self.tempdir.name
         return subprocess.run(
-            [str(SCRIPT), *args],
+            [*SCRIPT_CMD, *args],
             cwd=cwd,
             check=check,
             capture_output=True,
