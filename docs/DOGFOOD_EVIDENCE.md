@@ -99,7 +99,8 @@ make codex-dogfood RUN_ROOT="$(mktemp -d)/codex-draft-course"
 ```
 
 The command runs a direct learner and an error-prone learner against separate isolated homes.
-The error-prone learner first makes a visible invalid menu choice, then must recover from the terminal feedback.
+The personas encourage different routes, but route choice is recorded evidence rather than part of the hidden success predicate.
+This lets unexpected friction or recovery remain visible instead of turning a completed learner goal into a false mission failure.
 Codex chooses every keyboard action from the bounded sanitized PTY observation, while the harness independently verifies that exactly one draft with the requested public fields exists.
 Codex receives neither the verifier implementation nor filesystem access to the mission, evidence, or repository.
 The command prints only each variant's final status and evidence path.

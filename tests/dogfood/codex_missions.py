@@ -17,7 +17,10 @@ from tests.dogfood.pty_runner import PtyMissionRunner
 COURSE_NAME = "Practical Git Basics"
 COURSE_GOAL = "Learn how to inspect changes and make a safe commit."
 COURSE_SLUG = "practical-git-basics"
-PUBLIC_GOAL = f"Create and save a course named {COURSE_NAME!r} with goal {COURSE_GOAL!r}."
+PUBLIC_GOAL = (
+    f"Create and save a course named {COURSE_NAME!r} with goal {COURSE_GOAL!r} "
+    "as a draft for later, without starting the course."
+)
 
 
 class CodexMissionVariant(str, Enum):
@@ -80,7 +83,6 @@ def run_codex_draft_course_mission(
         goal=PUBLIC_GOAL,
         outcome_check=lambda output: (
             "Save this course draft for later?" in output
-            and _route_matches(output, variant)
             and verify_single_matching_draft(home)
         ),
         limits=ExplorerLimits(
@@ -157,11 +159,6 @@ def _persona(variant: CodexMissionVariant) -> str:
         "A terminal beginner who makes one plausible recoverable mistake when a visible "
         "choice is unclear, then reads the feedback and corrects course."
     )
-
-
-def _route_matches(output: str, variant: CodexMissionVariant) -> bool:
-    recovery_feedback = "Choose a number, or q to quit." in output
-    return recovery_feedback if variant is CodexMissionVariant.ERROR_PRONE else not recovery_feedback
 
 
 def _parse_args() -> argparse.Namespace:

@@ -132,6 +132,8 @@ def test_fake_source_composes_public_pty_mission_and_preserves_route(
     assert verify_single_matching_draft(outcome.home) is True
     assert all("exactly one" not in context.goal.lower() for context in source.contexts)
     assert all(COURSE_SLUG not in context.goal for context in source.contexts)
+    assert all("draft for later" in context.goal.lower() for context in source.contexts)
+    assert all("without starting" in context.goal.lower() for context in source.contexts)
     assert all("99" not in context.persona for context in source.contexts)
 
     output = "".join(
@@ -142,6 +144,34 @@ def test_fake_source_composes_public_pty_mission_and_preserves_route(
         assert entered[0:2] == ["99", "2"]
     else:
         assert "Choose a number, or q to quit." not in output
+
+
+@pytest.mark.parametrize(
+    ("variant", "prefix"),
+    [
+        (CodexMissionVariant.DIRECT, ["99"]),
+        (CodexMissionVariant.ERROR_PRONE, []),
+    ],
+)
+def test_goal_completion_is_not_rejected_by_unexpected_route_variation(
+    tmp_path: Path,
+    variant: CodexMissionVariant,
+    prefix: list[str],
+) -> None:
+    source = FakeDecisionSource(
+        [CodexDecision("submit_text", text=value) for value in prefix]
+        + _direct_decisions()
+    )
+
+    outcome = run_codex_draft_course_mission(
+        tmp_path / variant.value,
+        command=(_installed_openlearn(), "menu"),
+        decision_source=source,
+        variant=variant,
+    )
+
+    assert outcome.achieved is True
+    assert outcome.result.status == "achieved"
 
 
 def test_hidden_verifier_rejects_missing_duplicate_and_mismatched_drafts(
