@@ -3571,6 +3571,7 @@ class InteractiveTests(unittest.TestCase):
         topic = cli.read_topic("vim")
         self.assertIn("How do I move?", topic.body)
         self.assertIn("Use h j k l for movement.", topic.body)
+        self.assertIsNone(cli.load_pending_learner_prompt("vim"))
 
     def test_repl_prompts_before_metadata_update_finishes_and_joins_before_next_turn(
         self,
@@ -3951,6 +3952,264 @@ class InteractiveTests(unittest.TestCase):
         self.assertTrue(any("answer was kept" in line.lower() for line in output))
         self.assertIn("press Enter to resubmit", prompts[1])
 
+    def test_pending_learner_prompt_storage_is_validated_isolated_and_private(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
+        call_silent(cli.cmd_new, Namespace(topic="Python", goal="Learn Python"))
+        vim_markdown = cli.topic_path("vim").read_text(encoding="utf-8")
+        cli.save_state(
+            "vim",
+            {
+                "pending_question": {"question": "What is normal mode?"},
+                "last_answer_status": "needs_work",
+            },
+        )
+
+        cli.save_pending_learner_prompt("vim", "  exact answer  ")
+        cli.save_pending_learner_prompt("python", "python answer")
+
+        self.assertEqual(cli.load_pending_learner_prompt("vim"), "  exact answer  ")
+        self.assertEqual(cli.load_pending_learner_prompt("python"), "python answer")
+        self.assertEqual(cli.topic_path("vim").read_text(encoding="utf-8"), vim_markdown)
+        state = cli.load_state("vim")
+        self.assertEqual(state["pending_question"]["question"], "What is normal mode?")
+        self.assertEqual(state["last_answer_status"], "needs_work")
+        self.assertNotIn("exact answer", cli.system_prompt(cli.read_topic("vim")))
+
+        cli.clear_pending_learner_prompt("vim")
+
+        self.assertIsNone(cli.load_pending_learner_prompt("vim"))
+        self.assertEqual(cli.load_pending_learner_prompt("python"), "python answer")
+        self.assertIn("pending_question", cli.load_state("vim"))
+
+        cli.save_pending_learner_prompt("vim", "newer answer")
+        self.assertFalse(
+            cli.clear_pending_learner_prompt("vim", expected_prompt="older answer")
+        )
+        self.assertEqual(cli.load_pending_learner_prompt("vim"), "newer answer")
+
+        for malformed in ("", "   ", [], {}, 3, None):
+            state = cli.load_state("vim")
+            state["pending_learner_prompt"] = malformed
+            cli.save_state("vim", state)
+            self.assertIsNone(cli.load_pending_learner_prompt("vim"))
+            cli.set_active_topic("vim")
+            prompts = []
+            call_silent(
+                cli.run_repl,
+                input_func=lambda prompt="": prompts.append(prompt) or "/q",
+                output_func=lambda _text: None,
+                show_intro=False,
+            )
+            self.assertNotIn("Answer kept", prompts[0])
+
+    def test_repl_restores_pending_answer_across_run_lifetimes_and_clears_on_success(
+        self,
+    ) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
+        original_ask_topic = cli.ask_topic
+        submitted = []
+
+        def failed_ask(_topic, prompt, _model, **_kwargs) -> str:
+            submitted.append(prompt)
+            raise cli.OpenLearnError("network unavailable")
+
+        cli.ask_topic = failed_ask
+        try:
+            call_silent(
+                cli.run_repl,
+                input_func=iter_input(["learner answer", "/q"]),
+                output_func=lambda _text: None,
+                show_intro=False,
+            )
+        finally:
+            cli.ask_topic = original_ask_topic
+
+        self.assertEqual(cli.load_pending_learner_prompt("vim"), "learner answer")
+        prompts = []
+
+        def input_func(prompt: str = "") -> str:
+            prompts.append(prompt)
+            return "" if len(prompts) == 1 else "/q"
+
+        def successful_ask(_topic, prompt, _model, **_kwargs) -> str:
+            submitted.append(prompt)
+            return "Tutor answer"
+
+        cli.ask_topic = successful_ask
+        try:
+            call_silent(
+                cli.run_repl,
+                input_func=input_func,
+                output_func=lambda _text: None,
+                show_intro=False,
+            )
+        finally:
+            cli.ask_topic = original_ask_topic
+
+        self.assertEqual(submitted, ["learner answer", "learner answer"])
+        self.assertIn("press Enter to resubmit", prompts[0])
+        self.assertIsNone(cli.load_pending_learner_prompt("vim"))
+
+    def test_repl_replaces_recovered_answer_before_dispatch(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
+        cli.save_pending_learner_prompt("vim", "old answer")
+        original_ask_topic = cli.ask_topic
+        submitted = []
+
+        def successful_ask(_topic, prompt, _model, **_kwargs) -> str:
+            submitted.append((prompt, cli.load_pending_learner_prompt("vim")))
+            return "Tutor answer"
+
+        cli.ask_topic = successful_ask
+        try:
+            call_silent(
+                cli.run_repl,
+                input_func=iter_input(["replacement answer", "/q"]),
+                output_func=lambda _text: None,
+                show_intro=False,
+            )
+        finally:
+            cli.ask_topic = original_ask_topic
+
+        self.assertEqual(submitted, [("replacement answer", "replacement answer")])
+        self.assertIsNone(cli.load_pending_learner_prompt("vim"))
+
+    def test_ask_topic_clears_matching_prompt_before_deferred_update_submission(
+        self,
+    ) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
+        cli.save_pending_learner_prompt("vim", "learner answer")
+        original_stream = cli.call_openai_streaming
+        seen_at_submit = []
+
+        class ImmediateDeferredUpdates:
+            output_func = staticmethod(lambda _text="": None)
+
+            def submit(self, _function, *_args, **_kwargs) -> None:
+                seen_at_submit.append(cli.load_pending_learner_prompt("vim"))
+
+        cli.call_openai_streaming = lambda *_args, **_kwargs: "Tutor answer"
+        try:
+            cli.ask_topic(
+                "vim",
+                "learner answer",
+                output_func=lambda _text: None,
+                deferred_updates=ImmediateDeferredUpdates(),
+                pending_learner_prompt="learner answer",
+            )
+        finally:
+            cli.call_openai_streaming = original_stream
+
+        self.assertEqual(seen_at_submit, [None])
+
+    def test_ask_topic_cleanup_failure_retains_prompt_and_skips_deferred_update(
+        self,
+    ) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
+        cli.save_pending_learner_prompt("vim", "learner answer")
+        original_stream = cli.call_openai_streaming
+        original_clear = cli.clear_pending_learner_prompt
+        submitted = []
+
+        class RecordingDeferredUpdates:
+            output_func = staticmethod(lambda _text="": None)
+
+            def submit(self, *_args, **_kwargs) -> None:
+                submitted.append(True)
+
+        cli.call_openai_streaming = lambda *_args, **_kwargs: "Tutor answer"
+        cli.clear_pending_learner_prompt = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError("disk unavailable")
+        )
+        try:
+            with self.assertRaises(OSError):
+                cli.ask_topic(
+                    "vim",
+                    "learner answer",
+                    output_func=lambda _text: None,
+                    deferred_updates=RecordingDeferredUpdates(),
+                    pending_learner_prompt="learner answer",
+                )
+        finally:
+            cli.call_openai_streaming = original_stream
+            cli.clear_pending_learner_prompt = original_clear
+
+        self.assertEqual(cli.load_pending_learner_prompt("vim"), "learner answer")
+        self.assertEqual(submitted, [])
+
+    def test_repl_state_write_failure_does_not_dispatch_and_keeps_answer_in_memory(
+        self,
+    ) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
+        original_save_prompt = cli.save_pending_learner_prompt
+        original_ask_topic = cli.ask_topic
+        save_attempts = []
+        submitted = []
+        prompts = []
+
+        def flaky_save(slug: str, prompt: str) -> None:
+            save_attempts.append((slug, prompt))
+            if len(save_attempts) == 1:
+                raise OSError("disk unavailable")
+            original_save_prompt(slug, prompt)
+
+        cli.save_pending_learner_prompt = flaky_save
+        cli.ask_topic = (
+            lambda _topic, prompt, _model, **_kwargs: submitted.append(prompt) or "Tutor answer"
+        )
+
+        def input_func(prompt: str = "") -> str:
+            prompts.append(prompt)
+            return "learner answer" if len(prompts) == 1 else ("" if len(prompts) == 2 else "/q")
+
+        try:
+            call_silent(
+                cli.run_repl,
+                input_func=input_func,
+                output_func=lambda _text: None,
+                show_intro=False,
+            )
+        finally:
+            cli.save_pending_learner_prompt = original_save_prompt
+            cli.ask_topic = original_ask_topic
+
+        self.assertEqual(len(save_attempts), 2)
+        self.assertEqual(submitted, ["learner answer"])
+        self.assertIn("press Enter to resubmit", prompts[1])
+
+    def test_repl_reloads_recovery_after_active_topic_command(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
+        call_silent(cli.cmd_new, Namespace(topic="Python", goal="Learn Python"))
+        cli.save_pending_learner_prompt("vim", "vim answer")
+        cli.save_pending_learner_prompt("python", "python answer")
+        cli.set_active_topic("vim")
+        original_ask_topic = cli.ask_topic
+        submitted = []
+        prompts = []
+
+        def input_func(prompt: str = "") -> str:
+            prompts.append(prompt)
+            return "/active python" if len(prompts) == 1 else ("" if len(prompts) == 2 else "/q")
+
+        cli.ask_topic = (
+            lambda _topic, prompt, _model, **_kwargs: submitted.append(prompt) or "Tutor answer"
+        )
+        try:
+            call_silent(
+                cli.run_repl,
+                input_func=input_func,
+                output_func=lambda _text: None,
+                show_intro=False,
+            )
+        finally:
+            cli.ask_topic = original_ask_topic
+
+        self.assertEqual(submitted, ["python answer"])
+        self.assertIn("press Enter to resubmit", prompts[0])
+        self.assertIn("press Enter to resubmit", prompts[1])
+        self.assertEqual(cli.load_pending_learner_prompt("vim"), "vim answer")
+        self.assertIsNone(cli.load_pending_learner_prompt("python"))
+
     def test_repl_advance_intent_records_preference_and_skips_stale_question(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Mac Workflow", goal="Learn macOS"))
         path = cli.topic_path("mac-workflow")
@@ -3979,6 +4238,7 @@ class InteractiveTests(unittest.TestCase):
             }
         )
         path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
+        cli.save_pending_learner_prompt("mac-workflow", "answer being abandoned")
         original_ask_topic = cli.ask_topic
         original_cmd_next = cli.cmd_next
         calls = []
@@ -4001,11 +4261,62 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(updated.metadata["current_slide"], 2)
         self.assertEqual(updated.metadata["last_answer_status"], "")
         self.assertNotIn("pending_question", updated.metadata)
+        self.assertIsNone(cli.load_pending_learner_prompt("mac-workflow"))
         self.assertIn(
             "No, skip corner snapping because I don't need it. Let's continue.",
             updated.metadata["learner_preferences"],
         )
         self.assertEqual(calls, ["next"])
+
+    def test_repl_failed_natural_navigation_retains_pending_answer(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
+        cli.save_pending_learner_prompt("vim", "answer to retain")
+        original_handle_advance = cli.handle_natural_advance
+        prompts = []
+
+        def failed_advance(*_args, **_kwargs) -> bool:
+            raise cli.OpenLearnError("navigation failed")
+
+        def input_func(prompt: str = "") -> str:
+            prompts.append(prompt)
+            return "continue" if len(prompts) == 1 else "/q"
+
+        cli.handle_natural_advance = failed_advance
+        try:
+            call_silent(
+                cli.run_repl,
+                input_func=input_func,
+                output_func=lambda _text: None,
+                show_intro=False,
+            )
+        finally:
+            cli.handle_natural_advance = original_handle_advance
+
+        self.assertEqual(cli.load_pending_learner_prompt("vim"), "answer to retain")
+        self.assertIn("press Enter to resubmit", prompts[1])
+
+    def test_repl_false_natural_navigation_falls_through_to_provider(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
+        original_handle_advance = cli.handle_natural_advance
+        original_ask_topic = cli.ask_topic
+        submitted = []
+        cli.handle_natural_advance = lambda *_args, **_kwargs: False
+        cli.ask_topic = (
+            lambda _topic, prompt, _model, **_kwargs: submitted.append(prompt) or "Tutor answer"
+        )
+        try:
+            call_silent(
+                cli.run_repl,
+                input_func=iter_input(["continue", "/q"]),
+                output_func=lambda _text: None,
+                show_intro=False,
+            )
+        finally:
+            cli.handle_natural_advance = original_handle_advance
+            cli.ask_topic = original_ask_topic
+
+        self.assertEqual(submitted, ["continue"])
+        self.assertIsNone(cli.load_pending_learner_prompt("vim"))
 
     def test_resume_restores_navigation_preferences_from_existing_history(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Mac Workflow", goal="Learn macOS"))

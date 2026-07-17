@@ -111,7 +111,9 @@ If no active topic exists, it falls back to the most recently changed topic.
 Learning actions from the menu continue into the REPL automatically.
 Interactive sessions support multiline paste as one learner message on POSIX terminals.
 On Windows, paste multiple lines one at a time.
-If a model-backed REPL turn fails after you type an answer, openLearn keeps that answer in the prompt so pressing Enter resubmits it, or typing replaces it.
+Before a model-backed REPL turn is sent, openLearn stores the answer in that topic's local state file.
+If the turn or process fails, the next REPL restores the answer so pressing Enter resubmits it or typing replaces it.
+The saved answer is cleared after the tutor response is appended, with at-least-once recovery if the process stops between those two writes.
 Plain requests such as "continue", "move on", or "skip" advance the current slide; if the wording includes a preference such as "I don't need this", openLearn stores it as a learner preference.
 
 Inside the REPL:
@@ -152,7 +154,7 @@ Transient provider failures such as rate limits, server errors, URL errors, and 
 ## Local Files
 
 - `learning-topics/*.md`: user-owned topic notes, course plan, metadata, and session log.
-- `learning-topics/<slug>.state.json`: dynamic learner model.
+- `learning-topics/<slug>.state.json`: dynamic learner model and any in-flight REPL answer.
 - `learning-topics/<slug>.events.jsonl`: append-only learning events.
 - `learning-topics/context/<slug>/`: imported source text, manifests, bundles, and summaries.
 - `learning-topics/drills/<slug>/`: generated drill files.
