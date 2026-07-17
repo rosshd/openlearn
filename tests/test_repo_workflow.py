@@ -8,7 +8,7 @@ import unittest
 
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "repo-workflow"
-SCRIPT_CMD = ["bash", str(SCRIPT)] if os.name == "nt" else [str(SCRIPT)]
+SCRIPT_CMD = ["bash", SCRIPT.as_posix()] if os.name == "nt" else [str(SCRIPT)]
 
 
 class RepoWorkflowTests(unittest.TestCase):
