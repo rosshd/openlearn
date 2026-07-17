@@ -42,6 +42,7 @@ class _EvidenceLog:
         self._recorder = recorder
         self._raw_chunks: list[str] = []
         self._pending_chunks: list[str] = []
+        self._observation_chunk_offset = 0
 
     def write(self, text: str) -> int:
         if text:
@@ -61,6 +62,12 @@ class _EvidenceLog:
         if self._pending_chunks:
             self._recorder.record_output("".join(self._pending_chunks))
             self._pending_chunks.clear()
+
+    def drain_raw_observation(self) -> tuple[str, bool]:
+        """Return only unread PTY chunks plus the cumulative control status."""
+        observation = "".join(self._raw_chunks[self._observation_chunk_offset :])
+        self._observation_chunk_offset = len(self._raw_chunks)
+        return observation, _has_unsupported_controls("".join(self._raw_chunks))
 
 
 class PtyMissionRunner:
@@ -89,7 +96,6 @@ class PtyMissionRunner:
         self._interaction_count = 0
         self._result: PtyRunResult | None = None
         self._evidence_log: _EvidenceLog | None = None
-        self._observation_raw_offset = 0
 
     def start(self) -> None:
         if self._child is not None or self._result is not None:
@@ -134,6 +140,7 @@ class PtyMissionRunner:
             raise RuntimeError("mission runner has not started")
         started_at = self._clock()
         settled_by = "timeout"
+        saw_output = False
         while True:
             remaining = timeout - max(0.0, self._clock() - started_at)
             if remaining <= 0:
@@ -141,21 +148,23 @@ class PtyMissionRunner:
             read_timeout = min(quiet_interval, remaining)
             try:
                 child.read_nonblocking(size=4096, timeout=read_timeout)
+                saw_output = True
             except pexpect.TIMEOUT:
-                settled_by = "quiet" if read_timeout == quiet_interval else "timeout"
-                break
+                if saw_output:
+                    settled_by = "quiet" if read_timeout == quiet_interval else "timeout"
+                    break
             except pexpect.EOF:
                 settled_by = "eof"
                 break
 
-        raw_output = "".join(evidence_log._raw_chunks)
-        raw_observation = raw_output[self._observation_raw_offset :]
-        self._observation_raw_offset = len(raw_output)
+        if settled_by != "eof" and not child.isalive():
+            settled_by = "eof"
+        raw_observation, has_unsupported_controls = evidence_log.drain_raw_observation()
         self._flush_output()
         return PtyObservation(
             text=self._recorder.sanitize_terminal(raw_observation),
             settled_by=settled_by,
-            has_unsupported_controls=_has_unsupported_controls(raw_output),
+            has_unsupported_controls=has_unsupported_controls,
         )
 
     def send(self, text: str) -> None:

@@ -144,7 +144,13 @@ def _worktree_pythonpath() -> str:
     return str(source)
 
 
-def _saved_draft_matches(path: Path) -> bool:
+def _saved_draft_matches(
+    path: Path,
+    *,
+    course_name: str = COURSE_NAME,
+    course_slug: str = COURSE_SLUG,
+    course_goal: str = COURSE_GOAL,
+) -> bool:
     if not path.is_file():
         return False
     text = path.read_text(encoding="utf-8")
@@ -153,13 +159,14 @@ def _saved_draft_matches(path: Path) -> bool:
     try:
         metadata_text, body = text[4:].split("\n---\n", 1)
         metadata = json.loads(metadata_text)
-    except (ValueError, json.JSONDecodeError):
+    except (OSError, ValueError, json.JSONDecodeError):
         return False
     return (
-        metadata.get("topic") == COURSE_NAME
-        and metadata.get("slug") == COURSE_SLUG
-        and metadata.get("goal") == COURSE_GOAL
+        path.name == f"{course_slug}.md"
+        and metadata.get("topic") == course_name
+        and metadata.get("slug") == course_slug
+        and metadata.get("goal") == course_goal
         and metadata.get("course_started") is False
-        and f"# {COURSE_NAME}" in body
-        and f"## Current Goal\n\n{COURSE_GOAL}" in body
+        and f"# {course_name}" in body
+        and f"## Current Goal\n\n{course_goal}" in body
     )

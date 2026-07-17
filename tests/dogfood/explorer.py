@@ -3,17 +3,18 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
 from tests.dogfood.artifacts import EvidenceBundle
 from tests.dogfood.codex_driver import (
     MAX_PRIOR_ACTIONS,
     CodexDecision,
+    CodexDecisionError,
     DecisionContext,
     DecisionSource,
 )
-from tests.dogfood.pty_runner import PtyMissionRunner, PtyRunResult
+from tests.dogfood.pty_runner import PtyMissionRunner
 
 
 @dataclass(frozen=True)
@@ -62,10 +63,9 @@ class Explorer:
         goal: str,
         outcome_check: Callable[[str], bool],
         limits: ExplorerLimits,
-        decision_source_kind: str | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        source_kind = decision_source_kind or getattr(decision_source, "source_kind", None)
+        source_kind = decision_source.source_kind
         if source_kind not in {"fake", "codex"}:
             raise ValueError("decision source must identify source_kind as fake or codex")
         self.runner = runner
@@ -141,6 +141,7 @@ class Explorer:
                     seconds_remaining=seconds_remaining,
                     prior_actions=context.prior_actions,
                     elapsed_seconds=self._elapsed(),
+                    provenance=self._decision_provenance(),
                 )
                 if self._elapsed() >= self._limits.max_elapsed_seconds:
                     return self._fail(
@@ -156,7 +157,10 @@ class Explorer:
             self._finalize_failure("KeyboardInterrupt: explorer interrupted.")
             raise
         except (Exception, SystemExit) as error:
-            summary = f"{type(error).__name__}: explorer failed."
+            if isinstance(error, CodexDecisionError):
+                summary = f"CodexDecisionError: {error}"
+            else:
+                summary = f"{type(error).__name__}: explorer failed."
             self._finalize_failure(summary)
             if isinstance(error, SystemExit):
                 raise
@@ -200,8 +204,9 @@ class Explorer:
         )
 
     def _complete_achieved(self) -> ExplorerResult:
-        result = self._process_result()
+        result = self.runner.terminate()
         summary = "Learner-visible goal achieved."
+        self._bundle.capture_final_state()
         self._bundle.complete(result, achieved=True, summary=summary)
         self._finalized = True
         return ExplorerResult(
@@ -226,11 +231,13 @@ class Explorer:
         if self._finalized:
             return
         self.runner.close()
+        self._bundle.capture_final_state()
         self._bundle.fail(summary)
         self._finalized = True
 
-    def _process_result(self) -> PtyRunResult:
-        return self.runner.terminate()
+    def _decision_provenance(self) -> Mapping[str, object] | None:
+        provenance = self._decision_source.last_provenance
+        return provenance if isinstance(provenance, Mapping) else None
 
     def _elapsed(self) -> float:
         if self._started_at is None:

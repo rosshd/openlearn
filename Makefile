@@ -3,7 +3,7 @@ OPENLEARN ?= .venv/bin/openlearn
 REVIEW_DIR ?= .artifacts/review
 TYPE ?= feat
 
-.PHONY: test unit pytest lint typecheck smoke e2e diff validate check review repo-status worktree finish
+.PHONY: test unit pytest lint typecheck smoke e2e codex-dogfood diff validate check review repo-status worktree finish
 
 # --- Individual lanes ---------------------------------------------------------
 
@@ -30,6 +30,11 @@ smoke:
 
 e2e:
 	OPENLEARN_MOCK=1 OPENLEARN_HOME="$$(mktemp -d)" ./manual-tests/smoke-full.sh --mock
+
+# Opt-in and live. This target is deliberately absent from `check`.
+codex-dogfood:
+	@test -n "$(RUN_ROOT)" || { echo "usage: make codex-dogfood RUN_ROOT=<new-private-path>" >&2; exit 2; }
+	PYTHON=$(PYTHON) ./scripts/run-codex-dogfood "$(RUN_ROOT)" --openlearn "$(OPENLEARN)"
 
 diff:
 	git diff --stat

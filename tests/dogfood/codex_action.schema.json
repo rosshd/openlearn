@@ -1,38 +1,31 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "openLearn dogfood keyboard decision",
-  "oneOf": [
-    {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["action", "text"],
-      "properties": {
-        "action": { "const": "submit_text" },
-        "text": { "type": "string", "minLength": 1, "maxLength": 1000 },
-        "commentary": { "type": "string", "minLength": 1, "maxLength": 240 }
-      }
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["action", "text", "key", "reason", "commentary"],
+  "properties": {
+    "action": { "enum": ["submit_text", "press_key", "stop"] },
+    "text": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "maxLength": 1000,
+      "pattern": "^[^\\u0000-\\u001F\\u007F]+$"
     },
-    {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["action", "key"],
-      "properties": {
-        "action": { "const": "press_key" },
-        "key": {
-          "enum": ["enter", "escape", "backspace", "up", "down", "left", "right", "ctrl_c"]
-        },
-        "commentary": { "type": "string", "minLength": 1, "maxLength": 240 }
-      }
+    "key": {
+      "enum": [
+        "enter",
+        "escape",
+        "backspace",
+        "up",
+        "down",
+        "left",
+        "right",
+        "ctrl_c",
+        null
+      ]
     },
-    {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["action", "reason"],
-      "properties": {
-        "action": { "const": "stop" },
-        "reason": { "type": "string", "minLength": 1, "maxLength": 240 },
-        "commentary": { "type": "string", "minLength": 1, "maxLength": 240 }
-      }
-    }
-  ]
+    "reason": { "type": ["string", "null"], "minLength": 1, "maxLength": 240 },
+    "commentary": { "type": ["string", "null"], "minLength": 1, "maxLength": 240 }
+  }
 }

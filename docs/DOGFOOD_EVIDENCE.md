@@ -40,6 +40,7 @@ mock-draft-course/
 └── evidence/
     ├── manifest.json             mission context, artifact index, and outcome
     ├── interactions.jsonl        ordered keyboard input and rendered PTY output
+    ├── decisions.jsonl           bounded observations, selected actions, and provenance
     ├── final-state.json          metadata-only inventory of the isolated home
     └── frames/
         ├── 001-mission-entry.txt
@@ -63,6 +64,9 @@ Paths recorded in `manifest.json` are relative to the evidence directory except 
 Each line of `interactions.jsonl` is an ordered JSON event with `schema_version`, `event` (`input` or `output`), mission-relative `elapsed_seconds`, and sanitized `text`.
 Input events represent keyboard text sent through the PTY, while output events contain chunks rendered by the real terminal process.
 
+Each line of `decisions.jsonl` links one selected action to the exact bounded observation supplied to its fake or Codex decision source.
+The record includes truncation and remaining-budget metadata plus sanitized source provenance when the source provides it.
+
 Each terminal frame is a sanitized plain-text snapshot of rendered output at a meaningful checkpoint.
 The manifest is the source of frame order, labels, paths, and capture times.
 
@@ -83,6 +87,41 @@ It deliberately excludes file contents, hashes, sizes, timestamps, permissions, 
 
 The representative mission does not enter a teaching session, so it has no tutor-only transcript.
 A future teaching mission must derive a sanitized tutor transcript from captured public terminal interactions without storing hidden model reasoning or private source material.
+
+## Run the Opt-In Codex Explorer
+
+The Codex explorer is deliberately excluded from `make check` and the default pytest suite never resolves or starts a Codex executable.
+Use it only when a live AI-driven terminal evaluation is intended.
+The supplied output root must not already exist.
+
+```bash
+make codex-dogfood RUN_ROOT="$(mktemp -d)/codex-draft-course"
+```
+
+The command runs a direct learner and an error-prone learner against separate isolated homes.
+The error-prone learner first makes a visible invalid menu choice, then must recover from the terminal feedback.
+Codex chooses every keyboard action from the bounded sanitized PTY observation, while the harness independently verifies that exactly one draft with the requested public fields exists.
+Codex receives neither the verifier implementation nor filesystem access to the mission, evidence, or repository.
+The command prints only each variant's final status and evidence path.
+It exits nonzero if either variant does not achieve the mission.
+
+Pass an explicit installed command, Codex home, or model when needed:
+
+```bash
+./scripts/run-codex-dogfood /private/tmp/openlearn-codex-run \
+  --openlearn .venv/bin/openlearn \
+  --codex /Users/ross/.local/bin/codex \
+  --codex-home /Users/ross/.codex \
+  --model gpt-5
+```
+
+Each decision record includes `source_kind` plus sanitized provenance.
+Live records identify Codex's CLI version and model when explicitly selected, invocation and schema fingerprints, process status and duration, and accepted event-type counts.
+Fake composition tests use `source_kind: fake`, so deterministic evidence cannot be mistaken for a live Codex run.
+Raw Codex reasoning, stderr, environment variables, prompts, authentication material, and user configuration are never persisted.
+
+Explorer evidence is not an independent review verdict.
+Future UX-critic and tutor-judge evaluations must use fresh Codex runs that do not reuse the explorer's model session or hidden reasoning.
 
 ## Extend the Harness
 

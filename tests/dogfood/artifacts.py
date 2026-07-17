@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
+import math
 import re
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -43,16 +44,19 @@ class EvidenceBundle:
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self.root = root
-        self.root.mkdir(parents=True, exist_ok=True)
+        self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self.root.chmod(0o700)
         self._now = now
         self._openlearn_home = metadata.openlearn_home
         self.recorder = EvidenceRecorder(
             self.root / INTERACTIONS_NAME,
             sensitive_values=sensitive_values,
         )
-        self.recorder.path.touch()
+        self.recorder.path.touch(mode=0o600)
+        self.recorder.path.chmod(0o600)
         self._decisions_path = self.root / DECISIONS_NAME
-        self._decisions_path.touch()
+        self._decisions_path.touch(mode=0o600)
+        self._decisions_path.chmod(0o600)
         self._observation_ids: set[str] = set()
         self._manifest_path = self.root / MANIFEST_NAME
         self._frames: list[dict[str, str]] = []
@@ -93,6 +97,7 @@ class EvidenceBundle:
         seconds_remaining: float,
         prior_actions: tuple[str, ...],
         elapsed_seconds: float,
+        provenance: Mapping[str, object] | None = None,
     ) -> None:
         """Persist one concise action linked to its exact supplied observation."""
         if self._completed:
@@ -119,6 +124,11 @@ class EvidenceBundle:
             "seconds_remaining": round(max(0.0, seconds_remaining), 6),
             "elapsed_seconds": round(max(0.0, elapsed_seconds), 6),
         }
+        if provenance is not None:
+            sanitized_provenance = _sanitize_provenance(provenance, self.recorder)
+            if sanitized_provenance["source_kind"] != source_kind:
+                raise ValueError("decision provenance source does not match")
+            payload["provenance"] = sanitized_provenance
         with self._decisions_path.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
             stream.write("\n")
@@ -137,12 +147,14 @@ class EvidenceBundle:
         slug = slug[:60].rstrip("-") or "checkpoint"
         relative_path = Path(FRAMES_DIRECTORY) / f"{frame_number:03}-{slug}.txt"
         frame_path = self.root / relative_path
-        frame_path.parent.mkdir(parents=True, exist_ok=True)
+        frame_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        frame_path.parent.chmod(0o700)
         temporary_path = frame_path.with_suffix(".txt.tmp")
         temporary_path.write_text(
             self.recorder.sanitize_terminal(rendered_output),
             encoding="utf-8",
         )
+        temporary_path.chmod(0o600)
         temporary_path.replace(frame_path)
 
         self._frames.append(
@@ -195,6 +207,7 @@ class EvidenceBundle:
             + "\n",
             encoding="utf-8",
         )
+        temporary_path.chmod(0o600)
         temporary_path.replace(final_state_path)
         artifacts = self._manifest["artifacts"]
         assert isinstance(artifacts, dict)
@@ -246,6 +259,7 @@ class EvidenceBundle:
             json.dumps(self._manifest, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
+        temporary_path.chmod(0o600)
         temporary_path.replace(self._manifest_path)
 
 
@@ -267,3 +281,54 @@ def _decision_action(
         return {"action": decision.action, "key": decision.key}
     assert decision.reason is not None
     return {"action": decision.action, "reason": recorder.sanitize(decision.reason)}
+
+
+def _sanitize_provenance(
+    provenance: Mapping[str, object], recorder: EvidenceRecorder
+) -> dict[str, object]:
+    required = {
+        "source_kind",
+        "cli_version",
+        "model",
+        "invocation_fingerprint",
+        "schema_fingerprint",
+        "process_status",
+        "duration_seconds",
+        "event_counts",
+    }
+    if set(provenance) != required or provenance["source_kind"] not in {"fake", "codex"}:
+        raise ValueError("invalid decision provenance")
+    event_counts = provenance["event_counts"]
+    if not isinstance(event_counts, Mapping) or any(
+        not isinstance(name, str)
+        or not isinstance(count, int)
+        or isinstance(count, bool)
+        or count < 0
+        for name, count in event_counts.items()
+    ):
+        raise ValueError("invalid decision provenance event counts")
+    cli_version = provenance["cli_version"]
+    model = provenance["model"]
+    process_status = provenance["process_status"]
+    duration_seconds = provenance["duration_seconds"]
+    if (
+        not isinstance(process_status, int)
+        or isinstance(process_status, bool)
+        or not isinstance(duration_seconds, (int, float))
+        or isinstance(duration_seconds, bool)
+        or not math.isfinite(duration_seconds)
+        or duration_seconds < 0
+    ):
+        raise ValueError("invalid decision provenance process metrics")
+    return {
+        "source_kind": provenance["source_kind"],
+        "cli_version": None if cli_version is None else recorder.sanitize(str(cli_version)),
+        "model": None if model is None else recorder.sanitize(str(model)),
+        "invocation_fingerprint": recorder.sanitize(
+            str(provenance["invocation_fingerprint"])
+        ),
+        "schema_fingerprint": recorder.sanitize(str(provenance["schema_fingerprint"])),
+        "process_status": process_status,
+        "duration_seconds": round(float(duration_seconds), 6),
+        "event_counts": dict(sorted(event_counts.items())),
+    }

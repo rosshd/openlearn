@@ -16,6 +16,7 @@ from tests.dogfood.pty_runner import PtyMissionRunner
 
 class FakeSource:
     source_kind = "fake"
+    last_provenance = None
 
     def __init__(self, decisions: list[CodexDecision | BaseException]) -> None:
         self.decisions = decisions
@@ -110,6 +111,37 @@ def test_explorer_dispatches_text_and_named_keys_and_links_exact_observations(
     ]
     assert source.contexts[1].prior_actions == ("submit_text:hello",)
     assert read_manifest(bundle)["status"] == "completed"
+
+
+@pytest.mark.parametrize(
+    ("key", "expected"),
+    [
+        ("escape", "\x1b"),
+        ("backspace", "\x7f"),
+        ("up", "\x1b[A"),
+        ("down", "\x1b[B"),
+        ("left", "\x1b[D"),
+        ("right", "\x1b[C"),
+        ("ctrl_c", "\x03"),
+    ],
+)
+def test_explorer_dispatches_each_allow_listed_named_key(
+    tmp_path: Path,
+    monkeypatch,
+    key: str,
+    expected: str,
+) -> None:
+    explorer, _bundle = make_explorer(
+        tmp_path,
+        FakeSource([]),
+        "import time; time.sleep(30)",
+    )
+    sent: list[str] = []
+    monkeypatch.setattr(explorer.runner, "send", sent.append)
+
+    explorer._dispatch(CodexDecision(action="press_key", key=key))
+
+    assert sent == [expected]
 
 
 @pytest.mark.parametrize(
