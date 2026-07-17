@@ -11,6 +11,7 @@ SCRIPT = Path(__file__).parents[1] / "scripts" / "repo-workflow"
 SCRIPT_CMD = ["bash", SCRIPT.as_posix()] if os.name == "nt" else [str(SCRIPT)]
 
 
+@unittest.skipIf(os.name == "nt", "repo-workflow is a POSIX shell helper")
 class RepoWorkflowTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()

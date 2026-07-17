@@ -4089,7 +4089,10 @@ class InteractiveTests(unittest.TestCase):
             cli.handle_repl_command("missing")
 
     def test_repl_prompt_switches_to_answer_when_question_is_pending(self) -> None:
-        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
+        call_silent(
+            cli.cmd_new,
+            Namespace(topic="Vim", goal="learn vim", mastery_profile="proficient"),
+        )
         path = cli.topic_path("vim")
         metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
         metadata = dict(metadata)
@@ -4114,7 +4117,10 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(prompts[0], "Answer> ")
 
     def test_repl_prompt_uses_openlearn_when_no_question_is_pending(self) -> None:
-        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
+        call_silent(
+            cli.cmd_new,
+            Namespace(topic="Vim", goal="learn vim", mastery_profile="proficient"),
+        )
         prompts = []
 
         def input_func(prompt: str = "") -> str:
