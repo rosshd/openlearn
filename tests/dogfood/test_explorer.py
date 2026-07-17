@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -36,6 +37,7 @@ def make_explorer(
     program: str,
     *,
     limits: ExplorerLimits | None = None,
+    clock: Callable[[], float] = time.monotonic,
 ) -> tuple[Explorer, EvidenceBundle]:
     home = tmp_path / "home"
     home.mkdir(parents=True)
@@ -71,6 +73,7 @@ def make_explorer(
                 quiet_interval=0.03,
                 observation_timeout=0.3,
             ),
+            clock=clock,
         ),
         bundle,
     )
@@ -262,10 +265,12 @@ def test_explorer_elapsed_budget_can_expire_before_a_decision(tmp_path: Path) ->
 def test_explorer_does_not_dispatch_a_decision_returned_after_elapsed_budget(
     tmp_path: Path,
 ) -> None:
+    elapsed = [0.0]
+
     class SlowFakeSource(FakeSource):
         def decide(self, context: DecisionContext) -> CodexDecision:
             self.contexts.append(context)
-            time.sleep(0.03)
+            elapsed[0] = 0.05
             return CodexDecision(action="submit_text", text="must-not-be-sent")
 
     source = SlowFakeSource([])
@@ -280,6 +285,7 @@ def test_explorer_does_not_dispatch_a_decision_returned_after_elapsed_budget(
             quiet_interval=0.005,
             observation_timeout=0.01,
         ),
+        clock=lambda: elapsed[0],
     )
 
     result = explorer.run()
