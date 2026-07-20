@@ -2942,6 +2942,15 @@ def register_enter_advance_cue(
     return True
 
 
+def expire_enter_advance_cue(metadata: dict[str, object]) -> None:
+    registration = metadata.get("enter_advance_cue")
+    if not isinstance(registration, dict) or registration.get("consumed") is not False:
+        return
+    expired = dict(registration)
+    expired["consumed"] = True
+    metadata["enter_advance_cue"] = expired
+
+
 def persist_current_slide_content(metadata: dict[str, object], answer: str) -> None:
     unit = metadata.get("current_unit")
     slide = metadata.get("current_slide")
@@ -3261,6 +3270,7 @@ def advance_slide(slug: str, output_func=print, force: bool = False) -> bool:
         raw_metadata, body = parse_topic(path.read_text(encoding="utf-8"))
         metadata = merge_topic_state(normalize_topic_metadata(raw_metadata, slug), load_state(slug))
         metadata = dict(metadata)
+        expire_enter_advance_cue(metadata)
         pending = metadata.get("pending_question")
         if isinstance(pending, dict):
             previous_pending_question = dict(pending)
@@ -3514,6 +3524,7 @@ def set_course_progress(slug: str, unit_value: str, slide_value: str) -> None:
         metadata["current_slide"] = slide
         metadata["course_completed"] = False
         metadata["last_video_focus"] = None
+        expire_enter_advance_cue(metadata)
         metadata.pop("pending_chapter_quiz", None)
         metadata.pop("pending_quiz_chapter", None)
         save_state(slug, state_from_metadata(metadata))
@@ -3742,6 +3753,9 @@ def save_scope_change(topic: Topic, prompt: str, proposal: str) -> None:
     with file_lock(topic.path):
         metadata, body = parse_topic(topic.path.read_text(encoding="utf-8"))
         metadata = dict(metadata)
+        state = load_state(topic.slug)
+        expire_enter_advance_cue(state)
+        save_state(topic.slug, state)
         units = parse_course_units(proposal)
         if units:
             metadata["course_units"] = units
@@ -4464,6 +4478,7 @@ def save_course_started(topic: Topic, outline_prompt: str, outline: str) -> None
             normalize_topic_metadata(raw_metadata, topic.slug), load_state(topic.slug)
         )
         metadata = dict(metadata)
+        expire_enter_advance_cue(metadata)
         metadata["course_started"] = True
         metadata["course_completed"] = False
         metadata["slide_coverage"] = {}
@@ -6057,6 +6072,7 @@ def update_learning_metadata(
                     next_unit_number = current_unit + 1
                     next_unit = course_unit_at(metadata, next_unit_number)
                     if next_unit:
+                        expire_enter_advance_cue(metadata)
                         metadata["current_unit"] = next_unit_number
                         metadata["current_slide"] = 1
                         title = next_unit.get("title")

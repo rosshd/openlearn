@@ -4686,6 +4686,75 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(cli.read_topic("vim").metadata["current_slide"], 2)
         self.assertEqual(calls, [])
 
+    def test_returning_to_cue_origin_does_not_reactivate_it(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
+        self._set_meta(
+            "vim",
+            {
+                "current_unit": 1,
+                "current_slide": 1,
+                "course_units": [
+                    {"unit": 1, "chapter": "1", "title": "Modes", "slide_count": 3}
+                ],
+            },
+        )
+        cue = "**Next:**\nPress Enter to continue, or type what you want more help with."
+        cli.append_session(cli.read_topic("vim"), "chat", "Ready", cue)
+        cli.set_course_progress("vim", "1", "2")
+        cli.set_course_progress("vim", "1", "1")
+        calls = []
+
+        with mock.patch.object(cli, "cmd_next", side_effect=lambda *_a, **_kw: calls.append("next")):
+            call_silent(
+                cli.run_repl,
+                input_func=iter_input(["", "/q"]),
+                output_func=lambda _text: None,
+                show_intro=False,
+            )
+
+        self.assertEqual(cli.read_topic("vim").metadata["current_slide"], 1)
+        self.assertEqual(calls, [])
+
+    def test_same_position_scope_rewrite_invalidates_existing_enter_cue(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
+        self._set_meta(
+            "vim",
+            {
+                "current_unit": 1,
+                "current_slide": 1,
+                "course_units": [
+                    {"unit": 1, "chapter": "1", "title": "Modes", "slide_count": 3}
+                ],
+            },
+        )
+        cue = "**Next:**\nPress Enter to continue, or type what you want more help with."
+        cli.append_session(cli.read_topic("vim"), "chat", "Ready", cue)
+        proposal = textwrap.dedent(
+            """
+            Scope: Vim search
+            Excludes: plugins
+            Assumptions: none
+            Units:
+            1. Search (3 slides) - Search efficiently.
+            Concepts: Forward search; Search history
+            """
+        ).strip()
+        cli.save_scope_change(cli.read_topic("vim"), "Focus on search", proposal)
+        calls = []
+
+        with mock.patch.object(cli, "cmd_next", side_effect=lambda *_a, **_kw: calls.append("next")):
+            call_silent(
+                cli.run_repl,
+                input_func=iter_input(["", "/q"]),
+                output_func=lambda _text: None,
+                show_intro=False,
+            )
+
+        topic = cli.read_topic("vim")
+        self.assertEqual(topic.metadata["current_unit"], 1)
+        self.assertEqual(topic.metadata["current_slide"], 1)
+        self.assertEqual(calls, [])
+
     def test_mastery_auto_advance_invalidates_cue_from_previous_unit(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
         self._set_meta(
