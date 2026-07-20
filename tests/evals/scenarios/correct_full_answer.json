@@ -1,5 +1,6 @@
 {
   "name": "correct_full_answer",
+  "persona": "A prepared learner who gives a precise production-level explanation.",
   "description": "Guards against re-quizzing after a learner demonstrates solid understanding.",
   "topic": "functions",
   "goal": "Learn Python functions",

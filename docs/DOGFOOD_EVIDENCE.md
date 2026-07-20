@@ -131,3 +131,25 @@ Capture frames at entry, major decisions, friction or errors, and completion.
 Always close the runner in a `finally` block, inventory final state before completing the bundle, and determine achievement from visible process results plus isolated local state.
 
 Add integration coverage that proves the installed command saw a real TTY, actions went through keyboard input, the caller's home remained untouched, artifacts survived process exit, and private fixture values were absent from every persisted file.
+
+## Run the Tutor Behavior Eval
+
+The tutor behavior lane runs the scripted learner scenarios in `tests/evals/scenarios/` through the live `ask_topic` flow.
+It creates a separate isolated `OPENLEARN_HOME` for every scenario and never reads saved openLearn config, topics, state, or credentials.
+Supply the provider key through the process environment and select a judge model that differs from the tutor model.
+
+```bash
+OPENAI_API_KEY="..." \
+OPENLEARN_MODEL="tutor-model" \
+make tutor-behavior-eval \
+  RUN_ROOT="$(mktemp -d)/tutor-behavior" \
+  JUDGE_MODEL="independent-judge-model"
+```
+
+The output root must not exist before the run.
+The target is deliberately absent from `make check` because it makes live model calls and evaluates output quality.
+If live access is missing, mock mode is enabled, or the tutor and judge models match, the command exits with setup instructions instead of reporting a false pass.
+
+Each run writes `evidence/manifest.json`, `evidence/summary.md`, and `evidence/turns.jsonl`.
+Every JSONL record includes the scenario and learner persona, scripted history, live learner message and tutor response, rubric verdict, state delta, emitted learning events, and sanitized model and fixture provenance.
+Use this lane before tutor-policy changes and as an intentional release check for releases that change tutor behavior.

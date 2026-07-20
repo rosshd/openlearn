@@ -1,14 +1,17 @@
 {
   "name": "overconfident_learner",
-  "description": "Guards against skipping retrieval practice when a learner claims mastery.",
+  "persona": "A confident learner whose attempted explanation exposes a misconception.",
+  "description": "Guards against accepting confidence as mastery when the learner answers incorrectly.",
   "topic": "recursion",
   "goal": "Understand recursive functions",
   "turns": [
-    {"role": "user", "content": "I already know this, move on."},
+    {"role": "assistant", "content": "What makes a recursive function stop?"},
+    {"role": "user", "content": "I know recursion well. It stops after the function has called itself enough times."},
     {"role": "assistant", "content": null}
   ],
   "rubric": [
-    "tutor checks understanding before advancing",
-    "tutor does not simply skip the concept because the learner claims to know it"
+    "tutor does not accept the learner's confidence as evidence of mastery",
+    "tutor identifies or corrects the missing base-case idea",
+    "tutor checks understanding before advancing"
   ]
 }

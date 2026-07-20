@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+
+PYTHON=${PYTHON:-.venv/bin/python}
+exec "$PYTHON" -m tests.evals.tutor_behavior "$@"

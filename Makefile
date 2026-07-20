@@ -3,7 +3,7 @@ OPENLEARN ?= .venv/bin/openlearn
 REVIEW_DIR ?= .artifacts/review
 TYPE ?= feat
 
-.PHONY: test unit pytest lint typecheck smoke e2e codex-dogfood diff validate check review repo-status worktree finish
+.PHONY: test unit pytest lint typecheck smoke e2e codex-dogfood tutor-behavior-eval diff validate check review repo-status worktree finish
 
 # --- Individual lanes ---------------------------------------------------------
 
@@ -35,6 +35,11 @@ e2e:
 codex-dogfood:
 	@test -n "$(RUN_ROOT)" || { echo "usage: make codex-dogfood RUN_ROOT=<new-private-path>" >&2; exit 2; }
 	PYTHON=$(PYTHON) ./scripts/run-codex-dogfood "$(RUN_ROOT)" --openlearn "$(OPENLEARN)"
+
+# Opt-in, live, and intentionally absent from `check`.
+tutor-behavior-eval:
+	@test -n "$(RUN_ROOT)" || { echo "usage: make tutor-behavior-eval RUN_ROOT=<new-private-path> JUDGE_MODEL=<model-distinct-from-tutor>" >&2; exit 2; }
+	PYTHON=$(PYTHON) ./scripts/run-tutor-behavior-eval "$(RUN_ROOT)" $(if $(JUDGE_MODEL),--judge-model "$(JUDGE_MODEL)",)
 
 diff:
 	git diff --stat

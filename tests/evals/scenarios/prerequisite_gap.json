@@ -1,5 +1,6 @@
 {
   "name": "prerequisite_gap",
+  "persona": "A learner whose answer reveals missing prerequisite vocabulary.",
   "description": "Guards against continuing with dereferencing before addressing memory addresses.",
   "topic": "pointers",
   "goal": "Understand pointers in C",
