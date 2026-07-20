@@ -71,7 +71,6 @@ from openlearn.text import (
     extract_covered_concepts,
     first_lines,
     last_lines,
-    last_question,
     one_line,
     parse_metadata_update,
     sanitize_model_output,
@@ -233,6 +232,9 @@ Use **Feedback:** when responding to a learner answer. Use **Lesson:** when
 teaching new material. Use **Check:** when asking a question. Use **Hint:** for
 a Socratic nudge. Use **Example:** for a worked example. Use **Next:** to affirm
 and transition. Do not skip the label — it is required on every response.
+- **Check:** is the explicit grading contract. Use it only when the learner's
+  next reply should be judged as an answer. Put clarifying questions, offers to
+  continue, navigation prompts, and off-topic redirects under another label.
 - Bold labels only at section starts (e.g. **Example:**, **Action:**).
   Do not bold random words inside prose. Avoid tables and long headings.
 - Keep paragraphs short; prefer 1-3 compact bullets when listing ideas.
@@ -1535,11 +1537,15 @@ def save_learner_navigation_preference(topic: Topic, prompt: str) -> None:
     preference = learner_preference_from_advance(prompt)
     if not preference:
         return
+    previous_pending_question: dict[str, object] | None = None
     with file_lock(topic.path):
         raw_metadata, body = parse_topic(topic.path.read_text(encoding="utf-8"))
         metadata = merge_topic_state(
             normalize_topic_metadata(raw_metadata, topic.slug), load_state(topic.slug)
         )
+        pending = metadata.get("pending_question")
+        if isinstance(pending, dict):
+            previous_pending_question = dict(pending)
         preferences = metadata.get("learner_preferences")
         values = (
             [item for item in preferences if isinstance(item, str) and item.strip()]
@@ -1555,6 +1561,12 @@ def save_learner_navigation_preference(topic: Topic, prompt: str) -> None:
             topic.path,
             format_topic(stable_metadata_for_topic(metadata), body),
         )
+    log_pending_question_transition(
+        topic.slug,
+        previous_pending_question,
+        None,
+        reason="navigation_preference",
+    )
 
 
 def restore_learner_preferences_from_history(topic: Topic) -> Topic:
@@ -3177,10 +3189,14 @@ def advance_slide(slug: str, output_func=print, force: bool = False) -> bool:
     last_lesson_response = last_tutor_lesson_response(topic)
     coverage_message = ""
     completed_course = False
+    previous_pending_question: dict[str, object] | None = None
     with file_lock(path):
         raw_metadata, body = parse_topic(path.read_text(encoding="utf-8"))
         metadata = merge_topic_state(normalize_topic_metadata(raw_metadata, slug), load_state(slug))
         metadata = dict(metadata)
+        pending = metadata.get("pending_question")
+        if isinstance(pending, dict):
+            previous_pending_question = dict(pending)
         answer_status = metadata.get("last_answer_status")
         tutor_accepted = tutor_response_has_advance_cue(last_lesson_response)
         if answer_status in {"needs_work", "partial"} and not force and not tutor_accepted:
@@ -3298,6 +3314,12 @@ def advance_slide(slug: str, output_func=print, force: bool = False) -> bool:
             metadata.pop("pending_quiz_chapter", None)
         save_state(slug, state_from_metadata(metadata))
         write_text_atomic(path, format_topic(stable_metadata_for_topic(metadata), body))
+        log_pending_question_transition(
+            slug,
+            previous_pending_question,
+            None,
+            reason="navigation",
+        )
         if crossed_unit:
             log_event(
                 slug,
@@ -3375,16 +3397,26 @@ def set_course_progress(slug: str, unit_value: str, slide_value: str) -> None:
 
 def finish_pending_chapter_quiz(slug: str) -> bool:
     path = topic_path(slug)
+    previous_pending_question: dict[str, object] | None = None
     with file_lock(path):
         raw_metadata, body = parse_topic(path.read_text(encoding="utf-8"))
         metadata = merge_topic_state(normalize_topic_metadata(raw_metadata, slug), load_state(slug))
         if metadata.get("pending_chapter_quiz") is not True:
             return False
+        pending = metadata.get("pending_question")
+        if isinstance(pending, dict):
+            previous_pending_question = dict(pending)
         metadata.pop("pending_chapter_quiz", None)
         metadata.pop("pending_quiz_chapter", None)
         clear_learning_gate(metadata)
         save_state(slug, state_from_metadata(metadata))
         write_text_atomic(path, format_topic(stable_metadata_for_topic(metadata), body))
+        log_pending_question_transition(
+            slug,
+            previous_pending_question,
+            None,
+            reason="chapter_quiz_completed",
+        )
         return True
 
 
@@ -5469,7 +5501,7 @@ def save_pending_question(
 ) -> None:
     has_answer_key = answer_key in {"A", "B", "C", "D"}
     question = (
-        question_text or extract_pending_question_text(answer) or last_question(answer)
+        question_text if question_text is not None else extract_pending_question_text(answer)
     ).strip()
     if not question:
         return
@@ -5485,38 +5517,108 @@ def save_pending_question(
     }
     if has_answer_key:
         pending_question["answer_key"] = answer_key
+    previous_pending_question: dict[str, object] | None = None
     with file_lock(topic.path):
         raw_metadata, body = parse_topic(topic.path.read_text(encoding="utf-8"))
         metadata = merge_topic_state(
             normalize_topic_metadata(raw_metadata, topic.slug), load_state(topic.slug)
         )
+        previous = metadata.get("pending_question")
+        if isinstance(previous, dict):
+            previous_pending_question = dict(previous)
         metadata["pending_question"] = pending_question
         save_state(topic.slug, state_from_metadata(metadata))
         write_text_atomic(topic.path, format_topic(stable_metadata_for_topic(metadata), body))
+    log_pending_question_transition(
+        topic.slug,
+        previous_pending_question,
+        pending_question,
+        reason="explicit_check",
+    )
 
 
 def extract_pending_question_text(text: str) -> str:
-    lines = text.splitlines()
-    question_index = -1
-    for index, line in enumerate(lines):
-        if "?" in line:
-            question_index = index
-    if question_index < 0:
-        return ""
-
-    selected = [lines[question_index].strip()]
-    for line in lines[question_index + 1 :]:
-        stripped = line.strip()
-        if not stripped:
-            if len(selected) == 1:
-                continue
-            break
-        if re.match(r"(?i)^[A-D][\).:-]\s+", stripped):
-            selected.append(stripped)
+    section_pattern = re.compile(
+        r"(?i)^\s*(?:\*\*)?"
+        r"(Lesson|Feedback|Example|Check|Hint|Next|Action):"
+        r"(?:\*\*)?\s*(.*)$"
+    )
+    check_sections: list[list[str]] = []
+    active_check: list[str] | None = None
+    for line in text.splitlines():
+        section = section_pattern.match(line)
+        if section:
+            if active_check is not None:
+                check_sections.append(active_check)
+            active_check = [line.strip()] if section.group(1).casefold() == "check" else None
             continue
-        if len(selected) > 1:
-            break
-    return "\n".join(selected).strip()
+        if active_check is not None:
+            active_check.append(line.rstrip())
+    if active_check is not None:
+        check_sections.append(active_check)
+
+    for lines in reversed(check_sections):
+        while lines and not lines[-1].strip():
+            lines.pop()
+        for question_index in range(len(lines) - 1, -1, -1):
+            question_line = lines[question_index].strip()
+            if (
+                not question_line
+                or re.fullmatch(r"(?i)(?:\*\*)?check:(?:\*\*)?", question_line)
+                or re.match(r"(?i)^[A-D][\).:-]\s+", question_line)
+                or check_is_navigation_prompt(question_line)
+            ):
+                continue
+            selected = lines[: question_index + 1]
+            for line in lines[question_index + 1 :]:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                if re.match(r"(?i)^[A-D][\).:-]\s+", stripped):
+                    selected.append(stripped)
+                    continue
+                break
+            return "\n".join(selected).strip()
+    return ""
+
+
+def check_is_navigation_prompt(question: str) -> bool:
+    value = one_line(question)
+    value = re.sub(r"(?i)^(?:\*\*)?check:(?:\*\*)?\s*", "", value).strip()
+    patterns = (
+        r"^(?:type|enter|use)\s+`?/done\b`?",
+        r"^(?:(?:are you|do you feel|feel)\s+)?ready"
+        r"(?:\s+to\s+(?:continue|keep moving|move on|go on|start the next))?\??$",
+        r"^(?:want|do you want|would you like) to "
+        r"(?:continue|keep moving|move on|go on|return|start the next)\b",
+        r"^(?:would you like|do you want) (?:me to )?(?:show )?another "
+        r"(?:example|explanation)\b",
+        r"^(?:which|what) (?:part|piece|bit)\b.*\bclarif(?:y|ied|ication)\b",
+        r"^(?:return|go back) to\b",
+    )
+    return any(re.search(pattern, value, flags=re.IGNORECASE) for pattern in patterns)
+
+
+def log_pending_question_transition(
+    slug: str,
+    previous: dict[str, object] | None,
+    current: dict[str, object] | None,
+    reason: str,
+) -> None:
+    if previous == current:
+        return
+    if previous is None:
+        transition = "created"
+    elif current is None:
+        transition = "cleared"
+    else:
+        transition = "replaced"
+    data: dict[str, object] = {"transition": transition, "reason": reason}
+    if previous is not None:
+        data["previous_pending_question"] = previous
+    if current is not None:
+        data["pending_question"] = current
+    log_event(slug, "pending_question_changed", data)
 
 
 def metadata_update_prompt(
@@ -5847,6 +5949,18 @@ def update_learning_metadata(
         save_state(topic.slug, state_from_metadata(metadata))
         write_topic_backup(topic.path, current_text)
         write_text_atomic(topic.path, format_topic(stable_metadata_for_topic(metadata), body))
+        previous_pending = previous_metadata.get("pending_question")
+        current_pending = metadata.get("pending_question")
+        log_pending_question_transition(
+            topic.slug,
+            dict(previous_pending) if isinstance(previous_pending, dict) else None,
+            dict(current_pending) if isinstance(current_pending, dict) else None,
+            reason=(
+                "unit_advanced"
+                if unit_advanced_event is not None
+                else "answer_correct"
+            ),
+        )
         if metadata.get("last_answer_status") in {"correct", "partial", "needs_work"}:
             event_data: dict[str, object] = {
                 "status": metadata.get("last_answer_status"),

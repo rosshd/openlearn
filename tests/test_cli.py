@@ -3033,8 +3033,8 @@ class InteractiveTests(unittest.TestCase):
             if "Create a concise course plan" in user:
                 return "Scope: AI basics\nUnits:\n1. Definitions (2 slides) - Explain AI."
             return (
-                "Lesson: AI is building systems that perform intelligent tasks. "
-                "Question: What is AI?"
+                "Lesson: AI is building systems that perform intelligent tasks.\n"
+                "Check: What is AI?"
             )
 
         cli.call_openai = fake_call_openai
@@ -3077,7 +3077,7 @@ class InteractiveTests(unittest.TestCase):
         self.assertNotIn("Recent session history", calls[0][0])
         pending = cli.read_topic("intro-ai").metadata["pending_question"]
         self.assertEqual(pending["kind"], "free_response")
-        self.assertIn("Question: What is AI?", pending["question"])
+        self.assertIn("Check: What is AI?", pending["question"])
         self.assertNotIn("answer_key", pending)
 
     def test_start_course_blank_revision_keeps_course_unstarted(self) -> None:
@@ -4267,6 +4267,13 @@ class InteractiveTests(unittest.TestCase):
             updated.metadata["learner_preferences"],
         )
         self.assertEqual(calls, ["next"])
+        pending_events = [
+            event
+            for event in cli.load_event_log(cli.topic_events_path("mac-workflow"))
+            if event["event_type"] == "pending_question_changed"
+        ]
+        self.assertEqual(pending_events[-1]["data"]["transition"], "cleared")
+        self.assertEqual(pending_events[-1]["data"]["reason"], "navigation_preference")
 
     def test_repl_failed_natural_navigation_retains_pending_answer(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
@@ -4352,6 +4359,122 @@ class InteractiveTests(unittest.TestCase):
 
         self.assertEqual(topic.metadata["pending_question"]["answer_key"], "B")
         self.assertNotIn("answer:", topic.body)
+        pending_events = [
+            event
+            for event in cli.load_event_log(cli.topic_events_path("vim"))
+            if event["event_type"] == "pending_question_changed"
+        ]
+        self.assertEqual(pending_events[-1]["data"]["transition"], "created")
+        self.assertEqual(
+            pending_events[-1]["data"]["pending_question"]["answer_key"],
+            "B",
+        )
+
+    def test_only_explicit_check_section_extracts_pending_question(self) -> None:
+        self.assertEqual(
+            cli.extract_pending_question_text(
+                "**Lesson:**\n"
+                "Normal mode runs commands.\n\n"
+                "**Check:**\n"
+                "With the cursor on a line, what does `dd` do?\n\n"
+                "**Next:**\n"
+                "Want to keep moving?"
+            ),
+            "**Check:**\nWith the cursor on a line, what does `dd` do?",
+        )
+        self.assertEqual(
+            cli.extract_pending_question_text(
+                "Check: Which key moves down?\n"
+                "A) h\nB) j\nC) k\nD) l\n"
+                "Type /done when you are ready to continue."
+            ),
+            "Check: Which key moves down?\nA) h\nB) j\nC) k\nD) l",
+        )
+        self.assertEqual(
+            cli.extract_pending_question_text(
+                "**Check:**\nOpen Vim, press `j`, and describe what moved."
+            ),
+            "**Check:**\nOpen Vim, press `j`, and describe what moved.",
+        )
+        self.assertEqual(
+            cli.extract_pending_question_text(
+                "**Check:**\nWhat state change does `/done` trigger?"
+            ),
+            "**Check:**\nWhat state change does `/done` trigger?",
+        )
+        self.assertEqual(
+            cli.extract_pending_question_text(
+                "**Check:**\nReady queues contain which processes?"
+            ),
+            "**Check:**\nReady queues contain which processes?",
+        )
+        for conversational_question in (
+            "**Feedback:**\nWhich part would you like me to clarify?",
+            "**Next:**\nReady to continue to the next slide?",
+            "**Feedback:**\nThat IDE is useful. Want to return to the Vim lesson?",
+            "**Check:**\nAre you ready to continue?",
+            "**Check:**\nReady to continue?",
+            "**Check:**\nWould you like another example?",
+            "**Check:**\nWhich part should I clarify?",
+            "**Check:**\nReturn to Vim motions?",
+            "Would you like another example?",
+        ):
+            with self.subTest(answer=conversational_question):
+                self.assertEqual(
+                    cli.extract_pending_question_text(conversational_question),
+                    "",
+                )
+
+    def test_conversational_questions_preserve_pending_check_until_explicit_replacement(
+        self,
+    ) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
+        topic = cli.read_topic("vim")
+        cli.save_pending_question(topic, "Check: What does `j` do?", "")
+        original_pending = cli.read_topic("vim").metadata["pending_question"]
+
+        for conversational_question in (
+            "**Feedback:**\nWhich part should I clarify?",
+            "**Next:**\nWant to continue?",
+            "**Feedback:**\nVS Code supports extensions. Return to Vim motions?",
+        ):
+            cli.print_and_append_model_answer(
+                cli.read_topic("vim"),
+                "chat",
+                "learner message",
+                conversational_question,
+            )
+            self.assertEqual(
+                cli.read_topic("vim").metadata["pending_question"],
+                original_pending,
+            )
+
+        cli.print_and_append_model_answer(
+            cli.read_topic("vim"),
+            "chat",
+            "learner message",
+            "**Check:**\nWhich key moves left?\nA) h\nB) j\nC) k\nD) l",
+        )
+
+        pending = cli.read_topic("vim").metadata["pending_question"]
+        self.assertEqual(pending["kind"], "multiple_choice")
+        self.assertIn("Which key moves left?", pending["question"])
+        events = cli.load_event_log(cli.topic_events_path("vim"))
+        self.assertEqual(events[-1]["event_type"], "pending_question_changed")
+        self.assertEqual(events[-1]["data"]["transition"], "replaced")
+        self.assertEqual(events[-1]["data"]["previous_pending_question"], original_pending)
+        self.assertEqual(events[-1]["data"]["pending_question"], pending)
+
+        cli.print_and_append_model_answer(
+            cli.read_topic("vim"),
+            "chat",
+            "learner message",
+            "**Check:**\nOpen Vim, press `j`, and describe what moved.",
+        )
+
+        imperative_pending = cli.read_topic("vim").metadata["pending_question"]
+        self.assertEqual(imperative_pending["kind"], "free_response")
+        self.assertIn("describe what moved", imperative_pending["question"])
 
     def test_model_answer_saves_multiple_choice_without_hidden_key(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
@@ -4497,6 +4620,11 @@ class InteractiveTests(unittest.TestCase):
             {"unit": 1, "chapter": "1.1", "title": "Modes", "slide_count": 2},
             {"unit": 2, "chapter": "1.2", "title": "Search", "slide_count": 3},
         ]
+        metadata["pending_question"] = {
+            "kind": "free_response",
+            "question": "What distinguishes normal mode?",
+            "created": cli.today(),
+        }
         path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
         output = []
         calls = []
@@ -4535,6 +4663,13 @@ class InteractiveTests(unittest.TestCase):
         quiz_index = output.index("QUIZ_CALLED")
         self.assertLess(advanced_index, loading_index)
         self.assertLess(loading_index, quiz_index)
+        pending_events = [
+            event
+            for event in cli.load_event_log(cli.topic_events_path("vim"))
+            if event["event_type"] == "pending_question_changed"
+        ]
+        self.assertEqual(pending_events[-1]["data"]["transition"], "cleared")
+        self.assertEqual(pending_events[-1]["data"]["reason"], "navigation")
 
     def test_repl_done_after_chapter_quiz_teaches_new_unit_slide_one(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
@@ -4545,6 +4680,11 @@ class InteractiveTests(unittest.TestCase):
         metadata["current_slide"] = 1
         metadata["pending_chapter_quiz"] = True
         metadata["pending_quiz_chapter"] = "1 Modes"
+        metadata["pending_question"] = {
+            "kind": "free_response",
+            "question": "What does normal mode do?",
+            "created": cli.today(),
+        }
         metadata["course_units"] = [
             {"unit": 1, "chapter": "1", "title": "Modes", "slide_count": 2},
             {"unit": 2, "chapter": "2", "title": "Search", "slide_count": 3},
@@ -4566,6 +4706,13 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(calls, ["next"])
         self.assertIn("Loading first slide of the new unit...", output)
         self.assertFalse(any(line.startswith("Advanced to") for line in output))
+        pending_events = [
+            event
+            for event in cli.load_event_log(cli.topic_events_path("vim"))
+            if event["event_type"] == "pending_question_changed"
+        ]
+        self.assertEqual(pending_events[-1]["data"]["transition"], "cleared")
+        self.assertEqual(pending_events[-1]["data"]["reason"], "chapter_quiz_completed")
 
     def test_repl_done_persists_completed_slide_content(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
@@ -5925,6 +6072,11 @@ class PromptInstructionTests(unittest.TestCase):
 
             cli.update_learning_metadata(cli.read_topic("vim"), "c", "Not quite", "test-model")
             updated = cli.read_topic("vim")
+            pending_events = [
+                event
+                for event in cli.load_event_log(cli.topic_events_path("vim"))
+                if event["event_type"] == "pending_question_changed"
+            ]
         finally:
             cli.call_openai = original_call_openai
             if previous_home is None:
@@ -5936,6 +6088,8 @@ class PromptInstructionTests(unittest.TestCase):
 
         self.assertEqual(updated.metadata["last_answer_status"], "correct")
         self.assertNotIn("pending_question", updated.metadata)
+        self.assertEqual(pending_events[-1]["data"]["transition"], "cleared")
+        self.assertEqual(pending_events[-1]["data"]["reason"], "answer_correct")
 
     def test_pending_question_stays_until_answer_is_correct(self) -> None:
         home = tempfile.TemporaryDirectory()
@@ -6355,6 +6509,14 @@ class PromptInstructionTests(unittest.TestCase):
             cli.update_learning_metadata(
                 cli.read_topic("vim"), "First transfer answer", "Correct.", "test-model"
             )
+            topic = cli.read_topic("vim")
+            metadata = dict(topic.metadata)
+            metadata["pending_question"] = {
+                "kind": "free_response",
+                "question": "How does mode switching transfer here?",
+                "created": cli.today(),
+            }
+            cli.write_topic(topic.path, metadata, topic.body)
             cli.update_learning_metadata(
                 cli.read_topic("vim"), "Second transfer answer", "Correct.", "test-model"
             )
@@ -6373,6 +6535,11 @@ class PromptInstructionTests(unittest.TestCase):
         event_types = [event["event_type"] for event in events]
         self.assertIn("mastery_changed", event_types)
         self.assertIn("unit_advanced", event_types)
+        pending_events = [
+            event for event in events if event["event_type"] == "pending_question_changed"
+        ]
+        self.assertEqual(pending_events[-1]["data"]["transition"], "cleared")
+        self.assertEqual(pending_events[-1]["data"]["reason"], "unit_advanced")
 
     def test_quick_learn_stays_efficient_after_first_unit_mastery(self) -> None:
         original_call_openai = cli.call_openai
@@ -7432,6 +7599,8 @@ class PromptInstructionTests(unittest.TestCase):
         self.assertIn("Use hands-on checks when the concept is a keybinding", rules)
         self.assertIn("Skip the check when the slide is only orientation", rules)
         self.assertIn("Avoid NOT and EXCEPT questions", rules)
+        self.assertIn("**Check:** is the explicit grading contract", rules)
+        self.assertIn("off-topic redirects under another label", rules)
 
     def test_system_prompt_includes_exact_pending_question_to_grade(self) -> None:
         topic = cli.Topic(
