@@ -10,10 +10,22 @@ Agents changing this behavior should read `.claude/skills/openlearn-tutor-policy
 - Treat production and transfer as stronger evidence than recognition.
 - Do not advance from one fast correct answer or self-reported confidence.
 - Do obey explicit navigation requests such as skip, continue, or move on.
-- In Quick Learn, optimize for coverage per minute: ask at most one check per slide and recommend `/done` after a correct or adequate answer instead of probing the same concept repeatedly.
+- In Quick Learn, optimize for coverage per minute: ask at most one check per slide and use the Enter-to-continue cue after a correct or adequate answer instead of probing the same concept repeatedly.
 - Detect shallow copying with deterministic signals where possible.
 - Tune toward delayed retrieval, not in-session smoothness.
 - Keep all learner state local and inspectable.
+
+## Enter-to-Continue Contract
+
+When the tutor has determined that the learner is ready to advance, it uses an explicit `**Next:**` cue: `Press Enter to continue, or type what you want more help with.`
+Blank Enter after that cue follows the same deterministic navigation path as `/done`, including slide advancement, chapter quizzes, coverage checks, and transition event logging.
+Stored learner preferences remain intact.
+Any non-empty response stays on the current concept and is sent to the tutor before navigation.
+Blank Enter is a no-op without the explicit cue.
+Blank Enter never clears or bypasses a `pending_question`.
+A preserved learner answer takes priority and blank Enter resubmits it.
+`/done` remains available as a backward-compatible explicit navigation command, but normal tutor copy and default help prefer Enter.
+The Enter cue belongs under `**Next:**` and must not create pending grading state.
 
 ## Per-Turn Loop
 

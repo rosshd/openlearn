@@ -2147,6 +2147,13 @@ class InteractiveTests(unittest.TestCase):
         cli._CONFIG_CACHE = None
         self.home.cleanup()
 
+    def _set_meta(self, slug: str, updates: dict[str, object]) -> None:
+        path = cli.topic_path(slug)
+        metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+        metadata = dict(metadata)
+        metadata.update(updates)
+        path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
+
     def test_no_args_defaults_to_menu(self) -> None:
         parser = cli.build_parser()
         args = parser.parse_args([])
@@ -4510,7 +4517,8 @@ class InteractiveTests(unittest.TestCase):
         self.assertIn("get the next lesson", help_text)
         self.assertIn("/r", help_text)
         self.assertIn("/done", help_text)
-        self.assertIn("confirm your answer and advance", help_text)
+        self.assertIn("press Enter to advance", help_text)
+        self.assertIn("compatibility command", help_text)
         self.assertIn("/status", help_text)
         self.assertIn("/q", help_text)
         self.assertNotIn("/scope", help_text)
@@ -4569,6 +4577,224 @@ class InteractiveTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(prompts[0], "openlearn> ")
+
+    def test_blank_enter_advances_after_explicit_next_cue(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
+        self._set_meta(
+            "vim",
+            {
+                "current_unit": 1,
+                "current_slide": 1,
+                "last_answer_status": "correct",
+                "course_options": {"quiz_after_chapter": False},
+                "course_units": [
+                    {"unit": 1, "chapter": "1", "title": "Modes", "slide_count": 1},
+                    {"unit": 2, "chapter": "2", "title": "Search", "slide_count": 2},
+                ],
+            },
+        )
+        cli.append_session(
+            cli.read_topic("vim"),
+            "chat",
+            "Normal mode executes commands.",
+            "**Next:**\nPress Enter to continue, or type what you want more help with.",
+        )
+        calls = []
+
+        with mock.patch.object(cli, "cmd_next", side_effect=lambda *_a, **_kw: calls.append("next")):
+            call_silent(
+                cli.run_repl,
+                input_func=iter_input(["", "/q"]),
+                output_func=lambda _text: None,
+                show_intro=False,
+            )
+
+        topic = cli.read_topic("vim")
+        self.assertEqual(topic.metadata["current_unit"], 2)
+        self.assertEqual(topic.metadata["current_slide"], 1)
+        self.assertEqual(calls, ["next"])
+        unit_events = [
+            event
+            for event in cli.load_event_log(cli.topic_events_path("vim"))
+            if event["event_type"] == "unit_advanced"
+        ]
+        self.assertEqual(unit_events[-1]["data"], {"from_unit": 1, "to_unit": 2})
+
+    def test_blank_enter_does_not_bypass_pending_check(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
+        self._set_meta(
+            "vim",
+            {
+                "current_unit": 1,
+                "current_slide": 1,
+                "course_units": [
+                    {"unit": 1, "chapter": "1", "title": "Modes", "slide_count": 2}
+                ],
+            },
+        )
+        cli.print_and_append_model_answer(
+            cli.read_topic("vim"),
+            "chat",
+            "Teach normal mode.",
+            "**Check:**\nWhat does normal mode let you do?",
+        )
+        calls = []
+
+        with mock.patch.object(cli, "cmd_next", side_effect=lambda *_a, **_kw: calls.append("next")):
+            call_silent(
+                cli.run_repl,
+                input_func=iter_input(["", "/q"]),
+                output_func=lambda _text: None,
+                show_intro=False,
+            )
+
+        topic = cli.read_topic("vim")
+        self.assertEqual(topic.metadata["current_slide"], 1)
+        self.assertIn("pending_question", topic.metadata)
+        self.assertEqual(calls, [])
+
+    def test_typed_follow_up_at_enter_cue_stays_on_current_concept(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
+        self._set_meta(
+            "vim",
+            {
+                "current_unit": 1,
+                "current_slide": 1,
+                "course_units": [
+                    {"unit": 1, "chapter": "1", "title": "Modes", "slide_count": 2}
+                ],
+            },
+        )
+        cli.append_session(
+            cli.read_topic("vim"),
+            "chat",
+            "That is enough for this slide.",
+            "**Next:**\nPress Enter to continue, or type what you want more help with.",
+        )
+        submitted = []
+
+        def fake_ask(_topic, prompt, _model, **_kwargs):
+            submitted.append(prompt)
+            return "**Example:**\nHere is another example."
+
+        with mock.patch.object(cli, "ask_topic", side_effect=fake_ask):
+            call_silent(
+                cli.run_repl,
+                input_func=iter_input(["show me another example", "/q"]),
+                output_func=lambda _text: None,
+                show_intro=False,
+            )
+
+        self.assertEqual(submitted, ["show me another example"])
+        self.assertEqual(cli.read_topic("vim").metadata["current_slide"], 1)
+
+    def test_preserved_answer_takes_priority_over_enter_advance_cue(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
+        self._set_meta(
+            "vim",
+            {
+                "current_unit": 1,
+                "current_slide": 1,
+                "course_units": [
+                    {"unit": 1, "chapter": "1", "title": "Modes", "slide_count": 2}
+                ],
+            },
+        )
+        cli.append_session(
+            cli.read_topic("vim"),
+            "chat",
+            "That is enough for this slide.",
+            "**Next:**\nPress Enter to continue, or type what you want more help with.",
+        )
+        cli.save_pending_learner_prompt("vim", "preserved learner answer")
+        submitted = []
+
+        def fake_ask(_topic, prompt, _model, **_kwargs):
+            submitted.append(prompt)
+            return "**Feedback:**\nThanks."
+
+        with mock.patch.object(cli, "ask_topic", side_effect=fake_ask):
+            call_silent(
+                cli.run_repl,
+                input_func=iter_input(["", "/q"]),
+                output_func=lambda _text: None,
+                show_intro=False,
+            )
+
+        self.assertEqual(submitted, ["preserved learner answer"])
+        self.assertEqual(cli.read_topic("vim").metadata["current_slide"], 1)
+
+    def test_blank_enter_after_chapter_quiz_uses_existing_completion_path(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
+        self._set_meta(
+            "vim",
+            {
+                "current_unit": 2,
+                "current_slide": 1,
+                "pending_chapter_quiz": True,
+                "pending_quiz_chapter": "1 Modes",
+                "course_units": [
+                    {"unit": 1, "chapter": "1", "title": "Modes", "slide_count": 2},
+                    {"unit": 2, "chapter": "2", "title": "Search", "slide_count": 2},
+                ],
+            },
+        )
+        cli.append_session(
+            cli.read_topic("vim"),
+            "quiz",
+            "Chapter quiz answers",
+            "**Next:**\nPress Enter to continue, or type what you want more help with.",
+        )
+        calls = []
+
+        with mock.patch.object(cli, "cmd_next", side_effect=lambda *_a, **_kw: calls.append("next")):
+            call_silent(
+                cli.run_repl,
+                input_func=iter_input(["", "/q"]),
+                output_func=lambda _text: None,
+                show_intro=False,
+            )
+
+        topic = cli.read_topic("vim")
+        self.assertNotIn("pending_chapter_quiz", topic.metadata)
+        self.assertEqual(calls, ["next"])
+
+    def test_blank_enter_at_ordinary_prompt_is_no_op(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
+        self._set_meta(
+            "vim",
+            {
+                "current_unit": 1,
+                "current_slide": 1,
+                "course_units": [
+                    {"unit": 1, "chapter": "1", "title": "Modes", "slide_count": 2}
+                ],
+            },
+        )
+        calls = []
+
+        with mock.patch.object(cli, "cmd_next", side_effect=lambda *_a, **_kw: calls.append("next")):
+            call_silent(
+                cli.run_repl,
+                input_func=iter_input(["", "/q"]),
+                output_func=lambda _text: None,
+                show_intro=False,
+            )
+
+        self.assertEqual(cli.read_topic("vim").metadata["current_slide"], 1)
+        self.assertEqual(calls, [])
+
+    def test_enter_advance_cue_does_not_create_pending_question(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
+
+        cli.print_and_append_model_answer(
+            cli.read_topic("vim"),
+            "chat",
+            "learner answer",
+            "**Next:**\nPress Enter to continue, or type what you want more help with.",
+        )
+
+        self.assertNotIn("pending_question", cli.read_topic("vim").metadata)
 
     def test_repl_reports_malformed_command_quotes_as_openlearn_error(self) -> None:
         with self.assertRaises(cli.OpenLearnError):
@@ -4960,6 +5186,22 @@ class InteractiveTests(unittest.TestCase):
             cli.tutor_response_has_advance_cue(
                 "Nice recovery. Type /done when ready. "
                 + "I've marked this for review, and here's a short note to carry forward. " * 5
+            )
+        )
+
+    def test_enter_advance_cue_requires_next_section_and_explicit_copy(self) -> None:
+        cue = "**Next:**\nPress Enter to continue, or type what you want more help with."
+
+        self.assertTrue(cli.tutor_response_has_enter_advance_cue(cue))
+        self.assertTrue(cli.tutor_response_has_advance_cue(cue))
+        self.assertFalse(
+            cli.tutor_response_has_enter_advance_cue(
+                "**Check:**\nPress Enter to continue, or type what you want more help with."
+            )
+        )
+        self.assertFalse(
+            cli.tutor_response_has_enter_advance_cue(
+                "**Next:**\nPress Enter after you answer the check."
             )
         )
 
@@ -5378,7 +5620,8 @@ class PromptInstructionTests(unittest.TestCase):
         self.assertIn("Use exactly this structure: Lesson, Example, Check", captured[0])
         self.assertIn("Teach one small idea", captured[0])
         self.assertIn("one concrete example or mini-drill", captured[0])
-        self.assertIn("type /done", captured[0])
+        self.assertIn("Press Enter to continue", captured[0])
+        self.assertIn("Do not attach a continuation cue to an unanswered Check", captured[0])
         self.assertIn("Structured lesson:", captured[0])
         self.assertIn("Unit 2/2 · Slide 1/3", captured[0])
         self.assertIn("Unit: 1.2 Search with fzf", captured[0])
@@ -7583,11 +7826,38 @@ class PromptInstructionTests(unittest.TestCase):
         self.assertIn("Momentum rule", normalized)
         self.assertIn("consecutive_misses >= 2", normalized)
         self.assertIn("mark it for review and keep the course moving", normalized)
-        self.assertIn("Advance cues should fit the moment", normalized)
-        self.assertIn("want to keep moving? type /done when ready", normalized)
-        self.assertIn("Do not repeat one exact phrase every time", normalized)
+        self.assertIn("deterministic continuation contract", normalized)
+        self.assertIn("Press Enter to continue, or type what you want more help with", normalized)
+        self.assertIn("Non-empty follow-up text stays on the current concept", normalized)
         self.assertIn("mention a relevant video or visual resource proactively", normalized)
         self.assertIn(cli.TUTOR_FORMAT_RULES.splitlines()[0], prompt)
+
+    def test_quick_learn_prompt_prefers_enter_to_done(self) -> None:
+        topic = cli.Topic(
+            slug="demo",
+            path=Path("demo.md"),
+            metadata={"topic": "Demo", "learning_mode": "quick"},
+            body="# Demo\n",
+        )
+
+        prompt = cli.system_prompt(topic)
+
+        self.assertIn("Enter-to-continue **Next:** cue", prompt)
+        self.assertNotIn("default to /done", prompt)
+
+    def test_chapter_quiz_prompt_uses_enter_continuation_contract(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
+        captured = []
+
+        def fake_stream(*_args, user: str, **_kwargs) -> str:
+            captured.append(user)
+            return "**Check:**\nWhat does normal mode do?"
+
+        with mock.patch.object(cli, "call_openai_streaming", side_effect=fake_stream):
+            call_silent(cli.cmd_chapter_quiz, Namespace(topic="vim", model=None))
+
+        self.assertIn("Press Enter to continue, or type what you want more help with", captured[0])
+        self.assertNotIn("type /done", captured[0])
 
     def test_tutor_format_rules_define_question_type_decision_criteria(self) -> None:
         rules = " ".join(cli.TUTOR_FORMAT_RULES.split())

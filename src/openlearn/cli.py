@@ -200,10 +200,11 @@ class DryRunPrompt(Exception):
 
 IMPORT_SCAN_MAX_WORKERS = 4
 REPL_HELP_LINES = [
+    "At a tutor continuation cue, press Enter to advance.",
     "Common commands:",
     "  /n       get the next lesson",
     "  /r       resume learning",
-    "  /done    confirm your answer and advance",
+    "  /done    explicitly advance (compatibility command)",
     "  /status  show progress",
     "  /q       quit",
     "",
@@ -235,6 +236,9 @@ and transition. Do not skip the label — it is required on every response.
 - **Check:** is the explicit grading contract. Use it only when the learner's
   next reply should be judged as an answer. Put clarifying questions, offers to
   continue, navigation prompts, and off-topic redirects under another label.
+- When the learner is ready to advance, use **Next:** followed by exactly:
+  "Press Enter to continue, or type what you want more help with."
+  Never put this cue under **Check:** or attach it to an unanswered check.
 - Bold labels only at section starts (e.g. **Example:**, **Action:**).
   Do not bold random words inside prose. Avoid tables and long headings.
 - Keep paragraphs short; prefer 1-3 compact bullets when listing ideas.
@@ -1397,7 +1401,9 @@ def run_repl(
     if show_intro:
         print_section("Learning session", output_func)
         output_func(
-            "Type a question to ask the active topic. Commands: /help, /resume, /next, /done, /review, /summary, /options, /plan, /progress, /scope, /q"
+            "Type a question to ask the active topic. At a tutor continuation cue, "
+            "press Enter to advance. Commands: /help, /resume, /next, /done, /review, "
+            "/summary, /options, /plan, /progress, /scope, /q"
         )
 
     def print_active_status_bar() -> None:
@@ -1422,6 +1428,17 @@ def run_repl(
             try:
                 deferred_updates.wait()
                 if not prompt:
+                    if blank_input_can_advance():
+                        last_tutor_answer = handle_repl_command(
+                            "done",
+                            model=model,
+                            input_func=input_func,
+                            output_func=output_func,
+                            deferred_updates=deferred_updates,
+                        )
+                        preserved_prompt = load_pending_learner_prompt(
+                            resolve_topic_slug(None)
+                        )
                     continue
                 if prompt.lower() in {"/q", "/quit", "/exit", "quit", "exit", "q"}:
                     break
@@ -2868,7 +2885,7 @@ def last_tutor_lesson_response(topic: Topic) -> str:
     entries = session_entries(session_log)
     for entry in reversed(entries):
         if (
-            entry["kind"] in {"lesson", "next", "resume", "review", "chat"}
+            entry["kind"] in {"lesson", "next", "resume", "review", "chat", "quiz"}
             and entry["response"].strip()
         ):
             return entry["response"].strip()
@@ -3351,6 +3368,8 @@ def advance_slide(slug: str, output_func=print, force: bool = False) -> bool:
 
 
 def tutor_response_has_advance_cue(value: object) -> bool:
+    if tutor_response_has_enter_advance_cue(value):
+        return True
     if not isinstance(value, str):
         return False
     tail = value.lower()[-600:]
@@ -3362,6 +3381,35 @@ def tutor_response_has_advance_cue(value: object) -> bool:
         r"\bwhen\s+.+\s+/done\b",
     )
     return any(re.search(pattern, tail, flags=re.DOTALL) for pattern in cue_patterns)
+
+
+def tutor_response_has_enter_advance_cue(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    section_pattern = re.compile(
+        r"(?i)^\s*(?:\*\*)?"
+        r"(Lesson|Feedback|Example|Check|Hint|Next|Action):"
+        r"(?:\*\*)?\s*(.*)$"
+    )
+    in_next_section = False
+    for line in value[-600:].splitlines():
+        section = section_pattern.match(line)
+        if section:
+            in_next_section = section.group(1).casefold() == "next"
+            line = section.group(2)
+        if in_next_section and "press enter to continue" in line.casefold():
+            return True
+    return False
+
+
+def blank_input_can_advance() -> bool:
+    try:
+        topic = read_topic(resolve_topic_slug(None))
+    except OpenLearnError:
+        return False
+    if isinstance(topic.metadata.get("pending_question"), dict):
+        return False
+    return tutor_response_has_enter_advance_cue(last_tutor_lesson_response(topic))
 
 
 def set_course_progress(slug: str, unit_value: str, slide_value: str) -> None:
@@ -5446,8 +5494,10 @@ def cmd_next(args: argparse.Namespace, output_func=print) -> int:
         "and notes. "
         "Use exactly this structure: Lesson, Example, Check. Teach one small idea, "
         "or at most two tightly related uncovered ideas, give one concrete example "
-        "or mini-drill, then ask one check-for-understanding question. End by telling "
-        "the learner to type /done when they have answered and feel ready to move on. "
+        "or mini-drill, then ask one check-for-understanding question. Do not attach "
+        "a continuation cue to an unanswered Check. After the learner answers adequately, "
+        "use **Next:** followed by: Press Enter to continue, or type what you want more "
+        "help with. "
         "Append the required hidden <!-- covered: ... --> marker from the structured lesson."
         f"\n\nStructured lesson:\n{lesson_context}"
     )
@@ -5467,7 +5517,9 @@ def cmd_chapter_quiz(args: argparse.Namespace, output_func=print) -> int:
         f"Give a short chapter-end quiz for: {chapter}. "
         "Ask 2-3 questions that check the most important skills or concepts from that chapter. "
         "Use a mix of multiple-choice and short open-ended questions. "
-        "After the learner answers all questions, give brief feedback and tell them to type /done to start the next chapter."
+        "After the learner answers all questions adequately, give brief feedback, then use "
+        "**Next:** followed by: Press Enter to continue, or type what you want more help "
+        "with."
     )
     answer = call_openai_streaming(
         model=model, system=system_prompt(topic), user=user, output_func=output_func
@@ -8058,7 +8110,7 @@ def system_prompt(topic: Topic) -> str:
         (
             "Quick Learn mode — optimize for coverage per minute:\n"
             "- Ask at most one check per slide. After a correct or adequate answer, "
-            "affirm in one sentence and recommend moving on (default to /done) instead "
+            "affirm in one sentence and give the Enter-to-continue **Next:** cue instead "
             "of offering more probes on the same concept.\n"
             "- Do not re-teach a concept listed as already covered; if the current slide's "
             "concepts are covered, advance to the next uncovered concept for this unit.\n"
@@ -8118,10 +8170,10 @@ def system_prompt(topic: Topic) -> str:
         4. Momentum rule: if consecutive_misses >= 2, try one different explanation angle or a
            smaller worked example, then mark it for review and keep the course
            moving. Do not spiral into endless drilling on one slide.
-        5. Advance cues should fit the moment. Vary the wording naturally:
-           "want to keep moving? type /done when ready", "take a moment — use /done when this feels
-           solid", or "ask a follow-up, or use /done to continue." Do not repeat
-           one exact phrase every time.
+        5. When the learner is ready to advance, use the deterministic continuation
+           contract under **Next:**: "Press Enter to continue, or type what you want
+           more help with." Non-empty follow-up text stays on the current concept.
+           Do not use this cue while a graded **Check:** is unanswered.
         6. For visually complex CS/AI processes (search trees, probability
            graphs, neural architectures, TD backups, MCTS expansion), mention a
            relevant video or visual resource proactively when suggest_videos is
