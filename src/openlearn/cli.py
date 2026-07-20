@@ -104,10 +104,10 @@ OPENAI_RETRY_JITTER_SECONDS = 0.25
 
 DYNAMIC_METADATA_KEYS = {
     "concept_attempts",
-    "consumed_enter_advance_cue",
     "consecutive_correct",
     "consecutive_misses",
     "difficulty_tier",
+    "enter_advance_cue",
     "last_misconception",
     "quiz_answers_since_last",
     "quiz_history",
@@ -2920,7 +2920,7 @@ def enter_advance_cue_token(topic: Topic) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def mark_enter_advance_cue_consumed(
+def register_enter_advance_cue(
     metadata: dict[str, object],
     body: str,
     slug: str,
@@ -2929,9 +2929,16 @@ def mark_enter_advance_cue_consumed(
     token = enter_advance_cue_token(
         Topic(slug=slug, path=path, metadata=metadata, body=body)
     )
-    if not token or metadata.get("consumed_enter_advance_cue") == token:
+    unit = metadata.get("current_unit")
+    slide = metadata.get("current_slide")
+    if not token or not isinstance(unit, int) or not isinstance(slide, int):
         return False
-    metadata["consumed_enter_advance_cue"] = token
+    metadata["enter_advance_cue"] = {
+        "token": token,
+        "current_unit": unit,
+        "current_slide": slide,
+        "consumed": False,
+    }
     return True
 
 
@@ -3254,7 +3261,6 @@ def advance_slide(slug: str, output_func=print, force: bool = False) -> bool:
         raw_metadata, body = parse_topic(path.read_text(encoding="utf-8"))
         metadata = merge_topic_state(normalize_topic_metadata(raw_metadata, slug), load_state(slug))
         metadata = dict(metadata)
-        mark_enter_advance_cue_consumed(metadata, body, slug, path)
         pending = metadata.get("pending_question")
         if isinstance(pending, dict):
             previous_pending_question = dict(pending)
@@ -3459,8 +3465,26 @@ def claim_blank_input_advance() -> bool:
         )
         if isinstance(metadata.get("pending_question"), dict):
             return False
-        if not mark_enter_advance_cue_consumed(metadata, body, slug, path):
+        registration = metadata.get("enter_advance_cue")
+        if not isinstance(registration, dict) or registration.get("consumed") is not False:
             return False
+        token = enter_advance_cue_token(
+            Topic(slug=slug, path=path, metadata=metadata, body=body)
+        )
+        if not token or registration.get("token") != token:
+            return False
+        unit = metadata.get("current_unit")
+        slide = metadata.get("current_slide")
+        if (
+            not isinstance(unit, int)
+            or not isinstance(slide, int)
+            or registration.get("current_unit") != unit
+            or registration.get("current_slide") != slide
+        ):
+            return False
+        claimed = dict(registration)
+        claimed["consumed"] = True
+        metadata["enter_advance_cue"] = claimed
         save_state(slug, state_from_metadata(metadata))
         return True
 
@@ -3492,7 +3516,6 @@ def set_course_progress(slug: str, unit_value: str, slide_value: str) -> None:
         metadata["last_video_focus"] = None
         metadata.pop("pending_chapter_quiz", None)
         metadata.pop("pending_quiz_chapter", None)
-        mark_enter_advance_cue_consumed(metadata, body, slug, path)
         save_state(slug, state_from_metadata(metadata))
         write_text_atomic(path, format_topic(stable_metadata_for_topic(metadata), body))
 
@@ -3505,7 +3528,6 @@ def finish_pending_chapter_quiz(slug: str) -> bool:
         metadata = merge_topic_state(normalize_topic_metadata(raw_metadata, slug), load_state(slug))
         if metadata.get("pending_chapter_quiz") is not True:
             return False
-        mark_enter_advance_cue_consumed(metadata, body, slug, path)
         pending = metadata.get("pending_question")
         if isinstance(pending, dict):
             previous_pending_question = dict(pending)
@@ -7773,10 +7795,10 @@ def normalize_topic_metadata(metadata: dict[str, object], slug: str) -> dict[str
         normalized.pop("pending_question", None)
     if "active_drill" in normalized and not isinstance(normalized.get("active_drill"), str):
         normalized.pop("active_drill", None)
-    if "consumed_enter_advance_cue" in normalized and not isinstance(
-        normalized.get("consumed_enter_advance_cue"), str
+    if "enter_advance_cue" in normalized and not isinstance(
+        normalized.get("enter_advance_cue"), dict
     ):
-        normalized.pop("consumed_enter_advance_cue", None)
+        normalized.pop("enter_advance_cue", None)
     if not isinstance(normalized.get("slide_contents"), dict):
         normalized["slide_contents"] = {}
     normalized["course_options"] = course_options(normalized)
@@ -8150,6 +8172,22 @@ def append_session(
         else:
             with topic.path.open("a", encoding="utf-8") as file:
                 file.write("\n\n" + entry + "\n")
+        if kind in {"lesson", "next", "resume", "review", "chat", "quiz"} and (
+            tutor_response_has_enter_advance_cue(answer)
+        ):
+            current_text = topic.path.read_text(encoding="utf-8")
+            raw_metadata, body = parse_topic(current_text)
+            metadata = merge_topic_state(
+                normalize_topic_metadata(raw_metadata, topic.slug),
+                load_state(topic.slug),
+            )
+            if register_enter_advance_cue(
+                metadata,
+                body,
+                topic.slug,
+                topic.path,
+            ):
+                save_state(topic.slug, state_from_metadata(metadata))
 
 
 def system_prompt(topic: Topic) -> str:
@@ -8164,7 +8202,7 @@ def system_prompt(topic: Topic) -> str:
     move_prompt = tier_move_prompt(topic.metadata, tier)
     quiz_prompt = cumulative_quiz_prompt(topic.metadata)
     model_metadata = dict(topic.metadata)
-    model_metadata.pop("consumed_enter_advance_cue", None)
+    model_metadata.pop("enter_advance_cue", None)
     model_metadata.pop("pending_learner_prompt", None)
     quick_learn_prompt = (
         (

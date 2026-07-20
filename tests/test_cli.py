@@ -4686,6 +4686,108 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(cli.read_topic("vim").metadata["current_slide"], 2)
         self.assertEqual(calls, [])
 
+    def test_mastery_auto_advance_invalidates_cue_from_previous_unit(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
+        self._set_meta(
+            "vim",
+            {
+                "current_focus": "Normal mode",
+                "current_unit": 1,
+                "current_slide": 1,
+                "course_units": [
+                    {
+                        "unit": 1,
+                        "chapter": "1",
+                        "title": "Modes",
+                        "slide_count": 1,
+                        "concepts": [{"id": "normal-mode", "label": "Normal mode"}],
+                    },
+                    {
+                        "unit": 2,
+                        "chapter": "2",
+                        "title": "Saving",
+                        "slide_count": 2,
+                        "concepts": [{"id": "saving", "label": "Saving"}],
+                    },
+                ],
+            },
+        )
+        update = {
+            "last_answer_status": "correct",
+            "answer_score": 1.0,
+            "answer_kind": "production",
+            "is_transfer": True,
+            "gameable": False,
+        }
+        cue = "**Next:**\nPress Enter to continue, or type what you want more help with."
+        with (
+            mock.patch.object(cli, "call_openai", return_value="{}"),
+            mock.patch.object(cli, "parse_metadata_update", return_value=update),
+        ):
+            cli.update_learning_metadata(
+                cli.read_topic("vim"), "first transfer", "Correct.", "test-model"
+            )
+            cli.append_session(cli.read_topic("vim"), "chat", "second transfer", cue)
+            cli.update_learning_metadata(
+                cli.read_topic("vim"), "second transfer", cue, "test-model"
+            )
+        calls = []
+
+        with mock.patch.object(cli, "cmd_next", side_effect=lambda *_a, **_kw: calls.append("next")):
+            call_silent(
+                cli.run_repl,
+                input_func=iter_input(["", "/q"]),
+                output_func=lambda _text: None,
+                show_intro=False,
+            )
+
+        topic = cli.read_topic("vim")
+        self.assertEqual(topic.metadata["current_unit"], 2)
+        self.assertEqual(topic.metadata["current_slide"], 1)
+        self.assertEqual(calls, [])
+
+    def test_course_start_rewrite_invalidates_existing_enter_cue(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
+        self._set_meta(
+            "vim",
+            {
+                "current_unit": 2,
+                "current_slide": 1,
+                "course_units": [
+                    {"unit": 1, "chapter": "1", "title": "Modes", "slide_count": 2},
+                    {"unit": 2, "chapter": "2", "title": "Saving", "slide_count": 2},
+                ],
+            },
+        )
+        cue = "**Next:**\nPress Enter to continue, or type what you want more help with."
+        cli.append_session(cli.read_topic("vim"), "chat", "Ready", cue)
+        outline = textwrap.dedent(
+            """
+            Scope: Vim
+            Excludes: plugins
+            Assumptions: none
+            Units:
+            1. Modes (3 slides) - Navigate modes.
+            Concepts: Normal mode; Insert mode
+            """
+        ).strip()
+
+        cli.save_course_started(cli.read_topic("vim"), "Start the course", outline)
+        calls = []
+
+        with mock.patch.object(cli, "cmd_next", side_effect=lambda *_a, **_kw: calls.append("next")):
+            call_silent(
+                cli.run_repl,
+                input_func=iter_input(["", "/q"]),
+                output_func=lambda _text: None,
+                show_intro=False,
+            )
+
+        topic = cli.read_topic("vim")
+        self.assertEqual(topic.metadata["current_unit"], 1)
+        self.assertEqual(topic.metadata["current_slide"], 1)
+        self.assertEqual(calls, [])
+
     def test_identical_cue_on_later_tutor_turn_can_advance(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
         self._set_meta(
@@ -4716,6 +4818,36 @@ class InteractiveTests(unittest.TestCase):
 
         self.assertEqual(cli.read_topic("vim").metadata["current_slide"], 3)
         self.assertEqual(calls, ["next", "next"])
+
+    def test_enter_cue_without_registration_fails_closed(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
+        self._set_meta(
+            "vim",
+            {
+                "current_unit": 1,
+                "current_slide": 1,
+                "course_units": [
+                    {"unit": 1, "chapter": "1", "title": "Modes", "slide_count": 2}
+                ],
+            },
+        )
+        cue = "**Next:**\nPress Enter to continue, or type what you want more help with."
+        cli.append_session(cli.read_topic("vim"), "chat", "Ready", cue)
+        state = cli.load_state("vim")
+        state.pop("enter_advance_cue", None)
+        cli.save_state("vim", state)
+        calls = []
+
+        with mock.patch.object(cli, "cmd_next", side_effect=lambda *_a, **_kw: calls.append("next")):
+            call_silent(
+                cli.run_repl,
+                input_func=iter_input(["", "/q"]),
+                output_func=lambda _text: None,
+                show_intro=False,
+            )
+
+        self.assertEqual(cli.read_topic("vim").metadata["current_slide"], 1)
+        self.assertEqual(calls, [])
 
     def test_blank_enter_does_not_bypass_pending_check(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))

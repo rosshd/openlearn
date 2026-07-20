@@ -19,8 +19,10 @@ Agents changing this behavior should read `.claude/skills/openlearn-tutor-policy
 
 When the tutor has determined that the learner is ready to advance, it uses an explicit `**Next:**` cue: `Press Enter to continue, or type what you want more help with.`
 Blank Enter after that cue follows the same deterministic navigation path as `/done`, including slide advancement, chapter quizzes, coverage checks, and transition event logging.
-Each persisted tutor cue is single-use, and claiming it remains durable even if loading the next lesson fails or the learner changes progress.
-The claim identifies the originating session-entry occurrence so a later tutor turn can reuse identical cue copy safely.
+Each persisted tutor cue is registered with its session-entry occurrence and originating unit and slide.
+Blank Enter succeeds only when that exact latest occurrence remains unconsumed and the learner is still at its origin.
+Claiming the cue remains durable if loading the next lesson fails, while mastery or course rewrites invalidate it by changing position.
+A later tutor turn can reuse identical cue copy safely because it has a different occurrence token.
 Stored learner preferences remain intact.
 Any non-empty response stays on the current concept and is sent to the tutor before navigation.
 Blank Enter is a no-op without the explicit cue.
