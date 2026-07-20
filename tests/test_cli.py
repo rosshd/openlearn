@@ -4620,6 +4620,103 @@ class InteractiveTests(unittest.TestCase):
         ]
         self.assertEqual(unit_events[-1]["data"], {"from_unit": 1, "to_unit": 2})
 
+    def test_failed_next_lesson_does_not_make_enter_cue_reusable(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
+        self._set_meta(
+            "vim",
+            {
+                "current_unit": 1,
+                "current_slide": 1,
+                "course_units": [
+                    {"unit": 1, "chapter": "1", "title": "Modes", "slide_count": 3}
+                ],
+            },
+        )
+        cli.append_session(
+            cli.read_topic("vim"),
+            "chat",
+            "That is enough for this slide.",
+            "**Next:**\nPress Enter to continue, or type what you want more help with.",
+        )
+        calls = []
+
+        def failed_next(*_args, **_kwargs):
+            calls.append("next")
+            raise cli.OpenLearnError("model unavailable")
+
+        with mock.patch.object(cli, "cmd_next", side_effect=failed_next):
+            call_silent(
+                cli.run_repl,
+                input_func=iter_input(["", "", "/q"]),
+                output_func=lambda _text: None,
+                show_intro=False,
+            )
+
+        self.assertEqual(cli.read_topic("vim").metadata["current_slide"], 2)
+        self.assertEqual(calls, ["next"])
+
+    def test_progress_change_invalidates_existing_enter_cue(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
+        self._set_meta(
+            "vim",
+            {
+                "current_unit": 1,
+                "current_slide": 1,
+                "course_units": [
+                    {"unit": 1, "chapter": "1", "title": "Modes", "slide_count": 3}
+                ],
+            },
+        )
+        cli.append_session(
+            cli.read_topic("vim"),
+            "chat",
+            "That is enough for this slide.",
+            "**Next:**\nPress Enter to continue, or type what you want more help with.",
+        )
+        calls = []
+
+        with mock.patch.object(cli, "cmd_next", side_effect=lambda *_a, **_kw: calls.append("next")):
+            call_silent(
+                cli.run_repl,
+                input_func=iter_input(["/progress 1 2", "", "/q"]),
+                output_func=lambda _text: None,
+                show_intro=False,
+            )
+
+        self.assertEqual(cli.read_topic("vim").metadata["current_slide"], 2)
+        self.assertEqual(calls, [])
+
+    def test_identical_cue_on_later_tutor_turn_can_advance(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
+        self._set_meta(
+            "vim",
+            {
+                "current_unit": 1,
+                "current_slide": 1,
+                "course_units": [
+                    {"unit": 1, "chapter": "1", "title": "Modes", "slide_count": 3}
+                ],
+            },
+        )
+        cue = "**Next:**\nPress Enter to continue, or type what you want more help with."
+        cli.append_session(cli.read_topic("vim"), "chat", "First answer", cue)
+        calls = []
+
+        def append_identical_cue(*_args, **_kwargs):
+            calls.append("next")
+            cli.append_session(cli.read_topic("vim"), "next", "Next lesson", cue)
+
+        with mock.patch.object(cli, "cmd_next", side_effect=append_identical_cue):
+            call_silent(
+                cli.run_repl,
+                input_func=iter_input(["", "", "/q"]),
+                output_func=lambda _text: None,
+                show_intro=False,
+            )
+
+        self.assertEqual(cli.read_topic("vim").metadata["current_slide"], 3)
+        self.assertEqual(calls, ["next", "next"])
+
     def test_blank_enter_does_not_bypass_pending_check(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
         self._set_meta(

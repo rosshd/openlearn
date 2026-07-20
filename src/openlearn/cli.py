@@ -104,6 +104,7 @@ OPENAI_RETRY_JITTER_SECONDS = 0.25
 
 DYNAMIC_METADATA_KEYS = {
     "concept_attempts",
+    "consumed_enter_advance_cue",
     "consecutive_correct",
     "consecutive_misses",
     "difficulty_tier",
@@ -1428,7 +1429,7 @@ def run_repl(
             try:
                 deferred_updates.wait()
                 if not prompt:
-                    if blank_input_can_advance():
+                    if claim_blank_input_advance():
                         last_tutor_answer = handle_repl_command(
                             "done",
                             model=model,
@@ -2881,15 +2882,57 @@ def slide_content_prompt(topic: Topic) -> str:
 
 
 def last_tutor_lesson_response(topic: Topic) -> str:
+    entry = last_tutor_lesson_entry(topic)
+    return entry[1]["response"].strip() if entry else ""
+
+
+def last_tutor_lesson_entry(topic: Topic) -> tuple[int, dict[str, str]] | None:
     _topic_body, session_log = split_session_log(topic.body)
     entries = session_entries(session_log)
-    for entry in reversed(entries):
+    for index in range(len(entries) - 1, -1, -1):
+        entry = entries[index]
         if (
             entry["kind"] in {"lesson", "next", "resume", "review", "chat", "quiz"}
             and entry["response"].strip()
         ):
-            return entry["response"].strip()
-    return ""
+            return index, entry
+    return None
+
+
+def enter_advance_cue_token(topic: Topic) -> str:
+    occurrence = last_tutor_lesson_entry(topic)
+    if occurrence is None:
+        return ""
+    index, entry = occurrence
+    if not tutor_response_has_enter_advance_cue(entry["response"]):
+        return ""
+    payload = json.dumps(
+        {
+            "index": index,
+            "kind": entry["kind"],
+            "prompt": entry["prompt"],
+            "response": entry["response"],
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def mark_enter_advance_cue_consumed(
+    metadata: dict[str, object],
+    body: str,
+    slug: str,
+    path: Path,
+) -> bool:
+    token = enter_advance_cue_token(
+        Topic(slug=slug, path=path, metadata=metadata, body=body)
+    )
+    if not token or metadata.get("consumed_enter_advance_cue") == token:
+        return False
+    metadata["consumed_enter_advance_cue"] = token
+    return True
 
 
 def persist_current_slide_content(metadata: dict[str, object], answer: str) -> None:
@@ -3211,6 +3254,7 @@ def advance_slide(slug: str, output_func=print, force: bool = False) -> bool:
         raw_metadata, body = parse_topic(path.read_text(encoding="utf-8"))
         metadata = merge_topic_state(normalize_topic_metadata(raw_metadata, slug), load_state(slug))
         metadata = dict(metadata)
+        mark_enter_advance_cue_consumed(metadata, body, slug, path)
         pending = metadata.get("pending_question")
         if isinstance(pending, dict):
             previous_pending_question = dict(pending)
@@ -3402,14 +3446,23 @@ def tutor_response_has_enter_advance_cue(value: object) -> bool:
     return False
 
 
-def blank_input_can_advance() -> bool:
+def claim_blank_input_advance() -> bool:
     try:
-        topic = read_topic(resolve_topic_slug(None))
+        slug = resolve_topic_slug(None)
+        path = topic_path(slug)
     except OpenLearnError:
         return False
-    if isinstance(topic.metadata.get("pending_question"), dict):
-        return False
-    return tutor_response_has_enter_advance_cue(last_tutor_lesson_response(topic))
+    with file_lock(path):
+        raw_metadata, body = parse_topic(path.read_text(encoding="utf-8"))
+        metadata = merge_topic_state(
+            normalize_topic_metadata(raw_metadata, slug), load_state(slug)
+        )
+        if isinstance(metadata.get("pending_question"), dict):
+            return False
+        if not mark_enter_advance_cue_consumed(metadata, body, slug, path):
+            return False
+        save_state(slug, state_from_metadata(metadata))
+        return True
 
 
 def set_course_progress(slug: str, unit_value: str, slide_value: str) -> None:
@@ -3439,6 +3492,7 @@ def set_course_progress(slug: str, unit_value: str, slide_value: str) -> None:
         metadata["last_video_focus"] = None
         metadata.pop("pending_chapter_quiz", None)
         metadata.pop("pending_quiz_chapter", None)
+        mark_enter_advance_cue_consumed(metadata, body, slug, path)
         save_state(slug, state_from_metadata(metadata))
         write_text_atomic(path, format_topic(stable_metadata_for_topic(metadata), body))
 
@@ -3451,6 +3505,7 @@ def finish_pending_chapter_quiz(slug: str) -> bool:
         metadata = merge_topic_state(normalize_topic_metadata(raw_metadata, slug), load_state(slug))
         if metadata.get("pending_chapter_quiz") is not True:
             return False
+        mark_enter_advance_cue_consumed(metadata, body, slug, path)
         pending = metadata.get("pending_question")
         if isinstance(pending, dict):
             previous_pending_question = dict(pending)
@@ -7718,6 +7773,10 @@ def normalize_topic_metadata(metadata: dict[str, object], slug: str) -> dict[str
         normalized.pop("pending_question", None)
     if "active_drill" in normalized and not isinstance(normalized.get("active_drill"), str):
         normalized.pop("active_drill", None)
+    if "consumed_enter_advance_cue" in normalized and not isinstance(
+        normalized.get("consumed_enter_advance_cue"), str
+    ):
+        normalized.pop("consumed_enter_advance_cue", None)
     if not isinstance(normalized.get("slide_contents"), dict):
         normalized["slide_contents"] = {}
     normalized["course_options"] = course_options(normalized)
@@ -8105,6 +8164,7 @@ def system_prompt(topic: Topic) -> str:
     move_prompt = tier_move_prompt(topic.metadata, tier)
     quiz_prompt = cumulative_quiz_prompt(topic.metadata)
     model_metadata = dict(topic.metadata)
+    model_metadata.pop("consumed_enter_advance_cue", None)
     model_metadata.pop("pending_learner_prompt", None)
     quick_learn_prompt = (
         (
