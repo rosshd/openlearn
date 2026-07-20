@@ -1,5 +1,6 @@
 {
   "name": "correct_brief_answer",
+  "persona": "A concise beginner who has the right intuition but cannot yet explain it.",
   "description": "Guards against treating a brief metaphor as complete understanding.",
   "topic": "variables",
   "goal": "Understand Python variables and types",

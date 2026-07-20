@@ -1,5 +1,6 @@
 {
   "name": "off_topic_question",
+  "persona": "A curious learner who briefly detours from the active lesson.",
   "description": "Guards against ignoring a learner's side question or losing the lesson thread.",
   "topic": "sorting",
   "goal": "Learn sorting algorithms",
