@@ -274,7 +274,7 @@ def _seed_scenario(
         topic = cli.read_topic(slug)
         cli.append_session(topic, "chat", prompt, tutor_text)
         topic = cli.read_topic(slug)
-        cli.save_pending_question(topic, tutor_text, "")
+        cli.save_pending_question(topic, tutor_text, "", question_text=tutor_text)
         history.append({"learner": prompt, "tutor": tutor_text})
         pending_learner = ""
 
