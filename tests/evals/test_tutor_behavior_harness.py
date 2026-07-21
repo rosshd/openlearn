@@ -164,6 +164,71 @@ def test_run_evaluation_preserves_failed_verdict_and_redacts_credentials(
     assert _read_jsonl(outcome.evidence_dir / "turns.jsonl")[0]["judge"]["pass"] is False
 
 
+def test_answer_first_scenarios_record_prior_focus_and_same_turn_struggling_move(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tutor_systems: dict[str, str] = {}
+    call_order: list[tuple[str, str]] = []
+
+    def fake_streaming(model: str, system: str, user: str, output_func) -> str:
+        call_order.append(("tutor", user))
+        tutor_systems[user] = system
+        return "**Feedback:**\nTargeted feedback from the updated learner state."
+
+    def fake_call(model: str, system: str, user: str) -> str:
+        if system != cli.METADATA_EXTRACTOR_SYSTEM:
+            return json.dumps({"pass": True, "score": 0.9, "reason": "Policy followed."})
+        scenario = "functions" if "result the function sends back" in user else "pointers"
+        call_order.append(("judge", scenario))
+        if "result the function sends back" in user:
+            return json.dumps(
+                {
+                    "message_kind": "answer",
+                    "last_answer_status": "correct",
+                    "answer_score": 1.0,
+                    "answer_kind": "production",
+                    "is_transfer": True,
+                }
+            )
+        return json.dumps(
+            {
+                "message_kind": "answer",
+                "last_answer_status": "needs_work",
+                "answer_score": 0.2,
+                "answer_kind": "production",
+                "answer_gap": "memory addresses",
+            }
+        )
+
+    monkeypatch.setattr(cli, "call_openai_streaming", fake_streaming)
+    monkeypatch.setattr(cli, "call_openai", fake_call)
+
+    outcome = run_evaluation(
+        tmp_path / "run",
+        tutor_model="tutor-model",
+        judge_model="judge-model",
+        scenario_ids=["correct_full_answer", "prerequisite_gap"],
+    )
+    records = {
+        record["scenario"]: record
+        for record in _read_jsonl(outcome.evidence_dir / "turns.jsonl")
+    }
+
+    correct_events = records["correct_full_answer"]["events"]
+    answer_event = next(event for event in correct_events if event["event_type"] == "answer_judged")
+    assert answer_event["data"]["current_focus"] == "return values"
+    assert call_order[:2] == [
+        ("judge", "functions"),
+        ("tutor", records["correct_full_answer"]["learner_message"]),
+    ]
+    gap_system = tutor_systems[
+        "I think *p just means the pointer variable's name. I don't really get what an address is."
+    ]
+    assert "Tier move: struggling" in gap_system
+    assert "Address this prerequisite gap before continuing: memory addresses" in gap_system
+
+
 def test_run_evaluation_rejects_existing_output_root(
     tmp_path: Path,
     mocked_providers: dict[str, list[str]],

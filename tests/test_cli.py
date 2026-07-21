@@ -3580,6 +3580,226 @@ class InteractiveTests(unittest.TestCase):
         self.assertIn("Use h j k l for movement.", topic.body)
         self.assertIsNone(cli.load_pending_learner_prompt("vim"))
 
+    def test_ask_topic_judges_answer_before_generating_tutor_move(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Python", goal="Learn functions"))
+        path = cli.topic_path("python")
+        metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+        metadata = dict(metadata)
+        metadata["current_focus"] = "return values"
+        metadata["pending_question"] = {
+            "kind": "free_response",
+            "question": "What does a return value do?",
+            "created": cli.today(),
+        }
+        path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
+        calls = []
+
+        def fake_judge(*_args, **_kwargs) -> str:
+            calls.append("judge")
+            return json.dumps(
+                {
+                    "message_kind": "answer",
+                    "last_answer_status": "correct",
+                    "answer_score": 1.0,
+                    "answer_kind": "production",
+                    "is_transfer": True,
+                    "current_focus": "parameters and arguments",
+                }
+            )
+
+        def fake_stream(*_args, system: str, **_kwargs) -> str:
+            calls.append("tutor")
+            self.assertIn('"last_answer_status": "correct"', system)
+            self.assertIn('"current_focus": "return values"', system)
+            return "**Next:**\nPress Enter to continue, or type what you want more help with."
+
+        with (
+            mock.patch.object(cli, "call_openai", side_effect=fake_judge),
+            mock.patch.object(cli, "call_openai_streaming", side_effect=fake_stream),
+            mock.patch.object(cli, "maybe_suggest_videos"),
+        ):
+            cli.ask_topic(
+                "python",
+                "It sends the computed result back to the caller.",
+                "test-model",
+                output_func=lambda _text: None,
+            )
+
+        updated = cli.read_topic("python")
+        self.assertEqual(calls, ["judge", "tutor"])
+        self.assertEqual(updated.metadata["current_focus"], "return values")
+        self.assertIn("return-values", updated.metadata["concept_attempts"])
+        self.assertNotIn("parameters-and-arguments", updated.metadata["concept_attempts"])
+
+    def test_ask_topic_uses_partial_and_incorrect_judgments_for_same_turn_move(self) -> None:
+        cases = (
+            (
+                "partial",
+                0.5,
+                {"misconception": "return prints instead of returning"},
+                "on_track",
+                "return prints instead of returning",
+            ),
+            (
+                "needs_work",
+                0.2,
+                {"answer_gap": "function call stack"},
+                "struggling",
+                "function call stack",
+            ),
+        )
+        for status, score, detail, tier, expected_detail in cases:
+            with self.subTest(status=status):
+                slug = cli.slugify(f"python-{status}")
+                call_silent(
+                    cli.cmd_new,
+                    Namespace(topic=slug, goal="Learn functions"),
+                )
+                path = cli.topic_path(slug)
+                metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+                metadata = dict(metadata)
+                metadata["current_focus"] = "return values"
+                metadata["pending_question"] = {
+                    "kind": "free_response",
+                    "question": "What does return do?",
+                    "created": cli.today(),
+                }
+                path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
+                captured_system = []
+
+                def fake_stream(*_args, system: str, **_kwargs) -> str:
+                    captured_system.append(system)
+                    return "**Feedback:**\nLet us work through that."
+
+                judgment = {
+                    "message_kind": "answer",
+                    "last_answer_status": status,
+                    "answer_score": score,
+                    "answer_kind": "production",
+                    **detail,
+                }
+                with (
+                    mock.patch.object(cli, "call_openai", return_value=json.dumps(judgment)),
+                    mock.patch.object(cli, "call_openai_streaming", side_effect=fake_stream),
+                    mock.patch.object(cli, "maybe_suggest_videos"),
+                ):
+                    cli.ask_topic(
+                        slug, "My attempt", "test-model", output_func=lambda _text: None
+                    )
+
+                system = captured_system[0]
+                self.assertIn(f'"last_answer_status": "{status}"', system)
+                self.assertIn(f'"difficulty_tier": "{tier}"', system)
+                self.assertIn(expected_detail, system)
+
+    def test_ask_topic_does_not_grade_unrelated_request_with_pending_question(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Python", goal="Learn functions"))
+        path = cli.topic_path("python")
+        metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+        metadata = dict(metadata)
+        metadata["current_focus"] = "return values"
+        metadata["pending_question"] = {
+            "kind": "free_response",
+            "question": "What does return do?",
+            "created": cli.today(),
+        }
+        path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
+
+        unrelated = {
+            "message_kind": "request",
+            "last_answer_status": "correct",
+            "answer_score": 1.0,
+            "known_add": ["return values"],
+        }
+        captured_system = []
+
+        def fake_stream(*_args, system: str, **_kwargs) -> str:
+            captured_system.append(system)
+            return "**Lesson:**\nHere is how to configure your editor."
+
+        with (
+            mock.patch.object(cli, "call_openai", return_value=json.dumps(unrelated)),
+            mock.patch.object(
+                cli,
+                "call_openai_streaming",
+                side_effect=fake_stream,
+            ),
+            mock.patch.object(cli, "maybe_suggest_videos"),
+        ):
+            cli.ask_topic(
+                "python",
+                "Can you help configure my editor?",
+                "test-model",
+                output_func=lambda _text: None,
+            )
+
+        updated = cli.read_topic("python")
+        self.assertEqual(updated.metadata["last_answer_status"], "")
+        self.assertNotIn("return values", updated.metadata["known"])
+        self.assertIn("pending_question", updated.metadata)
+        self.assertIn("classified as request, not as an answer", captured_system[0])
+
+    def test_ask_topic_navigation_bypasses_answer_judge(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Python", goal="Learn functions"))
+        path = cli.topic_path("python")
+        metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+        metadata = dict(metadata)
+        metadata["pending_question"] = {
+            "kind": "free_response",
+            "question": "What does return do?",
+            "created": cli.today(),
+        }
+        path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
+
+        with (
+            mock.patch.object(cli, "call_openai") as judge,
+            mock.patch.object(
+                cli,
+                "call_openai_streaming",
+                return_value="**Next:**\nPress Enter to continue, or type what you want more help with.",
+            ),
+            mock.patch.object(cli, "maybe_suggest_videos"),
+        ):
+            cli.ask_topic("python", "move on", "test-model", output_func=lambda _text: None)
+
+        judge.assert_not_called()
+
+    def test_ask_topic_judge_failure_preserves_pending_answer_and_generates_safely(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Python", goal="Learn functions"))
+        path = cli.topic_path("python")
+        metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+        metadata = dict(metadata)
+        metadata["current_focus"] = "return values"
+        metadata["pending_question"] = {
+            "kind": "free_response",
+            "question": "What does return do?",
+            "created": cli.today(),
+        }
+        path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
+        captured_system = []
+
+        def fake_stream(*_args, system: str, **_kwargs) -> str:
+            captured_system.append(system)
+            return "**Feedback:**\nI saved your answer, but could not grade it yet."
+
+        with (
+            mock.patch.object(cli, "call_openai", side_effect=cli.OpenLearnError("offline")),
+            mock.patch.object(cli, "call_openai_streaming", side_effect=fake_stream),
+            mock.patch.object(cli, "maybe_suggest_videos"),
+        ):
+            cli.ask_topic(
+                "python",
+                "It returns a value to the caller.",
+                "test-model",
+                output_func=lambda _text: None,
+            )
+
+        updated = cli.read_topic("python")
+        self.assertEqual(updated.metadata["last_answer_status"], "")
+        self.assertIn("pending_question", updated.metadata)
+        self.assertIn("It returns a value to the caller.", updated.body)
+        self.assertIn('"pending_question"', captured_system[0])
+
     def test_repl_prompts_before_metadata_update_finishes_and_joins_before_next_turn(
         self,
     ) -> None:
