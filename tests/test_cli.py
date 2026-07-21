@@ -1646,6 +1646,48 @@ class ProviderResponseTests(unittest.TestCase):
         self.assertEqual(payload["max_tokens"], cli.DEFAULT_MAX_TOKENS)
         self.assertIs(payload["include_reasoning"], False)
 
+    def test_answer_judge_uses_bounded_json_request(self) -> None:
+        os.environ["OPENAI_API_KEY"] = "sk-test"
+        requests = []
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def read(self):
+                return json.dumps(
+                    {"choices": [{"message": {"content": '{"message_kind":"answer"}'}}]}
+                ).encode()
+
+        def fake_urlopen(request, timeout=0):
+            requests.append((request, timeout))
+            return FakeResponse()
+
+        with mock.patch.object(cli, "urlopen", side_effect=fake_urlopen):
+            result = cli.call_openai_judgment("extractor-model", "system", "user")
+
+        payload = json.loads(requests[0][0].data.decode("utf-8"))
+        self.assertEqual(result, '{"message_kind":"answer"}')
+        self.assertEqual(payload["max_tokens"], cli.JUDGE_MAX_TOKENS)
+        self.assertEqual(requests[0][1], cli.JUDGE_TIMEOUT_SECONDS)
+
+    def test_answer_judge_bound_does_not_retry_provider_failure(self) -> None:
+        os.environ["OPENAI_API_KEY"] = "sk-test"
+        attempts = []
+
+        def fail_once(_request, timeout=0):
+            attempts.append(timeout)
+            raise cli.URLError("offline")
+
+        with mock.patch.object(cli, "urlopen", side_effect=fail_once):
+            with self.assertRaisesRegex(cli.OpenLearnError, "offline"):
+                cli.call_openai_judgment("extractor-model", "system", "user")
+
+        self.assertEqual(attempts, [cli.JUDGE_TIMEOUT_SECONDS])
+
     def test_call_openai_retries_transient_failures_then_succeeds(self) -> None:
         previous_key = os.environ.get("OPENAI_API_KEY")
         os.environ["OPENAI_API_KEY"] = "sk-test"
@@ -3799,6 +3841,216 @@ class InteractiveTests(unittest.TestCase):
         self.assertIn("pending_question", updated.metadata)
         self.assertIn("It returns a value to the caller.", updated.body)
         self.assertIn('"pending_question"', captured_system[0])
+
+    def test_incomplete_answer_judgment_does_not_reuse_stale_answer_state(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Python", goal="Learn functions"))
+        path = cli.topic_path("python")
+        metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+        metadata = dict(metadata)
+        metadata.update(
+            {
+                "current_focus": "return values",
+                "last_answer_status": "correct",
+                "last_answer_score": 1.0,
+                "consecutive_correct": 2,
+                "pending_question": {
+                    "kind": "free_response",
+                    "question": "What does return do?",
+                    "focus": "return values",
+                    "concept_id": "return-values",
+                    "created": cli.today(),
+                },
+            }
+        )
+        cli.write_topic(path, metadata, body)
+        events_before = cli.load_event_log(cli.topic_events_path("python"))
+
+        with mock.patch.object(
+            cli,
+            "call_openai",
+            return_value=json.dumps({"message_kind": "answer"}),
+        ):
+            result = cli.update_learning_metadata(
+                cli.read_topic("python"),
+                "It gives back something.",
+                "**Check:** What does return do?",
+                "test-model",
+            )
+
+        updated = cli.read_topic("python")
+        self.assertEqual(result, "")
+        self.assertEqual(updated.metadata["last_answer_status"], "correct")
+        self.assertEqual(updated.metadata["last_answer_score"], 1.0)
+        self.assertEqual(updated.metadata["consecutive_correct"], 2)
+        self.assertIn("pending_question", updated.metadata)
+        self.assertNotIn("concept_attempts", updated.metadata)
+        self.assertEqual(
+            cli.load_event_log(cli.topic_events_path("python")),
+            events_before,
+        )
+
+    def test_incomplete_model_judgment_uses_multiple_choice_answer_key(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Python", goal="Learn functions"))
+        path = cli.topic_path("python")
+        metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+        metadata = dict(metadata)
+        metadata["current_focus"] = "return values"
+        cli.write_topic(path, metadata, body)
+        cli.save_pending_question(
+            cli.read_topic("python"),
+            "",
+            "B",
+            question_text="Which keyword sends a value back?\nA) print\nB) return\nC) def\nD) pass",
+        )
+
+        with mock.patch.object(
+            cli,
+            "call_openai",
+            return_value=json.dumps({"message_kind": "answer"}),
+        ):
+            result = cli.update_learning_metadata(
+                cli.read_topic("python"),
+                "B",
+                "**Check:** Which keyword sends a value back?",
+                "test-model",
+            )
+
+        updated = cli.read_topic("python")
+        self.assertEqual(result, "answer")
+        self.assertEqual(updated.metadata["last_answer_status"], "correct")
+        self.assertEqual(updated.metadata["last_answer_score"], 1.0)
+        self.assertNotIn("pending_question", updated.metadata)
+
+    def test_successful_judge_rolls_back_when_tutor_generation_fails(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Python", goal="Learn functions"))
+        path = cli.topic_path("python")
+        metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+        metadata = dict(metadata)
+        metadata["current_focus"] = "return values"
+        cli.write_topic(path, metadata, body)
+        topic = cli.read_topic("python")
+        cli.save_pending_question(
+            topic,
+            "",
+            "",
+            question_text="What does a return value do?",
+        )
+        cli.save_pending_learner_prompt("python", "It sends a result to the caller.")
+        before = cli.read_topic("python")
+        events_before = cli.load_event_log(cli.topic_events_path("python"))
+        judgment = {
+            "message_kind": "answer",
+            "last_answer_status": "correct",
+            "answer_score": 1.0,
+            "answer_kind": "production",
+            "is_transfer": True,
+        }
+
+        with (
+            mock.patch.object(cli, "call_openai", return_value=json.dumps(judgment)),
+            mock.patch.object(
+                cli,
+                "call_openai_streaming",
+                side_effect=cli.OpenLearnError("tutor unavailable"),
+            ),
+        ):
+            with self.assertRaisesRegex(cli.OpenLearnError, "tutor unavailable"):
+                cli.ask_topic(
+                    "python",
+                    "It sends a result to the caller.",
+                    "test-model",
+                    output_func=lambda _text: None,
+                    pending_learner_prompt="It sends a result to the caller.",
+                )
+
+        restored = cli.read_topic("python")
+        self.assertEqual(restored.metadata["pending_question"], before.metadata["pending_question"])
+        self.assertEqual(restored.metadata["last_answer_status"], before.metadata["last_answer_status"])
+        self.assertNotIn("concept_attempts", restored.metadata)
+        self.assertEqual(
+            cli.load_pending_learner_prompt("python"),
+            "It sends a result to the caller.",
+        )
+        self.assertEqual(
+            cli.load_event_log(cli.topic_events_path("python")),
+            events_before,
+        )
+        judge_prompts = []
+
+        def retry_judge(_model: str, _system: str, user: str) -> str:
+            judge_prompts.append(user)
+            return json.dumps(judgment)
+
+        with (
+            mock.patch.object(cli, "call_openai", side_effect=retry_judge),
+            mock.patch.object(
+                cli,
+                "call_openai_streaming",
+                return_value="**Feedback:**\nCorrect.",
+            ),
+            mock.patch.object(cli, "maybe_suggest_videos"),
+        ):
+            cli.ask_topic(
+                "python",
+                "It sends a result to the caller.",
+                "test-model",
+                output_func=lambda _text: None,
+                pending_learner_prompt="It sends a result to the caller.",
+            )
+
+        self.assertIn("What does a return value do?", judge_prompts[0])
+        self.assertIsNone(cli.load_pending_learner_prompt("python"))
+        self.assertTrue(
+            any(
+                event["event_type"] == "answer_judged"
+                for event in cli.load_event_log(cli.topic_events_path("python"))
+            )
+        )
+
+    def test_pending_question_focus_controls_consecutive_attempt_attribution(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Python", goal="Learn functions"))
+        path = cli.topic_path("python")
+        original_call_openai = cli.call_openai
+        try:
+            for focus, ambient in (("return values", "parameters"), ("parameters", "scope")):
+                topic = cli.read_topic("python")
+                metadata = dict(topic.metadata)
+                metadata["current_focus"] = focus
+                cli.write_topic(path, metadata, topic.body)
+                topic = cli.read_topic("python")
+                cli.save_pending_question(
+                    topic,
+                    "",
+                    "",
+                    question_text=f"Explain {focus}.",
+                )
+                pending = cli.read_topic("python").metadata["pending_question"]
+                self.assertEqual(pending["focus"], focus)
+                metadata = dict(cli.read_topic("python").metadata)
+                metadata["current_focus"] = ambient
+                cli.write_topic(path, metadata, cli.read_topic("python").body)
+                cli.call_openai = lambda *_args, **_kwargs: json.dumps(
+                    {
+                        "message_kind": "answer",
+                        "last_answer_status": "correct",
+                        "answer_score": 1.0,
+                        "answer_kind": "production",
+                        "is_transfer": True,
+                    }
+                )
+                cli.update_learning_metadata(
+                    cli.read_topic("python"),
+                    f"Explanation of {focus}",
+                    f"**Check:** Explain {focus}.",
+                    "test-model",
+                )
+        finally:
+            cli.call_openai = original_call_openai
+
+        attempts = cli.read_topic("python").metadata["concept_attempts"]
+        self.assertEqual(attempts["return-values"]["attempts"], 1)
+        self.assertEqual(attempts["parameters"]["attempts"], 1)
+        self.assertNotIn("scope", attempts)
 
     def test_repl_prompts_before_metadata_update_finishes_and_joins_before_next_turn(
         self,
