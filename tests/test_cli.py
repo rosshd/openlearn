@@ -7352,6 +7352,46 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(run_calls, [(["nvim", str(drill_path)], True)])
         self.assertTrue(any("Drill saved:" in line for line in output))
         self.assertTrue(any("Opened in nvim" in line for line in output))
+        activity = cli.load_state("python")["active_activity"]
+        self.assertEqual(activity["status"], "active")
+        self.assertEqual(activity["purpose"], "practice")
+        self.assertEqual(set(activity["domain_payload"]), {"coding"})
+        activity_events = [
+            event["event_type"]
+            for event in cli.load_event_log(cli.topic_events_path("python"))
+            if str(event["event_type"]).startswith("activity_")
+        ]
+        self.assertEqual(
+            activity_events[-3:],
+            ["activity_proposed", "activity_accepted", "activity_active"],
+        )
+
+    def test_activity_proposal_and_cancellation_have_no_external_side_effects(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Python", goal="practice functions"))
+        request = {
+            "domain": "coding",
+            "kind": "python_drill",
+            "objective": "Practice a small function.",
+            "concept_ids": ["functions"],
+            "requested_evidence": ["pytest_result"],
+            "scaffolding_level": 1,
+            "purpose": "practice",
+            "domain_payload": {
+                "title": "Small Function",
+                "language": "python",
+                "tool_requests": [{"action": "create_drill_workspace", "payload": {}}],
+            },
+        }
+
+        activity = cli.propose_topic_activity("python", request)
+        drill_root = cli.topics_dir() / "drills" / "python"
+
+        self.assertFalse(drill_root.exists())
+        with self.assertRaisesRegex(cli.OpenLearnError, "explicit learner confirmation"):
+            cli.accept_topic_activity("python", activity, learner_confirmed=False)
+        cancelled = cli.transition_topic_activity("python", activity, "cancelled")
+        self.assertEqual(cancelled["status"], "cancelled")
+        self.assertFalse(drill_root.exists())
 
     def test_drill_editor_keeps_multi_argument_command_and_path_separate(self) -> None:
         path = Path(self.home.name) / "drill with spaces.py"
@@ -7478,7 +7518,47 @@ class InteractiveTests(unittest.TestCase):
             run_calls[0][0], [sys.executable, "-m", "pytest", str(drill_path), "-v", "--tb=short"]
         )
         self.assertIn("FAILED test_case_1", captured_prompt[0])
+        self.assertIn("do not claim mastery", captured_prompt[0])
         self.assertTrue(any("fix the return value" in line for line in output))
+        migrated = cli.load_state("python")["active_activity"]
+        self.assertEqual(migrated["domain"], "coding")
+        self.assertEqual(migrated["status"], "active")
+        self.assertEqual(len(migrated["evidence_refs"]), 1)
+
+    def test_successful_coding_activity_records_evidence_without_mastery(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Arrays", goal="practice arrays"))
+        original_run = cli.subprocess.run
+        original_call_openai = cli.call_openai
+        cli.subprocess.run = lambda _args, check: None
+        try:
+            cli.handle_repl_command("drill --leetcode", output_func=lambda _text: None)
+        finally:
+            cli.subprocess.run = original_run
+
+        def fake_run(_args, capture_output=False, text=False):
+            return types.SimpleNamespace(returncode=0, stdout="1 passed", stderr="")
+
+        cli.subprocess.run = fake_run
+        cli.call_openai = lambda *_args, **_kwargs: "Good attempt. Try a transfer case next."
+        try:
+            result = cli.cmd_check(
+                Namespace(topic="arrays", model=None), output_func=lambda _text: None
+            )
+        finally:
+            cli.subprocess.run = original_run
+            cli.call_openai = original_call_openai
+
+        self.assertEqual(result, 0)
+        state = cli.load_state("arrays")
+        activity = state["active_activity"]
+        self.assertEqual(activity["status"], "completed")
+        self.assertEqual(len(activity["evidence_refs"]), 1)
+        self.assertNotIn("mastery", activity)
+        events = cli.load_event_log(cli.topic_events_path("arrays"))
+        evidence = [event for event in events if event["event_type"] == "activity_evidence_recorded"]
+        self.assertEqual(evidence[-1]["data"]["mastery_update_applied"], False)
+        self.assertEqual(set(evidence[-1]["data"]["domain_evidence"]), {"coding"})
+        self.assertNotIn("mastery_changed", [event["event_type"] for event in events])
 
     def test_enable_drill_tests_replaces_only_standalone_guard_line(self) -> None:
         path = Path(self.home.name) / "drill.py"

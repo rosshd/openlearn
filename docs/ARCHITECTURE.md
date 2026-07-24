@@ -50,6 +50,31 @@ Pending questions may be multiple choice with an answer key, multiple choice wit
 Learner preferences capture explicit navigation choices such as skipped material and should constrain future tutor turns.
 Quick Learn topics also store `learning_mode`, `quick_source_type`, `quick_source_label`, and `coverage_contract` so they can remain visibly separate and enforce source-grounded concept coverage.
 
+## Practice Activities
+
+`openlearn.activities` defines the versioned, domain-neutral contract for hands-on practice.
+An activity has a stable ID, objective, concept IDs, domain and kind, requested evidence, scaffolding level, purpose, lifecycle status, resource provenance, an adapter-owned payload, and opaque evidence references.
+The purpose is either `practice` or `mastery_check`; completing either purpose does not itself change mastery.
+
+The lifecycle is `proposed` to `accepted` to `active`, followed by `completed`, `abandoned`, `cancelled`, or `failed`.
+Transitions are validated and repeated transitions to the current state are idempotent.
+Each changed state is persisted in the topic state file and projected into the append-only topic event log.
+Evidence details live only in namespaced evidence events, while activity state stores opaque evidence IDs.
+Resource source and license provenance are stored separately from learner evidence.
+
+The built-in adapter registry is explicit and does not dynamically import packages.
+Adapters own their activity kinds, payload validation, evidence kinds, and narrow semantic tool actions.
+The generic contract rejects unknown domains, unknown kinds, oversized payloads, arbitrary tool actions, and malformed JSON values before a tool can run.
+Tool execution remains application code and can happen only after the activity reaches `accepted`.
+Denied or cancelled proposals therefore have no workspace, launcher, or execution side effects.
+
+The first adapter is `coding.python_drill`.
+It allows only creating the owned drill workspace, opening the configured editor, and running the generated drill tests.
+Drill paths are checked against `learning-topics/drills/<slug>/` before execution.
+The existing `/drill` command is explicit learner consent and remains the reliable manual fallback.
+Future tutor-selected proposals must show the proposal and obtain an explicit learner acceptance before dispatch.
+Instrument and electronics shapes are contract fixtures only; their tools are not implemented.
+
 ## Model Calls
 
 Model-backed commands send only selected-topic context:

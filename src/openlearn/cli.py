@@ -26,6 +26,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path, PureWindowsPath
+from uuid import uuid4
 from urllib.parse import urlencode, urlparse
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -34,6 +35,17 @@ from platformdirs import user_data_dir
 
 from openlearn import __version__
 from openlearn import stats as stats_metrics
+from openlearn.activities import (
+    ActivityContractError,
+    ActivityRegistry,
+    accept_activity,
+    activity_event_data,
+    attach_evidence_reference,
+    propose_activity,
+    transition_activity,
+    validate_activity,
+)
+from openlearn.coding_activities import CodingActivityAdapter
 from openlearn.course_templates import (
     CourseTemplateError,
     CourseTemplateNotFoundError,
@@ -5864,6 +5876,189 @@ def restore_prejudgment_turn_state(
             write_text_atomic(state_path, state_text)
 
 
+def built_in_activity_registry() -> ActivityRegistry:
+    """Return the explicit built-in adapter set.
+
+    Constructing the registry is cheap and avoids process-global plugin state.
+    """
+    return ActivityRegistry((CodingActivityAdapter(),))
+
+
+def propose_topic_activity(slug: str, request: dict[str, object]) -> dict[str, object]:
+    """Persist a validated proposal without performing an external side effect."""
+    try:
+        activity = propose_activity(request, built_in_activity_registry())
+    except ActivityContractError as exc:
+        raise OpenLearnError(str(exc)) from exc
+    state = load_state(slug)
+    existing = state.get("active_activity")
+    if isinstance(existing, dict):
+        try:
+            current = validate_activity(existing)
+        except ActivityContractError:
+            current = None
+        if current is not None and current.get("status") not in {
+            "completed",
+            "abandoned",
+            "cancelled",
+            "failed",
+        }:
+            raise OpenLearnError("another practice activity is already in progress")
+    state["active_activity"] = activity
+    save_state(slug, state)
+    log_event(slug, "activity_proposed", activity_event_data(activity))
+    return activity
+
+
+def transition_topic_activity(
+    slug: str,
+    activity: dict[str, object],
+    target: str,
+    *,
+    reason: str = "",
+) -> dict[str, object]:
+    """Persist one idempotent lifecycle transition and its append-only event."""
+    if target == "accepted":
+        raise OpenLearnError("use accept_topic_activity with explicit learner confirmation")
+    try:
+        updated, changed = transition_activity(activity, target, reason=reason)
+    except ActivityContractError as exc:
+        raise OpenLearnError(str(exc)) from exc
+    if not changed:
+        return updated
+    state = load_state(slug)
+    persisted = state.get("active_activity")
+    if not isinstance(persisted, dict) or persisted.get("activity_id") != activity.get(
+        "activity_id"
+    ):
+        raise OpenLearnError("practice activity state changed; reload before continuing")
+    if persisted.get("revision") != activity.get("revision"):
+        raise OpenLearnError("practice activity revision changed; reload before continuing")
+    state["active_activity"] = updated
+    save_state(slug, state)
+    log_event(
+        slug,
+        f"activity_{target}",
+        activity_event_data(updated, previous_status=str(activity["status"])),
+    )
+    return updated
+
+
+def accept_topic_activity(
+    slug: str,
+    activity: dict[str, object],
+    *,
+    learner_confirmed: bool,
+) -> dict[str, object]:
+    """Persist acceptance only after an explicit learner action."""
+    try:
+        updated, changed = accept_activity(activity, learner_confirmed=learner_confirmed)
+    except ActivityContractError as exc:
+        raise OpenLearnError(str(exc)) from exc
+    if not changed:
+        return updated
+    state = load_state(slug)
+    persisted = state.get("active_activity")
+    if not isinstance(persisted, dict) or persisted.get("revision") != activity.get("revision"):
+        raise OpenLearnError("practice activity revision changed; reload before accepting")
+    state["active_activity"] = updated
+    save_state(slug, state)
+    log_event(
+        slug,
+        "activity_accepted",
+        activity_event_data(updated, previous_status=str(activity["status"])),
+    )
+    return updated
+
+
+def active_topic_activity(
+    slug: str, *, domain: str | None = None, kind: str | None = None
+) -> dict[str, object] | None:
+    raw = load_state(slug).get("active_activity")
+    if not isinstance(raw, dict):
+        return None
+    try:
+        activity = validate_activity(raw)
+    except ActivityContractError as exc:
+        raise OpenLearnError(f"invalid saved practice activity: {exc}") from exc
+    if domain is not None and activity.get("domain") != domain:
+        return None
+    if kind is not None and activity.get("kind") != kind:
+        return None
+    if activity.get("status") not in {"active", "completed"}:
+        return None
+    return activity
+
+
+def record_topic_activity_evidence(
+    slug: str,
+    activity: dict[str, object],
+    evidence_kind: str,
+    domain_payload: dict[str, object],
+) -> dict[str, object]:
+    """Persist domain evidence in an event and only its opaque reference in state."""
+    try:
+        adapter = built_in_activity_registry().adapter_for(str(activity["domain"]))
+        evidence = adapter.validate_evidence(evidence_kind, domain_payload)
+        evidence_id = f"evidence_{uuid4().hex}"
+        updated, changed = attach_evidence_reference(activity, evidence_id)
+    except ActivityContractError as exc:
+        raise OpenLearnError(str(exc)) from exc
+    if not changed:
+        return updated
+    state = load_state(slug)
+    persisted = state.get("active_activity")
+    if not isinstance(persisted, dict) or persisted.get("revision") != activity.get("revision"):
+        raise OpenLearnError("practice activity revision changed; reload before recording evidence")
+    state["active_activity"] = updated
+    save_state(slug, state)
+    log_event(
+        slug,
+        "activity_evidence_recorded",
+        {
+            **activity_event_data(updated),
+            "evidence_id": evidence_id,
+            "evidence_kind": evidence_kind,
+            "domain_evidence": {str(activity["domain"]): evidence},
+            "mastery_update_applied": False,
+        },
+    )
+    return updated
+
+
+def coding_drill_concept_ids(topic: Topic) -> list[str]:
+    focus = topic.metadata.get("current_focus")
+    if isinstance(focus, str) and focus.strip():
+        return [concept_id_for_focus(topic.metadata, focus)]
+    return [concept_key(str(topic.metadata.get("topic") or topic.slug))]
+
+
+def ensure_coding_drill_activity(topic: Topic, drill_path: Path) -> dict[str, object]:
+    """Migrate a legacy active drill into the activity contract on explicit /check."""
+    existing = active_topic_activity(topic.slug, domain="coding", kind="python_drill")
+    if existing is not None:
+        return existing
+    activity = propose_topic_activity(
+        topic.slug,
+        {
+            "domain": "coding",
+            "kind": "python_drill",
+            "objective": f"Complete the existing coding drill {drill_path.stem}.",
+            "concept_ids": coding_drill_concept_ids(topic),
+            "requested_evidence": ["pytest_result"],
+            "scaffolding_level": 1,
+            "purpose": "practice",
+            "domain_payload": {
+                "title": drill_path.stem,
+                "language": "python",
+                "tool_requests": [{"action": "run_drill_tests", "payload": {}}],
+            },
+        },
+    )
+    activity = accept_topic_activity(topic.slug, activity, learner_confirmed=True)
+    return transition_topic_activity(topic.slug, activity, "active")
+
+
 def cmd_drill(args: argparse.Namespace, output_func=print) -> int:
     topic = read_topic(resolve_topic_slug(args.topic))
     set_active_topic(topic.slug)
@@ -5874,12 +6069,58 @@ def cmd_drill(args: argparse.Namespace, output_func=print) -> int:
         user = drill_generation_prompt(topic)
         raw = call_openai_with_status(model, system_prompt(topic), user, retry_status=output_func)
         drill = parse_drill_json(raw)
-    path = write_drill_file(topic.slug, drill)
-    save_active_drill(topic.slug, path)
+    previous_activity = active_topic_activity(topic.slug, domain="coding", kind="python_drill")
+    if previous_activity is not None and previous_activity.get("status") == "active":
+        transition_topic_activity(
+            topic.slug,
+            previous_activity,
+            "abandoned",
+            reason="replaced by a new learner-requested drill",
+        )
+    activity = propose_topic_activity(
+        topic.slug,
+        {
+            "domain": "coding",
+            "kind": "python_drill",
+            "objective": str(drill["description"]),
+            "concept_ids": coding_drill_concept_ids(topic),
+            "requested_evidence": ["pytest_result"],
+            "scaffolding_level": 1,
+            "purpose": "practice",
+            "domain_payload": {
+                "title": str(drill["title"]),
+                "language": "python",
+                "tool_requests": [
+                    {"action": "create_drill_workspace", "payload": {}},
+                    {"action": "open_configured_editor", "payload": {}},
+                    {"action": "run_drill_tests", "payload": {}},
+                ],
+            },
+        },
+    )
+    # Entering /drill is the learner's explicit consent. Proposal APIs remain
+    # side-effect free for future tutor-selected activities.
+    activity = accept_topic_activity(topic.slug, activity, learner_confirmed=True)
+    try:
+        path = write_drill_file(topic.slug, drill)
+        save_active_drill(topic.slug, path)
+    except (OSError, OpenLearnError) as exc:
+        transition_topic_activity(topic.slug, activity, "failed", reason=str(exc))
+        raise OpenLearnError(f"could not create drill workspace: {exc}") from exc
+    activity = transition_topic_activity(topic.slug, activity, "active")
     output_func(f"Drill saved: {path}")
     try:
         editor = open_drill_in_editor(path)
     except OpenLearnError as exc:
+        log_event(
+            topic.slug,
+            "activity_tool_failed",
+            {
+                **activity_event_data(activity),
+                "tool_action": "open_configured_editor",
+                "error": str(exc)[:500],
+            },
+        )
         output_func(str(exc))
         return 0
     output_func(f"Opened in {editor}. Solve the function, then type /check.")
@@ -5889,15 +6130,30 @@ def cmd_drill(args: argparse.Namespace, output_func=print) -> int:
 def cmd_check(args: argparse.Namespace, output_func=print) -> int:
     topic = read_topic(resolve_topic_slug(args.topic))
     drill_path = active_drill_path(topic)
+    activity = ensure_coding_drill_activity(topic, drill_path)
     enable_drill_tests(drill_path)
-    result = subprocess.run(
-        [sys.executable, "-m", "pytest", str(drill_path), "-v", "--tb=short"],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "pytest", str(drill_path), "-v", "--tb=short"],
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        transition_topic_activity(topic.slug, activity, "failed", reason=str(exc))
+        raise OpenLearnError(f"could not run drill tests: {exc}") from exc
     output = "\n".join(part for part in [result.stdout.strip(), result.stderr.strip()] if part)
+    activity = record_topic_activity_evidence(
+        topic.slug,
+        activity,
+        "pytest_result",
+        {"return_code": result.returncode, "summary": output[:4_000]},
+    )
+    if result.returncode == 0:
+        activity = transition_topic_activity(topic.slug, activity, "completed")
     user = (
-        "The learner attempted this drill. "
+        "The learner attempted a practice activity. Activity completion and test "
+        "output are candidate evidence only; do not claim mastery or advance solely "
+        "because the activity completed. "
         f"Pytest return code: {result.returncode}\n\n"
         f"Here is the pytest output:\n{output or '(no output)'}\n\n"
         "Give specific feedback on what failed and why. If tests passed, briefly "
@@ -6079,6 +6335,9 @@ def active_drill_path(topic: Topic) -> Path:
     path = Path(value).expanduser().resolve()
     if not path.exists() or not path.is_file():
         raise OpenLearnError(f"active drill file not found: {path}")
+    owned_root = (topics_dir() / "drills" / topic.slug).resolve()
+    if not path.is_relative_to(owned_root):
+        raise OpenLearnError(f"active drill is outside its owned workspace: {path}")
     return path
 
 
