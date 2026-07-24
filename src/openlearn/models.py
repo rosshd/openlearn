@@ -23,3 +23,6 @@ class TopicSummary:
 class PendingContext:
     filename: str
     text: str
+    source_path: Path | None = None
+    source_root: Path | None = None
+    source_checksum: str | None = None
