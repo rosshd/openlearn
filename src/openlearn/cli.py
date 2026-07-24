@@ -426,6 +426,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     config_set_base_url.set_defaults(func=cmd_config_set_base_url)
 
+    config_set_editor = config_sub.add_parser(
+        "set-editor",
+        help="Save the editor command as an argument list",
+    )
+    config_set_editor.add_argument(
+        "editor",
+        nargs=argparse.REMAINDER,
+        help="Editor command and arguments, for example: code --wait",
+    )
+    config_set_editor.set_defaults(func=cmd_config_set_editor)
+
     config_clear_key = config_sub.add_parser("clear-key", help="Remove the saved API key")
     config_clear_key.set_defaults(func=cmd_config_clear_key)
 
@@ -1793,6 +1804,7 @@ def cmd_config_show(_args: argparse.Namespace) -> int:
     print(f"Model: {model}")
     print(f"Extractor model: {extractor_model}")
     print(f"Base URL: {base_url}")
+    print(f"Editor: {shlex.join(configured_editor_argv(config))}")
     if env_key:
         print(f"API key: set by OPENAI_API_KEY ({mask_key(env_key)})")
     elif isinstance(saved_key, str) and saved_key:
@@ -1837,6 +1849,19 @@ def cmd_config_set_base_url(args: argparse.Namespace) -> int:
     config["base_url"] = base_url
     write_config(config)
     print(f"Base URL: {base_url}")
+    return 0
+
+
+def cmd_config_set_editor(args: argparse.Namespace) -> int:
+    editor = list(args.editor)
+    if editor and editor[0] == "--":
+        editor = editor[1:]
+    if not editor or any(not isinstance(arg, str) or not arg for arg in editor):
+        raise OpenLearnError("editor command cannot be empty")
+    config = read_config()
+    config["editor"] = editor
+    write_config(config)
+    print(f"Editor: {shlex.join(editor)}")
     return 0
 
 
@@ -4708,8 +4733,8 @@ def cmd_active(args: argparse.Namespace) -> int:
 def cmd_edit(args: argparse.Namespace) -> int:
     topic = read_topic(resolve_topic_slug(args.topic))
     set_active_topic(topic.slug)
-    editor = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "nvim"
-    os.execvp(editor, [editor, str(topic.path)])
+    editor = configured_editor_argv()
+    os.execvp(editor[0], [*editor, str(topic.path)])
     return 0
 
 
@@ -5120,7 +5145,7 @@ def _finish_source_import(
 def cmd_paste(args: argparse.Namespace) -> int:
     topic = read_topic(slugify(args.topic))
     set_active_topic(topic.slug)
-    editor = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "nvim"
+    editor = configured_editor_argv()
     requested_suffix = Path(args.name).suffix.lower()
     suffix = requested_suffix if requested_suffix in {".txt", ".md"} else ".txt"
     with tempfile.NamedTemporaryFile(
@@ -5129,7 +5154,7 @@ def cmd_paste(args: argparse.Namespace) -> int:
         temp_path = Path(temp_file.name)
         temp_file.write("")
     try:
-        subprocess.run([editor, str(temp_path)], check=False)
+        subprocess.run([*editor, str(temp_path)], check=False)
         text = temp_path.read_text(encoding="utf-8")
     finally:
         with contextlib.suppress(FileNotFoundError):
@@ -5207,9 +5232,13 @@ def cmd_drill(args: argparse.Namespace, output_func=print) -> int:
         drill = parse_drill_json(raw)
     path = write_drill_file(topic.slug, drill)
     save_active_drill(topic.slug, path)
-    open_drill_in_editor(path)
     output_func(f"Drill saved: {path}")
-    output_func("Open it in VS Code, solve the function, then type /check.")
+    try:
+        editor = open_drill_in_editor(path)
+    except OpenLearnError as exc:
+        output_func(str(exc))
+        return 0
+    output_func(f"Opened in {editor}. Solve the function, then type /check.")
     return 0
 
 
@@ -5417,9 +5446,17 @@ def enable_drill_tests(path: Path) -> None:
     write_text_atomic(path, updated)
 
 
-def open_drill_in_editor(path: Path) -> None:
-    with contextlib.suppress(OSError):
-        subprocess.Popen(["code", str(path)])
+def open_drill_in_editor(path: Path) -> str:
+    editor = configured_editor_argv()
+    editor_label = shlex.join(editor)
+    command = [*editor, str(path)]
+    try:
+        subprocess.run(command, check=True)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise OpenLearnError(
+            f"Could not open drill with {editor_label}: {exc}. Open manually: {path}"
+        ) from exc
+    return editor_label
 
 
 def curated_drill(topic: Topic) -> dict[str, object]:
@@ -6667,6 +6704,31 @@ def configured_base_url(config: dict[str, object] | None = None) -> str:
     return base_url.rstrip("/") if isinstance(base_url, str) and base_url else DEFAULT_BASE_URL
 
 
+def configured_editor_argv(config: dict[str, object] | None = None) -> list[str]:
+    config = read_config() if config is None else config
+    saved_editor = config.get("editor")
+    if saved_editor is not None:
+        if (
+            not isinstance(saved_editor, list)
+            or not saved_editor
+            or any(not isinstance(arg, str) or not arg for arg in saved_editor)
+        ):
+            raise OpenLearnError("config editor must be a non-empty argument list")
+        return list(saved_editor)
+
+    for name in ("EDITOR", "VISUAL"):
+        value = os.environ.get(name)
+        if not value:
+            continue
+        try:
+            editor = shlex.split(value, posix=os.name != "nt")
+        except ValueError as exc:
+            raise OpenLearnError(f"invalid {name} editor command: {exc}") from exc
+        if editor:
+            return editor
+    return ["nvim"]
+
+
 def configured_openai_api_key() -> str | None:
     env_key = os.environ.get("OPENAI_API_KEY")
     if env_key:
@@ -7205,8 +7267,8 @@ def choose_context_file(input_func, output_func, slug: str, title: str) -> Path 
 
 
 def open_context_file(path: Path) -> None:
-    editor = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "nvim"
-    subprocess.run([editor, str(path)], check=False)
+    editor = configured_editor_argv()
+    subprocess.run([*editor, str(path)], check=False)
 
 
 def read_topic(slug: str) -> Topic:
