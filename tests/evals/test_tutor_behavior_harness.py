@@ -47,6 +47,8 @@ def mocked_providers(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[str]]:
     def fake_call(model: str, system: str, user: str) -> str:
         calls["models"].append(model)
         if system == cli.METADATA_EXTRACTOR_SYSTEM:
+            if "best Python IDE" in user:
+                return json.dumps({"message_kind": "question"})
             return json.dumps(
                 {
                     "last_answer_status": "partial",
@@ -108,9 +110,11 @@ def test_run_evaluation_uses_isolated_homes_and_writes_reviewable_evidence(
     assert all(record["persona"] for record in turns)
     assert all(record["learner_message"] for record in turns)
     assert all(record["tutor_response"] for record in turns)
-    assert all(record["state_delta"] for record in turns)
+    assert all("state_delta" in record for record in turns)
+    assert any(record["state_delta"] for record in turns)
     assert all(record["judge"]["pass"] is True for record in turns)
     assert all(record["state_assertions"]["pass"] is True for record in turns)
+    assert all(record["event_assertions"]["pass"] is True for record in turns)
     assert all(record["provenance"]["judge_model"] == "judge-model" for record in turns)
     assert all(
         Path(record["provenance"]["openlearn_home"]).is_relative_to(run_root / "homes")
@@ -282,15 +286,86 @@ def test_off_topic_scenario_requires_empty_pending_question_state(
         "pass": False,
         "checks": [
             {
+                "field": "last_answer_status",
+                "expected": "",
+                "actual": "",
+                "pass": True,
+            },
+            {
                 "field": "pending_question",
                 "expected": None,
                 "actual": record["state_delta"]["pending_question"]["after"],
                 "pass": False,
-            }
+            },
         ],
         "reason": "One or more deterministic state assertions failed.",
     }
     assert "off_topic_question - FAIL" in (
+        outcome.evidence_dir / "summary.md"
+    ).read_text(encoding="utf-8")
+
+
+def test_off_topic_scenario_rejects_durable_answer_judgment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_ask_topic(
+        slug: str,
+        prompt: str,
+        model: str,
+        output_func,
+    ) -> str:
+        cli.log_event(
+            slug,
+            "answer_judged",
+            {
+                "status": "correct",
+                "score": 1.0,
+                "learner_prompt": prompt,
+            },
+        )
+        return (
+            "**Feedback:** A popular Python IDE can be useful, depending on your needs.\n"
+            "**Next:** Let us return to sorting algorithms."
+        )
+
+    monkeypatch.setattr(cli, "ask_topic", fake_ask_topic)
+    monkeypatch.setattr(
+        cli,
+        "call_openai",
+        lambda model, system, user: json.dumps(
+            {
+                "pass": True,
+                "score": 0.9,
+                "reason": "The visible response satisfies the conversational rubric.",
+            }
+        ),
+    )
+
+    outcome = run_evaluation(
+        tmp_path / "run",
+        tutor_model="tutor-model",
+        judge_model="judge-model",
+        scenario_ids=["off_topic_question"],
+    )
+    record = _read_jsonl(outcome.evidence_dir / "turns.jsonl")[0]
+
+    assert outcome.passed is False
+    assert record["judge"]["pass"] is True
+    assert record["state_assertions"]["pass"] is True
+    assert record["event_assertions"] == {
+        "pass": False,
+        "checks": [
+            {
+                "event_type": "answer_judged",
+                "expected_count": 0,
+                "actual_count": 1,
+                "pass": False,
+            }
+        ],
+        "reason": "One or more deterministic event assertions failed.",
+    }
+    assert "Events: One or more deterministic event assertions failed." in (
         outcome.evidence_dir / "summary.md"
     ).read_text(encoding="utf-8")
 

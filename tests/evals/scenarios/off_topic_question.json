@@ -9,7 +9,11 @@
     {"role": "assistant", "content": null}
   ],
   "state_assertions": {
-    "pending_question": null
+    "pending_question": null,
+    "last_answer_status": ""
+  },
+  "event_assertions": {
+    "forbidden_types": ["answer_judged"]
   },
   "rubric": [
     "tutor briefly answers the off-topic question",
