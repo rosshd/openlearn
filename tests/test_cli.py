@@ -11964,12 +11964,77 @@ class RepeatedMissProgressionTests(unittest.TestCase):
         self.assertNotIn("pending_remediation", metadata)
         self.assertNotIn("pending_question", metadata)
         self.assertEqual(metadata["consecutive_misses"], 0)
+        record = metadata["concept_attempts"]["pointer-dereference"]
+        self.assertNotIn("remediation_stage", record)
+        self.assertEqual(record["remediation_misses"], 0)
         events = cli.load_event_log(cli.topic_events_path("pointers"))
         skip_events = [
             event for event in events if event["event_type"] == "remediation_skipped"
         ]
         self.assertEqual(len(skip_events), 1)
         self.assertEqual(skip_events[0]["data"]["reason"], "explicit_navigation")
+
+        self.grade("correct", 1.0)
+        self.grade("correct", 1.0)
+        self.grade("correct", 1.0)
+        mastered = cli.read_topic("pointers").metadata
+        self.assertTrue(mastered["concept_attempts"]["pointer-dereference"]["mastered"])
+
+    def test_defer_updates_strong_ebisu_once_and_repeated_update_is_idempotent(
+        self,
+    ) -> None:
+        strong_model = [20.0, 1.0, 30.0]
+        missed_model = [1.0, 20.0, 1.0]
+        metadata: dict[str, object] = {
+            "review_due": [
+                {
+                    "concept": "pointer dereference",
+                    "due": "2099-01-01",
+                    "difficulty": "easy",
+                    "ebisu_model": strong_model,
+                }
+            ],
+            "pending_question": {"kind": "free_response", "question": "Explain it."},
+        }
+
+        with mock.patch.object(
+            cli,
+            "update_ebisu_model",
+            return_value=missed_model,
+        ) as update_model:
+            events: list[tuple[str, dict[str, object]]] = []
+            for _ in range(4):
+                events = cli.update_remediation_progress(
+                    metadata,
+                    concept_id="pointer-dereference",
+                    focus="pointer dereference",
+                    status="needs_work",
+                    score=0.1,
+                    answer_gap=None,
+                )
+
+            self.assertEqual(update_model.call_count, 1)
+            self.assertEqual(update_model.call_args.args[:2], (strong_model, "missed"))
+            review = metadata["review_due"][0]
+            self.assertEqual(review["ebisu_model"], missed_model)
+            self.assertEqual(review["difficulty"], "missed")
+            self.assertEqual(
+                [event_type for event_type, _data in events],
+                ["remediation_progressed", "concept_deferred"],
+            )
+            deferred = dict(metadata["pending_remediation"])
+            repeated_events = cli.update_remediation_progress(
+                metadata,
+                concept_id="pointer-dereference",
+                focus="pointer dereference",
+                status="needs_work",
+                score=0.1,
+                answer_gap=None,
+            )
+
+        self.assertEqual(repeated_events, [])
+        self.assertEqual(metadata["pending_remediation"], deferred)
+        self.assertEqual(update_model.call_count, 1)
 
 
 if __name__ == "__main__":

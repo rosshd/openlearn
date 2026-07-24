@@ -1831,6 +1831,14 @@ def learner_preference_from_advance(prompt: str) -> str:
 def clear_learning_gate(metadata: dict[str, object]) -> None:
     metadata["last_answer_status"] = ""
     metadata["consecutive_misses"] = 0
+    remediation = metadata.get("pending_remediation")
+    if isinstance(remediation, dict):
+        concept_id = remediation.get("concept_id")
+        attempts = metadata.get("concept_attempts")
+        record = attempts.get(concept_id) if isinstance(attempts, dict) else None
+        if isinstance(record, dict):
+            record.pop("remediation_stage", None)
+            record["remediation_misses"] = 0
     for key in (
         "last_answer_gap",
         "last_answer_hint",
@@ -4729,6 +4737,11 @@ def update_remediation_progress(
                 },
             )
         ]
+    if previous is not None and previous.get("stage") == "deferred":
+        metadata["pending_remediation"] = previous
+        metadata.pop("pending_question", None)
+        metadata.pop("pending_hint", None)
+        return []
 
     prior_misses = coerce_int(previous.get("misses"), 0) if previous is not None else 0
     misses = prior_misses + 1
@@ -4774,13 +4787,13 @@ def update_remediation_progress(
             )
         )
     if stage == "deferred":
-        schedule_review_item(metadata, label, "missed")
-        due = remediation_review_due(metadata, label)
-        if due:
-            state["deferred_review_due"] = due
         metadata.pop("pending_question", None)
         metadata.pop("pending_hint", None)
         if previous_stage != "deferred":
+            schedule_review_item(metadata, label, "missed", update_ebisu=True)
+            due = remediation_review_due(metadata, label)
+            if due:
+                state["deferred_review_due"] = due
             events.append(
                 (
                     "concept_deferred",
