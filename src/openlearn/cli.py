@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import contextlib
 import getpass
 import hashlib
@@ -5869,6 +5870,7 @@ def restore_prejudgment_turn_state(
         write_text_atomic(topic.path, topic_text)
     state_path = topic_state_path(topic.slug)
     with file_lock(state_path):
+        _recover_activity_update_locked(topic.slug)
         if state_text is None:
             with contextlib.suppress(FileNotFoundError):
                 state_path.unlink()
@@ -5884,29 +5886,114 @@ def built_in_activity_registry() -> ActivityRegistry:
     return ActivityRegistry((CodingActivityAdapter(),))
 
 
+def _validated_persisted_activity(value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise OpenLearnError("saved practice activity must be an object")
+    try:
+        return validate_activity(value, built_in_activity_registry())
+    except ActivityContractError as exc:
+        raise OpenLearnError(f"invalid saved practice activity: {exc}") from exc
+
+
+def _activity_update_checkpoint(_stage: str) -> None:
+    """Test seam for simulating process failure between durable boundaries."""
+
+
+def _activity_update_journal(
+    slug: str,
+    state_after: dict[str, object],
+    event_type: str,
+    event_data: dict[str, object],
+) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "update_id": f"activity_update_{uuid4().hex}",
+        "slug": slug,
+        "state_after": state_after,
+        "event_type": event_type,
+        "event_data": event_data,
+        "event_ts": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _persist_activity_update_locked(
+    slug: str,
+    state_after: dict[str, object],
+    event_type: str,
+    event_data: dict[str, object],
+) -> None:
+    journal = _activity_update_journal(slug, state_after, event_type, event_data)
+    journal_path = topic_activity_journal_path(slug)
+    write_text_atomic(journal_path, json.dumps(journal, indent=2, sort_keys=True) + "\n")
+    _activity_update_checkpoint("after_journal")
+    write_text_atomic(
+        topic_state_path(slug), json.dumps(state_after, indent=2, sort_keys=True) + "\n"
+    )
+    _activity_update_checkpoint("after_state")
+    _append_activity_event_once(slug, journal)
+    _activity_update_checkpoint("after_event")
+    journal_path.unlink(missing_ok=True)
+
+
+def _assert_activity_cas(
+    persisted: object,
+    expected: dict[str, object],
+) -> dict[str, object]:
+    current = _validated_persisted_activity(persisted)
+    if current["activity_id"] != expected.get("activity_id"):
+        raise OpenLearnError("practice activity ID changed; reload before continuing")
+    if current["revision"] != expected.get("revision"):
+        raise OpenLearnError("practice activity revision changed; reload before continuing")
+    return current
+
+
+def _commit_activity_change(
+    slug: str,
+    expected: dict[str, object],
+    updated: dict[str, object],
+    event_type: str,
+    event_data: dict[str, object],
+    *,
+    changed: bool,
+) -> dict[str, object]:
+    path = topic_state_path(slug)
+    with file_lock(path):
+        _recover_activity_update_locked(slug)
+        state = _load_state_unlocked(slug)
+        _assert_activity_cas(state.get("active_activity"), expected)
+        if not changed:
+            return _validated_persisted_activity(state["active_activity"])
+        _validated_persisted_activity(updated)
+        state["active_activity"] = updated
+        _persist_activity_update_locked(slug, state, event_type, event_data)
+    return updated
+
+
 def propose_topic_activity(slug: str, request: dict[str, object]) -> dict[str, object]:
     """Persist a validated proposal without performing an external side effect."""
     try:
         activity = propose_activity(request, built_in_activity_registry())
     except ActivityContractError as exc:
         raise OpenLearnError(str(exc)) from exc
-    state = load_state(slug)
-    existing = state.get("active_activity")
-    if isinstance(existing, dict):
-        try:
-            current = validate_activity(existing)
-        except ActivityContractError:
-            current = None
-        if current is not None and current.get("status") not in {
-            "completed",
-            "abandoned",
-            "cancelled",
-            "failed",
-        }:
-            raise OpenLearnError("another practice activity is already in progress")
-    state["active_activity"] = activity
-    save_state(slug, state)
-    log_event(slug, "activity_proposed", activity_event_data(activity))
+    _validated_persisted_activity(activity)
+    path = topic_state_path(slug)
+    with file_lock(path):
+        _recover_activity_update_locked(slug)
+        state = _load_state_unlocked(slug)
+        existing = state.get("active_activity")
+        if existing is not None:
+            current = _validated_persisted_activity(existing)
+            if current.get("status") not in {
+                "completed",
+                "abandoned",
+                "cancelled",
+                "failed",
+            }:
+                raise OpenLearnError("another practice activity is already in progress")
+        state["active_activity"] = activity
+        _persist_activity_update_locked(
+            slug, state, "activity_proposed", activity_event_data(activity)
+        )
     return activity
 
 
@@ -5921,27 +6008,18 @@ def transition_topic_activity(
     if target == "accepted":
         raise OpenLearnError("use accept_topic_activity with explicit learner confirmation")
     try:
-        updated, changed = transition_activity(activity, target, reason=reason)
+        current = validate_activity(activity, built_in_activity_registry())
+        updated, changed = transition_activity(current, target, reason=reason)
     except ActivityContractError as exc:
         raise OpenLearnError(str(exc)) from exc
-    if not changed:
-        return updated
-    state = load_state(slug)
-    persisted = state.get("active_activity")
-    if not isinstance(persisted, dict) or persisted.get("activity_id") != activity.get(
-        "activity_id"
-    ):
-        raise OpenLearnError("practice activity state changed; reload before continuing")
-    if persisted.get("revision") != activity.get("revision"):
-        raise OpenLearnError("practice activity revision changed; reload before continuing")
-    state["active_activity"] = updated
-    save_state(slug, state)
-    log_event(
+    return _commit_activity_change(
         slug,
+        current,
+        updated,
         f"activity_{target}",
-        activity_event_data(updated, previous_status=str(activity["status"])),
+        activity_event_data(updated, previous_status=str(current["status"])),
+        changed=changed,
     )
-    return updated
 
 
 def accept_topic_activity(
@@ -5952,35 +6030,27 @@ def accept_topic_activity(
 ) -> dict[str, object]:
     """Persist acceptance only after an explicit learner action."""
     try:
-        updated, changed = accept_activity(activity, learner_confirmed=learner_confirmed)
+        current = validate_activity(activity, built_in_activity_registry())
+        updated, changed = accept_activity(current, learner_confirmed=learner_confirmed)
     except ActivityContractError as exc:
         raise OpenLearnError(str(exc)) from exc
-    if not changed:
-        return updated
-    state = load_state(slug)
-    persisted = state.get("active_activity")
-    if not isinstance(persisted, dict) or persisted.get("revision") != activity.get("revision"):
-        raise OpenLearnError("practice activity revision changed; reload before accepting")
-    state["active_activity"] = updated
-    save_state(slug, state)
-    log_event(
+    return _commit_activity_change(
         slug,
+        current,
+        updated,
         "activity_accepted",
-        activity_event_data(updated, previous_status=str(activity["status"])),
+        activity_event_data(updated, previous_status=str(current["status"])),
+        changed=changed,
     )
-    return updated
 
 
 def active_topic_activity(
     slug: str, *, domain: str | None = None, kind: str | None = None
 ) -> dict[str, object] | None:
     raw = load_state(slug).get("active_activity")
-    if not isinstance(raw, dict):
+    if raw is None:
         return None
-    try:
-        activity = validate_activity(raw)
-    except ActivityContractError as exc:
-        raise OpenLearnError(f"invalid saved practice activity: {exc}") from exc
+    activity = _validated_persisted_activity(raw)
     if domain is not None and activity.get("domain") != domain:
         return None
     if kind is not None and activity.get("kind") != kind:
@@ -5998,32 +6068,28 @@ def record_topic_activity_evidence(
 ) -> dict[str, object]:
     """Persist domain evidence in an event and only its opaque reference in state."""
     try:
-        adapter = built_in_activity_registry().adapter_for(str(activity["domain"]))
+        current = validate_activity(activity, built_in_activity_registry())
+        adapter = built_in_activity_registry().adapter_for(str(current["domain"]))
         evidence = adapter.validate_evidence(evidence_kind, domain_payload)
         evidence_id = f"evidence_{uuid4().hex}"
-        updated, changed = attach_evidence_reference(activity, evidence_id)
+        updated, changed = attach_evidence_reference(current, evidence_id)
     except ActivityContractError as exc:
         raise OpenLearnError(str(exc)) from exc
-    if not changed:
-        return updated
-    state = load_state(slug)
-    persisted = state.get("active_activity")
-    if not isinstance(persisted, dict) or persisted.get("revision") != activity.get("revision"):
-        raise OpenLearnError("practice activity revision changed; reload before recording evidence")
-    state["active_activity"] = updated
-    save_state(slug, state)
-    log_event(
+    event_data = {
+        **activity_event_data(updated),
+        "evidence_id": evidence_id,
+        "evidence_kind": evidence_kind,
+        "domain_evidence": {str(current["domain"]): evidence},
+        "mastery_update_applied": False,
+    }
+    return _commit_activity_change(
         slug,
+        current,
+        updated,
         "activity_evidence_recorded",
-        {
-            **activity_event_data(updated),
-            "evidence_id": evidence_id,
-            "evidence_kind": evidence_kind,
-            "domain_evidence": {str(activity["domain"]): evidence},
-            "mastery_update_applied": False,
-        },
+        event_data,
+        changed=changed,
     )
-    return updated
 
 
 def coding_drill_concept_ids(topic: Topic) -> list[str]:
@@ -6227,8 +6293,7 @@ def validate_drill_data(data: dict[str, object]) -> dict[str, object]:
         raise OpenLearnError("drill JSON missing description")
     if not isinstance(function_stub, str) or not function_stub.strip():
         raise OpenLearnError("drill JSON missing function_stub")
-    if not function_name_from_stub(function_stub):
-        raise OpenLearnError("drill function_stub must define one function")
+    validate_inert_function_stub(function_stub)
     if not isinstance(test_cases, list) or not test_cases:
         raise OpenLearnError("drill JSON missing test_cases")
     normalized_cases = []
@@ -6245,8 +6310,72 @@ def validate_drill_data(data: dict[str, object]) -> dict[str, object]:
 
 
 def function_name_from_stub(function_stub: str) -> str:
-    match = re.search(r"(?m)^\s*def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(", function_stub)
-    return match.group(1) if match else ""
+    try:
+        return validate_inert_function_stub(function_stub)
+    except OpenLearnError:
+        return ""
+
+
+def validate_inert_function_stub(function_stub: str) -> str:
+    """Accept only one inert function definition before writing generated code."""
+    try:
+        module = ast.parse(function_stub, mode="exec")
+    except SyntaxError as exc:
+        raise OpenLearnError(f"drill function_stub is invalid Python: {exc.msg}") from exc
+    if len(module.body) != 1 or not isinstance(module.body[0], ast.FunctionDef):
+        raise OpenLearnError("drill function_stub must contain exactly one function definition")
+    function = module.body[0]
+    if function.decorator_list:
+        raise OpenLearnError("drill function_stub decorators are not allowed")
+    arguments = [
+        *function.args.posonlyargs,
+        *function.args.args,
+        *function.args.kwonlyargs,
+    ]
+    if function.args.vararg is not None:
+        arguments.append(function.args.vararg)
+    if function.args.kwarg is not None:
+        arguments.append(function.args.kwarg)
+    if (
+        function.args.defaults
+        or any(default is not None for default in function.args.kw_defaults)
+        or function.returns is not None
+        or any(argument.annotation is not None for argument in arguments)
+        or function.type_comment is not None
+        or bool(getattr(function, "type_params", ()))
+    ):
+        raise OpenLearnError("drill function_stub defaults, annotations, and type comments are unsafe")
+    body = list(function.body)
+    if (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
+    ):
+        body.pop(0)
+    inert = len(body) == 1 and (
+        isinstance(body[0], ast.Pass) or _is_not_implemented_raise(body[0])
+    )
+    if not inert:
+        raise OpenLearnError(
+            "drill function_stub body must contain only pass or raise NotImplementedError"
+        )
+    return function.name
+
+
+def _is_not_implemented_raise(statement: ast.stmt) -> bool:
+    if not isinstance(statement, ast.Raise) or statement.cause is not None:
+        return False
+    exception = statement.exc
+    if isinstance(exception, ast.Name):
+        return exception.id == "NotImplementedError"
+    return (
+        isinstance(exception, ast.Call)
+        and isinstance(exception.func, ast.Name)
+        and exception.func.id == "NotImplementedError"
+        and not exception.args
+        and not exception.keywords
+    )
 
 
 def drill_filename(title: str) -> str:
@@ -6260,8 +6389,9 @@ def topic_drill_dir(slug: str) -> Path:
 
 
 def write_drill_file(slug: str, drill: dict[str, object]) -> Path:
-    path = unique_drill_path(slug, str(drill["title"]))
-    write_text_atomic(path, render_drill_file(drill))
+    validated = validate_drill_data(drill)
+    path = unique_drill_path(slug, str(validated["title"]))
+    write_text_atomic(path, render_drill_file(validated))
     return path
 
 
@@ -8005,6 +8135,10 @@ def topic_state_path(slug: str) -> Path:
     return topics_dir() / f"{slug}.state.json"
 
 
+def topic_activity_journal_path(slug: str) -> Path:
+    return topics_dir() / f".{slug}.activity-update.json"
+
+
 def topic_events_path(slug: str) -> Path:
     return topics_dir() / f"{slug}.events.jsonl"
 
@@ -8913,7 +9047,7 @@ def clear_active_topic() -> None:
             path.unlink(missing_ok=True)
 
 
-def load_state(slug: str) -> dict[str, object]:
+def _load_state_unlocked(slug: str) -> dict[str, object]:
     path = topic_state_path(slug)
     if not path.exists():
         return {}
@@ -8924,10 +9058,123 @@ def load_state(slug: str) -> dict[str, object]:
     return data if isinstance(data, dict) else {}
 
 
+def _validated_activity_journal(slug: str, value: object) -> dict[str, object]:
+    if not isinstance(value, dict) or set(value) != {
+        "schema_version",
+        "update_id",
+        "slug",
+        "state_after",
+        "event_type",
+        "event_data",
+        "event_ts",
+    }:
+        raise OpenLearnError("practice activity update journal is malformed")
+    if value.get("schema_version") != 1 or value.get("slug") != slug:
+        raise OpenLearnError("practice activity update journal has invalid identity")
+    update_id = value.get("update_id")
+    if not isinstance(update_id, str) or not re.fullmatch(
+        r"activity_update_[a-f0-9]{32}", update_id
+    ):
+        raise OpenLearnError("practice activity update journal has invalid update ID")
+    event_type = value.get("event_type")
+    if not isinstance(event_type, str) or not re.fullmatch(r"activity_[a-z_]+", event_type):
+        raise OpenLearnError("practice activity update journal has invalid event type")
+    state_after = value.get("state_after")
+    event_data = value.get("event_data")
+    event_ts = value.get("event_ts")
+    if not isinstance(state_after, dict) or not isinstance(event_data, dict):
+        raise OpenLearnError("practice activity update journal has invalid payload")
+    if not isinstance(event_ts, str) or parse_event_ts(event_ts) is None:
+        raise OpenLearnError("practice activity update journal has invalid timestamp")
+    activity = _validated_persisted_activity(state_after.get("active_activity"))
+    if (
+        event_data.get("activity_id") != activity["activity_id"]
+        or event_data.get("activity_revision") != activity["revision"]
+    ):
+        raise OpenLearnError("practice activity journal state and event disagree")
+    return value
+
+
+def _append_activity_event_once(slug: str, journal: dict[str, object]) -> None:
+    path = topic_events_path(slug)
+    update_id = str(journal["update_id"])
+    with file_lock(path):
+        existing = ""
+        if path.exists():
+            try:
+                existing = path.read_text(encoding="utf-8")
+            except OSError:
+                existing = ""
+        for line in existing.splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            data = event.get("data") if isinstance(event, dict) else None
+            if isinstance(data, dict) and data.get("activity_update_id") == update_id:
+                return
+        raw_data = journal.get("event_data")
+        if not isinstance(raw_data, dict):
+            raise OpenLearnError("practice activity update journal has invalid event data")
+        data = dict(raw_data)
+        data["activity_update_id"] = update_id
+        event = {
+            "schema_version": EVENT_SCHEMA_VERSION,
+            "ts": journal["event_ts"],
+            "event_type": journal["event_type"],
+            "slug": slug,
+            "data": data,
+        }
+        text = existing
+        if text and not text.endswith("\n"):
+            text += "\n"
+        text += json.dumps(event, sort_keys=True) + "\n"
+        write_text_atomic(path, text)
+
+
+def _recover_activity_update_locked(slug: str) -> None:
+    journal_path = topic_activity_journal_path(slug)
+    if not journal_path.exists():
+        return
+    try:
+        raw = json.loads(journal_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise OpenLearnError("practice activity update journal is unreadable") from exc
+    journal = _validated_activity_journal(slug, raw)
+    raw_state_after = journal.get("state_after")
+    if not isinstance(raw_state_after, dict):
+        raise OpenLearnError("practice activity update journal has invalid state")
+    state_after = dict(raw_state_after)
+    if _load_state_unlocked(slug) != state_after:
+        write_text_atomic(
+            topic_state_path(slug), json.dumps(state_after, indent=2, sort_keys=True) + "\n"
+        )
+    _append_activity_event_once(slug, journal)
+    journal_path.unlink(missing_ok=True)
+
+
+def recover_activity_update(slug: str) -> None:
+    path = topic_state_path(slug)
+    with file_lock(path):
+        _recover_activity_update_locked(slug)
+
+
+def load_state(slug: str) -> dict[str, object]:
+    path = topic_state_path(slug)
+    with file_lock(path):
+        _recover_activity_update_locked(slug)
+        return _load_state_unlocked(slug)
+
+
 def save_state(slug: str, state: dict[str, object]) -> None:
     path = topic_state_path(slug)
     with file_lock(path):
-        write_text_atomic(path, json.dumps(state, indent=2, sort_keys=True) + "\n")
+        _recover_activity_update_locked(slug)
+        existing = _load_state_unlocked(slug)
+        updated = dict(state)
+        if "active_activity" in existing:
+            updated["active_activity"] = existing["active_activity"]
+        write_text_atomic(path, json.dumps(updated, indent=2, sort_keys=True) + "\n")
 
 
 def load_pending_learner_prompt(slug: str) -> str | None:
@@ -8942,7 +9189,8 @@ def save_pending_learner_prompt(slug: str, prompt: str) -> None:
         raise OpenLearnError("pending learner prompt must be non-empty")
     path = topic_state_path(slug)
     with file_lock(path):
-        state = load_state(slug)
+        _recover_activity_update_locked(slug)
+        state = _load_state_unlocked(slug)
         state["pending_learner_prompt"] = prompt
         write_text_atomic(path, json.dumps(state, indent=2, sort_keys=True) + "\n")
 
@@ -8952,7 +9200,8 @@ def clear_pending_learner_prompt(
 ) -> bool:
     path = topic_state_path(slug)
     with file_lock(path):
-        state = load_state(slug)
+        _recover_activity_update_locked(slug)
+        state = _load_state_unlocked(slug)
         current = state.get("pending_learner_prompt")
         if expected_prompt is not None and current != expected_prompt:
             return False
@@ -8989,6 +9238,9 @@ def log_event(slug: str, event_type: str, data: dict[str, object]) -> None:
 
 
 def load_event_log(path: Path) -> list[dict[str, object]]:
+    suffix = ".events.jsonl"
+    if path.name.endswith(suffix):
+        recover_activity_update(path.name[: -len(suffix)])
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except OSError:

@@ -56,6 +56,7 @@ Practice and mastery-check purposes remain distinct throughout this flow.
 
 Cancellation and adapter failures preserve the surrounding tutor session.
 The learner can continue chatting and use manual `/drill` and `/check` fallbacks without a generic shell, arbitrary executable, or arbitrary path permission.
+Activity state and its teaching evidence recover together after an interrupted write through the durable activity-update journal.
 
 ## Learner State
 

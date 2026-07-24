@@ -7393,6 +7393,247 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(cancelled["status"], "cancelled")
         self.assertFalse(drill_root.exists())
 
+    def test_activity_journal_recovers_each_commit_boundary_exactly_once(self) -> None:
+        def request(title: str) -> dict[str, object]:
+            return {
+                "domain": "coding",
+                "kind": "python_drill",
+                "objective": "Practice a small function.",
+                "concept_ids": ["functions"],
+                "requested_evidence": ["pytest_result"],
+                "scaffolding_level": 1,
+                "purpose": "practice",
+                "domain_payload": {
+                    "title": title,
+                    "language": "python",
+                    "tool_requests": [{"action": "create_drill_workspace", "payload": {}}],
+                },
+            }
+
+        for stage in ("after_journal", "after_state", "after_event"):
+            slug = f"journal-{stage}"
+            call_silent(cli.cmd_new, Namespace(topic=slug, goal="practice functions"))
+
+            def fail_at_stage(current: str, *, target: str = stage) -> None:
+                if current == target:
+                    raise RuntimeError(f"crash at {target}")
+
+            with self.subTest(stage=stage):
+                with mock.patch.object(
+                    cli, "_activity_update_checkpoint", side_effect=fail_at_stage
+                ):
+                    with self.assertRaisesRegex(RuntimeError, f"crash at {stage}"):
+                        cli.propose_topic_activity(slug, request(stage))
+
+                recovered = cli.load_state(slug)["active_activity"]
+                self.assertEqual(recovered["status"], "proposed")
+                self.assertFalse(cli.topic_activity_journal_path(slug).exists())
+                events = [
+                    event
+                    for event in cli.load_event_log(cli.topic_events_path(slug))
+                    if event["event_type"] == "activity_proposed"
+                ]
+                self.assertEqual(len(events), 1)
+                self.assertEqual(
+                    len({event["data"]["activity_update_id"] for event in events}),
+                    1,
+                )
+
+    def test_activity_journal_recovers_an_event_write_failure(self) -> None:
+        slug = "journal-event-failure"
+        call_silent(cli.cmd_new, Namespace(topic=slug, goal="practice functions"))
+        request = {
+            "domain": "coding",
+            "kind": "python_drill",
+            "objective": "Practice a small function.",
+            "concept_ids": ["functions"],
+            "requested_evidence": ["pytest_result"],
+            "scaffolding_level": 1,
+            "purpose": "practice",
+            "domain_payload": {
+                "title": "Event failure",
+                "language": "python",
+                "tool_requests": [],
+            },
+        }
+
+        with mock.patch.object(
+            cli, "_append_activity_event_once", side_effect=OSError("disk unavailable")
+        ):
+            with self.assertRaisesRegex(OSError, "disk unavailable"):
+                cli.propose_topic_activity(slug, request)
+
+        recovered = cli.load_state(slug)["active_activity"]
+        self.assertEqual(recovered["status"], "proposed")
+        events = [
+            event
+            for event in cli.load_event_log(cli.topic_events_path(slug))
+            if event["event_type"] == "activity_proposed"
+        ]
+        self.assertEqual(len(events), 1)
+        self.assertFalse(cli.topic_activity_journal_path(slug).exists())
+
+    def test_activity_journal_creation_failure_publishes_nothing(self) -> None:
+        slug = "journal-create-failure"
+        call_silent(cli.cmd_new, Namespace(topic=slug, goal="practice functions"))
+        request = {
+            "domain": "coding",
+            "kind": "python_drill",
+            "objective": "Practice a small function.",
+            "concept_ids": ["functions"],
+            "requested_evidence": ["pytest_result"],
+            "scaffolding_level": 1,
+            "purpose": "practice",
+            "domain_payload": {
+                "title": "Journal failure",
+                "language": "python",
+                "tool_requests": [],
+            },
+        }
+        original_write = cli.write_text_atomic
+
+        def fail_journal(path: Path, text: str) -> None:
+            if path == cli.topic_activity_journal_path(slug):
+                raise OSError("journal unavailable")
+            original_write(path, text)
+
+        with mock.patch.object(cli, "write_text_atomic", side_effect=fail_journal):
+            with self.assertRaisesRegex(OSError, "journal unavailable"):
+                cli.propose_topic_activity(slug, request)
+
+        self.assertNotIn("active_activity", cli.load_state(slug))
+        self.assertFalse(cli.topic_activity_journal_path(slug).exists())
+        self.assertFalse(
+            any(
+                event["event_type"] == "activity_proposed"
+                for event in cli.load_event_log(cli.topic_events_path(slug))
+            )
+        )
+
+    def test_evidence_event_failure_recovers_without_a_dangling_reference(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Evidence Recovery", goal="practice"))
+        request = {
+            "domain": "coding",
+            "kind": "python_drill",
+            "objective": "Practice a small function.",
+            "concept_ids": ["functions"],
+            "requested_evidence": ["pytest_result"],
+            "scaffolding_level": 1,
+            "purpose": "practice",
+            "domain_payload": {"title": "Evidence", "language": "python", "tool_requests": []},
+        }
+        proposed = cli.propose_topic_activity("evidence-recovery", request)
+        accepted = cli.accept_topic_activity(
+            "evidence-recovery", proposed, learner_confirmed=True
+        )
+        active = cli.transition_topic_activity("evidence-recovery", accepted, "active")
+
+        with mock.patch.object(
+            cli, "_append_activity_event_once", side_effect=OSError("event disk full")
+        ):
+            with self.assertRaisesRegex(OSError, "event disk full"):
+                cli.record_topic_activity_evidence(
+                    "evidence-recovery",
+                    active,
+                    "pytest_result",
+                    {"return_code": 1, "summary": "failed"},
+                )
+
+        recovered = cli.load_state("evidence-recovery")["active_activity"]
+        evidence_id = recovered["evidence_refs"][0]["evidence_id"]
+        evidence_events = [
+            event
+            for event in cli.load_event_log(cli.topic_events_path("evidence-recovery"))
+            if event["event_type"] == "activity_evidence_recorded"
+        ]
+        self.assertEqual(len(evidence_events), 1)
+        self.assertEqual(evidence_events[0]["data"]["evidence_id"], evidence_id)
+        self.assertFalse(cli.topic_activity_journal_path("evidence-recovery").exists())
+
+    def test_activity_mutations_use_id_and_revision_compare_and_swap(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="CAS", goal="practice functions"))
+        request = {
+            "domain": "coding",
+            "kind": "python_drill",
+            "objective": "Practice a small function.",
+            "concept_ids": ["functions"],
+            "requested_evidence": ["pytest_result"],
+            "scaffolding_level": 1,
+            "purpose": "practice",
+            "domain_payload": {
+                "title": "CAS",
+                "language": "python",
+                "tool_requests": [],
+            },
+        }
+        proposed = cli.propose_topic_activity("cas", request)
+        stale_generic_state = cli.load_state("cas")
+        accepted = cli.accept_topic_activity("cas", proposed, learner_confirmed=True)
+
+        with self.assertRaisesRegex(cli.OpenLearnError, "revision changed"):
+            cli.accept_topic_activity("cas", proposed, learner_confirmed=True)
+
+        wrong_id = dict(accepted)
+        wrong_id["activity_id"] = "act_ffffffffffffffffffffffffffffffff"
+        with self.assertRaisesRegex(cli.OpenLearnError, "ID changed"):
+            cli.transition_topic_activity("cas", wrong_id, "active")
+
+        active = cli.transition_topic_activity("cas", accepted, "active")
+        stale_generic_state["pending_learner_prompt"] = "preserve both"
+        cli.save_state("cas", stale_generic_state)
+        after_generic_write = cli.load_state("cas")
+        self.assertEqual(after_generic_write["active_activity"]["revision"], active["revision"])
+        self.assertEqual(after_generic_write["pending_learner_prompt"], "preserve both")
+        cli.record_topic_activity_evidence(
+            "cas", active, "pytest_result", {"return_code": 1, "summary": "first"}
+        )
+        with self.assertRaisesRegex(cli.OpenLearnError, "revision changed"):
+            cli.record_topic_activity_evidence(
+                "cas", active, "pytest_result", {"return_code": 1, "summary": "second"}
+            )
+        persisted = cli.load_state("cas")["active_activity"]
+        self.assertEqual(len(persisted["evidence_refs"]), 1)
+
+    def test_corrupt_persisted_activities_fail_before_mutation_or_event_access(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Corrupt", goal="practice functions"))
+        request = {
+            "domain": "coding",
+            "kind": "python_drill",
+            "objective": "Practice a small function.",
+            "concept_ids": ["functions"],
+            "requested_evidence": ["pytest_result"],
+            "scaffolding_level": 1,
+            "purpose": "practice",
+            "domain_payload": {"title": "Safe", "language": "python", "tool_requests": []},
+        }
+        canonical = cli.propose_topic_activity("corrupt", request)
+        corruptions = {
+            "missing objective": lambda value: value.pop("objective"),
+            "bad timestamp": lambda value: value.__setitem__("updated_at", "yesterday"),
+            "empty reason": lambda value: value.__setitem__("status_reason", ""),
+            "bad evidence": lambda value: value.__setitem__(
+                "evidence_refs", [{"evidence_id": "bad", "event_type": 42}]
+            ),
+            "adapter payload": lambda value: value["domain_payload"]["coding"].__setitem__(
+                "tool_requests", [{"action": "run_arbitrary_shell", "payload": {}}]
+            ),
+            "extra field": lambda value: value.__setitem__("mastery", True),
+        }
+
+        for label, corrupt in corruptions.items():
+            with self.subTest(corruption=label):
+                value = json.loads(json.dumps(canonical))
+                corrupt(value)
+                cli.write_text_atomic(
+                    cli.topic_state_path("corrupt"),
+                    json.dumps({"active_activity": value}, indent=2) + "\n",
+                )
+                before_events = cli.load_event_log(cli.topic_events_path("corrupt"))
+                with self.assertRaisesRegex(cli.OpenLearnError, "invalid saved practice activity"):
+                    cli.active_topic_activity("corrupt")
+                after_events = cli.load_event_log(cli.topic_events_path("corrupt"))
+                self.assertEqual(after_events, before_events)
+
     def test_drill_editor_keeps_multi_argument_command_and_path_separate(self) -> None:
         path = Path(self.home.name) / "drill with spaces.py"
         calls = []
@@ -7481,6 +7722,39 @@ class InteractiveTests(unittest.TestCase):
             self.assertIn("title", validated)
             self.assertIn("function_stub", validated)
             self.assertIn("test_cases", validated)
+
+    def test_generated_drill_stub_rejects_executable_python_before_write(self) -> None:
+        base = {
+            "title": "Unsafe",
+            "description": "Do not execute generated setup code.",
+            "test_cases": [{"input": [], "expected": None}],
+        }
+        unsafe_stubs = {
+            "module prelude": "import os\ndef solve():\n    pass",
+            "module epilogue": "def solve():\n    pass\nopen('/tmp/pwned', 'w')",
+            "decorator": "@print\ndef solve():\n    pass",
+            "default call": "def solve(value=print('ran')):\n    pass",
+            "annotation call": "def solve(value: print('ran')):\n    pass",
+            "eager body": "def solve():\n    print('ran')",
+            "multiple functions": "def one():\n    pass\ndef two():\n    pass",
+        }
+
+        for label, stub in unsafe_stubs.items():
+            with self.subTest(stub=label):
+                with self.assertRaises(cli.OpenLearnError):
+                    cli.validate_drill_data({**base, "function_stub": stub})
+                with self.assertRaises(cli.OpenLearnError):
+                    cli.write_drill_file("unsafe-stub", {**base, "function_stub": stub})
+                self.assertFalse((cli.topics_dir() / "drills" / "unsafe-stub").exists())
+
+        for safe_stub in (
+            "def solve():\n    pass",
+            'def solve(value):\n    """Learner fills this in."""\n    raise NotImplementedError',
+            "def solve(*values, **options):\n    raise NotImplementedError()",
+        ):
+            with self.subTest(safe_stub=safe_stub):
+                validated = cli.validate_drill_data({**base, "function_stub": safe_stub})
+                self.assertEqual(validated["function_stub"], safe_stub)
 
     def test_check_runs_pytest_and_streams_specific_feedback(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Python", goal="practice functions"))
