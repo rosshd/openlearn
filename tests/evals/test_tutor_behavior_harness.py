@@ -767,11 +767,13 @@ def test_judge_rejects_malformed_dimension(
         _judge_response("judge-model", "prompt")
 
 
+@pytest.mark.parametrize("hard_failure", HARD_FAILURE_KEYS)
 def test_hard_failure_caps_score_and_fails_verdict(
     monkeypatch: pytest.MonkeyPatch,
+    hard_failure: str,
 ) -> None:
     hard_failures = {key: False for key in HARD_FAILURE_KEYS}
-    hard_failures["false_mastery"] = True
+    hard_failures[hard_failure] = True
     payload = _judge_payload(0.99, hard_failures=hard_failures)
     monkeypatch.setattr(cli, "call_openai", lambda model, system, prompt: json.dumps(payload))
 
@@ -779,13 +781,13 @@ def test_hard_failure_caps_score_and_fails_verdict(
 
     assert judged["pass"] is False
     assert judged["score"] == 0.49
-    assert judged["hard_failures"]["false_mastery"] is True
+    assert judged["hard_failures"][hard_failure] is True
 
 
 @pytest.mark.parametrize(
     ("score", "expected_pass"),
     [
-        (0.699, False),
+        (0.6996, False),
         (0.7, True),
     ],
 )
@@ -803,12 +805,14 @@ def test_judge_applies_aggregate_threshold(
     judged = _judge_response("judge-model", "prompt")
 
     assert judged["pass"] is expected_pass
+    if score == 0.6996:
+        assert judged["score"] == 0.7
 
 
 def test_judge_applies_per_dimension_floor(monkeypatch: pytest.MonkeyPatch) -> None:
     dimensions = _judge_payload(0.9)["dimensions"]
     dimensions["learner_action"] = {
-        "score": DIMENSION_FLOOR - 0.01,
+        "score": 0.4996,
         "evidence": "The requested action is ambiguous.",
     }
     monkeypatch.setattr(
@@ -816,6 +820,41 @@ def test_judge_applies_per_dimension_floor(monkeypatch: pytest.MonkeyPatch) -> N
         "call_openai",
         lambda model, system, prompt: json.dumps(
             _judge_payload(0.9, dimensions=dimensions)
+        ),
+    )
+
+    judged = _judge_response("judge-model", "prompt")
+
+    assert judged["score"] > 0.7
+    assert judged["dimensions"]["learner_action"]["score"] == 0.5
+    assert judged["pass"] is False
+
+
+@pytest.mark.parametrize(
+    ("shape", "failed_dimension"),
+    [
+        ("long_reteaching_after_strong_answer", "adaptation"),
+        ("prerequisite_concept_overload", "cognitive_load"),
+        ("ambiguous_recursion_edge_case", "learner_action"),
+        ("requiz_after_demonstrated_mastery", "pacing"),
+        ("unsupported_progress_claim", "state_fidelity"),
+    ],
+)
+def test_prior_false_pass_shapes_fail_despite_high_aggregate(
+    monkeypatch: pytest.MonkeyPatch,
+    shape: str,
+    failed_dimension: str,
+) -> None:
+    dimensions = _judge_payload(0.95)["dimensions"]
+    dimensions[failed_dimension] = {
+        "score": 0.2,
+        "evidence": f"This reproduces the {shape} dogfood regression.",
+    }
+    monkeypatch.setattr(
+        cli,
+        "call_openai",
+        lambda model, system, prompt: json.dumps(
+            _judge_payload(0.95, dimensions=dimensions)
         ),
     )
 

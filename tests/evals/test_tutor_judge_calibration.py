@@ -45,13 +45,12 @@ def test_tutor_judge_matches_calibration_fixture(case: dict[str, object]) -> Non
         pytest.skip(f"tutor judge calibration provider unavailable: {exc}")
 
     expected = case["expected"]
-    grade = case["grade"]
-    if grade == "good":
-        assert judged["pass"] is True, judged
-    elif grade == "bad":
-        assert judged["pass"] is False, judged
-    else:
-        assert judged["score"] <= expected["max_score"], judged
-    assert set(expected["hard_failures"]) <= {
+    assert judged["pass"] is expected["pass"], judged
+    assert judged["score"] <= expected["max_score"], judged
+    actual_failures = {
         key for key, failed in judged["hard_failures"].items() if failed
     }
+    required_failures = set(expected["hard_failures"])
+    allowed_extra_failures = set(expected.get("allowed_extra_hard_failures", []))
+    assert required_failures <= actual_failures, judged
+    assert actual_failures <= required_failures | allowed_extra_failures, judged

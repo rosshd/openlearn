@@ -147,6 +147,7 @@ def load_calibration_cases(
             raise ValueError(f"calibration case expected.pass is invalid: {name}")
         max_score = expected.get("max_score")
         expected_failures = expected.get("hard_failures")
+        allowed_extra_failures = expected.get("allowed_extra_hard_failures", [])
         if (
             not isinstance(max_score, (int, float))
             or isinstance(max_score, bool)
@@ -160,6 +161,18 @@ def load_calibration_cases(
         ):
             raise ValueError(
                 f"calibration case expected.hard_failures is invalid: {name}"
+            )
+        if (
+            not isinstance(allowed_extra_failures, list)
+            or not all(
+                failure in HARD_FAILURE_KEYS for failure in allowed_extra_failures
+            )
+            or len(allowed_extra_failures) != len(set(allowed_extra_failures))
+            or set(expected_failures) & set(allowed_extra_failures)
+        ):
+            raise ValueError(
+                "calibration case expected.allowed_extra_hard_failures "
+                f"is invalid: {name}"
             )
         names.add(name)
     return cases
@@ -616,6 +629,7 @@ def _judge_response(model: str, prompt: str) -> dict[str, object]:
     if not isinstance(dimensions, dict) or set(dimensions) != set(JUDGE_DIMENSIONS):
         raise ValueError(f"judge omitted required dimensions: {judged}")
     normalized_dimensions: dict[str, dict[str, object]] = {}
+    raw_scores: dict[str, float] = {}
     for key in JUDGE_DIMENSIONS:
         dimension = dimensions[key]
         if not isinstance(dimension, dict) or set(dimension) != {"score", "evidence"}:
@@ -630,8 +644,9 @@ def _judge_response(model: str, prompt: str) -> dict[str, object]:
             raise ValueError(f"judge dimension {key} score is invalid: {judged}")
         if not isinstance(evidence, str) or not evidence.strip():
             raise ValueError(f"judge dimension {key} omitted evidence: {judged}")
+        raw_scores[key] = float(score)
         normalized_dimensions[key] = {
-            "score": round(float(score), 3),
+            "score": round(raw_scores[key], 3),
             "evidence": evidence.strip(),
         }
     if not isinstance(hard_failures, dict) or set(hard_failures) != set(
@@ -640,13 +655,10 @@ def _judge_response(model: str, prompt: str) -> dict[str, object]:
         raise ValueError(f"judge omitted required hard failures: {judged}")
     if not all(isinstance(hard_failures[key], bool) for key in HARD_FAILURE_KEYS):
         raise ValueError(f"judge hard failures must be boolean: {judged}")
-    aggregate_score = sum(
-        float(normalized_dimensions[key]["score"]) for key in JUDGE_DIMENSIONS
-    ) / len(JUDGE_DIMENSIONS)
+    aggregate_score = sum(raw_scores.values()) / len(JUDGE_DIMENSIONS)
     base_passed = all(base_criteria[key] is True for key in BASE_CRITERION_KEYS)
     dimensions_passed = all(
-        float(normalized_dimensions[key]["score"]) >= DIMENSION_FLOOR
-        for key in JUDGE_DIMENSIONS
+        raw_scores[key] >= DIMENSION_FLOOR for key in JUDGE_DIMENSIONS
     )
     hard_failure = any(hard_failures[key] is True for key in HARD_FAILURE_KEYS)
     final_score = min(aggregate_score, 0.49) if hard_failure else aggregate_score
