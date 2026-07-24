@@ -243,7 +243,7 @@ and transition. Do not skip the label — it is required on every response.
 - When the learner is ready to advance, use **Next:** followed by exactly:
   "Press Enter to continue, or type what you want more help with."
   Never put this cue under **Check:** or attach it to an unanswered check.
-- Bold labels only at section starts (e.g. **Example:**, **Action:**).
+- Bold only the one primary label. If an Action: line is needed, keep it plain.
   Do not bold random words inside prose. Avoid tables and long headings.
 - Keep paragraphs short; prefer 1-3 compact bullets when listing ideas.
 - Use numbered lists for sequential steps and bullet lists for sets of
@@ -2538,23 +2538,14 @@ def first_lesson_prompt(outline: str) -> str:
     return (
         "Start teaching unit 1 from this accepted course plan. "
         "Do not repeat the whole plan. Teach exactly one concept. "
-        "Use exactly one Lesson section, one Example section, and at most one "
-        "Check section, then stop. Use this compact structure:\n"
-        "Lesson: teach one concept in 2-4 sentences.\n"
-        "Example: give one concrete example.\n"
-        "Check: ask one important check-for-understanding question only if the "
-        "first concept is testable now. You may omit Check for pure orientation "
-        "or foundational context.\n"
-        "If there is any ambiguity or multiple reasonable interpretations, make "
-        "the check multiple choice with one definite best answer. Use free "
-        "response for reasoning or algorithm tracing. Do not ask a question just "
-        f"to ask one. Hard limit: {FIRST_LESSON_WORD_LIMIT} words.\n"
-        "If the Check is multiple choice, append exactly this on its own line at the end: "
-        "<!-- answer: X --> where X is the correct letter. The CLI strips it before display "
-        "and uses it for grading — do not omit it. "
-        "After the answer marker, append <!-- covered: Exact concept label --> using one or "
-        "two exact labels from the current unit's Concepts: line. This marker is hidden from "
-        "the learner and is required for coverage tracking.\n\n"
+        "Use exactly one **Lesson:** section and no other primary label. "
+        "Explain the concept in 2-4 sentences. One short concrete example may "
+        "support that same concept inside the Lesson section. Do not append a "
+        "check, question, continuation cue, or learner action. "
+        f"Hard limit: {FIRST_LESSON_WORD_LIMIT} words.\n"
+        "Append <!-- covered: Exact concept label --> using one exact label from "
+        "the current unit's Concepts: line. This marker is hidden from the learner "
+        "and is required for coverage tracking.\n\n"
         f"Accepted course plan:\n{outline}"
     )
 
@@ -5254,7 +5245,11 @@ def ask_topic(
     is_review_session = topic.metadata.get("review_session_active") is True
     needs_judgment = learner_message_needs_judgment(topic.metadata, prompt)
     is_navigation = learner_requests_advance(prompt)
-    message_kind = "navigation" if is_navigation else ""
+    message_kind = (
+        "navigation"
+        if is_navigation
+        else ("" if needs_judgment else classify_ungraded_learner_message(prompt))
+    )
     queued_events: list[tuple[str, str, dict[str, object]]] = []
     topic_before_judgment = topic.path.read_text(encoding="utf-8") if needs_judgment else ""
     state_path = topic_state_path(topic.slug)
@@ -5351,6 +5346,36 @@ def learner_message_needs_judgment(metadata: dict[str, object], prompt: str) -> 
     if learner_requests_advance(prompt):
         return False
     return isinstance(metadata.get("pending_question"), dict)
+
+
+def classify_ungraded_learner_message(prompt: str) -> str:
+    """Classify a turn locally when no learning check is awaiting an answer."""
+    value = " ".join(prompt.strip().lower().split())
+    if not value:
+        return "other"
+    confusion_markers = (
+        "i don't understand",
+        "i dont understand",
+        "i'm confused",
+        "im confused",
+        "i don't get",
+        "i dont get",
+        "i'm stuck",
+        "im stuck",
+    )
+    if any(marker in value for marker in confusion_markers):
+        return "confusion"
+    if value.endswith("?") or re.match(
+        r"^(?:what|why|when|where|who|which|how|is|are|do|does|did|can|could|would|should)\b",
+        value,
+    ):
+        return "question"
+    if re.match(
+        r"^(?:please\b|show me\b|tell me\b|help me\b|explain\b|give me\b|quiz me\b)",
+        value,
+    ):
+        return "request"
+    return "other"
 
 
 def restore_prejudgment_turn_state(
@@ -5861,16 +5886,14 @@ def cmd_next(args: argparse.Namespace, output_func=print) -> int:
     model = args.model or str(topic.metadata.get("model") or configured_model())
     lesson_context = current_lesson_prompt(topic)
     user = (
-        "Continue the current slide using the slide flow below. "
+        "Continue the current slide using one primary teaching move. "
         "Stay inside the structured lesson below; do not drift to another unit "
         "or restart the course. Use the current goal, known concepts, weak spots, "
         "and notes. "
-        "Use exactly this structure: Lesson, Example, Check. Teach one small idea, "
-        "or at most two tightly related uncovered ideas, give one concrete example "
-        "or mini-drill, then ask one check-for-understanding question. Do not attach "
-        "a continuation cue to an unanswered Check. After the learner answers adequately, "
-        "use **Next:** followed by: Press Enter to continue, or type what you want more "
-        "help with. "
+        "Teach exactly one small uncovered idea under **Lesson:**. A short concrete "
+        "example may support that same idea inside the Lesson section, but do not add "
+        "a separate **Example:**, **Check:**, or **Next:** move and do not ask the learner "
+        "to do anything in this response. "
         "Append the required hidden <!-- covered: ... --> marker from the structured lesson."
         f"\n\nStructured lesson:\n{lesson_context}"
     )
@@ -8672,7 +8695,7 @@ def system_prompt(topic: Topic) -> str:
         personal, active-recall oriented, and practical. Sound like a patient
         human tutor sitting with the learner, not a report generator. Avoid
         repeating the same recap format. Prefer a natural reply, one useful
-        correction or example, and one small next move over long lectures. If
+        correction, example, check, or next move over long lectures. If
         the user asks about something outside the topic, answer normally but
         connect back to the learning goal when useful.
 
@@ -8694,33 +8717,26 @@ def system_prompt(topic: Topic) -> str:
         about unimportant details. If the learner is struggling, slow down and
         keep the response short, concrete, and confidence-building.
 
-        Slide flow — use tutor judgment instead of a fixed checklist:
-        1. Lesson: teach one small concept in 2-4 sentences. Be concrete and
-           specific to this learner's actual setup (use context files, not
-           generic defaults).
-        2. Example: give one concrete example, mini-trace, command, or workflow
-           move tied to the learner's goal.
-        3. Decide whether to check now:
-           - Skip the check for first-slide orientation, a simple definition the
-             learner just read, or when consecutive_correct >= 3 shows strong momentum.
-             Affirm briefly and give a natural next-step cue.
-           - Use multiple choice for recognition, common misconceptions, and
-             quick disambiguation with one best answer.
-           - Use free response for reasoning chains, "explain why", tracing an
-             algorithm, or synthesizing across concepts.
-           - Use hands-on action for keybindings, commands, workflow steps,
-             coding moves, or algorithm traces the learner can try directly.
-        4. Momentum rule: if consecutive_misses >= 2, try one different explanation angle or a
-           smaller worked example, then mark it for review and keep the course
-           moving. Do not spiral into endless drilling on one slide.
-        5. When the learner is ready to advance, use the deterministic continuation
+        Turn selection - choose one item, never a sequence:
+        1. New material: use **Lesson:** for one small concept in 2-4 sentences.
+           One short concrete example may support that concept inside the same
+           section. Do not append a check or continuation cue.
+        2. Retrieval or diagnosis: use **Check:** for one unambiguous question.
+           Do not teach its answer or introduce another concept in that response.
+        3. Remediation: use **Feedback:**, **Hint:**, or **Example:** for one
+           correction, scaffold, or worked example tied to the current gap.
+        4. Advancement: use **Next:** and only the deterministic continuation cue.
+        5. Momentum rule: if consecutive_misses >= 2, use one different explanation
+           angle or smaller worked example as this turn's sole move. Do not spiral
+           into endless drilling on one slide.
+        6. When the learner is ready to advance, use the deterministic continuation
            contract under **Next:**: "Press Enter to continue, or type what you want
            more help with." Non-empty follow-up text stays on the current concept.
            Do not use this cue while a graded **Check:** is unanswered.
-        6. For visually complex CS/AI processes (search trees, probability
-           graphs, neural architectures, TD backups, MCTS expansion), mention a
-           relevant video or visual resource proactively when suggest_videos is
-           enabled, especially before the learner gets stuck.
+        7. For visually complex CS/AI processes (search trees, probability
+           graphs, neural architectures, TD backups, MCTS expansion), a relevant
+           video or visual resource may support the one selected move when
+           suggest_videos is enabled. Do not add a second action.
 
         Format and question rules:
         {TUTOR_FORMAT_RULES}
@@ -8912,7 +8928,7 @@ def check_intensity_instruction(mode: str) -> str:
         "acknowledge": "Check intensity: acknowledge briefly in one sentence; do not add a graded question unless the learner asks for practice.",
         "recall": "Check intensity: ask one small active-recall prompt about the concept just taught.",
         "application": "Check intensity: ask the learner to apply the concept to a new example or explain why it works.",
-        "deep": "Check intensity: ask for one genuine attempt, then give a short worked example if needed, then one free-response check.",
+        "deep": "Check intensity: choose one free-response prompt that requires a genuine attempt; reserve any worked example for a later turn if needed.",
         "impasse": "Check intensity: manufacture a productive impasse with an edge case, novel transfer, or predict-before-I-show-you question.",
     }
     return instructions.get(mode, "")
@@ -8942,7 +8958,7 @@ def tier_move_prompt(metadata: dict[str, object], tier: str) -> str:
     frequency = profile_impasse_frequency(profile_name)
     lines = [
         "Tutoring approach for this turn:",
-        "- Teach genuinely new material first with a concise explanation or worked example; then elicit. For checks and practice, elicit before telling.",
+        "- Choose one move only. On a new-material turn, explain or illustrate one concept. On a check turn, elicit without also teaching.",
         "- Checks must require production or transfer (paraphrase, apply to a new example, predict, explain why, or find the edge case), not quoting the just-shown text.",
         "- Do not give the answer to a check before the learner tries.",
         f"- Mastery profile: {profile_name}; impasse-probe frequency: {frequency}.",
@@ -9243,7 +9259,12 @@ def _mock_openai_response(model: str, system: str, user: str) -> str:
     # First lesson must precede course-outline matching because its prompt embeds
     # the accepted course plan.
     if "start teaching unit 1" in prompt or "start teaching" in prompt or "first lesson" in prompt:
-        return "Lesson: Normal vs Insert.\nExample: Press i to enter Insert, Esc to return to Normal.\nCheck: Which mode runs commands like dd or /search? <!-- answer: B -->\nAction: Try switching modes in your editor."
+        return (
+            "**Lesson:**\nNormal vs Insert modes: Normal mode runs commands, while "
+            "Insert mode enters text. "
+            "For example, `i` enters Insert mode and `Esc` returns to Normal mode.\n"
+            "<!-- covered: Vim modes -->"
+        )
     # Course outline
     if (
         "create a concise course plan" in prompt

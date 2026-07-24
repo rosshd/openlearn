@@ -3842,6 +3842,60 @@ class InteractiveTests(unittest.TestCase):
         self.assertIn("pending_question", updated.metadata)
         self.assertIn("classified as request, not as an answer", captured_system[0])
 
+    def test_ask_topic_classifies_initial_side_question_without_judge_or_durable_state(
+        self,
+    ) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Sorting", goal="Learn algorithms"))
+        captured_system = []
+        call_order = []
+
+        def fake_stream(*_args, system: str, **_kwargs) -> str:
+            call_order.append("tutor")
+            captured_system.append(system)
+            return "**Feedback:**\nVS Code and PyCharm are both common choices."
+
+        def fake_update(*_args, **_kwargs) -> str:
+            call_order.append("metadata")
+            return json.dumps({"message_kind": "question"})
+
+        with (
+            mock.patch.object(cli, "call_openai", side_effect=fake_update),
+            mock.patch.object(cli, "call_openai_streaming", side_effect=fake_stream),
+            mock.patch.object(cli, "maybe_suggest_videos"),
+        ):
+            cli.ask_topic(
+                "sorting",
+                "What's the best Python IDE?",
+                "test-model",
+                output_func=lambda _text: None,
+            )
+
+        self.assertEqual(call_order, ["tutor", "metadata"])
+        self.assertIn(
+            "Current branch: conversational request or question",
+            captured_system[0],
+        )
+        self.assertIn(
+            "classified as question, not as an answer",
+            captured_system[0],
+        )
+        updated = cli.read_topic("sorting")
+        self.assertNotIn("current_turn_message_kind", updated.metadata)
+        self.assertEqual(updated.metadata["last_answer_status"], "")
+        self.assertNotIn("pending_question", updated.metadata)
+
+    def test_local_ungraded_classifier_preserves_navigation_and_confusion_intent(
+        self,
+    ) -> None:
+        self.assertEqual(cli.classify_ungraded_learner_message("Why heaps?"), "question")
+        self.assertEqual(cli.classify_ungraded_learner_message("Explain heaps"), "request")
+        self.assertEqual(
+            cli.classify_ungraded_learner_message("I'm confused about heaps"),
+            "confusion",
+        )
+        self.assertEqual(cli.classify_ungraded_learner_message("my notes"), "other")
+        self.assertTrue(cli.learner_requests_advance("move on"))
+
     def test_ask_topic_navigation_bypasses_answer_judge(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Python", goal="Learn functions"))
         path = cli.topic_path("python")
@@ -6818,7 +6872,7 @@ class PromptInstructionTests(unittest.TestCase):
         self.assertIn("bold-label format", captured[0])
         self.assertIn("warm, direct, and specific", captured[0])
 
-    def test_next_prompt_asks_for_learner_response(self) -> None:
+    def test_next_prompt_requests_one_lesson_move(self) -> None:
         captured = []
         topic = cli.Topic(
             slug="demo",
@@ -6871,11 +6925,12 @@ class PromptInstructionTests(unittest.TestCase):
             cli.set_active_topic = original_set_active_topic
             cli.set_review_session_active = original_set_review_session_active
 
-        self.assertIn("Use exactly this structure: Lesson, Example, Check", captured[0])
-        self.assertIn("Teach one small idea", captured[0])
-        self.assertIn("one concrete example or mini-drill", captured[0])
-        self.assertIn("Press Enter to continue", captured[0])
-        self.assertIn("Do not attach a continuation cue to an unanswered Check", captured[0])
+        self.assertIn("using one primary teaching move", captured[0])
+        self.assertIn("Teach exactly one small uncovered idea", captured[0])
+        self.assertIn("example may support that same idea", captured[0])
+        self.assertIn("do not add a separate **Example:**, **Check:**, or **Next:**", captured[0])
+        self.assertNotIn("Lesson, Example, Check", captured[0])
+        self.assertNotIn("then ask one check", captured[0])
         self.assertIn("Structured lesson:", captured[0])
         self.assertIn("Unit 2/2 · Slide 1/3", captured[0])
         self.assertIn("Unit: 1.2 Search with fzf", captured[0])
@@ -9363,19 +9418,23 @@ class PromptInstructionTests(unittest.TestCase):
         self.assertIn("stay on the same concept", normalized)
         self.assertIn("Do not advance just because the learner says no", normalized)
         self.assertIn("Do not ask filler clarifying questions", normalized)
-        self.assertIn("use tutor judgment instead of a fixed checklist", normalized)
-        self.assertIn("Skip the check for first-slide orientation", normalized)
-        self.assertIn("Use multiple choice for recognition", normalized)
-        self.assertIn("Use free response for reasoning chains", normalized)
-        self.assertIn("Use hands-on action for keybindings", normalized)
-        self.assertIn("consecutive_correct >= 3", normalized)
+        self.assertIn("Turn selection - choose one item, never a sequence", normalized)
+        self.assertIn("Do not append a check or continuation cue", normalized)
+        self.assertIn("Retrieval or diagnosis", normalized)
+        self.assertIn("Use multiple choice when testing recognition", normalized)
+        self.assertIn(
+            "Use free response when the learner needs to explain reasoning",
+            normalized,
+        )
+        self.assertIn("Use hands-on checks when the concept is a keybinding", normalized)
         self.assertIn("Momentum rule", normalized)
         self.assertIn("consecutive_misses >= 2", normalized)
-        self.assertIn("mark it for review and keep the course moving", normalized)
+        self.assertIn("as this turn's sole move", normalized)
         self.assertIn("deterministic continuation contract", normalized)
         self.assertIn("Press Enter to continue, or type what you want more help with", normalized)
         self.assertIn("Non-empty follow-up text stays on the current concept", normalized)
-        self.assertIn("mention a relevant video or visual resource proactively", normalized)
+        self.assertIn("video or visual resource may support the one selected move", normalized)
+        self.assertNotIn("Lesson, Example, Check", normalized)
         self.assertIn(cli.TUTOR_FORMAT_RULES.splitlines()[0], prompt)
 
     def test_quick_learn_prompt_prefers_enter_to_done(self) -> None:
@@ -9521,7 +9580,10 @@ class PromptInstructionTests(unittest.TestCase):
         prompt = cli.system_prompt(topic)
 
         self.assertIn("Tutoring approach for this turn:", prompt)
-        self.assertIn("Check intensity: ask for one genuine attempt", prompt)
+        self.assertIn(
+            "Check intensity: choose one free-response prompt that requires a genuine attempt",
+            prompt,
+        )
         self.assertIn("genuine attempt", prompt)
 
     def test_system_prompt_contains_state_move_policy_fragments(self) -> None:
@@ -9557,8 +9619,8 @@ class PromptInstructionTests(unittest.TestCase):
         normalized_section = " ".join(section.split())
 
         self.assertIn("Tutoring approach for this turn:", prompt)
-        self.assertIn("Teach genuinely new material first", normalized)
-        self.assertIn("For checks and practice, elicit before telling", normalized)
+        self.assertIn("Choose one move only", normalized)
+        self.assertIn("On a check turn, elicit without also teaching", normalized)
         self.assertIn("not quoting the just-shown text", normalized)
         self.assertIn("Do not give the answer to a check before the learner tries", normalized)
         self.assertIn("Mastery profile: deep; impasse-probe frequency: high", normalized)
@@ -9599,8 +9661,8 @@ class PromptInstructionTests(unittest.TestCase):
             with self.subTest(tier=tier):
                 prompt = cli.tier_move_prompt(metadata, tier)
                 self.assertEqual(prompt.count("Tutoring approach for this turn:"), 1)
-                self.assertEqual(prompt.count("Teach genuinely new material first"), 1)
-                self.assertEqual(prompt.count("For checks and practice, elicit before telling"), 1)
+                self.assertEqual(prompt.count("Choose one move only"), 1)
+                self.assertEqual(prompt.count("elicit without also teaching"), 1)
                 self.assertEqual(prompt.count("not quoting the just-shown text"), 1)
                 self.assertEqual(prompt.count("Do not give the answer to a check"), 1)
                 self.assertEqual(prompt.count("Check intensity:"), 1)
@@ -9695,6 +9757,12 @@ class PromptInstructionTests(unittest.TestCase):
         self.assertIn("Use exactly one primary bold label", prompt)
         self.assertIn("all required context unambiguous", prompt)
         self.assertIn("configuration claims only when", prompt)
+        self.assertNotIn("Lesson: teach one small concept", prompt)
+        self.assertNotIn("Example: give one concrete example", prompt)
+        self.assertNotIn("then elicit", prompt)
+        self.assertNotIn("Lesson, Example, Check", prompt)
+        self.assertNotIn("then give a short worked example", prompt)
+        self.assertNotIn("and one small next move", prompt)
 
     def test_system_prompt_includes_cumulative_quiz_fragment_only_when_active(self) -> None:
         inactive = cli.Topic(
@@ -9769,15 +9837,13 @@ class PromptInstructionTests(unittest.TestCase):
     def test_first_lesson_prompt_avoids_filler_questions(self) -> None:
         prompt = cli.first_lesson_prompt("Scope: Demo")
 
-        self.assertIn("one important check-for-understanding", prompt)
-        self.assertIn("multiple choice", prompt)
-        self.assertIn("You may omit Check for pure orientation", prompt)
-        self.assertIn("Use free response for reasoning or algorithm tracing", prompt)
-        self.assertIn("Do not ask a question just to ask one", prompt)
-        self.assertIn("Use this compact structure", prompt)
         self.assertIn("Teach exactly one concept", prompt)
-        self.assertIn("exactly one Lesson section", prompt)
-        self.assertIn("at most one Check section", prompt)
+        self.assertIn("exactly one **Lesson:** section", prompt)
+        self.assertIn("One short concrete example may support", prompt)
+        self.assertIn("Do not append a check, question, continuation cue", prompt)
+        self.assertNotIn("one Example section", prompt)
+        self.assertNotIn("Check section", prompt)
+        self.assertNotIn("Lesson, Example, Check", prompt)
         self.assertIn(f"Hard limit: {cli.FIRST_LESSON_WORD_LIMIT} words", prompt)
 
     def test_trim_words_enforces_first_lesson_limit(self) -> None:

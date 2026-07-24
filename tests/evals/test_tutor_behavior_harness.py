@@ -7,12 +7,15 @@ import pytest
 
 from openlearn import cli
 from tests.evals.tutor_behavior import (
+    BASE_CRITERION_KEYS,
     BASE_TUTOR_RUBRIC,
     SCENARIOS_DIR,
     load_scenarios,
     run_evaluation,
     validate_live_configuration,
 )
+
+PASSING_BASE_CRITERIA = {key: True for key in BASE_CRITERION_KEYS}
 
 
 def _read_jsonl(path: Path) -> list[dict[str, object]]:
@@ -65,6 +68,7 @@ def mocked_providers(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[str]]:
                 "pass": True,
                 "score": 0.9,
                 "reason": "The response follows the scenario rubric.",
+                "base_criteria": PASSING_BASE_CRITERIA,
             }
         )
 
@@ -165,7 +169,14 @@ def test_run_evaluation_preserves_failed_verdict_and_redacts_credentials(
                     "is_transfer": True,
                 }
             )
-        return json.dumps({"pass": False, "score": 0.2, "reason": f"Failed {secret}"})
+        return json.dumps(
+            {
+                "pass": False,
+                "score": 0.2,
+                "reason": f"Failed {secret}",
+                "base_criteria": PASSING_BASE_CRITERIA,
+            }
+        )
 
     monkeypatch.setattr(cli, "call_openai", fake_call)
 
@@ -197,7 +208,14 @@ def test_answer_first_scenarios_record_prior_focus_and_same_turn_struggling_move
 
     def fake_call(model: str, system: str, user: str) -> str:
         if system != cli.METADATA_EXTRACTOR_SYSTEM:
-            return json.dumps({"pass": True, "score": 0.9, "reason": "Policy followed."})
+            return json.dumps(
+                {
+                    "pass": True,
+                    "score": 0.9,
+                    "reason": "Policy followed.",
+                    "base_criteria": PASSING_BASE_CRITERIA,
+                }
+            )
         scenario = "functions" if "result the function sends back" in user else "pointers"
         call_order.append(("judge", scenario))
         if "result the function sends back" in user:
@@ -268,6 +286,7 @@ def test_off_topic_scenario_requires_empty_pending_question_state(
                 "pass": True,
                 "score": 0.9,
                 "reason": "The visible response satisfies the conversational rubric.",
+                "base_criteria": PASSING_BASE_CRITERIA,
             }
         )
 
@@ -339,6 +358,7 @@ def test_off_topic_scenario_rejects_durable_answer_judgment(
                 "pass": True,
                 "score": 0.9,
                 "reason": "The visible response satisfies the conversational rubric.",
+                "base_criteria": PASSING_BASE_CRITERIA,
             }
         ),
     )
@@ -435,6 +455,7 @@ def test_provider_failure_is_preserved_as_failed_evidence(
         "score": 0.0,
         "reason": "Harness error: provider unavailable",
         "threshold": 0.7,
+        "base_criteria": {key: False for key in BASE_CRITERION_KEYS},
     }
     assert record["provenance"]["openlearn_home"].endswith(
         "/homes/correct_brief_answer"
@@ -475,7 +496,7 @@ def test_live_rubric_checks_single_move_concision_and_authoritative_state() -> N
         "The response is concise and contains exactly one primary teaching move.",
         "The response gives the learner at most one action, question, choice, or continuation cue.",
         "The response stays on one concept instead of introducing multiple new concepts.",
-        "Any progress, mastery, environment, tool, or configuration claim is explicitly supported by the visible exchange.",
+        "Any progress, mastery, environment, tool, or configuration claim is explicitly supported by the visible exchange or authoritative scenario state.",
     )
 
 
@@ -494,3 +515,95 @@ def test_live_evidence_records_the_base_tutor_rubric(
     judge_prompt = mocked_providers["judge_prompts"][0]
     assert all(item in record["rubric"] for item in BASE_TUTOR_RUBRIC)
     assert all(item in judge_prompt for item in BASE_TUTOR_RUBRIC)
+    assert "Authoritative scenario state available to the tutor:" in judge_prompt
+    assert '"goal": "Understand Python variables and types"' in judge_prompt
+
+
+def test_live_judge_requires_every_base_criterion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        cli,
+        "call_openai_streaming",
+        lambda model, system, user, output_func: "**Feedback:**\nA concise reply.",
+    )
+
+    def fake_call(model: str, system: str, user: str) -> str:
+        if system == cli.METADATA_EXTRACTOR_SYSTEM:
+            return json.dumps(
+                {
+                    "message_kind": "answer",
+                    "last_answer_status": "partial",
+                    "answer_score": 0.5,
+                }
+            )
+        criteria = dict(PASSING_BASE_CRITERIA)
+        criteria["one_learner_action"] = False
+        return json.dumps(
+            {
+                "pass": True,
+                "score": 0.95,
+                "reason": "One mandatory invariant failed.",
+                "base_criteria": criteria,
+            }
+        )
+
+    monkeypatch.setattr(cli, "call_openai", fake_call)
+
+    outcome = run_evaluation(
+        tmp_path / "run",
+        tutor_model="tutor-model",
+        judge_model="judge-model",
+        scenario_ids=["correct_brief_answer"],
+    )
+
+    record = _read_jsonl(outcome.evidence_dir / "turns.jsonl")[0]
+    assert outcome.passed is False
+    assert record["judge"]["pass"] is False
+    assert record["judge"]["base_criteria"]["one_learner_action"] is False
+
+
+def test_live_judge_rejects_missing_base_criterion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        cli,
+        "call_openai_streaming",
+        lambda model, system, user, output_func: "**Feedback:**\nA concise reply.",
+    )
+
+    def fake_call(model: str, system: str, user: str) -> str:
+        if system == cli.METADATA_EXTRACTOR_SYSTEM:
+            return json.dumps(
+                {
+                    "message_kind": "answer",
+                    "last_answer_status": "partial",
+                    "answer_score": 0.5,
+                }
+            )
+        criteria = dict(PASSING_BASE_CRITERIA)
+        criteria.pop("authoritative_claims")
+        return json.dumps(
+            {
+                "pass": True,
+                "score": 0.95,
+                "reason": "Looks acceptable.",
+                "base_criteria": criteria,
+            }
+        )
+
+    monkeypatch.setattr(cli, "call_openai", fake_call)
+
+    outcome = run_evaluation(
+        tmp_path / "run",
+        tutor_model="tutor-model",
+        judge_model="judge-model",
+        scenario_ids=["correct_brief_answer"],
+    )
+
+    record = _read_jsonl(outcome.evidence_dir / "turns.jsonl")[0]
+    assert outcome.passed is False
+    assert record["judge"]["reason"].startswith("Harness error:")
+    assert "required base criteria" in record["judge"]["reason"]

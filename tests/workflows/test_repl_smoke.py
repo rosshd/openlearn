@@ -112,7 +112,7 @@ def test_quick_learn_file_reaches_repl(spawn_openlearn) -> None:
     try:
         proc.expect("First lesson")
         proc.expect("Normal vs Insert")
-        proc.expect("Answer> ")
+        proc.expect("openlearn> ")
         assert "Quick Learn plan" in proc.clean_output
         assert "Traceback" not in proc.clean_output
         assert "\x1b[" not in proc.clean_output
