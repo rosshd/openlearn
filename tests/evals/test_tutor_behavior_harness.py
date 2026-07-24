@@ -9,15 +9,43 @@ from openlearn import cli
 from tests.evals.tutor_behavior import (
     BASE_CRITERION_KEYS,
     BASE_TUTOR_RUBRIC,
+    CALIBRATION_FIXTURE_PATH,
+    DIMENSION_FLOOR,
+    HARD_FAILURE_KEYS,
+    JUDGE_DIMENSIONS,
     JUDGE_SYSTEM,
+    RUBRIC_VERSION,
     SCENARIOS_DIR,
+    _judge_response,
     _validated_assessment_evidence,
+    load_calibration_cases,
     load_scenarios,
     run_evaluation,
     validate_live_configuration,
 )
 
 PASSING_BASE_CRITERIA = {key: True for key in BASE_CRITERION_KEYS}
+
+
+def _judge_payload(
+    score: float = 0.9,
+    *,
+    reason: str = "The response follows the scenario rubric.",
+    base_criteria: dict[str, bool] | None = None,
+    hard_failures: dict[str, bool] | None = None,
+    dimensions: dict[str, dict[str, object]] | None = None,
+) -> dict[str, object]:
+    return {
+        "reason": reason,
+        "base_criteria": base_criteria or dict(PASSING_BASE_CRITERIA),
+        "dimensions": dimensions
+        or {
+            key: {"score": score, "evidence": f"{key} meets the rubric."}
+            for key in JUDGE_DIMENSIONS
+        },
+        "hard_failures": hard_failures
+        or {key: False for key in HARD_FAILURE_KEYS},
+    }
 
 
 def _read_jsonl(path: Path) -> list[dict[str, object]]:
@@ -65,14 +93,7 @@ def mocked_providers(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[str]]:
                 }
             )
         calls["judge_prompts"].append(user)
-        return json.dumps(
-            {
-                "pass": True,
-                "score": 0.9,
-                "reason": "The response follows the scenario rubric.",
-                "base_criteria": PASSING_BASE_CRITERIA,
-            }
-        )
+        return json.dumps(_judge_payload())
 
     monkeypatch.setattr(cli, "call_openai_streaming", fake_streaming)
     monkeypatch.setattr(cli, "call_openai", fake_call)
@@ -111,6 +132,7 @@ def test_run_evaluation_uses_isolated_homes_and_writes_reviewable_evidence(
     summary = (outcome.evidence_dir / "summary.md").read_text(encoding="utf-8")
 
     assert manifest["status"] == "completed"
+    assert manifest["rubric_version"] == RUBRIC_VERSION
     assert manifest["outcome"] == {"passed": 4, "failed": 0, "total": 4}
     assert len(turns) == 4
     assert "# Tutor behavior eval" in summary
@@ -120,6 +142,11 @@ def test_run_evaluation_uses_isolated_homes_and_writes_reviewable_evidence(
     assert all("state_delta" in record for record in turns)
     assert any(record["state_delta"] for record in turns)
     assert all(record["judge"]["pass"] is True for record in turns)
+    assert all(record["rubric_version"] == RUBRIC_VERSION for record in turns)
+    assert all(
+        set(record["judge"]["dimensions"]) == set(JUDGE_DIMENSIONS)
+        for record in turns
+    )
     assert all(record["assessment_mode"] is False for record in turns)
     assert all(
         record["assessment_item_count"] == {"min": 1, "max": 1}
@@ -176,14 +203,7 @@ def test_run_evaluation_preserves_failed_verdict_and_redacts_credentials(
                     "is_transfer": True,
                 }
             )
-        return json.dumps(
-            {
-                "pass": False,
-                "score": 0.2,
-                "reason": f"Failed {secret}",
-                "base_criteria": PASSING_BASE_CRITERIA,
-            }
-        )
+        return json.dumps(_judge_payload(0.2, reason=f"Failed {secret}"))
 
     monkeypatch.setattr(cli, "call_openai", fake_call)
 
@@ -215,14 +235,7 @@ def test_answer_first_scenarios_record_prior_focus_and_same_turn_struggling_move
 
     def fake_call(model: str, system: str, user: str) -> str:
         if system != cli.METADATA_EXTRACTOR_SYSTEM:
-            return json.dumps(
-                {
-                    "pass": True,
-                    "score": 0.9,
-                    "reason": "Policy followed.",
-                    "base_criteria": PASSING_BASE_CRITERIA,
-                }
-            )
+            return json.dumps(_judge_payload(reason="Policy followed."))
         scenario = "functions" if "result the function sends back" in user else "pointers"
         call_order.append(("judge", scenario))
         if "result the function sends back" in user:
@@ -289,12 +302,9 @@ def test_off_topic_scenario_requires_empty_pending_question_state(
         if system == cli.METADATA_EXTRACTOR_SYSTEM:
             return json.dumps({"message_kind": "question"})
         return json.dumps(
-            {
-                "pass": True,
-                "score": 0.9,
-                "reason": "The visible response satisfies the conversational rubric.",
-                "base_criteria": PASSING_BASE_CRITERIA,
-            }
+            _judge_payload(
+                reason="The visible response satisfies the conversational rubric."
+            )
         )
 
     monkeypatch.setattr(cli, "call_openai", fake_call)
@@ -361,12 +371,9 @@ def test_off_topic_scenario_rejects_durable_answer_judgment(
         cli,
         "call_openai",
         lambda model, system, user: json.dumps(
-            {
-                "pass": True,
-                "score": 0.9,
-                "reason": "The visible response satisfies the conversational rubric.",
-                "base_criteria": PASSING_BASE_CRITERIA,
-            }
+            _judge_payload(
+                reason="The visible response satisfies the conversational rubric."
+            )
         ),
     )
 
@@ -462,7 +469,13 @@ def test_provider_failure_is_preserved_as_failed_evidence(
         "score": 0.0,
         "reason": "Harness error: provider unavailable",
         "threshold": 0.7,
+        "dimension_floor": DIMENSION_FLOOR,
         "base_criteria": {key: False for key in BASE_CRITERION_KEYS},
+        "dimensions": {
+            key: {"score": 0.0, "evidence": "Scenario did not complete."}
+            for key in JUDGE_DIMENSIONS
+        },
+        "hard_failures": {key: False for key in HARD_FAILURE_KEYS},
     }
     assert record["provenance"]["openlearn_home"].endswith(
         "/homes/correct_brief_answer"
@@ -516,6 +529,9 @@ def test_live_judge_trusts_only_supplied_state_and_quotes_all_content() -> None:
         JUDGE_SYSTEM
     )
     assert "False means the turn has no batch exemption" in JUDGE_SYSTEM
+    assert RUBRIC_VERSION in JUDGE_SYSTEM
+    assert all(key in JUDGE_SYSTEM for key in JUDGE_DIMENSIONS)
+    assert all(key in JUDGE_SYSTEM for key in HARD_FAILURE_KEYS)
 
 
 def test_live_evidence_records_the_base_tutor_rubric(
@@ -533,13 +549,17 @@ def test_live_evidence_records_the_base_tutor_rubric(
     judge_prompt = mocked_providers["judge_prompts"][0]
     assert all(item in record["rubric"] for item in BASE_TUTOR_RUBRIC)
     assert all(item in judge_prompt for item in BASE_TUTOR_RUBRIC)
-    assert "Authoritative scenario state available to the tutor:" in judge_prompt
+    assert "Authoritative scenario state before the turn:" in judge_prompt
+    assert "Authoritative scenario state after the turn:" in judge_prompt
+    assert "Durable events emitted during the turn:" in judge_prompt
     assert '"goal": "Understand Python variables and types"' in judge_prompt
     assert "Trusted assessment mode: false" in judge_prompt
     assert '"max": 1' in judge_prompt
     assert '"min": 1' in judge_prompt
     assert record["assessment_mode"] is False
     assert record["assessment_item_count"] == {"min": 1, "max": 1}
+    assert record["rubric_version"] == RUBRIC_VERSION
+    assert record["provenance"]["rubric_version"] == RUBRIC_VERSION
 
 
 def test_assessment_evidence_rejects_normal_batch_bounds() -> None:
@@ -615,12 +635,11 @@ def test_live_judge_requires_every_base_criterion(
         criteria = dict(PASSING_BASE_CRITERIA)
         criteria["one_learner_action"] = False
         return json.dumps(
-            {
-                "pass": True,
-                "score": 0.95,
-                "reason": "One mandatory invariant failed.",
-                "base_criteria": criteria,
-            }
+            _judge_payload(
+                0.95,
+                reason="One mandatory invariant failed.",
+                base_criteria=criteria,
+            )
         )
 
     monkeypatch.setattr(cli, "call_openai", fake_call)
@@ -660,12 +679,11 @@ def test_live_judge_rejects_missing_base_criterion(
         criteria = dict(PASSING_BASE_CRITERIA)
         criteria.pop("authoritative_claims")
         return json.dumps(
-            {
-                "pass": True,
-                "score": 0.95,
-                "reason": "Looks acceptable.",
-                "base_criteria": criteria,
-            }
+            _judge_payload(
+                0.95,
+                reason="Looks acceptable.",
+                base_criteria=criteria,
+            )
         )
 
     monkeypatch.setattr(cli, "call_openai", fake_call)
@@ -681,3 +699,127 @@ def test_live_judge_rejects_missing_base_criterion(
     assert outcome.passed is False
     assert record["judge"]["reason"].startswith("Harness error:")
     assert "required base criteria" in record["judge"]["reason"]
+
+
+def test_calibration_fixture_is_versioned_and_covers_known_grades_and_failures() -> None:
+    cases = load_calibration_cases()
+
+    assert CALIBRATION_FIXTURE_PATH.name == "tutor_judge_calibration_v2.json"
+    assert {case["grade"] for case in cases} == {"good", "borderline", "bad"}
+    assert next(case for case in cases if case["grade"] == "good")["expected"][
+        "pass"
+    ] is True
+    assert all(
+        case["expected"]["max_score"] < 1.0
+        for case in cases
+        if case["grade"] == "borderline"
+    )
+    bad_names = {case["name"] for case in cases if case["grade"] == "bad"}
+    assert {
+        "bad_long_reteaching_after_strong_answer",
+        "bad_off_topic_redirect_saved_as_check",
+        "bad_unsupported_slide_position",
+        "bad_ambiguous_recursion_edge_case",
+        "bad_prerequisite_concept_overload",
+    } <= bad_names
+    covered_hard_failures = {
+        failure
+        for case in cases
+        for failure in case["expected"]["hard_failures"]
+    }
+    assert {
+        "invented_state",
+        "false_mastery",
+        "source_contradiction",
+        "privacy_leakage",
+        "unsafe_instruction",
+        "wrong_action_grading",
+    } <= covered_hard_failures
+
+
+def test_judge_rejects_missing_dimension(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = _judge_payload()
+    payload["dimensions"].pop("pacing")
+    monkeypatch.setattr(cli, "call_openai", lambda model, system, prompt: json.dumps(payload))
+
+    with pytest.raises(ValueError, match="required dimensions"):
+        _judge_response("judge-model", "prompt")
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        {"score": 0.9},
+        {"score": 1.1, "evidence": "Too high."},
+        {"score": 0.9, "evidence": ""},
+        {"score": 0.9, "evidence": "Fine.", "extra": True},
+    ],
+)
+def test_judge_rejects_malformed_dimension(
+    monkeypatch: pytest.MonkeyPatch,
+    malformed: dict[str, object],
+) -> None:
+    payload = _judge_payload()
+    payload["dimensions"]["feedback_specificity"] = malformed
+    monkeypatch.setattr(cli, "call_openai", lambda model, system, prompt: json.dumps(payload))
+
+    with pytest.raises(ValueError, match="dimension feedback_specificity"):
+        _judge_response("judge-model", "prompt")
+
+
+def test_hard_failure_caps_score_and_fails_verdict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hard_failures = {key: False for key in HARD_FAILURE_KEYS}
+    hard_failures["false_mastery"] = True
+    payload = _judge_payload(0.99, hard_failures=hard_failures)
+    monkeypatch.setattr(cli, "call_openai", lambda model, system, prompt: json.dumps(payload))
+
+    judged = _judge_response("judge-model", "prompt")
+
+    assert judged["pass"] is False
+    assert judged["score"] == 0.49
+    assert judged["hard_failures"]["false_mastery"] is True
+
+
+@pytest.mark.parametrize(
+    ("score", "expected_pass"),
+    [
+        (0.699, False),
+        (0.7, True),
+    ],
+)
+def test_judge_applies_aggregate_threshold(
+    monkeypatch: pytest.MonkeyPatch,
+    score: float,
+    expected_pass: bool,
+) -> None:
+    monkeypatch.setattr(
+        cli,
+        "call_openai",
+        lambda model, system, prompt: json.dumps(_judge_payload(score)),
+    )
+
+    judged = _judge_response("judge-model", "prompt")
+
+    assert judged["pass"] is expected_pass
+
+
+def test_judge_applies_per_dimension_floor(monkeypatch: pytest.MonkeyPatch) -> None:
+    dimensions = _judge_payload(0.9)["dimensions"]
+    dimensions["learner_action"] = {
+        "score": DIMENSION_FLOOR - 0.01,
+        "evidence": "The requested action is ambiguous.",
+    }
+    monkeypatch.setattr(
+        cli,
+        "call_openai",
+        lambda model, system, prompt: json.dumps(
+            _judge_payload(0.9, dimensions=dimensions)
+        ),
+    )
+
+    judged = _judge_response("judge-model", "prompt")
+
+    assert judged["score"] > 0.7
+    assert judged["pass"] is False
