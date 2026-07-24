@@ -6870,6 +6870,52 @@ def configured_base_url(config: dict[str, object] | None = None) -> str:
     return base_url.rstrip("/") if isinstance(base_url, str) and base_url else DEFAULT_BASE_URL
 
 
+def _split_windows_command_line(command: str) -> list[str]:
+    """Split a command using Windows backslash and double-quote rules."""
+    args: list[str] = []
+    index = 0
+    while index < len(command):
+        while index < len(command) and command[index] in " \t":
+            index += 1
+        if index == len(command):
+            break
+
+        arg: list[str] = []
+        in_quotes = False
+        while index < len(command):
+            backslashes = 0
+            while index < len(command) and command[index] == "\\":
+                backslashes += 1
+                index += 1
+
+            if index < len(command) and command[index] == '"':
+                arg.extend("\\" * (backslashes // 2))
+                if backslashes % 2:
+                    arg.append('"')
+                else:
+                    in_quotes = not in_quotes
+                index += 1
+                continue
+
+            arg.extend("\\" * backslashes)
+            if index == len(command) or (
+                command[index] in " \t" and not in_quotes
+            ):
+                break
+            arg.append(command[index])
+            index += 1
+
+        args.append("".join(arg))
+
+    return args
+
+
+def _split_editor_command(command: str) -> list[str]:
+    if os.name == "nt":
+        return _split_windows_command_line(command)
+    return shlex.split(command)
+
+
 def configured_editor_argv(config: dict[str, object] | None = None) -> list[str]:
     config = read_config() if config is None else config
     saved_editor = config.get("editor")
@@ -6887,7 +6933,7 @@ def configured_editor_argv(config: dict[str, object] | None = None) -> list[str]
         if not value:
             continue
         try:
-            editor = shlex.split(value, posix=os.name != "nt")
+            editor = _split_editor_command(value)
         except ValueError as exc:
             raise OpenLearnError(f"invalid {name} editor command: {exc}") from exc
         if editor:
