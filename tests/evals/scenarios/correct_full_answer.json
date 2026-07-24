@@ -4,6 +4,7 @@
   "description": "Guards against re-quizzing after a learner demonstrates solid understanding.",
   "topic": "functions",
   "goal": "Learn Python functions",
+  "state": {"current_focus": "return values"},
   "turns": [
     {"role": "assistant", "content": "What does a return value do in a Python function?"},
     {"role": "user", "content": "A return value is the result the function sends back to the caller. It lets the caller store or use the computed value, and once return runs the function exits."},

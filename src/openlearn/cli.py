@@ -101,6 +101,9 @@ REPL_PASTE_CONTINUATION_WAIT_SECONDS = 0.01
 OPENAI_MAX_ATTEMPTS = 3
 OPENAI_RETRY_BASE_DELAY_SECONDS = 0.5
 OPENAI_RETRY_JITTER_SECONDS = 0.25
+JUDGE_MAX_TOKENS = 512
+JUDGE_TIMEOUT_SECONDS = 20
+JUDGE_MAX_ATTEMPTS = 1
 
 DYNAMIC_METADATA_KEYS = {
     "concept_attempts",
@@ -4316,6 +4319,28 @@ def apply_pending_question_answer_key(metadata: dict[str, object], learner_promp
         metadata["last_answer_status"] = "needs_work"
 
 
+def prepare_current_answer_judgment(
+    metadata: dict[str, object], learner_prompt: str, update: dict[str, object]
+) -> bool:
+    """Validate this turn's judgment without consulting persisted answer fields."""
+    pending = metadata.get("pending_question")
+    if isinstance(pending, dict) and pending.get("kind") == "multiple_choice":
+        answer_key = pending.get("answer_key")
+        selected = learner_prompt.strip().upper()[:1]
+        if isinstance(answer_key, str) and answer_key in {"A", "B", "C", "D"}:
+            correct = selected == answer_key
+            update["last_answer_status"] = "correct" if correct else "needs_work"
+            update["answer_score"] = 1.0 if correct else 0.0
+            update["answer_kind"] = "recognition"
+            update["is_transfer"] = False
+            return True
+    status = update.get("last_answer_status")
+    score = update.get("answer_score")
+    return status in {"correct", "partial", "needs_work"} and isinstance(
+        score, (int, float)
+    ) and 0.0 <= float(score) <= 1.0
+
+
 def due_review_matches_answer(
     metadata: dict[str, object],
     due_items: list[dict[str, object]],
@@ -5160,16 +5185,72 @@ def ask_topic(
     set_active_topic(topic.slug)
     model = model or str(topic.metadata.get("model") or configured_model())
     is_review_session = topic.metadata.get("review_session_active") is True
-    answer = call_openai_streaming(
-        model=model, system=system_prompt(topic), user=prompt, output_func=output_func
+    needs_judgment = learner_message_needs_judgment(topic.metadata, prompt)
+    is_navigation = learner_requests_advance(prompt)
+    message_kind = "navigation" if is_navigation else ""
+    queued_events: list[tuple[str, str, dict[str, object]]] = []
+    topic_before_judgment = topic.path.read_text(encoding="utf-8") if needs_judgment else ""
+    state_path = topic_state_path(topic.slug)
+    state_before_judgment = (
+        state_path.read_text(encoding="utf-8") if needs_judgment and state_path.exists() else None
     )
-    answer = print_and_append_model_answer(topic, "chat", prompt, answer, output_func=output_func)
+
+    def queue_event(slug: str, event_type: str, data: dict[str, object]) -> None:
+        queued_events.append((slug, event_type, data))
+
+    if needs_judgment:
+        message_kind = update_learning_metadata(
+            topic,
+            prompt,
+            last_tutor_lesson_response(topic),
+            model,
+            is_review_session=is_review_session,
+            event_sink=queue_event,
+        )
+        topic = read_topic(topic.slug)
+    if message_kind:
+        topic = Topic(
+            slug=topic.slug,
+            path=topic.path,
+            metadata={**topic.metadata, "current_turn_message_kind": message_kind},
+            body=topic.body,
+        )
+    try:
+        answer = call_openai_streaming(
+            model=model, system=system_prompt(topic), user=prompt, output_func=output_func
+        )
+        answer = print_and_append_model_answer(
+            topic,
+            "chat",
+            prompt,
+            answer,
+            output_func=output_func,
+            event_sink=queue_event if needs_judgment else None,
+        )
+    except Exception:
+        if needs_judgment:
+            restore_prejudgment_turn_state(
+                topic,
+                topic_before_judgment,
+                state_before_judgment,
+            )
+        raise
+    for event_slug, event_type, event_data in queued_events:
+        log_event(event_slug, event_type, event_data)
     if pending_learner_prompt is not None:
         clear_pending_learner_prompt(
             topic.slug, expected_prompt=pending_learner_prompt
         )
     if deferred_updates is None:
-        finish_turn_update(topic, prompt, answer, model, is_review_session, output_func)
+        finish_turn_update(
+            topic,
+            prompt,
+            answer,
+            model,
+            is_review_session,
+            not needs_judgment and not is_navigation,
+            output_func,
+        )
     else:
         deferred_updates.submit(
             finish_turn_update,
@@ -5178,6 +5259,7 @@ def ask_topic(
             answer,
             model,
             is_review_session,
+            not needs_judgment and not is_navigation,
             deferred_updates.output_func,
         )
     return answer
@@ -5189,10 +5271,36 @@ def finish_turn_update(
     answer: str,
     model: str,
     is_review_session: bool,
+    update_metadata: bool = True,
     output_func=print,
 ) -> None:
-    update_learning_metadata(topic, prompt, answer, model, is_review_session=is_review_session)
+    if update_metadata:
+        update_learning_metadata(topic, prompt, answer, model, is_review_session=is_review_session)
     maybe_suggest_videos(topic.slug, output_func)
+
+
+def learner_message_needs_judgment(metadata: dict[str, object], prompt: str) -> bool:
+    """Return whether this turn may answer an existing learning check."""
+    if learner_requests_advance(prompt):
+        return False
+    return isinstance(metadata.get("pending_question"), dict)
+
+
+def restore_prejudgment_turn_state(
+    topic: Topic,
+    topic_text: str,
+    state_text: str | None,
+) -> None:
+    """Roll back an uncommitted judgment after tutor generation fails."""
+    with file_lock(topic.path):
+        write_text_atomic(topic.path, topic_text)
+    state_path = topic_state_path(topic.slug)
+    with file_lock(state_path):
+        if state_text is None:
+            with contextlib.suppress(FileNotFoundError):
+                state_path.unlink()
+        else:
+            write_text_atomic(state_path, state_text)
 
 
 def cmd_drill(args: argparse.Namespace, output_func=print) -> int:
@@ -5627,6 +5735,7 @@ def print_and_append_model_answer(
     answer: str,
     mark_reviewed: bool = False,
     output_func=print,
+    event_sink: Callable[[str, str, dict[str, object]], None] | None = None,
 ) -> str:
     global _LAST_RESPONSE_ANSWER_KEY, _LAST_RESPONSE_COVERED_CONCEPTS
     answer = sanitize_model_output(answer)
@@ -5635,13 +5744,22 @@ def print_and_append_model_answer(
         save_current_slide_coverage(topic.slug, answer, _LAST_RESPONSE_COVERED_CONCEPTS)
         _LAST_RESPONSE_COVERED_CONCEPTS = []
     if kind in {"chat", "resume", "next", "lesson", "review"}:
-        save_pending_question(topic, answer, _LAST_RESPONSE_ANSWER_KEY)
+        save_pending_question(
+            topic,
+            answer,
+            _LAST_RESPONSE_ANSWER_KEY,
+            event_sink=event_sink,
+        )
         _LAST_RESPONSE_ANSWER_KEY = ""
     return answer
 
 
 def save_pending_question(
-    topic: Topic, answer: str, answer_key: str, question_text: str | None = None
+    topic: Topic,
+    answer: str,
+    answer_key: str,
+    question_text: str | None = None,
+    event_sink: Callable[[str, str, dict[str, object]], None] | None = None,
 ) -> None:
     has_answer_key = answer_key in {"A", "B", "C", "D"}
     question = (
@@ -5661,6 +5779,10 @@ def save_pending_question(
     }
     if has_answer_key:
         pending_question["answer_key"] = answer_key
+    focus = topic.metadata.get("current_focus")
+    if isinstance(focus, str) and focus.strip():
+        pending_question["focus"] = focus.strip()
+        pending_question["concept_id"] = concept_id_for_focus(topic.metadata, focus)
     previous_pending_question: dict[str, object] | None = None
     with file_lock(topic.path):
         raw_metadata, body = parse_topic(topic.path.read_text(encoding="utf-8"))
@@ -5678,6 +5800,7 @@ def save_pending_question(
         previous_pending_question,
         pending_question,
         reason="explicit_check",
+        event_sink=event_sink,
     )
 
 
@@ -5748,6 +5871,7 @@ def log_pending_question_transition(
     previous: dict[str, object] | None,
     current: dict[str, object] | None,
     reason: str,
+    event_sink: Callable[[str, str, dict[str, object]], None] | None = None,
 ) -> None:
     if previous == current:
         return
@@ -5762,7 +5886,7 @@ def log_pending_question_transition(
         data["previous_pending_question"] = previous
     if current is not None:
         data["pending_question"] = current
-    log_event(slug, "pending_question_changed", data)
+    (event_sink or log_event)(slug, "pending_question_changed", data)
 
 
 def metadata_update_prompt(
@@ -5784,6 +5908,9 @@ def metadata_update_prompt(
         f"""
         Update this learner's lightweight topic metadata from the latest exchange.
         Return only a JSON object with these optional keys:
+        - message_kind: classify the learner message first as one of answer,
+          question, request, confusion, navigation, or other. Use answer only
+          when the message actually responds to the stored pending question.
         - known_add: short concepts the learner demonstrated understanding of.
         - weak_spots_add: short concepts the learner missed or confused.
         - review_due_add: short concepts that should be reviewed later.
@@ -5815,9 +5942,11 @@ def metadata_update_prompt(
 
         Do not add broad course names. Prefer specific concepts. If there is no
         clear evidence, return empty arrays.
-        If the learner skips the answer, says they do not know, gives an unrelated
-        response, or does not choose a clear option for a multiple-choice question,
-        last_answer_status must be partial or needs_work, never correct.
+        If the learner says they do not know or attempts an answer without choosing
+        a clear option for a multiple-choice question, classify it as answer and
+        set last_answer_status to partial or needs_work, never correct.
+        If the learner asks a new question, makes an unrelated request, or requests
+        navigation, classify it accordingly and omit all answer evaluation fields.
         If pending_question.kind is multiple_choice and the learner's selected
         letter matches pending_question.answer_key, last_answer_status must be
         correct. If it does not match, it must be needs_work or partial. Never
@@ -5831,7 +5960,7 @@ def metadata_update_prompt(
         Learner message:
         {learner_prompt}
 
-        Tutor response:
+        Prior tutor response that established the pending question:
         {tutor_answer}
         """
     ).strip()
@@ -5843,18 +5972,30 @@ def update_learning_metadata(
     tutor_answer: str,
     model: str,
     is_review_session: bool = False,
-) -> None:
+    event_sink: Callable[[str, str, dict[str, object]], None] | None = None,
+) -> str:
     previously_shown_text = last_tutor_lesson_response(topic)
+    pending_at_answer = topic.metadata.get("pending_question")
     update_prompt = metadata_update_prompt(topic.metadata, learner_prompt, tutor_answer)
     try:
-        raw_update = call_openai(
+        raw_update = call_openai_judgment(
             configured_extractor_model(model), METADATA_EXTRACTOR_SYSTEM, update_prompt
         )
         update = parse_metadata_update(raw_update)
     except (OpenLearnError, ValueError, json.JSONDecodeError):
-        return
+        return ""
     if not update:
-        return
+        return ""
+    message_kind = update.get("message_kind")
+    if isinstance(message_kind, str) and message_kind != "answer":
+        return message_kind
+    pending = topic.metadata.get("pending_question")
+    requires_complete_judgment = message_kind == "answer" or isinstance(pending, dict)
+    if requires_complete_judgment and not prepare_current_answer_judgment(
+        topic.metadata, learner_prompt, update
+    ):
+        return ""
+    emit_event = event_sink or log_event
 
     with file_lock(topic.path):
         current_text = topic.path.read_text(encoding="utf-8")
@@ -5871,9 +6012,17 @@ def update_learning_metadata(
         due_review_items_at_answer = due_review_items(metadata)
         schedule_review_additions(metadata, update.get("review_due_add"))
         remove_known_from_review_lists(metadata)
+        score = update.get("answer_score")
+        fresh_score = isinstance(score, (int, float)) and 0.0 <= float(score) <= 1.0
+        answer_was_judged = message_kind == "answer" or update.get(
+            "last_answer_status"
+        ) in {"correct", "partial", "needs_work"}
         previous_focus = metadata.get("current_focus")
         focus = update.get("current_focus")
-        if isinstance(focus, str) and focus.strip():
+        # A graded attempt belongs to the concept that was in focus when the
+        # pending question was asked. The judge cannot reattribute it to a new
+        # concept mentioned in its own output.
+        if not answer_was_judged and isinstance(focus, str) and focus.strip():
             metadata["current_focus"] = focus.strip()
             if previous_focus != metadata["current_focus"]:
                 metadata["last_video_focus"] = None
@@ -5885,11 +6034,22 @@ def update_learning_metadata(
         if metadata.get("last_answer_status") == "correct":
             metadata.pop("pending_hint", None)
             metadata.pop("last_answer_gap", None)
-        score = update.get("answer_score")
-        fresh_score = isinstance(score, (int, float)) and 0.0 <= float(score) <= 1.0
         if fresh_score:
             metadata["last_answer_score"] = round(coerce_float(score), 3)
         focus = metadata.get("current_focus")
+        pending_focus = (
+            pending_at_answer.get("focus") if isinstance(pending_at_answer, dict) else None
+        )
+        answer_focus = (
+            pending_focus.strip()
+            if isinstance(pending_focus, str) and pending_focus.strip()
+            else focus
+        )
+        pending_concept_id = (
+            pending_at_answer.get("concept_id")
+            if isinstance(pending_at_answer, dict)
+            else None
+        )
         score_val = metadata.get("last_answer_score")
         answer_kind = normalized_answer_kind(update.get("answer_kind")) if fresh_score else ""
         pending_for_kind = metadata.get("pending_question")
@@ -5909,14 +6069,18 @@ def update_learning_metadata(
         was_mastered = False
         if (
             fresh_score
-            and isinstance(focus, str)
-            and focus.strip()
+            and isinstance(answer_focus, str)
+            and answer_focus.strip()
             and isinstance(score_val, (int, float))
         ):
             attempts = metadata.get("concept_attempts")
             if not isinstance(attempts, dict):
                 attempts = {}
-            concept_id = concept_id_for_focus(metadata, focus)
+            concept_id = (
+                pending_concept_id.strip()
+                if isinstance(pending_concept_id, str) and pending_concept_id.strip()
+                else concept_id_for_focus(metadata, answer_focus)
+            )
             rec = attempts.setdefault(concept_id, {"attempts": 0, "correct_sum": 0.0})
             if not isinstance(rec, dict):
                 rec = {"attempts": 0, "correct_sum": 0.0}
@@ -6105,6 +6269,7 @@ def update_learning_metadata(
                 if unit_advanced_event is not None
                 else "answer_correct"
             ),
+            event_sink=emit_event,
         )
         if metadata.get("last_answer_status") in {"correct", "partial", "needs_work"}:
             event_data: dict[str, object] = {
@@ -6113,8 +6278,8 @@ def update_learning_metadata(
             }
             if isinstance(metadata.get("last_answer_score"), (int, float)):
                 event_data["score"] = metadata["last_answer_score"]
-            if isinstance(metadata.get("current_focus"), str):
-                event_data["current_focus"] = metadata["current_focus"]
+            if isinstance(answer_focus, str) and answer_focus.strip():
+                event_data["current_focus"] = answer_focus.strip()
             if is_review_session:
                 event_data["source"] = "review"
                 event_data["is_retrieval"] = True
@@ -6131,13 +6296,13 @@ def update_learning_metadata(
                     metadata,
                     due_review_items_at_answer,
                     concept_id,
-                    metadata.get("current_focus"),
+                    answer_focus,
                 ):
                     event_data["source"] = "srs"
                     event_data["is_retrieval"] = True
-            log_event(topic.slug, "answer_judged", event_data)
+            emit_event(topic.slug, "answer_judged", event_data)
         if gaming_suspected:
-            log_event(
+            emit_event(
                 topic.slug,
                 "gaming_suspected",
                 {
@@ -6148,11 +6313,11 @@ def update_learning_metadata(
                 },
             )
         for event_data in mastery_events:
-            log_event(topic.slug, "mastery_changed", event_data)
+            emit_event(topic.slug, "mastery_changed", event_data)
         if unit_advanced_event:
-            log_event(topic.slug, "unit_advanced", unit_advanced_event)
+            emit_event(topic.slug, "unit_advanced", unit_advanced_event)
         if quiz_completed_event:
-            log_event(topic.slug, "quiz_completed", quiz_completed_event)
+            emit_event(topic.slug, "quiz_completed", quiz_completed_event)
         if isinstance(current_unit, int) and isinstance(units, list):
             for unit in units:
                 if not isinstance(unit, dict) or unit.get("unit") != current_unit:
@@ -6162,7 +6327,7 @@ def update_learning_metadata(
                     previous_unit_difficulty is not None
                     and new_difficulty != previous_unit_difficulty
                 ):
-                    log_event(
+                    emit_event(
                         topic.slug,
                         "difficulty_changed",
                         {
@@ -6172,6 +6337,7 @@ def update_learning_metadata(
                         },
                     )
                 break
+    return "answer"
 
 
 def merge_metadata_list(metadata: dict[str, object], key: str, additions: object) -> None:
@@ -8350,8 +8516,20 @@ def system_prompt(topic: Topic) -> str:
 
 
 def pending_question_prompt(metadata: dict[str, object]) -> str:
+    message_kind = metadata.get("current_turn_message_kind")
+    if isinstance(message_kind, str) and message_kind not in {"", "answer"}:
+        return (
+            f"The current learner message was classified as {message_kind}, not as an answer. "
+            "Respond to that intent and do not grade it or create mastery evidence."
+        )
     pending = metadata.get("pending_question")
     if not isinstance(pending, dict):
+        if message_kind == "answer":
+            return (
+                "The current learner message was classified and judged as an answer before "
+                "this tutor move. Use the current judgment and updated learner state below; "
+                "do not re-judge or reattribute the attempt."
+            )
         return ""
     question = pending.get("question")
     answer_key = pending.get("answer_key")
@@ -8360,9 +8538,15 @@ def pending_question_prompt(metadata: dict[str, object]) -> str:
     answer_key_instruction = ""
     if isinstance(answer_key, str) and answer_key in {"A", "B", "C", "D"}:
         answer_key_instruction = f"\nStored correct answer key: {answer_key}"
+    judgment_instruction = (
+        "The current learner message was already classified and judged. Use the stored "
+        "judgment below; do not re-judge or reattribute it."
+        if message_kind == "answer"
+        else "Grade the learner's next answer against this exact question only."
+    )
     return textwrap.dedent(
         f"""
-        Grade the learner's next answer against this exact question only.
+        {judgment_instruction}
         Stored question: {question.strip()}{answer_key_instruction}
         Do not substitute a different question from recent history or context.
         """
@@ -8449,6 +8633,11 @@ def tier_move_prompt(metadata: dict[str, object], tier: str) -> str:
     if isinstance(misconception, str) and misconception.strip():
         lines.append(
             f"- Target this misconception next: {one_line(misconception)}. Address that specific wrong model before introducing a new concept."
+        )
+    gap = metadata.get("last_answer_gap")
+    if isinstance(gap, str) and gap.strip():
+        lines.append(
+            f"- Address this prerequisite gap before continuing: {one_line(gap)}. Keep remediation concrete and verify it with one small attempt."
         )
     rate = metadata.get("rolling_pass_rate")
     if isinstance(rate, (int, float)):
@@ -8758,6 +8947,9 @@ def call_openai(
     retry_sleep: Callable[[float], object] = time.sleep,
     retry_jitter: Callable[[float, float], float] = random.uniform,
     retry_status: Callable[[str], object] | None = None,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
+    timeout_seconds: int = 60,
+    max_attempts: int = OPENAI_MAX_ATTEMPTS,
 ) -> str:
     if _DRY_RUN:
         raise DryRunPrompt(model, system, user)
@@ -8774,7 +8966,7 @@ def call_openai(
 
     payload = {
         "model": model,
-        "max_tokens": DEFAULT_MAX_TOKENS,
+        "max_tokens": max_tokens,
         "include_reasoning": False,
         "messages": [
             {"role": "system", "content": system},
@@ -8793,13 +8985,13 @@ def call_openai(
         headers=headers,
         method="POST",
     )
-    for attempt in range(1, OPENAI_MAX_ATTEMPTS + 1):
+    for attempt in range(1, max_attempts + 1):
         try:
-            with urlopen(request, timeout=60) as response:
+            with urlopen(request, timeout=timeout_seconds) as response:
                 data = json.loads(response.read().decode("utf-8"))
             break
         except (HTTPError, URLError, TimeoutError) as exc:
-            if not is_transient_openai_error(exc) or attempt == OPENAI_MAX_ATTEMPTS:
+            if not is_transient_openai_error(exc) or attempt == max_attempts:
                 if isinstance(exc, HTTPError):
                     if exc.code == 401 and not api_key:
                         raise OpenLearnError(
@@ -8816,7 +9008,7 @@ def call_openai(
             if retry_status is not None:
                 retry_status(
                     f"Temporary OpenAI failure; retrying in {delay:.1f}s "
-                    f"({attempt + 1}/{OPENAI_MAX_ATTEMPTS})..."
+                    f"({attempt + 1}/{max_attempts})..."
                 )
             retry_sleep(delay)
 
@@ -8827,6 +9019,20 @@ def call_openai(
             "OpenAI response did not contain output text; the model may have spent its output budget on reasoning. Try a faster non-reasoning model or increase the token limit."
         )
     return text.strip()
+
+
+def call_openai_judgment(model: str, system: str, user: str) -> str:
+    """Run the pre-stream JSON judge with a small, provider-neutral budget."""
+    if getattr(call_openai, "__name__", "") != "call_openai":
+        return call_openai(model, system, user)
+    return call_openai(
+        model,
+        system,
+        user,
+        max_tokens=JUDGE_MAX_TOKENS,
+        timeout_seconds=JUDGE_TIMEOUT_SECONDS,
+        max_attempts=JUDGE_MAX_ATTEMPTS,
+    )
 
 
 def call_openai_with_status(

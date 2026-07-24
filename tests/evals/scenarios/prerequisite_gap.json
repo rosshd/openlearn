@@ -4,6 +4,7 @@
   "description": "Guards against continuing with dereferencing before addressing memory addresses.",
   "topic": "pointers",
   "goal": "Understand pointers in C",
+  "state": {"current_focus": "pointer dereferencing"},
   "turns": [
     {"role": "assistant", "content": "If p is an int pointer, what does *p mean?"},
     {"role": "user", "content": "I think *p just means the pointer variable's name. I don't really get what an address is."},
