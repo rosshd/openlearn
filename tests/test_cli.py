@@ -1364,6 +1364,28 @@ class CliStorageTests(unittest.TestCase):
         ):
             self.assertEqual(cli.configured_editor_argv(), ["nvim"])
 
+    def test_configured_editor_parses_quoted_windows_executable_path(self) -> None:
+        command = r'"C:\Program Files\Microsoft VS Code\Code.exe" --wait'
+        with (
+            mock.patch.dict(os.environ, {"EDITOR": command}, clear=False),
+            mock.patch.object(cli.os, "name", "nt"),
+        ):
+            self.assertEqual(
+                cli.configured_editor_argv({}),
+                [r"C:\Program Files\Microsoft VS Code\Code.exe", "--wait"],
+            )
+
+    def test_configured_editor_keeps_posix_shlex_quoting(self) -> None:
+        command = "'/Applications/Visual Studio Code/bin/code' --wait"
+        with (
+            mock.patch.dict(os.environ, {"EDITOR": command}, clear=False),
+            mock.patch.object(cli.os, "name", "posix"),
+        ):
+            self.assertEqual(
+                cli.configured_editor_argv({}),
+                ["/Applications/Visual Studio Code/bin/code", "--wait"],
+            )
+
     def test_active_topic_resolution_falls_back_to_most_recent_topic(self) -> None:
         call_silent(cli.cmd_init, Namespace())
         cli.write_topic(
