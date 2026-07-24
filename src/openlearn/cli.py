@@ -989,6 +989,19 @@ def create_course_from_setup(
     for context in pending_contexts:
         saved = write_context_text(slug, context.filename, context.text)
         saved_contexts.append(saved)
+        if (
+            context.source_path is not None
+            and context.source_root is not None
+            and context.source_checksum is not None
+        ):
+            save_imported_source_provenance(
+                slug,
+                context.source_root,
+                context.source_path,
+                saved,
+                topic_context_dir(slug) / f"{saved.stem}.summary.txt",
+                context.source_checksum,
+            )
         output_func(f"Saved context: {saved.name}")
     return saved_contexts
 
@@ -1051,8 +1064,17 @@ def pending_contexts_from_dir(directory: Path, output_func=print) -> list[Pendin
     failed = 0
     for source in scan_source_files(directory):
         try:
-            contexts.append(read_pending_context(source, output_func))
-        except OpenLearnError as exc:
+            context = read_pending_context(source, output_func)
+            contexts.append(
+                PendingContext(
+                    context.filename,
+                    context.text,
+                    source_path=source.resolve(),
+                    source_root=directory,
+                    source_checksum=_file_checksum(source),
+                )
+            )
+        except (OSError, UnicodeDecodeError, OpenLearnError) as exc:
             failed += 1
             output_func(f"Failed {source.name}: {exc}")
     output_func(f"{len(contexts)} added, {failed} failed from {directory.name}")
@@ -5827,6 +5849,8 @@ def cmd_resume(args: argparse.Namespace, output_func=print) -> int:
     set_active_topic(topic.slug)
     set_review_session_active(topic.slug, False)
     model = args.model or str(topic.metadata.get("model") or configured_model())
+    refresh_imported_source_folders(topic.slug, model=model, output_func=output_func)
+    topic = read_topic(topic.slug)
     resume_context = resume_context_prompt(topic)
     last_learner_message = last_actual_learner_message(topic)
     should_update_metadata = topic.metadata.get("last_answer_status") in {"needs_work", "partial"}
@@ -7471,6 +7495,60 @@ def imported_checksums(metadata: dict[str, object]) -> set[str]:
     return {value for value in values if isinstance(value, str)}
 
 
+def imported_source_folders(metadata: dict[str, object]) -> dict[str, dict[str, object]]:
+    values = metadata.get("imported_source_folders")
+    if not isinstance(values, dict):
+        return {}
+    return {
+        key: dict(value)
+        for key, value in values.items()
+        if isinstance(key, str) and isinstance(value, dict)
+    }
+
+
+def save_imported_source_provenance(
+    slug: str,
+    source_root: Path,
+    source: Path,
+    context_path: Path,
+    summary_path: Path,
+    checksum: str,
+) -> None:
+    source_root = source_root.expanduser().resolve()
+    source = source.expanduser().resolve()
+    try:
+        relative = source.relative_to(source_root).as_posix()
+    except ValueError as exc:
+        raise OpenLearnError(f"source is outside imported folder: {source}") from exc
+    path = topic_path(slug)
+    with file_lock(path):
+        metadata, body = parse_topic(path.read_text(encoding="utf-8"))
+        metadata = dict(metadata)
+        folders = imported_source_folders(metadata)
+        folder = dict(folders.get(str(source_root), {}))
+        raw_files = folder.get("files")
+        files = dict(raw_files) if isinstance(raw_files, dict) else {}
+        files[relative] = {
+            "source_path": str(source),
+            "context_file": context_path.name,
+            "summary_file": summary_path.name,
+            "checksum": checksum,
+        }
+        folder["files"] = files
+        folders[str(source_root)] = folder
+        metadata["imported_source_folders"] = folders
+        values = metadata.get("imported_checksums")
+        checksums = (
+            [value for value in values if isinstance(value, str)]
+            if isinstance(values, list)
+            else []
+        )
+        if checksum not in checksums:
+            checksums.append(checksum)
+        metadata["imported_checksums"] = checksums
+        write_text_atomic(path, format_topic(metadata, body))
+
+
 def save_imported_checksum(slug: str, checksum: str) -> None:
     path = topic_path(slug)
     with file_lock(path):
@@ -7507,12 +7585,14 @@ def cmd_import_scan(slug: str, directory: Path, model: str | None = None, output
         lines: list[str] = []
         try:
             saved = import_context_file(slug, source, output_func=lines.append)
-            summarize_context_file(slug, saved, model=model, output_func=lines.append)
+            summary = summarize_context_file(slug, saved, model=model, output_func=lines.append)
         except OpenLearnError as exc:
             with seen_lock:
                 seen.discard(checksum)  # unclaim so future runs can retry
             return "failed", source.name, None, str(exc)
-        save_imported_checksum(slug, checksum)
+        save_imported_source_provenance(
+            slug, directory, source, saved, summary, checksum
+        )
         return "imported", source.name, saved.name, "\n".join(lines)
 
     with ThreadPoolExecutor(max_workers=IMPORT_SCAN_MAX_WORKERS) as executor:
@@ -7539,14 +7619,114 @@ def cmd_import_scan(slug: str, directory: Path, model: str | None = None, output
     return 0
 
 
-def summarize_context_file(
-    slug: str, source: Path, model: str | None = None, output_func=print
-) -> Path:
-    if source.name.endswith(".summary.txt"):
-        raise OpenLearnError("choose a raw context file, not an existing summary")
-    if not source.exists() or not source.is_file():
-        raise OpenLearnError(f"context file not found: {source}")
-    text = source.read_text(encoding="utf-8")
+def _source_record_artifact(slug: str, record: dict[str, object], key: str) -> Path | None:
+    value = record.get(key)
+    if not isinstance(value, str) or not value or Path(value).name != value:
+        return None
+    return topic_context_dir(slug) / value
+
+
+def refresh_imported_source_folders(
+    slug: str, model: str | None = None, output_func=print
+) -> tuple[int, int, int]:
+    """Refresh changed files from folders previously imported into a topic."""
+    topic = read_topic(slug)
+    folders = imported_source_folders(topic.metadata)
+    refreshed = unchanged = failed = 0
+    for folder_name, folder_data in sorted(folders.items()):
+        directory = Path(folder_name)
+        if not directory.exists() or not directory.is_dir():
+            failed += 1
+            output_func(f"Source refresh skipped: folder unavailable: {directory}")
+            continue
+        raw_records = folder_data.get("files")
+        records = dict(raw_records) if isinstance(raw_records, dict) else {}
+        try:
+            sources = scan_source_files(directory)
+        except OSError as exc:
+            failed += 1
+            output_func(f"Source refresh skipped for {directory}: {exc}")
+            continue
+        current_relatives: set[str] = set()
+        for source in sources:
+            try:
+                relative = source.resolve().relative_to(directory.resolve()).as_posix()
+                current_relatives.add(relative)
+                checksum = _file_checksum(source)
+            except (OSError, ValueError) as exc:
+                failed += 1
+                output_func(f"Failed to refresh {source.name}: {exc}")
+                continue
+            raw_record = records.get(relative)
+            record = dict(raw_record) if isinstance(raw_record, dict) else {}
+            context_path = _source_record_artifact(slug, record, "context_file")
+            summary_path = _source_record_artifact(slug, record, "summary_file")
+            if (
+                record.get("checksum") == checksum
+                and context_path is not None
+                and summary_path is not None
+                and context_path.is_file()
+                and summary_path.is_file()
+            ):
+                unchanged += 1
+                continue
+            try:
+                text, filename = context_text_from_file(source, output_func=lambda _: None)
+                summary_text = generate_context_summary(
+                    slug,
+                    context_path.name if context_path is not None else filename,
+                    text,
+                    model=model,
+                    output_func=lambda _: None,
+                )
+                claimed_new_context = False
+                if context_path is None:
+                    context_path = unique_context_path(slug, filename)
+                    claimed_new_context = True
+                if summary_path is None:
+                    summary_path = topic_context_dir(slug) / f"{context_path.stem}.summary.txt"
+                previous_context = (
+                    context_path.read_bytes()
+                    if context_path.exists() and not claimed_new_context
+                    else None
+                )
+                previous_summary = (
+                    summary_path.read_bytes() if summary_path.exists() else None
+                )
+                try:
+                    write_text_atomic(context_path, text.rstrip() + "\n")
+                    write_text_atomic(summary_path, summary_text)
+                    save_imported_source_provenance(
+                        slug, directory, source, context_path, summary_path, checksum
+                    )
+                except Exception:
+                    if previous_context is None:
+                        context_path.unlink(missing_ok=True)
+                    else:
+                        write_text_atomic(context_path, previous_context.decode("utf-8"))
+                    if previous_summary is None:
+                        summary_path.unlink(missing_ok=True)
+                    else:
+                        write_text_atomic(summary_path, previous_summary.decode("utf-8"))
+                    raise
+                refreshed += 1
+                output_func(f"Refreshed source: {relative}")
+            except Exception as exc:
+                failed += 1
+                output_func(f"Failed to refresh {relative}: {exc}")
+        for relative in sorted(set(records) - current_relatives):
+            failed += 1
+            output_func(f"Source refresh skipped: file unavailable: {directory / relative}")
+    return refreshed, unchanged, failed
+
+
+def generate_context_summary(
+    slug: str,
+    source_name: str,
+    text: str,
+    model: str | None = None,
+    output_func=print,
+) -> str:
     if not text.strip():
         raise OpenLearnError("context file is empty")
     clipped = text[:CONTEXT_SUMMARY_CHAR_LIMIT]
@@ -7567,7 +7747,7 @@ def summarize_context_file(
         prerequisites, and instructor/course priorities.
         Use concise bullets with clear labels. Keep it under 500 words.
 
-        File: {source.name}
+        File: {source_name}
 
         {clipped}{truncation_note}
         """
@@ -7584,10 +7764,27 @@ def summarize_context_file(
             break
         except ConnectionResetError:
             if attempt == 2:
-                raise OpenLearnError(f"connection reset after 3 attempts: {source.name}")
+                raise OpenLearnError(f"connection reset after 3 attempts: {source_name}")
             time.sleep(2**attempt)
+    return summary.rstrip() + "\n"
+
+
+def summarize_context_file(
+    slug: str, source: Path, model: str | None = None, output_func=print
+) -> Path:
+    if source.name.endswith(".summary.txt"):
+        raise OpenLearnError("choose a raw context file, not an existing summary")
+    if not source.exists() or not source.is_file():
+        raise OpenLearnError(f"context file not found: {source}")
+    summary = generate_context_summary(
+        slug,
+        source.name,
+        source.read_text(encoding="utf-8"),
+        model=model,
+        output_func=output_func,
+    )
     summary_path = topic_context_dir(slug) / f"{source.stem}.summary.txt"
-    write_text_atomic(summary_path, summary.rstrip() + "\n")
+    write_text_atomic(summary_path, summary)
     return summary_path
 
 

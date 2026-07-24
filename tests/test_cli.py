@@ -894,6 +894,215 @@ class CliStorageTests(unittest.TestCase):
         self.assertEqual(len(saved_sources), 1)
         self.assertIn(saved_sources[0], {"copy.txt", "week1.txt"})
 
+    def test_import_scan_persists_source_folder_provenance(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="AI", goal="learn ai"))
+        directory = Path(self.home.name) / "semester"
+        directory.mkdir()
+        source = directory / "week1.txt"
+        source.write_text("lecture one", encoding="utf-8")
+
+        with mock.patch.object(cli, "generate_context_summary", return_value="Summary.\n"):
+            call_silent(
+                cli.cmd_import_scan,
+                "ai",
+                directory,
+                model="test-model",
+            )
+
+        folders = cli.imported_source_folders(cli.read_topic("ai").metadata)
+        record = folders[str(directory.resolve())]["files"]["week1.txt"]
+        self.assertEqual(record["source_path"], str(source.resolve()))
+        self.assertEqual(record["context_file"], "week1.txt")
+        self.assertEqual(record["summary_file"], "week1.summary.txt")
+        self.assertEqual(record["checksum"], cli._file_checksum(source))
+
+    def test_folder_refresh_unchanged_preserves_artifacts_and_avoids_provider(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="AI", goal="learn ai"))
+        directory = Path(self.home.name) / "semester"
+        directory.mkdir()
+        source = directory / "week1.txt"
+        source.write_text("lecture one", encoding="utf-8")
+        with mock.patch.object(cli, "generate_context_summary", return_value="Summary one.\n"):
+            call_silent(cli.cmd_import_scan, "ai", directory, model="test-model")
+        context = cli.topic_context_dir("ai") / "week1.txt"
+        summary = cli.topic_context_dir("ai") / "week1.summary.txt"
+        topic_before = cli.topic_path("ai").stat().st_mtime_ns
+        context_before = context.stat().st_mtime_ns
+        summary_before = summary.stat().st_mtime_ns
+
+        with mock.patch.object(cli, "generate_context_summary") as generate:
+            result = cli.refresh_imported_source_folders(
+                "ai", model="test-model", output_func=lambda _text: None
+            )
+
+        self.assertEqual(result, (0, 1, 0))
+        generate.assert_not_called()
+        self.assertEqual(cli.topic_path("ai").stat().st_mtime_ns, topic_before)
+        self.assertEqual(context.stat().st_mtime_ns, context_before)
+        self.assertEqual(summary.stat().st_mtime_ns, summary_before)
+
+    def test_folder_refresh_updates_only_changed_file(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="AI", goal="learn ai"))
+        directory = Path(self.home.name) / "semester"
+        directory.mkdir()
+        first = directory / "week1.txt"
+        second = directory / "week2.md"
+        first.write_text("lecture one", encoding="utf-8")
+        second.write_text("# lecture two", encoding="utf-8")
+        with mock.patch.object(cli, "generate_context_summary", return_value="Initial.\n"):
+            call_silent(cli.cmd_import_scan, "ai", directory, model="test-model")
+        second_context = cli.topic_context_dir("ai") / "week2.md"
+        second_summary = cli.topic_context_dir("ai") / "week2.summary.txt"
+        second_context_mtime = second_context.stat().st_mtime_ns
+        second_summary_mtime = second_summary.stat().st_mtime_ns
+        first.write_text("lecture one revised", encoding="utf-8")
+
+        with mock.patch.object(
+            cli, "generate_context_summary", return_value="Revised summary.\n"
+        ) as generate:
+            result = cli.refresh_imported_source_folders(
+                "ai", model="test-model", output_func=lambda _text: None
+            )
+
+        self.assertEqual(result, (1, 1, 0))
+        generate.assert_called_once()
+        self.assertEqual(
+            (cli.topic_context_dir("ai") / "week1.txt").read_text(encoding="utf-8"),
+            "lecture one revised\n",
+        )
+        self.assertEqual(
+            (cli.topic_context_dir("ai") / "week1.summary.txt").read_text(encoding="utf-8"),
+            "Revised summary.\n",
+        )
+        self.assertEqual(second_context.stat().st_mtime_ns, second_context_mtime)
+        self.assertEqual(second_summary.stat().st_mtime_ns, second_summary_mtime)
+        self.assertEqual(first.read_text(encoding="utf-8"), "lecture one revised")
+
+    def test_folder_refresh_imports_new_supported_file_incrementally(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="AI", goal="learn ai"))
+        directory = Path(self.home.name) / "semester"
+        directory.mkdir()
+        first = directory / "week1.txt"
+        first.write_text("lecture one", encoding="utf-8")
+        with mock.patch.object(cli, "generate_context_summary", return_value="Initial.\n"):
+            call_silent(cli.cmd_import_scan, "ai", directory, model="test-model")
+        first_context = cli.topic_context_dir("ai") / "week1.txt"
+        first_mtime = first_context.stat().st_mtime_ns
+        (directory / "week2.md").write_text("# lecture two", encoding="utf-8")
+
+        with mock.patch.object(cli, "generate_context_summary", return_value="New.\n"):
+            result = cli.refresh_imported_source_folders(
+                "ai", model="test-model", output_func=lambda _text: None
+            )
+
+        self.assertEqual(result, (1, 1, 0))
+        self.assertEqual(first_context.stat().st_mtime_ns, first_mtime)
+        folders = cli.imported_source_folders(cli.read_topic("ai").metadata)
+        self.assertEqual(
+            set(folders[str(directory.resolve())]["files"]),
+            {"week1.txt", "week2.md"},
+        )
+
+    def test_folder_refresh_unavailable_is_clear_and_non_corrupting(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="AI", goal="learn ai"))
+        directory = Path(self.home.name) / "semester"
+        directory.mkdir()
+        (directory / "week1.txt").write_text("lecture one", encoding="utf-8")
+        with mock.patch.object(cli, "generate_context_summary", return_value="Summary.\n"):
+            call_silent(cli.cmd_import_scan, "ai", directory, model="test-model")
+        topic_before = cli.topic_path("ai").read_bytes()
+        context_before = {
+            path.name: path.read_bytes() for path in cli.context_files("ai")
+        }
+        directory.rename(Path(self.home.name) / "semester-moved")
+        output: list[str] = []
+
+        result = cli.refresh_imported_source_folders(
+            "ai", model="test-model", output_func=output.append
+        )
+
+        self.assertEqual(result, (0, 0, 1))
+        self.assertIn("folder unavailable", output[0])
+        self.assertEqual(cli.topic_path("ai").read_bytes(), topic_before)
+        self.assertEqual(
+            {path.name: path.read_bytes() for path in cli.context_files("ai")},
+            context_before,
+        )
+
+    def test_folder_refresh_provider_failure_preserves_previous_artifacts(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="AI", goal="learn ai"))
+        directory = Path(self.home.name) / "semester"
+        directory.mkdir()
+        source = directory / "week1.txt"
+        source.write_text("lecture one", encoding="utf-8")
+        with mock.patch.object(cli, "generate_context_summary", return_value="Summary.\n"):
+            call_silent(cli.cmd_import_scan, "ai", directory, model="test-model")
+        topic_before = cli.topic_path("ai").read_bytes()
+        context_before = {
+            path.name: path.read_bytes() for path in cli.context_files("ai")
+        }
+        source.write_text("lecture one revised", encoding="utf-8")
+        output: list[str] = []
+
+        with mock.patch.object(
+            cli,
+            "generate_context_summary",
+            side_effect=cli.OpenLearnError("provider unavailable"),
+        ):
+            result = cli.refresh_imported_source_folders(
+                "ai", model="test-model", output_func=output.append
+            )
+
+        self.assertEqual(result, (0, 0, 1))
+        self.assertIn("provider unavailable", output[0])
+        self.assertEqual(cli.topic_path("ai").read_bytes(), topic_before)
+        self.assertEqual(
+            {path.name: path.read_bytes() for path in cli.context_files("ai")},
+            context_before,
+        )
+
+    def test_course_setup_preserves_folder_source_provenance(self) -> None:
+        directory = Path(self.home.name) / "semester"
+        directory.mkdir()
+        source = directory / "week1.txt"
+        source.write_text("lecture one", encoding="utf-8")
+        contexts = cli.pending_contexts_from_dir(directory, output_func=lambda _text: None)
+
+        cli.create_course_from_setup(
+            "AI",
+            "learn ai",
+            contexts,
+            output_func=lambda _text: None,
+        )
+
+        folders = cli.imported_source_folders(cli.read_topic("ai").metadata)
+        self.assertEqual(
+            folders[str(directory.resolve())]["files"]["week1.txt"]["source_path"],
+            str(source.resolve()),
+        )
+
+    def test_resume_checks_imported_folders_before_building_context(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="AI", goal="learn ai"))
+
+        with (
+            mock.patch.object(
+                cli, "refresh_imported_source_folders", return_value=(0, 0, 0)
+            ) as refresh,
+            mock.patch.object(
+                cli,
+                "call_openai_streaming",
+                return_value="**Lesson:** Continue.",
+            ),
+        ):
+            call_silent(
+                cli.cmd_resume,
+                Namespace(topic="ai", model="test-model"),
+            )
+
+        refresh.assert_called_once()
+        self.assertEqual(refresh.call_args.args[:2], ("ai",))
+        self.assertEqual(refresh.call_args.kwargs["model"], "test-model")
+
     def test_paste_command_opens_editor_and_summarizes_source(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="AI", goal="learn ai"))
         original_run = cli.subprocess.run
