@@ -42,6 +42,22 @@ The Enter cue belongs under `**Next:**` and must not create pending grading stat
 7. Generate one concise terminal-friendly tutor turn.
 8. Advance only after mastery evidence.
 
+## Practice Activity Evidence
+
+The tutor may select a hands-on activity as its next move, but selection only creates a side-effect-free proposal.
+The learner must explicitly accept before openLearn creates a workspace, opens a resource or application, or executes code.
+Direct learner commands such as `/drill` count as explicit acceptance and remain available when model-selected behavior is unavailable.
+
+An activity result is observable candidate evidence, not an answer judgment.
+The domain adapter validates and records bounded namespaced evidence, then supplies only the result needed for the teaching decision.
+The authoritative judge and move-selection loop decides whether that evidence warrants a learner-state update.
+Activity completion never advances mastery on its own, and a tool failure creates no mastery evidence.
+Practice and mastery-check purposes remain distinct throughout this flow.
+
+Cancellation and adapter failures preserve the surrounding tutor session.
+The learner can continue chatting and use manual `/drill` and `/check` fallbacks without a generic shell, arbitrary executable, or arbitrary path permission.
+Activity state and its teaching evidence recover together after an interrupted write through the durable activity-update journal.
+
 ## Learner State
 
 | Scope | Examples |
