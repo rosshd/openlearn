@@ -5638,28 +5638,60 @@ def load_curated_drills() -> list[dict[str, object]]:
     return [item for item in data if isinstance(item, dict)]
 
 
+MAX_REVIEW_SESSION_CONCEPTS = 5
+
+
+def select_due_review_items(
+    due_items: list[dict[str, object]],
+    limit: int = MAX_REVIEW_SESSION_CONCEPTS,
+) -> list[dict[str, object]]:
+    return sorted(
+        due_items,
+        key=lambda item: (
+            str(item.get("due") or ""),
+            concept_key(str(item.get("concept") or "")),
+        ),
+    )[: max(0, limit)]
+
+
 def cmd_review(args: argparse.Namespace, input_func=None, output_func=print) -> int:
     topic = read_topic(slugify(args.topic))
     set_active_topic(topic.slug)
     model = args.model or str(topic.metadata.get("model") or configured_model())
     due_items = due_review_items(topic.metadata)
-    due_lines = "\n".join(f"- {item['concept']}" for item in due_items)
+    selected_due_items = select_due_review_items(due_items)
+    due_lines = "\n".join(f"- {item['concept']}" for item in selected_due_items)
+    selected_count = len(selected_due_items)
     if getattr(args, "due_only", False):
         user = (
             "Create a short active-recall review session for this learner. "
-            "Use only the overdue concepts listed below. Do not add general weak spots "
-            "or unrelated topics. Include 3-5 questions, brief hints, and no answer key. "
+            "Use only the overdue concepts selected below. Do not add general weak spots, "
+            "other scheduled concepts, or unrelated topics. "
+            f"Ask exactly {selected_count} question(s), one for each selected concept. "
+            "Do not omit or replace any selected concept. Include brief hints and no "
+            "answer key. "
             "Ask the questions only; wait for the learner to answer before revealing or "
             "explaining answers."
-            f"\n\nOverdue concepts only:\n{due_lines or '(no scheduled concepts due today)'}"
+            f"\n\nOverdue concepts only (selected):\n"
+            f"{due_lines or '(no scheduled concepts due today)'}"
         )
     else:
+        weak_spot_guidance = (
+            "If fewer than 3 concepts are selected, you may add weak-spot questions after "
+            "the required selected-concept questions to reach 3 questions total. Never "
+            "replace or omit a selected-concept question, and do not add other scheduled "
+            "due concepts."
+            if selected_due_items
+            else "With no selected due concepts, ask 3-5 questions about weak spots."
+        )
         user = (
             "Create a short active-recall review session for this learner. "
-            "Focus on review concepts due today and weak spots. Include 3-5 questions, "
-            "brief hints, and no answer key. Ask the questions only; wait for the "
-            "learner to answer before revealing or explaining answers."
-            f"\n\nDue today:\n{due_lines or '(no scheduled concepts due today)'}"
+            f"Ask exactly one question for each of the {selected_count} selected due "
+            f"concept(s). {weak_spot_guidance} Include brief hints and no answer key. "
+            "Ask the questions only; wait for the learner to answer before revealing or "
+            "explaining answers."
+            f"\n\nDue today (selected for this session):\n"
+            f"{due_lines or '(no scheduled concepts due today)'}"
         )
     answer = call_openai_streaming(
         model=model, system=system_prompt(topic), user=user, output_func=output_func
@@ -5667,7 +5699,7 @@ def cmd_review(args: argparse.Namespace, input_func=None, output_func=print) -> 
     print_and_append_model_answer(
         topic, "review", user, answer, mark_reviewed=True, output_func=output_func
     )
-    maybe_prompt_review_result(topic.slug, due_items, input_func, output_func)
+    maybe_prompt_review_result(topic.slug, selected_due_items, input_func, output_func)
     set_review_session_active(topic.slug, True)
     return 0
 

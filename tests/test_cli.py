@@ -7289,6 +7289,104 @@ class PromptInstructionTests(unittest.TestCase):
             ],
         )
 
+    def test_review_grades_only_five_deterministically_selected_due_concepts(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="AI", goal="learn ai"))
+        path = cli.topic_path("ai")
+        metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+        metadata = dict(metadata)
+        yesterday = (date.fromisoformat(cli.today()) - timedelta(days=1)).isoformat()
+        concepts = [
+            ("concept-c", cli.today(), [3.0, 3.0, 3.0]),
+            ("concept-a", yesterday, [1.0, 1.0, 1.0]),
+            ("concept-g", cli.today(), [7.0, 7.0, 7.0]),
+            ("concept-b", yesterday, [2.0, 2.0, 2.0]),
+            ("concept-f", cli.today(), [6.0, 6.0, 6.0]),
+            ("concept-e", cli.today(), [5.0, 5.0, 5.0]),
+            ("concept-d", cli.today(), [4.0, 4.0, 4.0]),
+        ]
+        metadata["review_due"] = [
+            {
+                "concept": concept,
+                "due": due,
+                "difficulty": "hard",
+                "ebisu_model": model,
+            }
+            for concept, due, model in concepts
+        ]
+        path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
+        update_calls = []
+        captured_prompts = []
+        fake_ebisu = types.SimpleNamespace(
+            updateRecall=lambda model, successes, total, elapsed: (
+                update_calls.append((model, successes, total, elapsed))
+                or [model[0] + successes, model[1] + total, model[2]]
+            ),
+            modelToPercentileDecay=lambda model, _percentile: model[2],
+            defaultModel=lambda halflife: [4.0, 4.0, halflife],
+        )
+        original_call_openai = cli.call_openai
+        original_ebisu = sys.modules.get("ebisu")
+        cli.call_openai = (
+            lambda _model, _system, user: captured_prompts.append(user)
+            or "Five review questions."
+        )
+        cli.write_config({"srs": "ebisu"})
+        sys.modules["ebisu"] = fake_ebisu
+        try:
+            call_silent(
+                cli.cmd_review,
+                Namespace(topic="ai", model=None, due_only=False),
+                input_func=iter_input(["easy", "hard", "missed", "easy", "hard"]),
+                output_func=lambda _text: None,
+            )
+        finally:
+            cli.call_openai = original_call_openai
+            if original_ebisu is None:
+                sys.modules.pop("ebisu", None)
+            else:
+                sys.modules["ebisu"] = original_ebisu
+
+        selected = ["concept-a", "concept-b", "concept-c", "concept-d", "concept-e"]
+        unselected = {"concept-f", "concept-g"}
+        self.assertIn("exactly one question for each of the 5 selected", captured_prompts[0])
+        for concept in selected:
+            self.assertIn(f"- {concept}", captured_prompts[0])
+        for concept in unselected:
+            self.assertNotIn(concept, captured_prompts[0])
+
+        updated = cli.read_topic("ai")
+        review_items = {
+            item["concept"]: item for item in updated.metadata["review_due"]
+        }
+        for concept in selected:
+            self.assertIn(f"- {concept}", updated.body)
+        for concept in unselected:
+            self.assertNotIn(concept, updated.body)
+        for concept in selected:
+            self.assertEqual(review_items[concept]["last_reviewed"], cli.today())
+        for concept, due, model in concepts:
+            if concept not in unselected:
+                continue
+            self.assertEqual(review_items[concept]["due"], due)
+            self.assertEqual(review_items[concept]["difficulty"], "hard")
+            self.assertEqual(review_items[concept]["ebisu_model"], model)
+            self.assertNotIn("last_reviewed", review_items[concept])
+        self.assertEqual(len(update_calls), 5)
+        graded_events = [
+            event
+            for event in cli.load_event_log(cli.topic_events_path("ai"))
+            if event.get("event_type") == "review_graded"
+        ]
+        self.assertEqual(
+            [event["data"]["concept"] for event in graded_events],
+            selected,
+        )
+        self.assertTrue(
+            unselected.isdisjoint(
+                event["data"]["concept"] for event in graded_events
+            )
+        )
+
     def test_repl_review_parses_due_flag(self) -> None:
         calls = []
         original_cmd_review = cli.cmd_review
