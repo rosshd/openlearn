@@ -65,11 +65,15 @@ openlearn init
 openlearn config set-key
 openlearn config set-model gpt-4.1-mini
 openlearn config set-base-url https://api.openai.com/v1
+openlearn config set-editor nvim
 openlearn config show
 ```
 
 Choose the Ollama preset in `openlearn init`, or set `OPENLEARN_BASE_URL` / `base_url` to a local or custom OpenAI-compatible endpoint such as `http://localhost:11434/v1`, to use a provider that does not require an API key.
 Hosted defaults such as OpenAI, OpenRouter, and Anthropic still require `OPENAI_API_KEY` or a saved key.
+
+`openlearn config set-editor <command> [args...]` stores the editor as an argument list, so multi-argument commands such as `openlearn config set-editor code --wait` or `openlearn config set-editor idea --wait` do not use a shell.
+The saved editor takes precedence over `EDITOR`, then `VISUAL`; openLearn defaults to `nvim` when none are configured.
 
 Environment variables override saved config:
 
@@ -124,6 +128,7 @@ openlearn> continue
 openlearn> /done
 openlearn> /review
 openlearn> /drill
+openlearn> /drill --leetcode
 openlearn> /check
 openlearn> /videos --n 3 registers
 openlearn> /status
@@ -132,11 +137,16 @@ openlearn> /q
 
 Use `/help --all` for the full REPL command list.
 
+`/drill` generates a topic-aware Python exercise, while `/drill --leetcode` selects one from the bundled interview-practice bank without calling the model.
+After the drill opens in your configured editor, implement the function, save the file, return to openLearn, and run `/check`.
+The check enables the embedded tests, runs them with pytest, and gives tutor feedback from the result.
+If the editor cannot be launched, openLearn keeps the drill active and prints its path so you can open it manually before running `/check`.
+
 ## Command Surface
 
 | Area | Commands |
 | --- | --- |
-| Setup | `init`, `config show`, `config set-key`, `config set-model`, `config set-base-url`, `config clear-key` |
+| Setup | `init`, `config show`, `config set-key`, `config set-model`, `config set-base-url`, `config set-editor`, `config clear-key` |
 | Topics | `new`, `delete`, `list`, `recent`, `active`, `edit`, `status`, `summary`, `stats`, `repair` |
 | Learning | `menu`, `quick`, `repl`, `chat`, `resume`, `next`, `review`, `chapter`, `due` |
 | Sources | `import <topic> <file>`, `import <topic> --url <url>`, `import <topic> --scan <dir>`, `paste` |

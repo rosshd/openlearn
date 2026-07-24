@@ -1325,6 +1325,45 @@ class CliStorageTests(unittest.TestCase):
         self.assertIn("API key: saved locally (sk-...5678)", output)
         self.assertNotIn("test-secret", output)
 
+    def test_config_set_editor_stores_argv_and_overrides_editor_environment(self) -> None:
+        parsed = cli.build_parser().parse_args(
+            ["config", "set-editor", "idea", "--line", "12"],
+        )
+        self.assertEqual(parsed.editor, ["idea", "--line", "12"])
+
+        with mock.patch.dict(
+            os.environ,
+            {"EDITOR": "nvim", "VISUAL": "code"},
+            clear=False,
+        ):
+            output = capture_stdout(
+                cli.cmd_config_set_editor,
+                Namespace(editor=["idea", "--wait"]),
+            )
+
+            self.assertEqual(cli.read_config()["editor"], ["idea", "--wait"])
+            self.assertEqual(cli.configured_editor_argv(), ["idea", "--wait"])
+
+        self.assertIn("Editor: idea --wait", output)
+
+    def test_configured_editor_uses_editor_then_visual_then_nvim(self) -> None:
+        with mock.patch.dict(os.environ, {"EDITOR": "nvim -f", "VISUAL": "code"}, clear=False):
+            self.assertEqual(cli.configured_editor_argv(), ["nvim", "-f"])
+
+        with mock.patch.dict(
+            os.environ,
+            {"OPENLEARN_HOME": self.home.name, "VISUAL": "code --wait"},
+            clear=True,
+        ):
+            self.assertEqual(cli.configured_editor_argv(), ["code", "--wait"])
+
+        with mock.patch.dict(
+            os.environ,
+            {"OPENLEARN_HOME": self.home.name},
+            clear=True,
+        ):
+            self.assertEqual(cli.configured_editor_argv(), ["nvim"])
+
     def test_active_topic_resolution_falls_back_to_most_recent_topic(self) -> None:
         call_silent(cli.cmd_init, Namespace())
         cli.write_topic(
@@ -6068,11 +6107,11 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(calls, ["next"])
         self.assertTrue(any("Coverage check added 1 slide" in line for line in output))
 
-    def test_drill_command_generates_file_opens_vscode_and_saves_metadata(self) -> None:
+    def test_drill_command_generates_file_opens_selected_editor_and_saves_metadata(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Python", goal="practice functions"))
         original_call_openai = cli.call_openai
-        original_popen = cli.subprocess.Popen
-        popen_calls = []
+        original_run = cli.subprocess.run
+        run_calls = []
         output = []
         cli.call_openai = lambda *_args, **_kwargs: json.dumps(
             {
@@ -6085,12 +6124,13 @@ class InteractiveTests(unittest.TestCase):
                 ],
             }
         )
-        cli.subprocess.Popen = lambda args: popen_calls.append(args)
-        try:
-            cli.handle_repl_command("drill", output_func=output.append)
-        finally:
-            cli.call_openai = original_call_openai
-            cli.subprocess.Popen = original_popen
+        cli.subprocess.run = lambda args, check: run_calls.append((args, check))
+        with mock.patch.dict(os.environ, {"EDITOR": "nvim"}, clear=False):
+            try:
+                cli.handle_repl_command("drill", output_func=output.append)
+            finally:
+                cli.call_openai = original_call_openai
+                cli.subprocess.run = original_run
 
         topic = cli.read_topic("python")
         drill_path = Path(topic.metadata["active_drill"])
@@ -6099,22 +6139,84 @@ class InteractiveTests(unittest.TestCase):
         self.assertIn("def add_numbers(a, b):", text)
         self.assertIn("if False:", text)
         self.assertIn("assert add_numbers(*[1, 2]) == 3", text)
-        self.assertEqual(popen_calls, [["code", str(drill_path)]])
+        self.assertEqual(run_calls, [(["nvim", str(drill_path)], True)])
         self.assertTrue(any("Drill saved:" in line for line in output))
+        self.assertTrue(any("Opened in nvim" in line for line in output))
+
+    def test_drill_editor_keeps_multi_argument_command_and_path_separate(self) -> None:
+        path = Path(self.home.name) / "drill with spaces.py"
+        calls = []
+
+        with mock.patch.dict(os.environ, {"EDITOR": "code --wait"}, clear=False):
+            with mock.patch.object(
+                cli.subprocess,
+                "run",
+                side_effect=lambda args, check: calls.append((args, check)),
+            ):
+                result = cli.open_drill_in_editor(path)
+
+        self.assertEqual(calls, [(["code", "--wait", str(path)], True)])
+        self.assertEqual(result, "code --wait")
+
+        cli.write_config({"editor": ["idea", "--line", "12"]})
+        with mock.patch.object(
+            cli.subprocess,
+            "run",
+            side_effect=lambda args, check: calls.append((args, check)),
+        ):
+            result = cli.open_drill_in_editor(path)
+
+        self.assertEqual(calls[-1], (["idea", "--line", "12", str(path)], True))
+        self.assertEqual(result, "idea --line 12")
+
+    def test_drill_reports_missing_editor_and_manual_open_path(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Arrays", goal="practice leetcode arrays"))
+        output = []
+
+        with mock.patch.dict(os.environ, {"EDITOR": "missing-editor"}, clear=False):
+            with mock.patch.object(
+                cli.subprocess,
+                "run",
+                side_effect=FileNotFoundError("not found"),
+            ):
+                cli.handle_repl_command("drill --leetcode", output_func=output.append)
+
+        topic = cli.read_topic("arrays")
+        drill_path = Path(topic.metadata["active_drill"])
+        rendered = "\n".join(output)
+        self.assertIn("Could not open drill with missing-editor", rendered)
+        self.assertIn(f"Open manually: {drill_path}", rendered)
+        self.assertNotIn("Opened in", rendered)
+
+    def test_drill_reports_editor_nonzero_exit_without_claiming_it_opened(self) -> None:
+        path = Path(self.home.name) / "drill.py"
+
+        with mock.patch.dict(os.environ, {"EDITOR": "code"}, clear=False):
+            with mock.patch.object(
+                cli.subprocess,
+                "run",
+                side_effect=subprocess.CalledProcessError(1, ["code", str(path)]),
+            ):
+                with self.assertRaises(cli.OpenLearnError) as caught:
+                    cli.open_drill_in_editor(path)
+
+        message = str(caught.exception)
+        self.assertIn("code", message)
+        self.assertIn(str(path), message)
 
     def test_drill_leetcode_uses_curated_bank_without_model_call(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Arrays", goal="practice leetcode arrays"))
         original_call_openai = cli.call_openai
-        original_popen = cli.subprocess.Popen
+        original_run = cli.subprocess.run
         cli.call_openai = lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("model called")
         )
-        cli.subprocess.Popen = lambda _args: None
+        cli.subprocess.run = lambda _args, check: None
         try:
             cli.handle_repl_command("drill --leetcode", output_func=lambda _text: None)
         finally:
             cli.call_openai = original_call_openai
-            cli.subprocess.Popen = original_popen
+            cli.subprocess.run = original_run
 
         topic = cli.read_topic("arrays")
         drill_path = Path(topic.metadata["active_drill"])
