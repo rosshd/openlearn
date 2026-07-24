@@ -25,7 +25,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from urllib.parse import urlencode, urlparse
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -1118,12 +1118,15 @@ def scan_source_files(directory: Path) -> list[Path]:
 
 
 def require_safe_source_path(directory: Path, source: Path) -> Path:
-    root = directory.expanduser().resolve()
+    try:
+        root = directory.expanduser().resolve()
+    except (OSError, RuntimeError) as exc:
+        raise OpenLearnError(f"could not resolve imported folder: {directory}") from exc
     lexical_source = source.expanduser().absolute()
     try:
         resolved_source = source.expanduser().resolve(strict=True)
         resolved_source.relative_to(root)
-    except (OSError, ValueError) as exc:
+    except (OSError, RuntimeError, ValueError) as exc:
         raise OpenLearnError(f"source is outside imported folder: {source}") from exc
     if lexical_source != resolved_source or not resolved_source.is_file():
         raise OpenLearnError(f"source symlinks are not imported: {source}")
@@ -1132,7 +1135,10 @@ def require_safe_source_path(directory: Path, source: Path) -> Path:
 
 def snapshot_source_file(directory: Path, source: Path) -> SourceSnapshot:
     """Read one stable regular-file snapshot without following path symlinks."""
-    root = directory.expanduser().resolve()
+    try:
+        root = directory.expanduser().resolve()
+    except (OSError, RuntimeError) as exc:
+        raise OpenLearnError(f"could not resolve imported folder: {directory}") from exc
     lexical_source = source.expanduser().absolute()
     try:
         relative = lexical_source.relative_to(root)
@@ -1209,7 +1215,6 @@ def _read_stable_source_descriptor(file_descriptor: int, source: Path) -> bytes:
 
 
 def _snapshot_source_file_windows(root: Path, source: Path) -> SourceSnapshot:
-    import ctypes
     import msvcrt
 
     file_descriptor = -1
@@ -1219,22 +1224,9 @@ def _snapshot_source_file_windows(root: Path, source: Path) -> SourceSnapshot:
             os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOINHERIT", 0),
         )
         handle = msvcrt.get_osfhandle(file_descriptor)
-        buffer = ctypes.create_unicode_buffer(32768)
-        length = ctypes.windll.kernel32.GetFinalPathNameByHandleW(
-            handle, buffer, len(buffer), 0
-        )
-        if length == 0 or length >= len(buffer):
-            raise OSError(ctypes.get_last_error(), "could not resolve opened source handle")
-        final_name = buffer.value
-        if final_name.startswith("\\\\?\\"):
-            final_name = final_name[4:]
-        opened_path = Path(final_name).resolve()
-        try:
-            opened_path.relative_to(root)
-        except ValueError as exc:
-            raise OpenLearnError(f"source is outside imported folder: {source}") from exc
-        if opened_path != source:
-            raise OpenLearnError(f"source symlinks are not imported: {source}")
+        opened_path = _windows_final_path_for_handle(handle)
+        resolved_root = _windows_final_path_for_root(root)
+        _validate_windows_opened_source(root, source, resolved_root, opened_path)
         data = _read_stable_source_descriptor(file_descriptor, source)
         return SourceSnapshot(
             source,
@@ -1246,6 +1238,103 @@ def _snapshot_source_file_windows(root: Path, source: Path) -> SourceSnapshot:
     finally:
         if file_descriptor >= 0:
             os.close(file_descriptor)
+
+
+def _windows_api():
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    get_final_path = kernel32.GetFinalPathNameByHandleW
+    get_final_path.argtypes = [
+        wintypes.HANDLE,
+        wintypes.LPWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+    ]
+    get_final_path.restype = wintypes.DWORD
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    create_file.restype = wintypes.HANDLE
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [wintypes.HANDLE]
+    close_handle.restype = wintypes.BOOL
+    return get_final_path, create_file, close_handle
+
+
+def _windows_final_path_for_handle(handle: int) -> PureWindowsPath:
+    import ctypes
+    from ctypes import wintypes
+
+    get_final_path, _create_file, _close_handle = _windows_api()
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = get_final_path(wintypes.HANDLE(handle), buffer, len(buffer), 0)
+    if length == 0 or length >= len(buffer):
+        raise OSError(ctypes.get_last_error(), "could not resolve opened source handle")
+    return _normalize_windows_final_path(buffer.value)
+
+
+def _windows_final_path_for_root(root: Path) -> PureWindowsPath:
+    import ctypes
+    from ctypes import wintypes
+
+    get_final_path, create_file, close_handle = _windows_api()
+    share_all = 0x00000001 | 0x00000002 | 0x00000004
+    open_existing = 3
+    backup_semantics = 0x02000000
+    handle = create_file(
+        str(root),
+        0,
+        share_all,
+        None,
+        open_existing,
+        backup_semantics,
+        None,
+    )
+    invalid_handle = wintypes.HANDLE(-1).value
+    if handle == invalid_handle:
+        raise OSError(ctypes.get_last_error(), f"could not open imported folder: {root}")
+    try:
+        buffer = ctypes.create_unicode_buffer(32768)
+        length = get_final_path(handle, buffer, len(buffer), 0)
+        if length == 0 or length >= len(buffer):
+            raise OSError(ctypes.get_last_error(), "could not resolve imported folder handle")
+        return _normalize_windows_final_path(buffer.value)
+    finally:
+        close_handle(handle)
+
+
+def _normalize_windows_final_path(value: str) -> PureWindowsPath:
+    lowered = value.lower()
+    if lowered.startswith("\\\\?\\unc\\"):
+        value = "\\\\" + value[8:]
+    elif lowered.startswith("\\\\?\\"):
+        value = value[4:]
+    return PureWindowsPath(value)
+
+
+def _validate_windows_opened_source(
+    root: Path | PureWindowsPath,
+    source: Path | PureWindowsPath,
+    resolved_root: PureWindowsPath,
+    opened_path: PureWindowsPath,
+) -> None:
+    try:
+        relative = PureWindowsPath(source).relative_to(PureWindowsPath(root))
+        opened_path.relative_to(resolved_root)
+    except ValueError as exc:
+        raise OpenLearnError(f"source is outside imported folder: {source}") from exc
+    expected_path = resolved_root.joinpath(*relative.parts)
+    if opened_path != expected_path:
+        raise OpenLearnError(f"source symlinks are not imported: {source}")
 
 
 def seed_manual_test_course(started: bool = False, with_session: bool = False) -> None:

@@ -1094,6 +1094,143 @@ class CliStorageTests(unittest.TestCase):
         self.assertEqual(cli.context_files("ai"), [])
         self.assertEqual(cli.imported_source_folders(cli.read_topic("ai").metadata), {})
 
+    def test_folder_scan_ignores_self_referential_symlink_loops(self) -> None:
+        directory = Path(self.home.name) / "semester"
+        directory.mkdir()
+        loop = directory / "loop.txt"
+        loop.symlink_to(loop)
+
+        contexts = cli.pending_contexts_from_dir(
+            directory, output_func=lambda _text: None
+        )
+
+        self.assertEqual(contexts, [])
+
+    def test_source_resolution_wraps_runtime_error_from_older_python(self) -> None:
+        directory = Path(self.home.name) / "semester"
+        directory.mkdir()
+        source = directory / "loop.txt"
+
+        with mock.patch.object(Path, "resolve", side_effect=RuntimeError("symlink loop")):
+            with self.assertRaises(cli.OpenLearnError) as caught:
+                cli.require_safe_source_path(directory, source)
+
+        self.assertIn("could not resolve imported folder", str(caught.exception))
+
+    def test_windows_api_binding_and_unc_handle_normalization(self) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        class FakeFunction:
+            def __init__(self):
+                self.argtypes = None
+                self.restype = None
+
+            def __call__(self, *_args):
+                return 1
+
+        get_final = FakeFunction()
+        create_file = FakeFunction()
+        close_handle = FakeFunction()
+        kernel32 = types.SimpleNamespace(
+            GetFinalPathNameByHandleW=get_final,
+            CreateFileW=create_file,
+            CloseHandle=close_handle,
+        )
+        with mock.patch.object(
+            ctypes, "WinDLL", return_value=kernel32, create=True
+        ) as win_dll:
+            bound_get, bound_create, bound_close = cli._windows_api()
+
+        win_dll.assert_called_once_with("kernel32", use_last_error=True)
+        self.assertIs(bound_get, get_final)
+        self.assertIs(bound_create, create_file)
+        self.assertIs(bound_close, close_handle)
+        self.assertEqual(
+            get_final.argtypes,
+            [
+                wintypes.HANDLE,
+                wintypes.LPWSTR,
+                wintypes.DWORD,
+                wintypes.DWORD,
+            ],
+        )
+        self.assertIs(get_final.restype, wintypes.DWORD)
+        self.assertIs(create_file.restype, wintypes.HANDLE)
+        self.assertIs(close_handle.restype, wintypes.BOOL)
+        self.assertEqual(
+            cli._normalize_windows_final_path(
+                r"\\?\UNC\server\share\course\notes.txt"
+            ),
+            cli.PureWindowsPath(r"\\server\share\course\notes.txt"),
+        )
+        self.assertEqual(
+            cli._normalize_windows_final_path(r"\\?\C:\course\notes.txt"),
+            cli.PureWindowsPath(r"C:\course\notes.txt"),
+        )
+
+    def test_windows_handle_paths_support_mapped_drive_roots(self) -> None:
+        calls: list[int] = []
+
+        def get_final(handle, buffer, _size, _flags):
+            calls.append(int(handle.value))
+            buffer.value = r"\\?\UNC\server\share\course\notes.txt"
+            return len(buffer.value)
+
+        with mock.patch.object(
+            cli,
+            "_windows_api",
+            return_value=(get_final, mock.Mock(), mock.Mock()),
+        ):
+            opened = cli._windows_final_path_for_handle(321)
+
+        self.assertEqual(calls, [321])
+        self.assertEqual(
+            opened,
+            cli.PureWindowsPath(r"\\server\share\course\notes.txt"),
+        )
+        cli._validate_windows_opened_source(
+            cli.PureWindowsPath(r"Z:\course"),
+            cli.PureWindowsPath(r"Z:\course\notes.txt"),
+            cli.PureWindowsPath(r"\\server\share\course"),
+            opened,
+        )
+        with self.assertRaises(cli.OpenLearnError):
+            cli._validate_windows_opened_source(
+                cli.PureWindowsPath(r"Z:\course"),
+                cli.PureWindowsPath(r"Z:\course\notes.txt"),
+                cli.PureWindowsPath(r"\\server\share\course"),
+                cli.PureWindowsPath(r"\\other\share\notes.txt"),
+            )
+
+    def test_windows_root_handle_is_resolved_and_closed(self) -> None:
+        closed: list[int] = []
+
+        def create_file(*_args):
+            return 654
+
+        def get_final(handle, buffer, _size, _flags):
+            self.assertEqual(handle, 654)
+            buffer.value = r"\\?\UNC\server\share\course"
+            return len(buffer.value)
+
+        def close_handle(handle):
+            closed.append(handle)
+            return True
+
+        with mock.patch.object(
+            cli,
+            "_windows_api",
+            return_value=(get_final, create_file, close_handle),
+        ):
+            resolved = cli._windows_final_path_for_root(Path("Z:/course"))
+
+        self.assertEqual(
+            resolved,
+            cli.PureWindowsPath(r"\\server\share\course"),
+        )
+        self.assertEqual(closed, [654])
+
     def test_initial_folder_summary_failure_leaves_no_orphan_artifact(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="AI", goal="learn ai"))
         directory = Path(self.home.name) / "semester"
