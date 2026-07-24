@@ -7236,6 +7236,92 @@ class PromptInstructionTests(unittest.TestCase):
             [("Bayes rule", "easy"), ("gradient descent", "missed")],
         )
 
+    def test_review_with_one_due_item_excludes_ungraded_weak_spots(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="AI", goal="learn ai"))
+        path = cli.topic_path("ai")
+        metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+        metadata = dict(metadata)
+        metadata["weak_spots"] = ["untracked weak spot"]
+        metadata["review_due"] = [
+            {"concept": "Bayes rule", "due": cli.today(), "difficulty": "hard"}
+        ]
+        path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
+        captured = []
+        original_call_openai = cli.call_openai
+
+        def fake_call_openai(_model, system, user):
+            captured.append((system, user))
+            return "Question about Bayes rule."
+
+        cli.call_openai = fake_call_openai
+        try:
+            call_silent(
+                cli.cmd_review,
+                Namespace(topic="ai", model=None, due_only=False),
+                input_func=iter_input(["easy"]),
+                output_func=lambda _text: None,
+            )
+        finally:
+            cli.call_openai = original_call_openai
+
+        system, user = captured[0]
+        self.assertIn("Bayes rule", system)
+        self.assertIn("- Bayes rule", user)
+        self.assertIn("exactly one question", user)
+        self.assertNotIn("untracked weak spot", system)
+        self.assertNotIn("untracked weak spot", user)
+
+        updated = cli.read_topic("ai")
+        self.assertIn("- Bayes rule", updated.body)
+        self.assertNotIn("untracked weak spot", updated.body)
+        self.assertEqual(updated.metadata["weak_spots"], ["untracked weak spot"])
+        graded_events = [
+            event
+            for event in cli.load_event_log(cli.topic_events_path("ai"))
+            if event.get("event_type") == "review_graded"
+        ]
+        self.assertEqual(
+            [
+                (event["data"]["concept"], event["data"]["difficulty"])
+                for event in graded_events
+            ],
+            [("Bayes rule", "easy")],
+        )
+
+    def test_review_without_due_items_still_uses_weak_spots(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="AI", goal="learn ai"))
+        path = cli.topic_path("ai")
+        metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+        metadata = dict(metadata)
+        metadata["weak_spots"] = ["gradient intuition"]
+        metadata["review_due"] = []
+        path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
+        captured = []
+        original_call_openai = cli.call_openai
+        cli.call_openai = lambda _model, system, user: (
+            captured.append((system, user)) or "Weak-spot questions."
+        )
+        try:
+            call_silent(
+                cli.cmd_review,
+                Namespace(topic="ai", model=None, due_only=False),
+                output_func=lambda _text: None,
+            )
+        finally:
+            cli.call_openai = original_call_openai
+
+        system, user = captured[0]
+        self.assertIn("gradient intuition", system)
+        self.assertIn("ask 3-5 questions about weak spots", user)
+        self.assertEqual(
+            [
+                event
+                for event in cli.load_event_log(cli.topic_events_path("ai"))
+                if event.get("event_type") == "review_graded"
+            ],
+            [],
+        )
+
     def test_review_updates_each_due_concepts_ebisu_model_with_its_result(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="AI", goal="learn ai"))
         path = cli.topic_path("ai")
