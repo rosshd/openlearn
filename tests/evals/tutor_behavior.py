@@ -135,12 +135,7 @@ def run_evaluation(
         _append_jsonl(turns_path, sanitized_record)
         records.append(sanitized_record)
 
-    failure_count = sum(
-        1
-        for record in records
-        if not isinstance(record.get("judge"), dict)
-        or record["judge"].get("pass") is not True
-    )
+    failure_count = sum(1 for record in records if not _record_passed(record))
     passed_count = len(records) - failure_count
     manifest["completed_at"] = _utc_now()
     manifest["status"] = "completed"
@@ -213,6 +208,8 @@ def _run_scenario(
             scripted_history=scripted_history,
         )
         judge = _judge_response(judge_model, judge_prompt)
+        state_assertions = _evaluate_state_assertions(scenario, topic_after.metadata)
+        event_assertions = _evaluate_event_assertions(scenario, new_events)
 
         return {
             "schema_version": SCHEMA_VERSION,
@@ -224,6 +221,8 @@ def _run_scenario(
             "tutor_response": tutor_response,
             "rubric": scenario["rubric"],
             "judge": judge,
+            "state_assertions": state_assertions,
+            "event_assertions": event_assertions,
             "state_delta": _mapping_delta(metadata_before, topic_after.metadata),
             "events": new_events,
             "provenance": {
@@ -314,6 +313,16 @@ def _failed_record(
             "score": 0.0,
             "reason": f"Harness error: {error}",
             "threshold": JUDGE_THRESHOLD,
+        },
+        "state_assertions": {
+            "pass": False,
+            "checks": [],
+            "reason": "Scenario did not complete.",
+        },
+        "event_assertions": {
+            "pass": False,
+            "checks": [],
+            "reason": "Scenario did not complete.",
         },
         "state_delta": {},
         "events": [],
@@ -434,6 +443,83 @@ def _mapping_delta(
     return delta
 
 
+def _evaluate_state_assertions(
+    scenario: dict[str, object], metadata: dict[str, object]
+) -> dict[str, object]:
+    expected = scenario.get("state_assertions", {})
+    if not isinstance(expected, dict):
+        raise ValueError(f"scenario {scenario['name']} state_assertions must be an object")
+    checks = [
+        {
+            "field": key,
+            "expected": value,
+            "actual": metadata.get(key),
+            "pass": metadata.get(key) == value,
+        }
+        for key, value in sorted(expected.items())
+    ]
+    passed = all(check["pass"] is True for check in checks)
+    return {
+        "pass": passed,
+        "checks": checks,
+        "reason": (
+            "All deterministic state assertions passed."
+            if passed
+            else "One or more deterministic state assertions failed."
+        ),
+    }
+
+
+def _evaluate_event_assertions(
+    scenario: dict[str, object], events: list[dict[str, object]]
+) -> dict[str, object]:
+    expected = scenario.get("event_assertions", {})
+    if not isinstance(expected, dict):
+        raise ValueError(f"scenario {scenario['name']} event_assertions must be an object")
+    forbidden_types = expected.get("forbidden_types", [])
+    if not isinstance(forbidden_types, list) or not all(
+        isinstance(value, str) and value.strip() for value in forbidden_types
+    ):
+        raise ValueError(
+            f"scenario {scenario['name']} event_assertions.forbidden_types "
+            "must be a list of non-empty strings"
+        )
+    event_types = [event.get("event_type") for event in events]
+    checks = [
+        {
+            "event_type": event_type,
+            "expected_count": 0,
+            "actual_count": event_types.count(event_type),
+            "pass": event_type not in event_types,
+        }
+        for event_type in forbidden_types
+    ]
+    passed = all(check["pass"] is True for check in checks)
+    return {
+        "pass": passed,
+        "checks": checks,
+        "reason": (
+            "All deterministic event assertions passed."
+            if passed
+            else "One or more deterministic event assertions failed."
+        ),
+    }
+
+
+def _record_passed(record: dict[str, object]) -> bool:
+    judge = record.get("judge")
+    state_assertions = record.get("state_assertions")
+    event_assertions = record.get("event_assertions")
+    return (
+        isinstance(judge, dict)
+        and judge.get("pass") is True
+        and isinstance(state_assertions, dict)
+        and state_assertions.get("pass") is True
+        and isinstance(event_assertions, dict)
+        and event_assertions.get("pass") is True
+    )
+
+
 def _sanitize_value(value: object, sanitizer: EvidenceRecorder) -> object:
     serialized = json.dumps(value, ensure_ascii=False)
     return json.loads(sanitizer.sanitize(serialized))
@@ -460,12 +546,7 @@ def _write_json(path: Path, value: object) -> None:
 def _render_summary(
     records: list[dict[str, object]], *, tutor_model: str, judge_model: str
 ) -> str:
-    passed = sum(
-        1
-        for record in records
-        if isinstance(record.get("judge"), dict)
-        and record["judge"].get("pass") is True
-    )
+    passed = sum(1 for record in records if _record_passed(record))
     lines = [
         "# Tutor behavior eval",
         "",
@@ -480,10 +561,17 @@ def _render_summary(
     ]
     for record in records:
         judge = record["judge"]
-        verdict = "PASS" if judge["pass"] is True else "FAIL"
+        verdict = "PASS" if _record_passed(record) else "FAIL"
+        state_assertions = record["state_assertions"]
+        event_assertions = record["event_assertions"]
+        reason = cli.one_line(str(judge["reason"]))
+        if state_assertions["pass"] is not True:
+            reason = f"{reason} State: {cli.one_line(str(state_assertions['reason']))}"
+        if event_assertions["pass"] is not True:
+            reason = f"{reason} Events: {cli.one_line(str(event_assertions['reason']))}"
         lines.append(
             f"- **{record['scenario']} - {verdict} ({judge['score']:.2f})**: "
-            f"{cli.one_line(str(judge['reason']))}"
+            f"{reason}"
         )
         lines.append("")
     lines.extend(
