@@ -2263,6 +2263,11 @@ def explicit_multiple_choice_option(answer: str, question: str = "") -> str | No
         match = re.search(pattern, value, flags=re.IGNORECASE)
         if match:
             candidates.add(match.group(1).upper())
+    if candidates:
+        candidates.update(
+            letter.upper()
+            for letter in re.findall(r"\b([A-D])\b", value, flags=re.IGNORECASE)
+        )
 
     parsed = parse_multiple_choice_options(question) if question else None
     if parsed:
@@ -5289,7 +5294,7 @@ def ask_topic(
             output_func=output_func,
             event_sink=queue_event if needs_judgment else None,
         )
-    except Exception:
+    except (Exception, KeyboardInterrupt):
         if needs_judgment:
             restore_prejudgment_turn_state(
                 topic,
@@ -6062,9 +6067,17 @@ def update_learning_metadata(
                 f"Could not grade your answer because the judge is unavailable: {exc}"
             ) from exc
         return ""
-    except (ValueError, json.JSONDecodeError):
+    except (ValueError, json.JSONDecodeError) as exc:
+        if isinstance(pending_at_answer, dict):
+            raise OpenLearnError(
+                "Could not grade your answer because the judge returned an invalid result."
+            ) from exc
         return ""
     if not update:
+        if isinstance(pending_at_answer, dict):
+            raise OpenLearnError(
+                "Could not grade your answer because the judge returned an empty result."
+            )
         return ""
     message_kind = update.get("message_kind")
     if isinstance(message_kind, str) and message_kind != "answer":
@@ -6074,6 +6087,10 @@ def update_learning_metadata(
     if requires_complete_judgment and not prepare_current_answer_judgment(
         topic.metadata, learner_prompt, update
     ):
+        if isinstance(pending_at_answer, dict):
+            raise OpenLearnError(
+                "Could not grade your answer because the judge returned an incomplete result."
+            )
         return ""
     emit_event = event_sink or log_event
 
