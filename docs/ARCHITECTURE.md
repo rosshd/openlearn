@@ -25,6 +25,7 @@ Likely split points are provider calls, topic storage, import handling, and tuto
 
 Topic files are user-owned Markdown with JSON metadata between `---` separators.
 JSON avoids a YAML dependency and keeps the file editable.
+The user-facing format and sharing boundary are documented in [TOPIC_FORMAT.md](TOPIC_FORMAT.md).
 `repair` normalizes missing metadata defaults and can recover simple corrupt JSON frontmatter such as trailing commas or missing closing braces/brackets.
 When it rewrites a topic, it first writes the original text to `<slug>.md.bak`.
 

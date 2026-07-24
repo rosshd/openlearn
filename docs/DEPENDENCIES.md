@@ -47,7 +47,7 @@ URL import:
 requests fetches HTML
 trafilatura extracts readable text
 source summarizer compresses it
-summary is saved under learning-topics/context/<slug>/
+summary is saved under learning-topics/<slug>/context/
 ```
 
 File import uses format-specific parsers and the same source-summary path.

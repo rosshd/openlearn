@@ -396,6 +396,19 @@ class CliStorageTests(unittest.TestCase):
         self.assertTrue(any("vim" in line for line in output))
         self.assertTrue(any("algorithms" in line for line in output))
 
+    def test_cmd_templates_reports_invalid_bundled_template(self) -> None:
+        output = []
+
+        with mock.patch.object(
+            cli,
+            "available_course_templates",
+            side_effect=cli.CourseTemplateError("bad asset"),
+        ):
+            result = cli.cmd_templates(Namespace(), output_func=output.append)
+
+        self.assertEqual(result, 1)
+        self.assertEqual(output, ["Could not load course templates: bad asset"])
+
     def test_template_flag_loads_units_into_metadata(self) -> None:
         output = []
 
@@ -409,6 +422,56 @@ class CliStorageTests(unittest.TestCase):
         self.assertIsInstance(topic.metadata["template_units"], list)
         self.assertGreater(len(topic.metadata["template_units"]), 0)
         self.assertIn("Template 'Vim' loaded", "\n".join(output))
+        self.assertEqual(
+            topic.metadata["goal"],
+            "Edit text efficiently using Vim for real daily work",
+        )
+        self.assertIn(topic.metadata["goal"], topic.body)
+
+        topic.metadata["template_units"].append("A learner-owned unit")
+        fresh_template = cli.load_course_template("vim")
+        self.assertNotIn("A learner-owned unit", fresh_template.units)
+
+    def test_template_creation_writes_final_metadata_once_before_activation(self) -> None:
+        with (
+            mock.patch.object(cli, "write_topic", side_effect=OSError("disk full")) as write,
+            mock.patch.object(cli, "set_active_topic") as activate,
+        ):
+            with self.assertRaisesRegex(OSError, "disk full"):
+                cli.cmd_new(
+                    Namespace(topic="Atomic Vim", goal="", template="vim"),
+                    output_func=lambda _line: None,
+                )
+
+        self.assertEqual(write.call_count, 1)
+        written_metadata = write.call_args.args[1]
+        self.assertEqual(
+            written_metadata["template_units"],
+            list(cli.load_course_template("vim").units),
+        )
+        self.assertFalse(cli.topic_path("atomic-vim").exists())
+        activate.assert_not_called()
+
+    def test_template_goal_drives_mastery_inference(self) -> None:
+        template_goal = "Edit text efficiently using Vim for real daily work"
+        with (
+            mock.patch.object(cli, "configured_model", return_value="test-model"),
+            mock.patch.object(
+                cli,
+                "infer_mastery_profile_from_goal",
+                return_value="efficient",
+            ) as infer,
+        ):
+            call_silent(
+                cli.cmd_new,
+                Namespace(topic="Goal-Inferred Vim", goal="", template="vim"),
+            )
+
+        infer.assert_called_once_with(template_goal, "test-model")
+        self.assertEqual(
+            cli.read_topic("goal-inferred-vim").metadata["mastery_profile"],
+            "efficient",
+        )
 
     def test_template_flag_unknown_slug_returns_nonzero(self) -> None:
         output = []
@@ -420,17 +483,41 @@ class CliStorageTests(unittest.TestCase):
 
         self.assertEqual(result, 1)
         self.assertTrue(any("not found" in line for line in output))
+        self.assertFalse(cli.topic_path("missing-template").exists())
+
+    def test_template_flag_rejects_path_traversal_without_creating_topic(self) -> None:
+        output = []
+
+        result = cli.cmd_new(
+            Namespace(topic="Unsafe Template", goal="", template="../config"),
+            output_func=output.append,
+        )
+
+        self.assertEqual(result, 1)
+        self.assertTrue(any("invalid template ID" in line for line in output))
+        self.assertFalse(cli.topic_path("unsafe-template").exists())
+
+    def test_explicit_goal_takes_precedence_over_template_default(self) -> None:
+        call_silent(
+            cli.cmd_new,
+            Namespace(topic="Focused Vim", goal="Master text objects", template="vim"),
+        )
+
+        topic = cli.read_topic("focused-vim")
+
+        self.assertEqual(topic.metadata["goal"], "Master text objects")
+        self.assertIn("Master text objects", topic.body)
 
     def test_template_json_files_are_all_valid(self) -> None:
-        template_dir = Path(cli.__file__).parent / "templates"
-        files = sorted(template_dir.glob("*.json"))
+        templates = cli.available_course_templates()
 
-        self.assertGreaterEqual(len(files), 8)
-        for path in files:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            self.assertEqual(set(data), {"name", "slug", "goal", "tags", "units"})
-            self.assertIsInstance(data["units"], list)
-            self.assertGreater(len(data["units"]), 0)
+        self.assertGreaterEqual(len(templates), 8)
+        self.assertIn("algorithms", {template.slug for template in templates})
+        for template in templates:
+            self.assertTrue(template.name)
+            self.assertTrue(template.goal)
+            self.assertTrue(template.tags)
+            self.assertTrue(template.units)
 
     def test_course_outline_prompt_includes_template_units(self) -> None:
         call_silent(

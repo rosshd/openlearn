@@ -94,8 +94,12 @@ If `OPENLEARN_HOME` is unset, openLearn uses the current directory when it conta
 
 ```bash
 openlearn new vim --goal "Use Vim comfortably for real editing"
+openlearn new interview-prep --template algorithms
 openlearn resume
 ```
+
+Run `openlearn templates` to list the bundled Vim, Git, Python, SQL, algorithms, and other starter outlines.
+An explicit `--goal` takes precedence over a template's default goal.
 
 For assessment material, Quick Learn creates a separate focused topic and begins teaching without placement or outline approval:
 
@@ -166,12 +170,13 @@ Transient provider failures such as rate limits, server errors, URL errors, and 
 - `learning-topics/*.md`: user-owned topic notes, course plan, metadata, and session log.
 - `learning-topics/<slug>.state.json`: dynamic learner model and any in-flight REPL answer.
 - `learning-topics/<slug>.events.jsonl`: append-only learning events.
-- `learning-topics/context/<slug>/`: imported source text, manifests, bundles, and summaries.
+- `learning-topics/<slug>/context/`: imported source text, manifests, bundles, and summaries.
 - `learning-topics/drills/<slug>/`: generated drill files.
 - `state.json`: active-topic state.
 - `config.json`: saved provider settings and optional API key.
 
 These files are ignored by Git because they may contain private notes, class material, or credentials.
+See [the shareable topic format](docs/TOPIC_FORMAT.md) for the Markdown plus JSON structure and guidance on copying a topic safely.
 
 ## License
 

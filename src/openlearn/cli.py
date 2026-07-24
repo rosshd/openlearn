@@ -34,6 +34,12 @@ from platformdirs import user_data_dir
 
 from openlearn import __version__
 from openlearn import stats as stats_metrics
+from openlearn.course_templates import (
+    CourseTemplateError,
+    CourseTemplateNotFoundError,
+    available_course_templates,
+    load_course_template,
+)
 from openlearn.constants import (
     CONFIG_FILE,
     CONTEXT_SUMMARY_CHAR_LIMIT,
@@ -701,24 +707,22 @@ def cmd_init(args: argparse.Namespace, output_func=print, input_func=input) -> i
 
 
 def cmd_templates(_args: argparse.Namespace, output_func=print) -> int:
-    template_dir = Path(__file__).parent / "templates"
-    if not template_dir.exists():
-        output_func("No templates found.")
-        return 0
-    files = sorted(template_dir.glob("*.json"))
-    if not files:
+    try:
+        templates = available_course_templates()
+    except CourseTemplateError as exc:
+        output_func(f"Could not load course templates: {exc}")
+        return 1
+    if not templates:
         output_func("No templates found.")
         return 0
     output_func("Available course templates:")
     output_func("")
-    for file in files:
-        try:
-            data = json.loads(file.read_text(encoding="utf-8"))
-            tags = ", ".join(data.get("tags") or [])
-            unit_count = len(data.get("units") or [])
-            output_func(f"  {data['slug']:<22} {data['name']:<30} [{tags}]  {unit_count} units")
-        except Exception:
-            pass
+    for template in templates:
+        tags = ", ".join(template.tags)
+        output_func(
+            f"  {template.slug:<22} {template.name:<30} "
+            f"[{tags}]  {len(template.units)} units"
+        )
     output_func("")
     output_func("Use: openlearn new <topic> --template <slug>")
     return 0
@@ -2175,6 +2179,18 @@ def cmd_config_clear_key(_args: argparse.Namespace) -> int:
 
 
 def cmd_new(args: argparse.Namespace, output_func=print) -> int:
+    template_slug = getattr(args, "template", None)
+    template = None
+    if template_slug:
+        try:
+            template = load_course_template(template_slug)
+        except CourseTemplateNotFoundError as exc:
+            output_func(f"{exc}. Run 'openlearn templates' to list available.")
+            return 1
+        except CourseTemplateError as exc:
+            output_func(f"Could not load template '{template_slug}': {exc}")
+            return 1
+
     topics_dir().mkdir(parents=True, exist_ok=True)
     slug = slugify(args.topic)
     path = topic_path(slug)
@@ -2182,9 +2198,10 @@ def cmd_new(args: argparse.Namespace, output_func=print) -> int:
         raise OpenLearnError(f"topic already exists: {slug}")
 
     title = args.topic.strip() or slug.replace("-", " ").title()
+    goal = args.goal or (template.goal if template is not None else "")
     explicit_profile = getattr(args, "mastery_profile", None)
     inferred_profile = (
-        infer_mastery_profile_from_goal(args.goal, configured_model())
+        infer_mastery_profile_from_goal(goal, configured_model())
         if not explicit_profile
         else None
     )
@@ -2199,7 +2216,7 @@ def cmd_new(args: argparse.Namespace, output_func=print) -> int:
         "model": configured_model(),
         "created": today(),
         "last_reviewed": "",
-        "goal": args.goal,
+        "goal": goal,
         "known": [],
         "weak_spots": [],
         "review_due": [],
@@ -2212,11 +2229,13 @@ def cmd_new(args: argparse.Namespace, output_func=print) -> int:
         "placement_result": {},
         "review_session_active": False,
     }
+    if template is not None:
+        metadata["template_units"] = list(template.units)
     body = f"""# {title}
 
 ## Current Goal
 
-{args.goal or "Describe what you want to learn and why."}
+{goal or "Describe what you want to learn and why."}
 
 ## Notes
 
@@ -2229,25 +2248,8 @@ def cmd_new(args: argparse.Namespace, output_func=print) -> int:
     set_active_topic(slug)
     output_func(f"Created {path}")
     output_func(f"Mastery profile: {selected_profile}")
-    template_slug = getattr(args, "template", None)
-    if template_slug:
-        template_dir = Path(__file__).parent / "templates"
-        template_path = template_dir / f"{template_slug}.json"
-        if not template_path.exists():
-            output_func(
-                f"Template '{template_slug}' not found. "
-                f"Run 'openlearn templates' to list available."
-            )
-            return 1
-        template_data = json.loads(template_path.read_text(encoding="utf-8"))
-        topic = read_topic(slugify(args.topic))
-        meta = dict(topic.metadata)
-        if template_data.get("goal") and not meta.get("goal"):
-            meta["goal"] = template_data["goal"]
-        meta["template_units"] = template_data.get("units") or []
-        write_topic(topic.path, meta, topic.body)
-        unit_count = len(meta["template_units"])
-        output_func(f"Template '{template_data['name']}' loaded ({unit_count} units).")
+    if template is not None:
+        output_func(f"Template '{template.name}' loaded ({len(template.units)} units).")
     return 0
 
 
