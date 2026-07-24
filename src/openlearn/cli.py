@@ -5680,31 +5680,76 @@ def maybe_prompt_review_result(
 ) -> None:
     if input_func is None or not due_items:
         return
-    result = input_func("How did that go? [easy / hard / missed]: ").strip().lower()
-    if result not in {"easy", "hard", "missed"}:
-        output_func("Review result not saved.")
+
+    if len(due_items) == 1:
+        result = input_func("How did that go? [easy / hard / missed]: ").strip().lower()
+        if result not in {"easy", "hard", "missed"}:
+            output_func("Review result not saved.")
+            return
+        schedule_review_results(slug, due_items, result)
+        output_func("Scheduled 1 review item(s) as " + result + ".")
         return
-    schedule_review_results(slug, due_items, result)
-    output_func(f"Scheduled {len(due_items)} review item(s) as {result}.")
+
+    output_func("Grade each reviewed concept:")
+    outcomes: list[tuple[dict[str, object], str]] = []
+    for item in due_items:
+        concept = item.get("concept")
+        if not isinstance(concept, str) or not concept.strip():
+            continue
+        result = input_func(f"{concept} [easy / hard / missed]: ").strip().lower()
+        if result not in {"easy", "hard", "missed"}:
+            output_func(f"Review result not saved for {concept}.")
+            continue
+        outcomes.append((item, result))
+    if not outcomes:
+        output_func("No review results saved.")
+        return
+
+    schedule_review_outcomes(slug, outcomes)
+    counts = {
+        difficulty: sum(result == difficulty for _item, result in outcomes)
+        for difficulty in ("easy", "hard", "missed")
+    }
+    output_func(
+        f"Scheduled {len(outcomes)} review items: "
+        f"{counts['easy']} easy, {counts['hard']} hard, {counts['missed']} missed."
+    )
 
 
 def schedule_review_results(slug: str, due_items: list[dict[str, object]], difficulty: str) -> None:
+    schedule_review_outcomes(slug, [(item, difficulty) for item in due_items])
+
+
+def schedule_review_outcomes(
+    slug: str, outcomes: list[tuple[dict[str, object], str]]
+) -> None:
     path = topic_path(slug)
+    saved_outcomes: list[tuple[str, str]] = []
     with file_lock(path):
         metadata, body = parse_topic(path.read_text(encoding="utf-8"))
         metadata = dict(metadata)
-        for item in due_items:
+        for item, difficulty in outcomes:
             concept = item.get("concept")
-            if isinstance(concept, str):
-                ebisu_model = item.get("ebisu_model")
-                schedule_review_item(
-                    metadata,
-                    concept,
-                    difficulty,
-                    ebisu_model=ebisu_model if isinstance(ebisu_model, list) else None,
-                    update_ebisu=True,
-                )
+            if (
+                not isinstance(concept, str)
+                or not concept.strip()
+                or difficulty not in {"easy", "hard", "missed"}
+            ):
+                continue
+            schedule_review_item(metadata, concept, difficulty, update_ebisu=True)
+            saved_outcomes.append((concept, difficulty))
         write_text_atomic(path, format_topic(metadata, body))
+    for concept, difficulty in saved_outcomes:
+        log_event(
+            slug,
+            "review_graded",
+            {
+                "concept_id": concept_id_for_label(concept),
+                "concept": concept,
+                "difficulty": difficulty,
+                "source": "due_review",
+            },
+        )
 
 
 def cmd_due(_args: argparse.Namespace, output_func=print) -> int:

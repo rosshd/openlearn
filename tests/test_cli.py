@@ -7181,6 +7181,114 @@ class PromptInstructionTests(unittest.TestCase):
         self.assertTrue(any("Review question." in line for line in output))
         self.assertIn("Scheduled 1 review item(s) as easy.", output)
 
+    def test_review_records_a_separate_result_for_each_due_concept(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="AI", goal="learn ai"))
+        path = cli.topic_path("ai")
+        metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+        metadata = dict(metadata)
+        metadata["review_due"] = [
+            {"concept": "Bayes rule", "due": cli.today(), "difficulty": "hard"},
+            {"concept": "gradient descent", "due": cli.today(), "difficulty": "hard"},
+        ]
+        path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
+        output = []
+        original_call_openai = cli.call_openai
+        cli.call_openai = lambda *_args, **_kwargs: "Review questions."
+        try:
+            call_silent(
+                cli.cmd_review,
+                Namespace(topic="ai", model=None, due_only=True),
+                input_func=iter_input(["easy", "missed"]),
+                output_func=output.append,
+            )
+        finally:
+            cli.call_openai = original_call_openai
+
+        updated = cli.read_topic("ai")
+        review_items = {
+            item["concept"]: item for item in updated.metadata["review_due"]
+        }
+        self.assertEqual(review_items["Bayes rule"]["difficulty"], "easy")
+        self.assertEqual(review_items["gradient descent"]["difficulty"], "missed")
+        self.assertEqual(
+            review_items["Bayes rule"]["due"],
+            (date.fromisoformat(cli.today()) + timedelta(days=7)).isoformat(),
+        )
+        self.assertEqual(
+            review_items["gradient descent"]["due"],
+            (date.fromisoformat(cli.today()) + timedelta(days=1)).isoformat(),
+        )
+        self.assertIn("Grade each reviewed concept:", output)
+        self.assertIn(
+            "Scheduled 2 review items: 1 easy, 0 hard, 1 missed.",
+            output,
+        )
+        events = [
+            event
+            for event in cli.load_event_log(cli.topic_events_path("ai"))
+            if event.get("event_type") == "review_graded"
+        ]
+        self.assertEqual(
+            [
+                (event["data"]["concept"], event["data"]["difficulty"])
+                for event in events
+            ],
+            [("Bayes rule", "easy"), ("gradient descent", "missed")],
+        )
+
+    def test_review_updates_each_due_concepts_ebisu_model_with_its_result(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="AI", goal="learn ai"))
+        path = cli.topic_path("ai")
+        metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+        metadata = dict(metadata)
+        metadata["review_due"] = [
+            {
+                "concept": "Bayes rule",
+                "due": cli.today(),
+                "difficulty": "hard",
+                "ebisu_model": [4.0, 4.0, 2.0],
+            },
+            {
+                "concept": "gradient descent",
+                "due": cli.today(),
+                "difficulty": "hard",
+                "ebisu_model": [6.0, 6.0, 3.0],
+            },
+        ]
+        path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
+        update_calls = []
+        fake_ebisu = types.SimpleNamespace(
+            updateRecall=lambda model, successes, total, elapsed: (
+                update_calls.append((model, successes, total, elapsed))
+                or [model[0] + successes, model[1] + total, model[2]]
+            ),
+            modelToPercentileDecay=lambda model, _percentile: model[2],
+            defaultModel=lambda halflife: [4.0, 4.0, halflife],
+        )
+        original_ebisu = sys.modules.get("ebisu")
+        cli.write_config({"srs": "ebisu"})
+        sys.modules["ebisu"] = fake_ebisu
+        try:
+            cli.maybe_prompt_review_result(
+                "ai",
+                cli.due_review_items(metadata),
+                input_func=iter_input(["easy", "missed"]),
+                output_func=lambda _text: None,
+            )
+        finally:
+            if original_ebisu is None:
+                sys.modules.pop("ebisu", None)
+            else:
+                sys.modules["ebisu"] = original_ebisu
+
+        self.assertEqual(
+            update_calls,
+            [
+                ([4.0, 4.0, 2.0], 1, 1, 1.0),
+                ([6.0, 6.0, 3.0], 0, 1, 1.0),
+            ],
+        )
+
     def test_repl_review_parses_due_flag(self) -> None:
         calls = []
         original_cmd_review = cli.cmd_review
