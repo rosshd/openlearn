@@ -33,6 +33,11 @@ def mocked_providers(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[str]]:
         output_func,
     ) -> str:
         calls["models"].append(model)
+        if "best Python IDE" in user:
+            return (
+                "**Feedback:** A popular Python IDE can be useful, depending on your needs.\n"
+                "**Next:** Let us return to sorting algorithms."
+            )
         return (
             "**Feedback:** You have identified part of the idea.\n"
             "**Lesson:** Let us isolate the missing piece with a small example.\n"
@@ -105,6 +110,7 @@ def test_run_evaluation_uses_isolated_homes_and_writes_reviewable_evidence(
     assert all(record["tutor_response"] for record in turns)
     assert all(record["state_delta"] for record in turns)
     assert all(record["judge"]["pass"] is True for record in turns)
+    assert all(record["state_assertions"]["pass"] is True for record in turns)
     assert all(record["provenance"]["judge_model"] == "judge-model" for record in turns)
     assert all(
         Path(record["provenance"]["openlearn_home"]).is_relative_to(run_root / "homes")
@@ -235,6 +241,58 @@ def test_answer_first_scenarios_record_prior_focus_and_same_turn_struggling_move
     ]
     assert "Tier move: struggling" in gap_system
     assert "Address this prerequisite gap before continuing: memory addresses" in gap_system
+
+
+def test_off_topic_scenario_requires_empty_pending_question_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        cli,
+        "call_openai_streaming",
+        lambda model, system, user, output_func: (
+            "**Check:** Which sorting algorithm should we discuss next?"
+        ),
+    )
+
+    def fake_call(model: str, system: str, user: str) -> str:
+        if system == cli.METADATA_EXTRACTOR_SYSTEM:
+            return json.dumps({"message_kind": "question"})
+        return json.dumps(
+            {
+                "pass": True,
+                "score": 0.9,
+                "reason": "The visible response satisfies the conversational rubric.",
+            }
+        )
+
+    monkeypatch.setattr(cli, "call_openai", fake_call)
+
+    outcome = run_evaluation(
+        tmp_path / "run",
+        tutor_model="tutor-model",
+        judge_model="judge-model",
+        scenario_ids=["off_topic_question"],
+    )
+    record = _read_jsonl(outcome.evidence_dir / "turns.jsonl")[0]
+
+    assert outcome.passed is False
+    assert record["judge"]["pass"] is True
+    assert record["state_assertions"] == {
+        "pass": False,
+        "checks": [
+            {
+                "field": "pending_question",
+                "expected": None,
+                "actual": record["state_delta"]["pending_question"]["after"],
+                "pass": False,
+            }
+        ],
+        "reason": "One or more deterministic state assertions failed.",
+    }
+    assert "off_topic_question - FAIL" in (
+        outcome.evidence_dir / "summary.md"
+    ).read_text(encoding="utf-8")
 
 
 def test_run_evaluation_rejects_existing_output_root(

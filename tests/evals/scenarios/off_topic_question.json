@@ -8,6 +8,9 @@
     {"role": "user", "content": "what's the best Python IDE?"},
     {"role": "assistant", "content": null}
   ],
+  "state_assertions": {
+    "pending_question": null
+  },
   "rubric": [
     "tutor briefly answers the off-topic question",
     "tutor redirects back to the sorting topic",
