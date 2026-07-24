@@ -5638,36 +5638,85 @@ def load_curated_drills() -> list[dict[str, object]]:
     return [item for item in data if isinstance(item, dict)]
 
 
+MAX_REVIEW_SESSION_CONCEPTS = 5
+
+
+def select_due_review_items(
+    due_items: list[dict[str, object]],
+    limit: int = MAX_REVIEW_SESSION_CONCEPTS,
+) -> list[dict[str, object]]:
+    return sorted(
+        due_items,
+        key=lambda item: (
+            str(item.get("due") or ""),
+            concept_key(str(item.get("concept") or "")),
+        ),
+    )[: max(0, limit)]
+
+
 def cmd_review(args: argparse.Namespace, input_func=None, output_func=print) -> int:
     topic = read_topic(slugify(args.topic))
     set_active_topic(topic.slug)
     model = args.model or str(topic.metadata.get("model") or configured_model())
     due_items = due_review_items(topic.metadata)
-    due_lines = "\n".join(f"- {item['concept']}" for item in due_items)
-    if getattr(args, "due_only", False):
+    selected_due_items = select_due_review_items(due_items)
+    due_lines = "\n".join(f"- {item['concept']}" for item in selected_due_items)
+    selected_count = len(selected_due_items)
+    due_only = getattr(args, "due_only", False)
+    prompt_metadata = {
+        **topic.metadata,
+        "review_due": selected_due_items,
+        **({"weak_spots": []} if selected_due_items or due_only else {}),
+    }
+    prompt_topic = Topic(
+        slug=topic.slug,
+        path=topic.path,
+        metadata=prompt_metadata,
+        body=topic.body,
+    )
+    if due_only:
         user = (
             "Create a short active-recall review session for this learner. "
-            "Use only the overdue concepts listed below. Do not add general weak spots "
-            "or unrelated topics. Include 3-5 questions, brief hints, and no answer key. "
+            "Use only the overdue concepts selected below. Do not add general weak spots, "
+            "other scheduled concepts, or unrelated topics. "
+            f"Ask exactly {selected_count} question(s), one for each selected concept. "
+            "Do not omit or replace any selected concept. Include brief hints and no "
+            "answer key. "
             "Ask the questions only; wait for the learner to answer before revealing or "
             "explaining answers."
-            f"\n\nOverdue concepts only:\n{due_lines or '(no scheduled concepts due today)'}"
+            f"\n\nOverdue concepts only (selected):\n"
+            f"{due_lines or '(no scheduled concepts due today)'}"
         )
     else:
-        user = (
-            "Create a short active-recall review session for this learner. "
-            "Focus on review concepts due today and weak spots. Include 3-5 questions, "
-            "brief hints, and no answer key. Ask the questions only; wait for the "
-            "learner to answer before revealing or explaining answers."
-            f"\n\nDue today:\n{due_lines or '(no scheduled concepts due today)'}"
-        )
+        if selected_due_items:
+            user = (
+                "Create a short active-recall review session for this learner. "
+                f"Ask exactly one question for each of the {selected_count} selected due "
+                "concept(s). Use only those selected concepts; do not add weak spots, "
+                "other scheduled concepts, or unrelated topics. Include brief hints and "
+                "no answer key. Ask the questions only; wait for the learner to answer "
+                "before revealing or explaining answers."
+                f"\n\nDue today (selected for this session):\n{due_lines}"
+            )
+        else:
+            user = (
+                "Create a short active-recall review session for this learner. "
+                "With no selected due concepts, ask 3-5 questions about weak spots. "
+                "Include brief hints and no answer key. Ask the questions only; wait for "
+                "the learner to answer before revealing or explaining answers."
+                "\n\nDue today (selected for this session):\n"
+                "(no scheduled concepts due today)"
+            )
     answer = call_openai_streaming(
-        model=model, system=system_prompt(topic), user=user, output_func=output_func
+        model=model,
+        system=system_prompt(prompt_topic),
+        user=user,
+        output_func=output_func,
     )
     print_and_append_model_answer(
         topic, "review", user, answer, mark_reviewed=True, output_func=output_func
     )
-    maybe_prompt_review_result(topic.slug, due_items, input_func, output_func)
+    maybe_prompt_review_result(topic.slug, selected_due_items, input_func, output_func)
     set_review_session_active(topic.slug, True)
     return 0
 
@@ -5680,31 +5729,76 @@ def maybe_prompt_review_result(
 ) -> None:
     if input_func is None or not due_items:
         return
-    result = input_func("How did that go? [easy / hard / missed]: ").strip().lower()
-    if result not in {"easy", "hard", "missed"}:
-        output_func("Review result not saved.")
+
+    if len(due_items) == 1:
+        result = input_func("How did that go? [easy / hard / missed]: ").strip().lower()
+        if result not in {"easy", "hard", "missed"}:
+            output_func("Review result not saved.")
+            return
+        schedule_review_results(slug, due_items, result)
+        output_func("Scheduled 1 review item(s) as " + result + ".")
         return
-    schedule_review_results(slug, due_items, result)
-    output_func(f"Scheduled {len(due_items)} review item(s) as {result}.")
+
+    output_func("Grade each reviewed concept:")
+    outcomes: list[tuple[dict[str, object], str]] = []
+    for item in due_items:
+        concept = item.get("concept")
+        if not isinstance(concept, str) or not concept.strip():
+            continue
+        result = input_func(f"{concept} [easy / hard / missed]: ").strip().lower()
+        if result not in {"easy", "hard", "missed"}:
+            output_func(f"Review result not saved for {concept}.")
+            continue
+        outcomes.append((item, result))
+    if not outcomes:
+        output_func("No review results saved.")
+        return
+
+    schedule_review_outcomes(slug, outcomes)
+    counts = {
+        difficulty: sum(result == difficulty for _item, result in outcomes)
+        for difficulty in ("easy", "hard", "missed")
+    }
+    output_func(
+        f"Scheduled {len(outcomes)} review items: "
+        f"{counts['easy']} easy, {counts['hard']} hard, {counts['missed']} missed."
+    )
 
 
 def schedule_review_results(slug: str, due_items: list[dict[str, object]], difficulty: str) -> None:
+    schedule_review_outcomes(slug, [(item, difficulty) for item in due_items])
+
+
+def schedule_review_outcomes(
+    slug: str, outcomes: list[tuple[dict[str, object], str]]
+) -> None:
     path = topic_path(slug)
+    saved_outcomes: list[tuple[str, str]] = []
     with file_lock(path):
         metadata, body = parse_topic(path.read_text(encoding="utf-8"))
         metadata = dict(metadata)
-        for item in due_items:
+        for item, difficulty in outcomes:
             concept = item.get("concept")
-            if isinstance(concept, str):
-                ebisu_model = item.get("ebisu_model")
-                schedule_review_item(
-                    metadata,
-                    concept,
-                    difficulty,
-                    ebisu_model=ebisu_model if isinstance(ebisu_model, list) else None,
-                    update_ebisu=True,
-                )
+            if (
+                not isinstance(concept, str)
+                or not concept.strip()
+                or difficulty not in {"easy", "hard", "missed"}
+            ):
+                continue
+            schedule_review_item(metadata, concept, difficulty, update_ebisu=True)
+            saved_outcomes.append((concept, difficulty))
         write_text_atomic(path, format_topic(metadata, body))
+    for concept, difficulty in saved_outcomes:
+        log_event(
+            slug,
+            "review_graded",
+            {
+                "concept_id": concept_id_for_label(concept),
+                "concept": concept,
+                "difficulty": difficulty,
+                "source": "due_review",
+            },
+        )
 
 
 def cmd_due(_args: argparse.Namespace, output_func=print) -> int:
