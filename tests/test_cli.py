@@ -6885,7 +6885,16 @@ class PromptInstructionTests(unittest.TestCase):
                 "current_slide": 1,
                 "course_units": [
                     {"unit": 1, "chapter": "1.1", "title": "Modes", "slide_count": 2},
-                    {"unit": 2, "chapter": "1.2", "title": "Search with fzf", "slide_count": 3},
+                    {
+                        "unit": 2,
+                        "chapter": "1.2",
+                        "title": "Search with fzf",
+                        "slide_count": 3,
+                        "concepts": [
+                            {"id": "fuzzy-find", "label": "Fuzzy finding"},
+                            {"id": "preview", "label": "Preview window"},
+                        ],
+                    },
                 ],
                 "slide_contents": {
                     "1:2": {
@@ -6931,6 +6940,10 @@ class PromptInstructionTests(unittest.TestCase):
         self.assertIn("do not add a separate **Example:**, **Check:**, or **Next:**", captured[0])
         self.assertNotIn("Lesson, Example, Check", captured[0])
         self.assertNotIn("then ask one check", captured[0])
+        self.assertIn("Teach exactly one uncovered concept now", captured[0])
+        self.assertIn("<!-- covered: Exact concept label -->", captured[0])
+        self.assertNotIn("one or two tightly related uncovered concepts", captured[0])
+        self.assertNotIn("Optional second label", captured[0])
         self.assertIn("Structured lesson:", captured[0])
         self.assertIn("Unit 2/2 · Slide 1/3", captured[0])
         self.assertIn("Unit: 1.2 Search with fzf", captured[0])
@@ -7321,8 +7334,17 @@ class PromptInstructionTests(unittest.TestCase):
 
         system, user = captured[0]
         self.assertIn("Bayes rule", system)
+        self.assertIn("Explicit assessment-mode contract for this turn", system)
+        self.assertIn("containing 1 numbered item", system)
+        self.assertIn("Assess exactly these selected concepts once each", system)
+        self.assertIn("Bayes rule", system)
+        self.assertIn("bounded item count is the only exemption", system)
+        self.assertIn("configuration claims only when Current data", system)
+        self.assertNotIn("Single-move contract for this turn", system)
         self.assertIn("- Bayes rule", user)
         self.assertIn("exactly one question", user)
+        self.assertIn("one assessment move under one **Check:** label", user)
+        self.assertIn("all answers in one response", user)
         self.assertNotIn("untracked weak spot", system)
         self.assertNotIn("untracked weak spot", user)
 
@@ -7457,6 +7479,7 @@ class PromptInstructionTests(unittest.TestCase):
         path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
         update_calls = []
         captured_prompts = []
+        captured_systems = []
         fake_ebisu = types.SimpleNamespace(
             updateRecall=lambda model, successes, total, elapsed: (
                 update_calls.append((model, successes, total, elapsed))
@@ -7468,7 +7491,10 @@ class PromptInstructionTests(unittest.TestCase):
         original_call_openai = cli.call_openai
         original_ebisu = sys.modules.get("ebisu")
         cli.call_openai = (
-            lambda _model, _system, user: captured_prompts.append(user)
+            lambda _model, system, user: (
+                captured_systems.append(system),
+                captured_prompts.append(user),
+            )[-1]
             or "Five review questions."
         )
         cli.write_config({"srs": "ebisu"})
@@ -7490,8 +7516,14 @@ class PromptInstructionTests(unittest.TestCase):
         selected = ["concept-a", "concept-b", "concept-c", "concept-d", "concept-e"]
         unselected = {"concept-f", "concept-g"}
         self.assertIn("exactly one question for each of the 5 selected", captured_prompts[0])
+        self.assertIn("containing 5 numbered items", captured_systems[0])
+        self.assertIn(
+            "Assess exactly these selected concepts once each, in this order",
+            captured_systems[0],
+        )
         for concept in selected:
             self.assertIn(f"- {concept}", captured_prompts[0])
+            self.assertIn(concept, captured_systems[0])
         for concept in unselected:
             self.assertNotIn(concept, captured_prompts[0])
 
@@ -9450,19 +9482,49 @@ class PromptInstructionTests(unittest.TestCase):
         self.assertIn("Enter-to-continue **Next:** cue", prompt)
         self.assertNotIn("default to /done", prompt)
 
-    def test_chapter_quiz_prompt_uses_enter_continuation_contract(self) -> None:
+    def test_chapter_quiz_uses_bounded_single_assessment_move(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
         captured = []
 
-        def fake_stream(*_args, user: str, **_kwargs) -> str:
-            captured.append(user)
+        def fake_stream(*_args, system: str, user: str, **_kwargs) -> str:
+            captured.append((system, user))
             return "**Check:**\nWhat does normal mode do?"
 
         with mock.patch.object(cli, "call_openai_streaming", side_effect=fake_stream):
             call_silent(cli.cmd_chapter_quiz, Namespace(topic="vim", model=None))
 
-        self.assertIn("Press Enter to continue, or type what you want more help with", captured[0])
-        self.assertNotIn("type /done", captured[0])
+        system, user = captured[0]
+        self.assertIn("Explicit assessment-mode contract for this turn", system)
+        self.assertIn("containing 2-3 numbered items", system)
+        self.assertIn("one primary **Check:** move", system)
+        self.assertIn("all item answers together in one response", system)
+        self.assertNotIn("Single-move contract for this turn", system)
+        self.assertIn("Put every item under one **Check:** label", user)
+        self.assertIn("submit all answers in one response", user)
+        self.assertNotIn("Press Enter to continue", user)
+
+    def test_normal_tutor_turn_cannot_inherit_assessment_exemption(self) -> None:
+        topic = cli.Topic(
+            slug="demo",
+            path=Path("demo.md"),
+            metadata={
+                "topic": "Demo",
+                "assessment_mode": {
+                    "kind": "review",
+                    "min_items": 5,
+                    "max_items": 5,
+                    "selected_concepts": ["one", "two", "three", "four", "five"],
+                },
+            },
+            body="# Demo\n",
+        )
+
+        prompt = cli.system_prompt(topic)
+
+        self.assertIn("Single-move contract for this turn", prompt)
+        self.assertIn("at most one action, question, choice", prompt)
+        self.assertNotIn("Explicit assessment-mode contract", prompt)
+        self.assertNotIn('"assessment_mode"', prompt)
 
     def test_tutor_format_rules_define_question_type_decision_criteria(self) -> None:
         rules = " ".join(cli.TUTOR_FORMAT_RULES.split())

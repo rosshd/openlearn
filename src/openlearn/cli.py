@@ -3289,12 +3289,12 @@ def current_lesson_prompt(topic: Topic) -> str:
             lines.append(
                 "Still uncovered in this unit: "
                 + "; ".join(remaining)
-                + ". Teach one or two tightly related uncovered concepts now. "
+                + ". Teach exactly one uncovered concept now. "
                 "Do not repeat a covered concept."
             )
         lines.append(
-            "Append a hidden marker using the exact labels taught: "
-            "<!-- covered: Exact concept label; Optional second label -->"
+            "Append a hidden marker using the exact label taught: "
+            "<!-- covered: Exact concept label -->"
         )
     covered = course_coverage_ledger(metadata, unit)
     if covered:
@@ -5699,6 +5699,12 @@ def cmd_review(args: argparse.Namespace, input_func=None, output_func=print) -> 
         metadata=prompt_metadata,
         body=topic.body,
     )
+    assessment_mode = {
+        "kind": "review",
+        "min_items": selected_count if selected_due_items or due_only else 3,
+        "max_items": selected_count if selected_due_items or due_only else 5,
+        "selected_concepts": [str(item["concept"]) for item in selected_due_items],
+    }
     if due_only:
         user = (
             "Create a short active-recall review session for this learner. "
@@ -5732,9 +5738,14 @@ def cmd_review(args: argparse.Namespace, input_func=None, output_func=print) -> 
                 "\n\nDue today (selected for this session):\n"
                 "(no scheduled concepts due today)"
             )
+    user += (
+        "\n\nTreat this bounded batch as one assessment move under one **Check:** "
+        "label. Number the items, then end with one plain Action: instruction asking "
+        "for all answers in one response. Do not add another primary move."
+    )
     answer = call_openai_streaming(
         model=model,
-        system=system_prompt(prompt_topic),
+        system=system_prompt(prompt_topic, assessment_mode=assessment_mode),
         user=user,
         output_func=output_func,
     )
@@ -5913,12 +5924,29 @@ def cmd_chapter_quiz(args: argparse.Namespace, output_func=print) -> int:
         f"Give a short chapter-end quiz for: {chapter}. "
         "Ask 2-3 questions that check the most important skills or concepts from that chapter. "
         "Use a mix of multiple-choice and short open-ended questions. "
-        "After the learner answers all questions adequately, give brief feedback, then use "
-        "**Next:** followed by: Press Enter to continue, or type what you want more help "
-        "with."
+        "Put every item under one **Check:** label, then end with one plain Action: "
+        "instruction asking the learner to submit all answers in one response. "
+        "Do not add feedback, answers, or a **Next:** move yet."
+    )
+    prompt_topic = Topic(
+        slug=topic.slug,
+        path=topic.path,
+        metadata=topic.metadata,
+        body=topic.body,
     )
     answer = call_openai_streaming(
-        model=model, system=system_prompt(topic), user=user, output_func=output_func
+        model=model,
+        system=system_prompt(
+            prompt_topic,
+            assessment_mode={
+                "kind": "chapter_quiz",
+                "min_items": 2,
+                "max_items": 3,
+                "selected_concepts": [],
+            },
+        ),
+        user=user,
+        output_func=output_func,
     )
     print_and_append_model_answer(topic, "quiz", user, answer, output_func=output_func)
     return 0
@@ -8657,7 +8685,11 @@ def append_session(
                 save_state(topic.slug, state_from_metadata(metadata))
 
 
-def system_prompt(topic: Topic) -> str:
+def system_prompt(
+    topic: Topic,
+    *,
+    assessment_mode: dict[str, object] | None = None,
+) -> str:
     topic_context, recent_sessions = prompt_context(topic)
     context_list = context_file_prompt(topic.slug)
     context_summaries = context_summary_prompt(topic.slug)
@@ -8667,9 +8699,10 @@ def system_prompt(topic: Topic) -> str:
     hint_prompt = pending_hint_prompt(topic.metadata)
     tier = difficulty_tier(topic.metadata)
     move_prompt = tier_move_prompt(topic.metadata, tier)
-    turn_contract = tutor_turn_contract(topic.metadata)
+    turn_contract = tutor_turn_contract(topic.metadata, assessment_mode=assessment_mode)
     quiz_prompt = cumulative_quiz_prompt(topic.metadata)
     model_metadata = dict(topic.metadata)
+    model_metadata.pop("assessment_mode", None)
     model_metadata.pop("enter_advance_cue", None)
     model_metadata.pop("pending_learner_prompt", None)
     quick_learn_prompt = (
@@ -8866,8 +8899,14 @@ def state_move_policy_prompt(metadata: dict[str, object], tier: str) -> str:
     return tier_move_prompt(metadata, tier)
 
 
-def tutor_turn_contract(metadata: dict[str, object]) -> str:
+def tutor_turn_contract(
+    metadata: dict[str, object],
+    *,
+    assessment_mode: dict[str, object] | None = None,
+) -> str:
     """Return the single-move contract for the current learner turn."""
+    if assessment_mode is not None:
+        return assessment_turn_contract(assessment_mode)
     message_kind = metadata.get("current_turn_message_kind")
     status = metadata.get("last_answer_status")
     misses = metadata.get("consecutive_misses")
@@ -8919,6 +8958,61 @@ def tutor_turn_contract(metadata: dict[str, object]) -> str:
           they are explicitly supported by Current data or local context. Never infer that
           something is completed, mastered, installed, running, or configured.
         - {branch}
+        """
+    ).strip()
+
+
+def assessment_turn_contract(assessment_mode: dict[str, object]) -> str:
+    """Return the bounded exemption used only by explicit assessment commands."""
+    kind = assessment_mode.get("kind")
+    minimum = assessment_mode.get("min_items")
+    maximum = assessment_mode.get("max_items")
+    selected = assessment_mode.get("selected_concepts")
+    if (
+        kind not in {"review", "chapter_quiz"}
+        or not isinstance(minimum, int)
+        or not isinstance(maximum, int)
+        or minimum < 0
+        or maximum < minimum
+        or not isinstance(selected, list)
+        or not all(isinstance(item, str) and item.strip() for item in selected)
+    ):
+        raise ValueError("invalid assessment mode")
+    if selected and (minimum != len(selected) or maximum != len(selected)):
+        raise ValueError("selected assessment concepts must match the exact item count")
+    if maximum == 0:
+        return textwrap.dedent(
+            """
+            Explicit empty-review contract for this turn:
+            - There are no selected review items. Use one **Next:** move to say that
+              nothing is due. Do not invent a question, concept, or learner action.
+            - This exemption applies only to the current explicit /review command.
+              It does not apply to normal tutor turns.
+            """
+        ).strip()
+    count = str(minimum) if minimum == maximum else f"{minimum}-{maximum}"
+    item_word = "item" if minimum == maximum == 1 else "items"
+    selected_rule = (
+        "- Assess exactly these selected concepts once each, in this order: "
+        + "; ".join(selected)
+        + ". Do not omit, replace, combine, or add concepts."
+        if selected
+        else "- Stay within the assessment scope in the user request."
+    )
+    return textwrap.dedent(
+        f"""
+        Explicit assessment-mode contract for this turn:
+        - This exemption applies only to the current explicit /review or chapter-quiz
+          command. It does not apply to normal tutor turns.
+        - Produce exactly one primary **Check:** move containing {count} numbered {item_word}.
+          Do not add another primary label, lesson, worked answer, feedback, or Next cue.
+        - End with exactly one plain Action: instruction asking the learner to submit
+          all item answers together in one response. This is the only learner action.
+        {selected_rule}
+        - Keep every item unambiguous and do not reveal any answer.
+        - The bounded item count is the only exemption. Remain concise and make progress,
+          mastery, environment, tool, and configuration claims only when Current data or
+          local context explicitly supports them.
         """
     ).strip()
 
