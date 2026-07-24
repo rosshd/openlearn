@@ -8644,6 +8644,7 @@ def system_prompt(topic: Topic) -> str:
     hint_prompt = pending_hint_prompt(topic.metadata)
     tier = difficulty_tier(topic.metadata)
     move_prompt = tier_move_prompt(topic.metadata, tier)
+    turn_contract = tutor_turn_contract(topic.metadata)
     quiz_prompt = cumulative_quiz_prompt(topic.metadata)
     model_metadata = dict(topic.metadata)
     model_metadata.pop("enter_advance_cue", None)
@@ -8725,6 +8726,8 @@ def system_prompt(topic: Topic) -> str:
         {TUTOR_FORMAT_RULES}
 
         {move_prompt}
+
+        {turn_contract}
 
         {quiz_prompt}
 
@@ -8845,6 +8848,63 @@ def pending_hint_prompt(metadata: dict[str, object]) -> str:
 
 def state_move_policy_prompt(metadata: dict[str, object], tier: str) -> str:
     return tier_move_prompt(metadata, tier)
+
+
+def tutor_turn_contract(metadata: dict[str, object]) -> str:
+    """Return the single-move contract for the current learner turn."""
+    message_kind = metadata.get("current_turn_message_kind")
+    status = metadata.get("last_answer_status")
+    misses = metadata.get("consecutive_misses")
+    if isinstance(message_kind, str) and message_kind not in {"", "answer"}:
+        branch = (
+            "Current branch: conversational request or question. Answer the learner's "
+            "actual intent briefly. If it is off-topic, make at most one short connection "
+            "back to the active goal. Do not turn the redirect into a graded check."
+        )
+    elif status == "correct":
+        branch = (
+            "Current branch: correct answer. Affirm the demonstrated reasoning briefly, "
+            "then choose either one targeted transfer check or the deterministic Next cue. "
+            "Do not re-teach the concept."
+        )
+    elif status == "partial":
+        branch = (
+            "Current branch: partial answer. Name one correct piece and the single most "
+            "important gap, then request one focused attempt that addresses that gap."
+        )
+    elif status == "needs_work" and isinstance(misses, int) and misses >= 2:
+        branch = (
+            "Current branch: stuck learner. Change approach once with one small worked "
+            "example or concrete scaffold for the current focus, then request one faded "
+            "attempt. Do not repeat the failed question or introduce another concept."
+        )
+    elif status == "needs_work":
+        branch = (
+            "Current branch: incorrect answer. Address one specific misconception with a "
+            "hint or correction, then request one focused retry on that same target."
+        )
+    else:
+        branch = (
+            "Current branch: ungraded teaching turn. Choose one small concept and one "
+            "primary move: teach it, illustrate it, check it, or transition."
+        )
+    return textwrap.dedent(
+        f"""
+        Single-move contract for this turn:
+        - Choose exactly one primary teaching move. Do not bundle a new lesson, a second
+          concept, a recap, and a quiz into the same response.
+        - Use exactly one primary bold label in the entire response. A plain Action: line
+          may follow, but it must contain the response's only learner action.
+        - Give the learner at most one action, question, choice, or continuation cue.
+          If it is a check, make its target and all required context unambiguous.
+        - Default to at most 120 words and 8 nonblank lines unless a necessary code sample
+          or worked example requires more.
+        - Make progress, mastery, environment, tool, and configuration claims only when
+          they are explicitly supported by Current data or local context. Never infer that
+          something is completed, mastered, installed, running, or configured.
+        - {branch}
+        """
+    ).strip()
 
 
 def check_intensity_instruction(mode: str) -> str:

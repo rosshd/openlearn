@@ -9641,6 +9641,61 @@ class PromptInstructionTests(unittest.TestCase):
         self.assertIn("why or what-if probes", on_track_prompt)
         self.assertIn("hold difficulty steady", on_track_prompt)
 
+    def test_tutor_turn_contract_selects_one_move_for_each_answer_branch(self) -> None:
+        cases = [
+            (
+                {"last_answer_status": "correct"},
+                "Current branch: correct answer",
+                "either one targeted transfer check or the deterministic Next cue",
+            ),
+            (
+                {"last_answer_status": "partial"},
+                "Current branch: partial answer",
+                "single most important gap",
+            ),
+            (
+                {"last_answer_status": "needs_work", "consecutive_misses": 1},
+                "Current branch: incorrect answer",
+                "one focused retry",
+            ),
+            (
+                {"last_answer_status": "needs_work", "consecutive_misses": 2},
+                "Current branch: stuck learner",
+                "Do not repeat the failed question",
+            ),
+            (
+                {"current_turn_message_kind": "question"},
+                "Current branch: conversational request or question",
+                "Do not turn the redirect into a graded check",
+            ),
+        ]
+
+        for metadata, branch, instruction in cases:
+            with self.subTest(branch=branch):
+                contract = " ".join(cli.tutor_turn_contract(metadata).split())
+                self.assertIn("Choose exactly one primary teaching move", contract)
+                self.assertIn("at most one action, question, choice", contract)
+                self.assertIn("at most 120 words and 8 nonblank lines", contract)
+                self.assertIn("Never infer that something is completed", contract)
+                self.assertIn(branch, contract)
+                self.assertIn(instruction, contract)
+
+    def test_system_prompt_includes_single_move_contract_once(self) -> None:
+        topic = cli.Topic(
+            slug="demo",
+            path=Path("demo.md"),
+            metadata={"topic": "Demo", "last_answer_status": "partial"},
+            body="# Demo\n",
+        )
+
+        prompt = cli.system_prompt(topic)
+
+        self.assertEqual(prompt.count("Single-move contract for this turn:"), 1)
+        self.assertEqual(prompt.count("Current branch: partial answer"), 1)
+        self.assertIn("Use exactly one primary bold label", prompt)
+        self.assertIn("all required context unambiguous", prompt)
+        self.assertIn("configuration claims only when", prompt)
+
     def test_system_prompt_includes_cumulative_quiz_fragment_only_when_active(self) -> None:
         inactive = cli.Topic(
             slug="demo",

@@ -7,6 +7,7 @@ import pytest
 
 from openlearn import cli
 from tests.evals.tutor_behavior import (
+    BASE_TUTOR_RUBRIC,
     SCENARIOS_DIR,
     load_scenarios,
     run_evaluation,
@@ -467,3 +468,29 @@ def test_validate_live_configuration_fails_clearly(
 def test_all_scenarios_name_a_learner_persona() -> None:
     assert len(load_scenarios(SCENARIOS_DIR)) >= 4
     assert all(scenario.get("persona") for scenario in load_scenarios(SCENARIOS_DIR))
+
+
+def test_live_rubric_checks_single_move_concision_and_authoritative_state() -> None:
+    assert BASE_TUTOR_RUBRIC == (
+        "The response is concise and contains exactly one primary teaching move.",
+        "The response gives the learner at most one action, question, choice, or continuation cue.",
+        "The response stays on one concept instead of introducing multiple new concepts.",
+        "Any progress, mastery, environment, tool, or configuration claim is explicitly supported by the visible exchange.",
+    )
+
+
+def test_live_evidence_records_the_base_tutor_rubric(
+    tmp_path: Path,
+    mocked_providers: dict[str, list[str]],
+) -> None:
+    outcome = run_evaluation(
+        tmp_path / "run",
+        tutor_model="tutor-model",
+        judge_model="judge-model",
+        scenario_ids=["correct_brief_answer"],
+    )
+
+    record = _read_jsonl(outcome.evidence_dir / "turns.jsonl")[0]
+    judge_prompt = mocked_providers["judge_prompts"][0]
+    assert all(item in record["rubric"] for item in BASE_TUTOR_RUBRIC)
+    assert all(item in judge_prompt for item in BASE_TUTOR_RUBRIC)

@@ -19,6 +19,12 @@ from tests.dogfood.evidence import EvidenceRecorder
 SCHEMA_VERSION = 1
 JUDGE_THRESHOLD = 0.7
 SCENARIOS_DIR = Path(__file__).parent / "scenarios"
+BASE_TUTOR_RUBRIC = (
+    "The response is concise and contains exactly one primary teaching move.",
+    "The response gives the learner at most one action, question, choice, or continuation cue.",
+    "The response stays on one concept instead of introducing multiple new concepts.",
+    "Any progress, mastery, environment, tool, or configuration claim is explicitly supported by the visible exchange.",
+)
 JUDGE_SYSTEM = (
     "You are an independent evaluator of tutoring-policy conformance. "
     "Judge only the visible learner and tutor exchange. "
@@ -219,7 +225,7 @@ def _run_scenario(
             "scripted_history": scripted_history,
             "learner_message": learner_message,
             "tutor_response": tutor_response,
-            "rubric": scenario["rubric"],
+            "rubric": _effective_rubric(scenario),
             "judge": judge,
             "state_assertions": state_assertions,
             "event_assertions": event_assertions,
@@ -375,9 +381,7 @@ def _judge_prompt(
     *,
     scripted_history: list[dict[str, str]],
 ) -> str:
-    rubric = scenario["rubric"]
-    if not isinstance(rubric, list):
-        raise ValueError("scenario rubric must be a list")
+    rubric = _effective_rubric(scenario)
     rubric_text = "\n".join(f"- {item}" for item in rubric)
     history_text = "\n".join(
         f"Learner: {turn['learner']}\nTutor: {turn['tutor']}"
@@ -391,6 +395,15 @@ def _judge_prompt(
         f"Rubric:\n{rubric_text}\n\n"
         f"Tutor response:\n{tutor_response}"
     )
+
+
+def _effective_rubric(scenario: dict[str, object]) -> list[str]:
+    rubric = scenario["rubric"]
+    if not isinstance(rubric, list) or not all(
+        isinstance(item, str) and item.strip() for item in rubric
+    ):
+        raise ValueError("scenario rubric must be a list of non-empty strings")
+    return [*rubric, *BASE_TUTOR_RUBRIC]
 
 
 def _judge_response(model: str, prompt: str) -> dict[str, object]:
