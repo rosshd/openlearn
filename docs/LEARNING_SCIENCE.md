@@ -26,6 +26,7 @@ Use `.claude/skills/openlearn-tutor-policy/` for implementation rules.
 | Help abuse research | Prevent answer extraction and copy-forward progress |
 | Contingent tutoring | Step help up after misses and fade it after success |
 | Mastery learning | Advance on durable evidence, not seat time or confidence |
+| Bounded persistence | Escalate attempt, hint, example, and faded check once each, then defer to spaced review instead of drilling forever |
 
 ## Implementation Implications
 
@@ -36,6 +37,8 @@ Use `.claude/skills/openlearn-tutor-policy/` for implementation rules.
 - Treat fast high-overlap answers as suspect.
 - Use delayed retrieval performance as the best quality signal.
 - Keep feedback short, specific, and actionable.
+- Persist the active remediation stage and block advancement on prerequisite gaps until minimum evidence or an explicit skip.
+- Defer an exhausted concept to scheduled review without marking it mastered.
 
 ## Source Anchors
 

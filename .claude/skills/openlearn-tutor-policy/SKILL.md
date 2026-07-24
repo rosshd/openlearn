@@ -40,11 +40,14 @@ Clear stale learning gates, advance, and preserve durable learner preferences wh
 ## Move Policy
 
 - Struggling: reduce load, isolate one sub-concept, prompt an attempt, then give a worked example if needed.
+- Repeated misses: advance once through attempt, hint, worked example, and faded check, then defer to explicit scheduled review.
+- Blocking prerequisite gaps: keep the gate active until the learner meets the minimum score or explicitly skips.
 - On track: keep difficulty near the 80-85 percent success band with production and transfer checks.
 - Mastering: avoid fluency illusion with edge cases, prediction, novel transfer, and harder checks.
 - Suspected gaming: verify with an immediate transfer question and do not advance.
 - Explicit navigation: advance immediately and remember durable skip preferences.
 - Advancement: require passed production or transfer evidence, not one correct or confident answer.
+- Deferral: never mark an exhausted concept mastered; tell the learner when it will return and persist the transition as an event.
 
 ## Prompt Rules
 

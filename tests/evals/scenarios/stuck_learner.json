@@ -8,7 +8,15 @@
     "current_focus": "while loop syntax",
     "last_answer_status": "needs_work",
     "last_answer_score": 0.1,
-    "consecutive_misses": 2
+    "consecutive_misses": 2,
+    "pending_remediation": {
+      "concept_id": "while-loop-syntax",
+      "label": "while loop syntax",
+      "stage": "worked_example",
+      "misses": 2,
+      "minimum_score": 0.7,
+      "blocking_prerequisite": "Python block syntax"
+    }
   },
   "turns": [
     {"role": "user", "content": "I think a while loop is written like while x < 5 then print(x)."},
@@ -21,6 +29,8 @@
   "rubric": [
     "tutor offers a worked example or alternative explanation",
     "tutor does not repeat the same question verbatim",
-    "tutor does not advance past the concept without understanding"
+    "tutor does not advance past the concept without understanding",
+    "tutor keeps the blocking prerequisite active and does not claim mastery",
+    "tutor gives only the saved worked-example stage, not an endless retry sequence"
   ]
 }
