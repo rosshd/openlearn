@@ -930,13 +930,21 @@ class CliStorageTests(unittest.TestCase):
         context_before = context.stat().st_mtime_ns
         summary_before = summary.stat().st_mtime_ns
 
+        output: list[str] = []
         with mock.patch.object(cli, "generate_context_summary") as generate:
             result = cli.refresh_imported_source_folders(
-                "ai", model="test-model", output_func=lambda _text: None
+                "ai", model="test-model", output_func=output.append
             )
 
         self.assertEqual(result, (0, 1, 0))
         generate.assert_not_called()
+        self.assertEqual(
+            output,
+            [
+                "Source unchanged: week1.txt",
+                "Source refresh: 0 refreshed, 1 unchanged, 0 failed",
+            ],
+        )
         self.assertEqual(cli.topic_path("ai").stat().st_mtime_ns, topic_before)
         self.assertEqual(context.stat().st_mtime_ns, context_before)
         self.assertEqual(summary.stat().st_mtime_ns, summary_before)
@@ -952,7 +960,7 @@ class CliStorageTests(unittest.TestCase):
         with mock.patch.object(cli, "generate_context_summary", return_value="Initial.\n"):
             call_silent(cli.cmd_import_scan, "ai", directory, model="test-model")
         second_context = cli.topic_context_dir("ai") / "week2.md"
-        second_summary = cli.topic_context_dir("ai") / "week2.summary.txt"
+        second_summary = cli.topic_context_dir("ai") / "week2.md.summary.txt"
         second_context_mtime = second_context.stat().st_mtime_ns
         second_summary_mtime = second_summary.stat().st_mtime_ns
         first.write_text("lecture one revised", encoding="utf-8")
@@ -1061,6 +1069,128 @@ class CliStorageTests(unittest.TestCase):
             context_before,
         )
 
+    def test_folder_scan_rejects_outside_symlinks_without_artifacts(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="AI", goal="learn ai"))
+        directory = Path(self.home.name) / "semester"
+        directory.mkdir()
+        outside = Path(self.home.name) / "private-notes.txt"
+        outside.write_text("must not import", encoding="utf-8")
+        (directory / "linked-notes.txt").symlink_to(outside)
+
+        with mock.patch.object(cli, "generate_context_summary") as generate:
+            output = capture_stdout(
+                cli.cmd_import_scan,
+                "ai",
+                directory,
+                model="test-model",
+            )
+
+        generate.assert_not_called()
+        self.assertIn("0 imported, 0 skipped (already imported), 0 failed", output)
+        self.assertEqual(cli.context_files("ai"), [])
+        self.assertEqual(cli.imported_source_folders(cli.read_topic("ai").metadata), {})
+
+    def test_import_entry_points_revalidate_candidates_before_reading(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="AI", goal="learn ai"))
+        directory = Path(self.home.name) / "semester"
+        directory.mkdir()
+        outside = Path(self.home.name) / "private-notes.txt"
+        outside.write_text("must not import", encoding="utf-8")
+
+        with (
+            mock.patch.object(cli, "scan_source_files", return_value=[outside]),
+            mock.patch.object(cli, "_file_checksum") as checksum,
+            mock.patch.object(cli, "import_context_file") as import_file,
+        ):
+            output = capture_stdout(
+                cli.cmd_import_scan,
+                "ai",
+                directory,
+                model="test-model",
+            )
+
+        checksum.assert_not_called()
+        import_file.assert_not_called()
+        self.assertIn("1 failed", output)
+        self.assertEqual(cli.context_files("ai"), [])
+
+        with (
+            mock.patch.object(cli, "scan_source_files", return_value=[outside]),
+            mock.patch.object(cli, "read_pending_context") as read_context,
+            mock.patch.object(cli, "_file_checksum") as checksum,
+        ):
+            contexts = cli.pending_contexts_from_dir(
+                directory, output_func=lambda _text: None
+            )
+
+        read_context.assert_not_called()
+        checksum.assert_not_called()
+        self.assertEqual(contexts, [])
+        self.assertEqual(cli.context_files("ai"), [])
+
+    def test_same_stem_folder_sources_keep_distinct_summaries_through_refresh(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="AI", goal="learn ai"))
+        directory = Path(self.home.name) / "semester"
+        directory.mkdir()
+        text_source = directory / "lesson.txt"
+        markdown_source = directory / "lesson.md"
+        text_source.write_text("text lesson", encoding="utf-8")
+        markdown_source.write_text("# markdown lesson", encoding="utf-8")
+        barrier = threading.Barrier(2)
+
+        def concurrent_summary(
+            _slug, source_name, _text, model=None, output_func=print
+        ) -> str:
+            barrier.wait(timeout=2)
+            return f"Initial summary for {source_name}.\n"
+
+        with mock.patch.object(
+            cli, "generate_context_summary", side_effect=concurrent_summary
+        ):
+            call_silent(cli.cmd_import_scan, "ai", directory, model="test-model")
+
+        context_dir = cli.topic_context_dir("ai")
+        text_summary = context_dir / "lesson.summary.txt"
+        markdown_summary = context_dir / "lesson.md.summary.txt"
+        self.assertEqual(
+            text_summary.read_text(encoding="utf-8"),
+            "Initial summary for lesson.txt.\n",
+        )
+        self.assertEqual(
+            markdown_summary.read_text(encoding="utf-8"),
+            "Initial summary for lesson.md.\n",
+        )
+        records = cli.imported_source_folders(cli.read_topic("ai").metadata)[
+            str(directory.resolve())
+        ]["files"]
+        self.assertEqual(records["lesson.txt"]["summary_file"], text_summary.name)
+        self.assertEqual(records["lesson.md"]["summary_file"], markdown_summary.name)
+
+        text_source.write_text("revised text lesson", encoding="utf-8")
+        markdown_source.write_text("# revised markdown lesson", encoding="utf-8")
+
+        def revised_summary(
+            _slug, source_name, _text, model=None, output_func=print
+        ) -> str:
+            return f"Revised summary for {source_name}.\n"
+
+        with mock.patch.object(
+            cli, "generate_context_summary", side_effect=revised_summary
+        ):
+            result = cli.refresh_imported_source_folders(
+                "ai", model="test-model", output_func=lambda _text: None
+            )
+
+        self.assertEqual(result, (2, 0, 0))
+        self.assertEqual(
+            text_summary.read_text(encoding="utf-8"),
+            "Revised summary for lesson.txt.\n",
+        )
+        self.assertEqual(
+            markdown_summary.read_text(encoding="utf-8"),
+            "Revised summary for lesson.md.\n",
+        )
+
     def test_course_setup_preserves_folder_source_provenance(self) -> None:
         directory = Path(self.home.name) / "semester"
         directory.mkdir()
@@ -1102,6 +1232,27 @@ class CliStorageTests(unittest.TestCase):
         refresh.assert_called_once()
         self.assertEqual(refresh.call_args.args[:2], ("ai",))
         self.assertEqual(refresh.call_args.kwargs["model"], "test-model")
+
+    def test_resume_reports_unchanged_folder_refresh_counts(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="AI", goal="learn ai"))
+        directory = Path(self.home.name) / "semester"
+        directory.mkdir()
+        (directory / "week1.txt").write_text("lecture one", encoding="utf-8")
+        with mock.patch.object(cli, "generate_context_summary", return_value="Summary.\n"):
+            call_silent(cli.cmd_import_scan, "ai", directory, model="test-model")
+
+        with mock.patch.object(
+            cli,
+            "call_openai_streaming",
+            return_value="**Lesson:** Continue.",
+        ):
+            output = capture_stdout(
+                cli.cmd_resume,
+                Namespace(topic="ai", model="test-model"),
+            )
+
+        self.assertIn("Source unchanged: week1.txt", output)
+        self.assertIn("Source refresh: 0 refreshed, 1 unchanged, 0 failed", output)
 
     def test_paste_command_opens_editor_and_summarizes_source(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="AI", goal="learn ai"))

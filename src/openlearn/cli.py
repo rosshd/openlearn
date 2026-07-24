@@ -999,7 +999,7 @@ def create_course_from_setup(
                 context.source_root,
                 context.source_path,
                 saved,
-                topic_context_dir(slug) / f"{saved.stem}.summary.txt",
+                context_summary_path(slug, saved, collision_safe=True),
                 context.source_checksum,
             )
         output_func(f"Saved context: {saved.name}")
@@ -1009,17 +1009,23 @@ def create_course_from_setup(
 def summarize_pending_contexts(active: str | None, context_paths: list[Path], output_func) -> None:
     if not active or not context_paths:
         return
+    tracked_contexts = imported_folder_context_files(read_topic(active).metadata)
     pending = [
         path
         for path in context_paths
-        if not (topic_context_dir(active) / f"{path.stem}.summary.txt").exists()
+        if not context_summary_path(
+            active, path, collision_safe=path.name in tracked_contexts
+        ).exists()
     ]
     if not pending:
         return
 
     def summarize_one(path: Path):
         try:
-            saved = summarize_context_file(active, path, output_func=lambda _: None)
+            kwargs = {"collision_safe": True} if path.name in tracked_contexts else {}
+            saved = summarize_context_file(
+                active, path, output_func=lambda _: None, **kwargs
+            )
             return "ok", path.name, saved.name
         except Exception as exc:
             return "failed", path.name, str(exc)
@@ -1064,6 +1070,7 @@ def pending_contexts_from_dir(directory: Path, output_func=print) -> list[Pendin
     failed = 0
     for source in scan_source_files(directory):
         try:
+            source = require_safe_source_path(directory, source)
             context = read_pending_context(source, output_func)
             contexts.append(
                 PendingContext(
@@ -1083,10 +1090,27 @@ def pending_contexts_from_dir(directory: Path, output_func=print) -> list[Pendin
 
 def scan_source_files(directory: Path) -> list[Path]:
     patterns = ("*.pdf", "*.md", "*.txt", "*.docx")
-    return sorted(
-        {path for pattern in patterns for path in directory.glob(f"**/{pattern}")},
-        key=lambda path: str(path).lower(),
-    )
+    candidates = {path for pattern in patterns for path in directory.glob(f"**/{pattern}")}
+    safe_sources: list[Path] = []
+    for candidate in candidates:
+        try:
+            safe_sources.append(require_safe_source_path(directory, candidate))
+        except OpenLearnError:
+            continue
+    return sorted(set(safe_sources), key=lambda path: str(path).lower())
+
+
+def require_safe_source_path(directory: Path, source: Path) -> Path:
+    root = directory.expanduser().resolve()
+    lexical_source = source.expanduser().absolute()
+    try:
+        resolved_source = source.expanduser().resolve(strict=True)
+        resolved_source.relative_to(root)
+    except (OSError, ValueError) as exc:
+        raise OpenLearnError(f"source is outside imported folder: {source}") from exc
+    if lexical_source != resolved_source or not resolved_source.is_file():
+        raise OpenLearnError(f"source symlinks are not imported: {source}")
+    return resolved_source
 
 
 def seed_manual_test_course(started: bool = False, with_session: bool = False) -> None:
@@ -7199,6 +7223,14 @@ def context_summary_files(slug: str) -> list[Path]:
     return [path for path in context_files(slug) if path.name.endswith(".summary.txt")]
 
 
+def context_summary_path(
+    slug: str, source: Path, *, collision_safe: bool = False
+) -> Path:
+    suffix = source.suffix.lower()
+    summary_stem = source.name if collision_safe and suffix != ".txt" else source.stem
+    return topic_context_dir(slug) / f"{summary_stem}.summary.txt"
+
+
 def context_source_files(slug: str) -> list[Path]:
     return [path for path in context_files(slug) if not path.name.endswith(".summary.txt")]
 
@@ -7506,6 +7538,21 @@ def imported_source_folders(metadata: dict[str, object]) -> dict[str, dict[str, 
     }
 
 
+def imported_folder_context_files(metadata: dict[str, object]) -> set[str]:
+    names: set[str] = set()
+    for folder in imported_source_folders(metadata).values():
+        raw_files = folder.get("files")
+        if not isinstance(raw_files, dict):
+            continue
+        for raw_record in raw_files.values():
+            if not isinstance(raw_record, dict):
+                continue
+            name = raw_record.get("context_file")
+            if isinstance(name, str) and Path(name).name == name:
+                names.add(name)
+    return names
+
+
 def save_imported_source_provenance(
     slug: str,
     source_root: Path,
@@ -7577,7 +7624,11 @@ def cmd_import_scan(slug: str, directory: Path, model: str | None = None, output
     imported = skipped = failed = 0
 
     def process_one(source: Path):
-        checksum = _file_checksum(source)
+        try:
+            source = require_safe_source_path(directory, source)
+            checksum = _file_checksum(source)
+        except (OSError, OpenLearnError) as exc:
+            return "failed", source.name, None, str(exc)
         with seen_lock:
             if checksum in seen:
                 return "skipped", source.name, None, None
@@ -7585,7 +7636,13 @@ def cmd_import_scan(slug: str, directory: Path, model: str | None = None, output
         lines: list[str] = []
         try:
             saved = import_context_file(slug, source, output_func=lines.append)
-            summary = summarize_context_file(slug, saved, model=model, output_func=lines.append)
+            summary = summarize_context_file(
+                slug,
+                saved,
+                model=model,
+                output_func=lines.append,
+                collision_safe=True,
+            )
         except OpenLearnError as exc:
             with seen_lock:
                 seen.discard(checksum)  # unclaim so future runs can retry
@@ -7650,10 +7707,11 @@ def refresh_imported_source_folders(
         current_relatives: set[str] = set()
         for source in sources:
             try:
-                relative = source.resolve().relative_to(directory.resolve()).as_posix()
+                source = require_safe_source_path(directory, source)
+                relative = source.relative_to(directory.resolve()).as_posix()
                 current_relatives.add(relative)
                 checksum = _file_checksum(source)
-            except (OSError, ValueError) as exc:
+            except (OSError, ValueError, OpenLearnError) as exc:
                 failed += 1
                 output_func(f"Failed to refresh {source.name}: {exc}")
                 continue
@@ -7669,6 +7727,7 @@ def refresh_imported_source_folders(
                 and summary_path.is_file()
             ):
                 unchanged += 1
+                output_func(f"Source unchanged: {relative}")
                 continue
             try:
                 text, filename = context_text_from_file(source, output_func=lambda _: None)
@@ -7684,7 +7743,9 @@ def refresh_imported_source_folders(
                     context_path = unique_context_path(slug, filename)
                     claimed_new_context = True
                 if summary_path is None:
-                    summary_path = topic_context_dir(slug) / f"{context_path.stem}.summary.txt"
+                    summary_path = context_summary_path(
+                        slug, context_path, collision_safe=True
+                    )
                 previous_context = (
                     context_path.read_bytes()
                     if context_path.exists() and not claimed_new_context
@@ -7717,6 +7778,10 @@ def refresh_imported_source_folders(
         for relative in sorted(set(records) - current_relatives):
             failed += 1
             output_func(f"Source refresh skipped: file unavailable: {directory / relative}")
+    if folders:
+        output_func(
+            f"Source refresh: {refreshed} refreshed, {unchanged} unchanged, {failed} failed"
+        )
     return refreshed, unchanged, failed
 
 
@@ -7770,7 +7835,12 @@ def generate_context_summary(
 
 
 def summarize_context_file(
-    slug: str, source: Path, model: str | None = None, output_func=print
+    slug: str,
+    source: Path,
+    model: str | None = None,
+    output_func=print,
+    *,
+    collision_safe: bool = False,
 ) -> Path:
     if source.name.endswith(".summary.txt"):
         raise OpenLearnError("choose a raw context file, not an existing summary")
@@ -7783,7 +7853,7 @@ def summarize_context_file(
         model=model,
         output_func=output_func,
     )
-    summary_path = topic_context_dir(slug) / f"{source.stem}.summary.txt"
+    summary_path = context_summary_path(slug, source, collision_safe=collision_safe)
     write_text_atomic(summary_path, summary)
     return summary_path
 
