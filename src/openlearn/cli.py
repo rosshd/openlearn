@@ -2245,6 +2245,41 @@ def parse_multiple_choice_options(question: str) -> tuple[str, dict[str, str]] |
     return stem, options
 
 
+def explicit_multiple_choice_option(answer: str, question: str = "") -> str | None:
+    """Return one unambiguous selected option, or None for semantic free text."""
+    value = " ".join(answer.strip().split())
+    if not value:
+        return None
+    candidates: set[str] = set()
+    patterns = (
+        r"^([A-D])(?:[\).:-])?$",
+        r"^([A-D])[\).:-]\s+.+$",
+        r"\b(?:option|choice)\s+([A-D])\b",
+        r"\b(?:the\s+)?answer\s+(?:is\s+)?([A-D])\b",
+        r"^i\s+(?:think|believe|choose|chose|pick|picked|would choose|would pick)\s+"
+        r"(?:option\s+)?([A-D])\b",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, value, flags=re.IGNORECASE)
+        if match:
+            candidates.add(match.group(1).upper())
+    if candidates:
+        candidates.update(
+            letter.upper()
+            for letter in re.findall(r"\b([A-D])\b", value, flags=re.IGNORECASE)
+        )
+
+    parsed = parse_multiple_choice_options(question) if question else None
+    if parsed:
+        _stem, options = parsed
+        normalized_answer = value.casefold().rstrip(".")
+        for letter, option_text in options.items():
+            if normalized_answer == option_text.casefold().rstrip("."):
+                candidates.add(letter)
+
+    return next(iter(candidates)) if len(candidates) == 1 else None
+
+
 def rotate_placement_answer_options(
     data: dict[str, object], difficulty: int, results: list[dict[str, object]]
 ) -> dict[str, object]:
@@ -2278,7 +2313,7 @@ def placement_evaluation(
     concept: str = "",
     retry_status: Callable[[str], object] | None = None,
 ) -> dict[str, object]:
-    selected = answer.strip().upper()[:1]
+    selected = explicit_multiple_choice_option(answer, question)
     if answer_key in {"A", "B", "C", "D"} and selected in {"A", "B", "C", "D"}:
         correct = selected == answer_key
         return {
@@ -4335,10 +4370,13 @@ def apply_pending_question_answer_key(metadata: dict[str, object], learner_promp
     answer_key = pending.get("answer_key")
     if not isinstance(answer_key, str) or answer_key not in {"A", "B", "C", "D"}:
         return
-    selected = learner_prompt.strip().upper()[:1]
-    if selected not in {"A", "B", "C", "D"}:
-        metadata["last_answer_status"] = "needs_work"
-    elif selected == answer_key:
+    question = pending.get("question")
+    selected = explicit_multiple_choice_option(
+        learner_prompt, question if isinstance(question, str) else ""
+    )
+    if selected is None:
+        return
+    if selected == answer_key:
         metadata["last_answer_status"] = "correct"
     else:
         metadata["last_answer_status"] = "needs_work"
@@ -4351,14 +4389,18 @@ def prepare_current_answer_judgment(
     pending = metadata.get("pending_question")
     if isinstance(pending, dict) and pending.get("kind") == "multiple_choice":
         answer_key = pending.get("answer_key")
-        selected = learner_prompt.strip().upper()[:1]
+        question = pending.get("question")
+        selected = explicit_multiple_choice_option(
+            learner_prompt, question if isinstance(question, str) else ""
+        )
         if isinstance(answer_key, str) and answer_key in {"A", "B", "C", "D"}:
-            correct = selected == answer_key
-            update["last_answer_status"] = "correct" if correct else "needs_work"
-            update["answer_score"] = 1.0 if correct else 0.0
-            update["answer_kind"] = "recognition"
-            update["is_transfer"] = False
-            return True
+            if selected is not None:
+                correct = selected == answer_key
+                update["last_answer_status"] = "correct" if correct else "needs_work"
+                update["answer_score"] = 1.0 if correct else 0.0
+                update["answer_kind"] = "recognition"
+                update["is_transfer"] = False
+                return True
     status = update.get("last_answer_status")
     score = update.get("answer_score")
     return status in {"correct", "partial", "needs_work"} and isinstance(
@@ -5252,7 +5294,7 @@ def ask_topic(
             output_func=output_func,
             event_sink=queue_event if needs_judgment else None,
         )
-    except Exception:
+    except (Exception, KeyboardInterrupt):
         if needs_judgment:
             restore_prejudgment_turn_state(
                 topic,
@@ -6019,9 +6061,23 @@ def update_learning_metadata(
             configured_extractor_model(model), METADATA_EXTRACTOR_SYSTEM, update_prompt
         )
         update = parse_metadata_update(raw_update)
-    except (OpenLearnError, ValueError, json.JSONDecodeError):
+    except OpenLearnError as exc:
+        if isinstance(pending_at_answer, dict):
+            raise OpenLearnError(
+                f"Could not grade your answer because the judge is unavailable: {exc}"
+            ) from exc
+        return ""
+    except (ValueError, json.JSONDecodeError) as exc:
+        if isinstance(pending_at_answer, dict):
+            raise OpenLearnError(
+                "Could not grade your answer because the judge returned an invalid result."
+            ) from exc
         return ""
     if not update:
+        if isinstance(pending_at_answer, dict):
+            raise OpenLearnError(
+                "Could not grade your answer because the judge returned an empty result."
+            )
         return ""
     message_kind = update.get("message_kind")
     if isinstance(message_kind, str) and message_kind != "answer":
@@ -6031,6 +6087,10 @@ def update_learning_metadata(
     if requires_complete_judgment and not prepare_current_answer_judgment(
         topic.metadata, learner_prompt, update
     ):
+        if isinstance(pending_at_answer, dict):
+            raise OpenLearnError(
+                "Could not grade your answer because the judge returned an incomplete result."
+            )
         return ""
     emit_event = event_sink or log_event
 

@@ -145,7 +145,15 @@ def test_run_evaluation_preserves_failed_verdict_and_redacts_credentials(
 
     def fake_call(model: str, system: str, user: str) -> str:
         if system == cli.METADATA_EXTRACTOR_SYSTEM:
-            return "{}"
+            return json.dumps(
+                {
+                    "message_kind": "answer",
+                    "last_answer_status": "correct",
+                    "answer_score": 1.0,
+                    "answer_kind": "production",
+                    "is_transfer": True,
+                }
+            )
         return json.dumps({"pass": False, "score": 0.2, "reason": f"Failed {secret}"})
 
     monkeypatch.setattr(cli, "call_openai", fake_call)
@@ -265,6 +273,19 @@ def test_provider_failure_is_preserved_as_failed_evidence(
         raise cli.OpenLearnError("provider unavailable")
 
     monkeypatch.setattr(cli, "call_openai_streaming", fail_provider)
+    monkeypatch.setattr(
+        cli,
+        "call_openai",
+        lambda model, system, user: json.dumps(
+            {
+                "message_kind": "answer",
+                "last_answer_status": "correct",
+                "answer_score": 1.0,
+                "answer_kind": "production",
+                "is_transfer": True,
+            }
+        ),
+    )
 
     outcome = run_evaluation(
         tmp_path / "run",

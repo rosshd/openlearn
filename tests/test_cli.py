@@ -3867,7 +3867,9 @@ class InteractiveTests(unittest.TestCase):
 
         judge.assert_not_called()
 
-    def test_ask_topic_judge_failure_preserves_pending_answer_and_generates_safely(self) -> None:
+    def test_ask_topic_judge_failure_preserves_pending_question_and_stops_generation(
+        self,
+    ) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Python", goal="Learn functions"))
         path = cli.topic_path("python")
         metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
@@ -3879,29 +3881,28 @@ class InteractiveTests(unittest.TestCase):
             "created": cli.today(),
         }
         path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
-        captured_system = []
-
-        def fake_stream(*_args, system: str, **_kwargs) -> str:
-            captured_system.append(system)
-            return "**Feedback:**\nI saved your answer, but could not grade it yet."
+        tutor = mock.Mock(
+            return_value="**Feedback:**\nI saved your answer, but could not grade it yet."
+        )
 
         with (
             mock.patch.object(cli, "call_openai", side_effect=cli.OpenLearnError("offline")),
-            mock.patch.object(cli, "call_openai_streaming", side_effect=fake_stream),
+            mock.patch.object(cli, "call_openai_streaming", tutor),
             mock.patch.object(cli, "maybe_suggest_videos"),
         ):
-            cli.ask_topic(
-                "python",
-                "It returns a value to the caller.",
-                "test-model",
-                output_func=lambda _text: None,
-            )
+            with self.assertRaisesRegex(cli.OpenLearnError, "grade"):
+                cli.ask_topic(
+                    "python",
+                    "It returns a value to the caller.",
+                    "test-model",
+                    output_func=lambda _text: None,
+                )
 
         updated = cli.read_topic("python")
         self.assertEqual(updated.metadata["last_answer_status"], "")
         self.assertIn("pending_question", updated.metadata)
-        self.assertIn("It returns a value to the caller.", updated.body)
-        self.assertIn('"pending_question"', captured_system[0])
+        self.assertNotIn("It returns a value to the caller.", updated.body)
+        tutor.assert_not_called()
 
     def test_incomplete_answer_judgment_does_not_reuse_stale_answer_state(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Python", goal="Learn functions"))
@@ -3931,15 +3932,15 @@ class InteractiveTests(unittest.TestCase):
             "call_openai",
             return_value=json.dumps({"message_kind": "answer"}),
         ):
-            result = cli.update_learning_metadata(
-                cli.read_topic("python"),
-                "It gives back something.",
-                "**Check:** What does return do?",
-                "test-model",
-            )
+            with self.assertRaisesRegex(cli.OpenLearnError, "incomplete"):
+                cli.update_learning_metadata(
+                    cli.read_topic("python"),
+                    "It gives back something.",
+                    "**Check:** What does return do?",
+                    "test-model",
+                )
 
         updated = cli.read_topic("python")
-        self.assertEqual(result, "")
         self.assertEqual(updated.metadata["last_answer_status"], "correct")
         self.assertEqual(updated.metadata["last_answer_score"], 1.0)
         self.assertEqual(updated.metadata["consecutive_correct"], 2)
@@ -3981,6 +3982,274 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(updated.metadata["last_answer_status"], "correct")
         self.assertEqual(updated.metadata["last_answer_score"], 1.0)
         self.assertNotIn("pending_question", updated.metadata)
+
+    def test_multiple_choice_answer_key_parses_only_explicit_selections(self) -> None:
+        question = (
+            "Which keyword sends a value back?\n"
+            "A) print\nB) return\nC) def\nD) pass"
+        )
+        for answer in (
+            "B",
+            "Option B",
+            "I think B because it returns the result.",
+            "The answer is B",
+            "return",
+        ):
+            with self.subTest(answer=answer):
+                self.assertEqual(
+                    cli.explicit_multiple_choice_option(answer, question),
+                    "B",
+                )
+        for answer in (
+            "A return value goes back to the caller.",
+            "Because return sends the result back.",
+            "I am deciding between A and B.",
+            "Option B or C",
+            "I think B or C",
+            "The answer is B, but maybe C",
+            "Choice B, though possibly C",
+        ):
+            with self.subTest(answer=answer):
+                self.assertIsNone(
+                    cli.explicit_multiple_choice_option(answer, question)
+                )
+
+    def test_multiple_choice_free_text_keeps_complete_semantic_judgment(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Python", goal="Learn functions"))
+        path = cli.topic_path("python")
+        metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+        metadata = dict(metadata)
+        metadata["current_focus"] = "return values"
+        cli.write_topic(path, metadata, body)
+        cli.save_pending_question(
+            cli.read_topic("python"),
+            "",
+            "B",
+            question_text=(
+                "Which keyword sends a value back?\n"
+                "A) print\nB) return\nC) def\nD) pass"
+            ),
+        )
+        judgment = {
+            "message_kind": "answer",
+            "last_answer_status": "correct",
+            "answer_score": 0.9,
+            "answer_kind": "production",
+            "is_transfer": False,
+        }
+
+        with mock.patch.object(
+            cli,
+            "call_openai",
+            return_value=json.dumps(judgment),
+        ):
+            result = cli.update_learning_metadata(
+                cli.read_topic("python"),
+                "A return value goes back to the caller.",
+                "**Check:** Which keyword sends a value back?",
+                "test-model",
+            )
+
+        updated = cli.read_topic("python")
+        self.assertEqual(result, "answer")
+        self.assertEqual(updated.metadata["last_answer_status"], "correct")
+        self.assertEqual(updated.metadata["last_answer_score"], 0.9)
+        self.assertNotIn("pending_question", updated.metadata)
+
+    def test_multiple_choice_key_override_uses_shared_explicit_parser(self) -> None:
+        question = (
+            "Which keyword sends a value back?\n"
+            "A) print\nB) return\nC) def\nD) pass"
+        )
+        for answer, expected_status in (
+            ("Option B", "correct"),
+            ("I think B because it returns the result.", "correct"),
+            ("The answer is B", "correct"),
+            ("return", "correct"),
+            ("Option A", "needs_work"),
+        ):
+            with self.subTest(answer=answer):
+                metadata = {
+                    "pending_question": {
+                        "kind": "multiple_choice",
+                        "question": question,
+                        "answer_key": "B",
+                    },
+                    "last_answer_status": "partial",
+                }
+                update: dict[str, object] = {}
+                self.assertTrue(
+                    cli.prepare_current_answer_judgment(metadata, answer, update)
+                )
+                self.assertEqual(update["last_answer_status"], expected_status)
+                cli.apply_pending_question_answer_key(metadata, answer)
+                self.assertEqual(metadata["last_answer_status"], expected_status)
+
+    def test_ask_topic_judge_outage_fails_before_tutor_and_retries_once(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Python", goal="Learn functions"))
+        path = cli.topic_path("python")
+        metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+        metadata = dict(metadata)
+        metadata["current_focus"] = "return values"
+        cli.write_topic(path, metadata, body)
+        cli.save_pending_question(
+            cli.read_topic("python"),
+            "",
+            "",
+            question_text="What does a return value do?",
+        )
+        answer = "It sends the result back to the caller."
+        cli.save_pending_learner_prompt("python", answer)
+        tutor = mock.Mock(return_value="**Feedback:**\nCorrect.")
+
+        with (
+            mock.patch.object(
+                cli,
+                "call_openai",
+                side_effect=cli.OpenLearnError("judge offline"),
+            ),
+            mock.patch.object(cli, "call_openai_streaming", tutor),
+        ):
+            with self.assertRaisesRegex(cli.OpenLearnError, "grade"):
+                cli.ask_topic(
+                    "python",
+                    answer,
+                    "test-model",
+                    output_func=lambda _text: None,
+                    pending_learner_prompt=answer,
+                )
+
+        tutor.assert_not_called()
+        self.assertEqual(cli.load_pending_learner_prompt("python"), answer)
+        pending = cli.read_topic("python").metadata["pending_question"]
+        self.assertEqual(pending["question"], "What does a return value do?")
+
+        judgment = {
+            "message_kind": "answer",
+            "last_answer_status": "correct",
+            "answer_score": 1.0,
+            "answer_kind": "production",
+            "is_transfer": True,
+        }
+        judge = mock.Mock(return_value=json.dumps(judgment))
+        with (
+            mock.patch.object(cli, "call_openai", judge),
+            mock.patch.object(cli, "call_openai_streaming", tutor),
+            mock.patch.object(cli, "maybe_suggest_videos"),
+        ):
+            cli.ask_topic(
+                "python",
+                answer,
+                "test-model",
+                output_func=lambda _text: None,
+                pending_learner_prompt=answer,
+            )
+
+        judge.assert_called_once()
+        tutor.assert_called_once()
+        self.assertIsNone(cli.load_pending_learner_prompt("python"))
+        attempts = cli.read_topic("python").metadata["concept_attempts"]
+        self.assertEqual(attempts["return-values"]["attempts"], 1)
+        judged_events = [
+            event
+            for event in cli.load_event_log(cli.topic_events_path("python"))
+            if event["event_type"] == "answer_judged"
+        ]
+        self.assertEqual(len(judged_events), 1)
+
+    def test_ask_topic_unusable_judgments_fail_before_tutor_and_retry_once(
+        self,
+    ) -> None:
+        unusable_results = {
+            "malformed": "not JSON",
+            "empty": "{}",
+            "incomplete": json.dumps(
+                {
+                    "message_kind": "answer",
+                    "last_answer_status": "correct",
+                }
+            ),
+        }
+        judgment = {
+            "message_kind": "answer",
+            "last_answer_status": "correct",
+            "answer_score": 1.0,
+            "answer_kind": "production",
+            "is_transfer": True,
+        }
+
+        for case, unusable_result in unusable_results.items():
+            with self.subTest(case=case):
+                topic_name = f"Python {case}"
+                slug = cli.slugify(topic_name)
+                call_silent(
+                    cli.cmd_new,
+                    Namespace(topic=topic_name, goal="Learn functions"),
+                )
+                path = cli.topic_path(slug)
+                metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+                metadata = dict(metadata)
+                metadata["current_focus"] = "return values"
+                cli.write_topic(path, metadata, body)
+                cli.save_pending_question(
+                    cli.read_topic(slug),
+                    "",
+                    "",
+                    question_text="What does a return value do?",
+                )
+                answer = f"It sends the {case} result back to the caller."
+                cli.save_pending_learner_prompt(slug, answer)
+                tutor = mock.Mock(return_value="**Feedback:**\nCorrect.")
+
+                with (
+                    mock.patch.object(
+                        cli,
+                        "call_openai",
+                        return_value=unusable_result,
+                    ),
+                    mock.patch.object(cli, "call_openai_streaming", tutor),
+                ):
+                    with self.assertRaisesRegex(cli.OpenLearnError, "grade"):
+                        cli.ask_topic(
+                            slug,
+                            answer,
+                            "test-model",
+                            output_func=lambda _text: None,
+                            pending_learner_prompt=answer,
+                        )
+
+                tutor.assert_not_called()
+                self.assertEqual(cli.load_pending_learner_prompt(slug), answer)
+                self.assertEqual(
+                    cli.read_topic(slug).metadata["pending_question"]["question"],
+                    "What does a return value do?",
+                )
+
+                judge = mock.Mock(return_value=json.dumps(judgment))
+                with (
+                    mock.patch.object(cli, "call_openai", judge),
+                    mock.patch.object(cli, "call_openai_streaming", tutor),
+                    mock.patch.object(cli, "maybe_suggest_videos"),
+                ):
+                    cli.ask_topic(
+                        slug,
+                        answer,
+                        "test-model",
+                        output_func=lambda _text: None,
+                        pending_learner_prompt=answer,
+                    )
+
+                judge.assert_called_once()
+                tutor.assert_called_once()
+                self.assertIsNone(cli.load_pending_learner_prompt(slug))
+                attempts = cli.read_topic(slug).metadata["concept_attempts"]
+                self.assertEqual(attempts["return-values"]["attempts"], 1)
+                judged_events = [
+                    event
+                    for event in cli.load_event_log(cli.topic_events_path(slug))
+                    if event["event_type"] == "answer_judged"
+                ]
+                self.assertEqual(len(judged_events), 1)
 
     def test_successful_judge_rolls_back_when_tutor_generation_fails(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Python", goal="Learn functions"))
@@ -4067,6 +4336,97 @@ class InteractiveTests(unittest.TestCase):
                 for event in cli.load_event_log(cli.topic_events_path("python"))
             )
         )
+
+    def test_keyboard_interrupt_during_tutor_stream_rolls_back_for_retry(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Python", goal="Learn functions"))
+        path = cli.topic_path("python")
+        metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+        metadata = dict(metadata)
+        metadata["current_focus"] = "return values"
+        cli.write_topic(path, metadata, body)
+        cli.save_pending_question(
+            cli.read_topic("python"),
+            "",
+            "",
+            question_text="What does a return value do?",
+        )
+        answer = "It sends a result to the caller."
+        cli.save_pending_learner_prompt("python", answer)
+        before = cli.read_topic("python")
+        events_before = cli.load_event_log(cli.topic_events_path("python"))
+        judgment = {
+            "message_kind": "answer",
+            "last_answer_status": "correct",
+            "answer_score": 1.0,
+            "answer_kind": "production",
+            "is_transfer": True,
+        }
+
+        with (
+            mock.patch.object(
+                cli,
+                "call_openai",
+                return_value=json.dumps(judgment),
+            ),
+            mock.patch.object(
+                cli,
+                "call_openai_streaming",
+                side_effect=KeyboardInterrupt,
+            ),
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                cli.ask_topic(
+                    "python",
+                    answer,
+                    "test-model",
+                    output_func=lambda _text: None,
+                    pending_learner_prompt=answer,
+                )
+
+        restored = cli.read_topic("python")
+        self.assertEqual(
+            restored.metadata["pending_question"],
+            before.metadata["pending_question"],
+        )
+        self.assertEqual(
+            restored.metadata["last_answer_status"],
+            before.metadata["last_answer_status"],
+        )
+        self.assertNotIn("concept_attempts", restored.metadata)
+        self.assertEqual(cli.load_pending_learner_prompt("python"), answer)
+        self.assertEqual(
+            cli.load_event_log(cli.topic_events_path("python")),
+            events_before,
+        )
+
+        judge = mock.Mock(return_value=json.dumps(judgment))
+        with (
+            mock.patch.object(cli, "call_openai", judge),
+            mock.patch.object(
+                cli,
+                "call_openai_streaming",
+                return_value="**Feedback:**\nCorrect.",
+            ),
+            mock.patch.object(cli, "maybe_suggest_videos"),
+        ):
+            cli.ask_topic(
+                "python",
+                answer,
+                "test-model",
+                output_func=lambda _text: None,
+                pending_learner_prompt=answer,
+            )
+
+        judge.assert_called_once()
+        self.assertIsNone(cli.load_pending_learner_prompt("python"))
+        attempts = cli.read_topic("python").metadata["concept_attempts"]
+        self.assertEqual(attempts["return-values"]["attempts"], 1)
+        judged_events = [
+            event
+            for event in cli.load_event_log(cli.topic_events_path("python"))
+            if event["event_type"] == "answer_judged"
+        ]
+        self.assertEqual(len(judged_events), 1)
 
     def test_pending_question_focus_controls_consecutive_attempt_attribution(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Python", goal="Learn functions"))
