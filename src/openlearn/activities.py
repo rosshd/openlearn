@@ -221,6 +221,10 @@ def attach_evidence_reference(
     refs = list(current_refs)
     if any(isinstance(item, dict) and item.get("evidence_id") == identifier for item in refs):
         return current, False
+    if len(refs) >= MAX_EVIDENCE_REFS:
+        raise ActivityContractError(
+            f"activity cannot contain more than {MAX_EVIDENCE_REFS} evidence references"
+        )
     refs.append({"evidence_id": identifier, "event_type": _identifier(event_type, "event type")})
     updated = dict(current)
     updated["evidence_refs"] = refs

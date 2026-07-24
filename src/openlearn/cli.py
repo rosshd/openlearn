@@ -5866,12 +5866,30 @@ def restore_prejudgment_turn_state(
     state_text: str | None,
 ) -> None:
     """Roll back an uncommitted judgment after tutor generation fails."""
+    if _DRY_RUN:
+        return
     with file_lock(topic.path):
         write_text_atomic(topic.path, topic_text)
     state_path = topic_state_path(topic.slug)
     with file_lock(state_path):
         _recover_activity_update_locked(topic.slug)
-        if state_text is None:
+        current_state = _load_state_unlocked(topic.slug)
+        active_activity = current_state.get("active_activity")
+        if active_activity is not None:
+            preserved_activity = _validated_persisted_activity(active_activity)
+            restored_state: dict[str, object] = {}
+            if state_text is not None:
+                try:
+                    snapshot = json.loads(state_text)
+                except json.JSONDecodeError:
+                    snapshot = {}
+                if isinstance(snapshot, dict):
+                    restored_state.update(snapshot)
+            restored_state["active_activity"] = preserved_activity
+            write_text_atomic(
+                state_path, json.dumps(restored_state, indent=2, sort_keys=True) + "\n"
+            )
+        elif state_text is None:
             with contextlib.suppress(FileNotFoundError):
                 state_path.unlink()
         else:
@@ -5922,6 +5940,8 @@ def _persist_activity_update_locked(
     event_type: str,
     event_data: dict[str, object],
 ) -> None:
+    if _DRY_RUN:
+        return
     journal = _activity_update_journal(slug, state_after, event_type, event_data)
     journal_path = topic_activity_journal_path(slug)
     write_text_atomic(journal_path, json.dumps(journal, indent=2, sort_keys=True) + "\n")
@@ -9096,15 +9116,14 @@ def _validated_activity_journal(slug: str, value: object) -> dict[str, object]:
 
 
 def _append_activity_event_once(slug: str, journal: dict[str, object]) -> None:
+    if _DRY_RUN:
+        return
     path = topic_events_path(slug)
     update_id = str(journal["update_id"])
     with file_lock(path):
         existing = ""
         if path.exists():
-            try:
-                existing = path.read_text(encoding="utf-8")
-            except OSError:
-                existing = ""
+            existing = path.read_text(encoding="utf-8")
         for line in existing.splitlines():
             try:
                 event = json.loads(line)
@@ -9133,6 +9152,8 @@ def _append_activity_event_once(slug: str, journal: dict[str, object]) -> None:
 
 
 def _recover_activity_update_locked(slug: str) -> None:
+    if _DRY_RUN:
+        return
     journal_path = topic_activity_journal_path(slug)
     if not journal_path.exists():
         return

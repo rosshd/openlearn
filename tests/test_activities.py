@@ -166,6 +166,23 @@ class ActivityContractTests(unittest.TestCase):
         )
         self.assertNotIn("mastery", updated)
 
+    def test_evidence_reference_cap_rejects_the_sixty_fifth_reference(self) -> None:
+        activity, _ = accept_activity(self.proposal(), learner_confirmed=True)
+        activity, _ = transition_activity(activity, "active")
+        activity["evidence_refs"] = [
+            {
+                "evidence_id": f"evidence_{index:02d}",
+                "event_type": "activity_evidence_recorded",
+            }
+            for index in range(63)
+        ]
+        at_limit, changed = attach_evidence_reference(activity, "evidence_63")
+
+        self.assertTrue(changed)
+        self.assertEqual(len(at_limit["evidence_refs"]), 64)
+        with self.assertRaisesRegex(ActivityContractError, "more than 64"):
+            attach_evidence_reference(at_limit, "evidence_64")
+
     def test_lifecycle_event_projection_excludes_domain_payload_and_resources(self) -> None:
         data = activity_event_data(self.proposal())
 

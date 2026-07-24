@@ -7473,6 +7473,161 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertFalse(cli.topic_activity_journal_path(slug).exists())
 
+    def test_activity_event_read_failure_preserves_log_and_journal_for_retry(self) -> None:
+        slug = "event-read-failure"
+        call_silent(cli.cmd_new, Namespace(topic=slug, goal="practice functions"))
+        request = {
+            "domain": "coding",
+            "kind": "python_drill",
+            "objective": "Practice a small function.",
+            "concept_ids": ["functions"],
+            "requested_evidence": ["pytest_result"],
+            "scaffolding_level": 1,
+            "purpose": "practice",
+            "domain_payload": {"title": "Read failure", "language": "python", "tool_requests": []},
+        }
+        proposed = cli.propose_topic_activity(slug, request)
+
+        def crash_after_state(stage: str) -> None:
+            if stage == "after_state":
+                raise RuntimeError("crash after state")
+
+        with mock.patch.object(
+            cli, "_activity_update_checkpoint", side_effect=crash_after_state
+        ):
+            with self.assertRaisesRegex(RuntimeError, "crash after state"):
+                cli.accept_topic_activity(slug, proposed, learner_confirmed=True)
+
+        event_path = cli.topic_events_path(slug)
+        journal_path = cli.topic_activity_journal_path(slug)
+        prior_bytes = event_path.read_bytes()
+        original_read_text = Path.read_text
+
+        def fail_event_read(path: Path, *args, **kwargs):
+            if path == event_path:
+                raise OSError("event log unavailable")
+            return original_read_text(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "read_text", new=fail_event_read):
+            with self.assertRaisesRegex(OSError, "event log unavailable"):
+                cli.load_state(slug)
+
+        self.assertEqual(event_path.read_bytes(), prior_bytes)
+        self.assertTrue(journal_path.exists())
+        recovered = cli.load_state(slug)["active_activity"]
+        self.assertEqual(recovered["status"], "accepted")
+        self.assertFalse(journal_path.exists())
+        self.assertTrue(event_path.read_bytes().startswith(prior_bytes))
+
+    def test_dry_run_never_recovers_or_advances_a_preexisting_activity_journal(self) -> None:
+        slug = "dry-run-journal"
+        call_silent(cli.cmd_new, Namespace(topic=slug, goal="practice functions"))
+        request = {
+            "domain": "coding",
+            "kind": "python_drill",
+            "objective": "Practice a small function.",
+            "concept_ids": ["functions"],
+            "requested_evidence": ["pytest_result"],
+            "scaffolding_level": 1,
+            "purpose": "practice",
+            "domain_payload": {"title": "Dry run", "language": "python", "tool_requests": []},
+        }
+        proposed = cli.propose_topic_activity(slug, request)
+
+        def crash_after_journal(stage: str) -> None:
+            if stage == "after_journal":
+                raise RuntimeError("crash after journal")
+
+        with mock.patch.object(
+            cli, "_activity_update_checkpoint", side_effect=crash_after_journal
+        ):
+            with self.assertRaisesRegex(RuntimeError, "crash after journal"):
+                cli.accept_topic_activity(slug, proposed, learner_confirmed=True)
+
+        paths = (
+            cli.topic_state_path(slug),
+            cli.topic_events_path(slug),
+            cli.topic_activity_journal_path(slug),
+        )
+        before = {path: path.read_bytes() for path in paths}
+        cli._DRY_RUN = True
+        try:
+            self.assertEqual(cli.load_state(slug)["active_activity"]["status"], "proposed")
+            cli.load_event_log(cli.topic_events_path(slug))
+            cli.recover_activity_update(slug)
+        finally:
+            cli._DRY_RUN = False
+        self.assertEqual({path: path.read_bytes() for path in paths}, before)
+
+        self.assertEqual(cli.load_state(slug)["active_activity"]["status"], "accepted")
+        self.assertFalse(cli.topic_activity_journal_path(slug).exists())
+
+    def test_judgment_rollback_preserves_a_concurrent_activity_revision(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Rollback Activity", goal="practice"))
+        topic = cli.read_topic("rollback-activity")
+        request = {
+            "domain": "coding",
+            "kind": "python_drill",
+            "objective": "Practice a small function.",
+            "concept_ids": ["functions"],
+            "requested_evidence": ["pytest_result"],
+            "scaffolding_level": 1,
+            "purpose": "practice",
+            "domain_payload": {"title": "Rollback", "language": "python", "tool_requests": []},
+        }
+        proposed = cli.propose_topic_activity(topic.slug, request)
+        state_snapshot = cli.topic_state_path(topic.slug).read_text(encoding="utf-8")
+        accepted = cli.accept_topic_activity(topic.slug, proposed, learner_confirmed=True)
+        active = cli.transition_topic_activity(topic.slug, accepted, "active")
+
+        cli.restore_prejudgment_turn_state(
+            topic,
+            topic.path.read_text(encoding="utf-8"),
+            state_snapshot,
+        )
+
+        restored = cli.load_state(topic.slug)["active_activity"]
+        self.assertEqual(restored["activity_id"], active["activity_id"])
+        self.assertEqual(restored["revision"], active["revision"])
+        self.assertEqual(restored["status"], "active")
+
+    def test_judgment_rollback_recovers_and_preserves_a_pending_activity_journal(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Rollback Journal", goal="practice"))
+        topic = cli.read_topic("rollback-journal")
+        request = {
+            "domain": "coding",
+            "kind": "python_drill",
+            "objective": "Practice a small function.",
+            "concept_ids": ["functions"],
+            "requested_evidence": ["pytest_result"],
+            "scaffolding_level": 1,
+            "purpose": "practice",
+            "domain_payload": {"title": "Rollback", "language": "python", "tool_requests": []},
+        }
+        proposed = cli.propose_topic_activity(topic.slug, request)
+        state_snapshot = cli.topic_state_path(topic.slug).read_text(encoding="utf-8")
+
+        def crash_after_journal(stage: str) -> None:
+            if stage == "after_journal":
+                raise RuntimeError("crash after journal")
+
+        with mock.patch.object(
+            cli, "_activity_update_checkpoint", side_effect=crash_after_journal
+        ):
+            with self.assertRaisesRegex(RuntimeError, "crash after journal"):
+                cli.accept_topic_activity(topic.slug, proposed, learner_confirmed=True)
+
+        cli.restore_prejudgment_turn_state(
+            topic,
+            topic.path.read_text(encoding="utf-8"),
+            state_snapshot,
+        )
+
+        restored = cli.load_state(topic.slug)["active_activity"]
+        self.assertEqual(restored["status"], "accepted")
+        self.assertEqual(restored["revision"], 2)
+        self.assertFalse(cli.topic_activity_journal_path(topic.slug).exists())
+
     def test_activity_journal_creation_failure_publishes_nothing(self) -> None:
         slug = "journal-create-failure"
         call_silent(cli.cmd_new, Namespace(topic=slug, goal="practice functions"))
