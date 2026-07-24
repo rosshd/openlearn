@@ -438,6 +438,10 @@ def _validated_assessment_evidence(
     raw_count = scenario.get("assessment_item_count", {"min": 1, "max": 1})
     if not isinstance(raw_mode, bool):
         raise ValueError("scenario assessment_mode must be boolean")
+    if raw_mode:
+        raise ValueError(
+            "tutor behavior harness does not support assessment-mode scenarios"
+        )
     if not isinstance(raw_count, dict) or set(raw_count) != {"min", "max"}:
         raise ValueError("scenario assessment_item_count must contain min and max")
     minimum = raw_count.get("min")
@@ -451,7 +455,7 @@ def _validated_assessment_evidence(
         or maximum < minimum
     ):
         raise ValueError("scenario assessment item bounds are invalid")
-    if not raw_mode and (minimum != 1 or maximum != 1):
+    if minimum != 1 or maximum != 1:
         raise ValueError("normal scenarios must use one-item assessment bounds")
     return raw_mode, {"min": minimum, "max": maximum}
 

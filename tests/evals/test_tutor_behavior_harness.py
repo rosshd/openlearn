@@ -552,6 +552,47 @@ def test_assessment_evidence_rejects_normal_batch_bounds() -> None:
         )
 
 
+def test_misconfigured_assessment_fixture_cannot_claim_unused_exemption(
+    tmp_path: Path,
+    mocked_providers: dict[str, list[str]],
+) -> None:
+    scenarios_dir = tmp_path / "scenarios"
+    scenarios_dir.mkdir()
+    fixture = {
+        "name": "unsupported_batch",
+        "persona": "A learner requesting a batch assessment.",
+        "description": "The normal-turn harness cannot generate assessment contracts.",
+        "topic": "sorting",
+        "goal": "Learn sorting",
+        "assessment_mode": True,
+        "assessment_item_count": {"min": 2, "max": 3},
+        "turns": [
+            {"role": "user", "content": "Quiz me on sorting."},
+            {"role": "assistant", "content": None},
+        ],
+        "rubric": ["The tutor asks a bounded sorting assessment."],
+    }
+    (scenarios_dir / "unsupported_batch.json").write_text(
+        json.dumps(fixture),
+        encoding="utf-8",
+    )
+
+    outcome = run_evaluation(
+        tmp_path / "run",
+        tutor_model="tutor-model",
+        judge_model="judge-model",
+        scenario_ids=["unsupported_batch"],
+        scenarios_dir=scenarios_dir,
+    )
+
+    record = _read_jsonl(outcome.evidence_dir / "turns.jsonl")[0]
+    assert outcome.passed is False
+    assert record["assessment_mode"] is False
+    assert record["assessment_item_count"] == {"min": 1, "max": 1}
+    assert "does not support assessment-mode scenarios" in record["judge"]["reason"]
+    assert mocked_providers["judge_prompts"] == []
+
+
 def test_live_judge_requires_every_base_criterion(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

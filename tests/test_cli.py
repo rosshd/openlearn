@@ -7211,6 +7211,34 @@ class PromptInstructionTests(unittest.TestCase):
         self.assertNotIn("future concept", captured[0])
         self.assertNotIn("unrelated workflow drift", captured[0])
 
+    def test_empty_due_only_review_assembles_one_next_acknowledgment(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="AI", goal="learn ai"))
+        captured = []
+
+        def fake_call(*_args, system, user, **_kwargs):
+            captured.append((system, user))
+            return "**Next:**\nNothing is due for review."
+
+        with mock.patch.object(cli, "call_openai_streaming", side_effect=fake_call):
+            call_silent(
+                cli.cmd_review,
+                Namespace(topic="ai", model=None, due_only=True),
+                output_func=lambda _text: None,
+            )
+
+        system, user = captured[0]
+        contract = system.split(
+            "Explicit empty-review contract for this turn:", 1
+        )[1].split("Do not keep printing full progress summaries", 1)[0]
+        self.assertIn("Use one **Next:** move", contract)
+        self.assertIn("Do not emit a **Check:**, numbered items, or an Action: line", contract)
+        self.assertNotIn("Explicit assessment-mode contract for this turn", system)
+        self.assertIn("exactly one **Next:** acknowledgment", user)
+        self.assertIn("nothing is due", user)
+        self.assertIn("Do not emit a **Check:**, numbered items, a learner action", user)
+        self.assertNotIn("Treat this bounded batch", user)
+        self.assertNotIn("Ask exactly 0", user)
+
     def test_review_prompts_for_result_and_reschedules_due_items(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="AI", goal="learn ai"))
         path = cli.topic_path("ai")

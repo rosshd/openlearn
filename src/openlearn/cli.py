@@ -5747,23 +5747,28 @@ def cmd_review(args: argparse.Namespace, input_func=None, output_func=print) -> 
                 "\n\nDue today (selected for this session):\n"
                 "(no scheduled concepts due today)"
             )
-    if selected_due_items:
+    if due_only and selected_count == 0:
+        user = (
+            "There are no overdue concepts selected for this review. Respond with "
+            "exactly one **Next:** acknowledgment that nothing is due. Do not emit "
+            "a **Check:**, numbered items, a learner action, or any invented concept."
+        )
+    elif selected_due_items:
         review_action = (
             "work through the displayed items and submit ordered easy/hard/missed "
             "ratings in the single CLI prompt that follows"
         )
-    elif due_only:
-        review_action = "acknowledge that no review items are due, without a learner action"
     else:
         review_action = (
             "work through the displayed weak-spot items privately; no ratings or "
             "content-answer prompt follows"
         )
-    user += (
-        "\n\nTreat this bounded batch as one assessment move under one **Check:** "
-        f"label. Number the items, then {review_action}. Do not ask for content answers "
-        "or add another primary move."
-    )
+    if not (due_only and selected_count == 0):
+        user += (
+            "\n\nTreat this bounded batch as one assessment move under one **Check:** "
+            f"label. Number the items, then {review_action}. Do not ask for content answers "
+            "or add another primary move."
+        )
     answer = call_openai_streaming(
         model=model,
         system=system_prompt(prompt_topic, assessment_mode=assessment_mode),
@@ -9029,6 +9034,7 @@ def assessment_turn_contract(assessment_mode: dict[str, object]) -> str:
             Explicit empty-review contract for this turn:
             - There are no selected review items. Use one **Next:** move to say that
               nothing is due. Do not invent a question, concept, or learner action.
+              Do not emit a **Check:**, numbered items, or an Action: line.
             - This exemption applies only to the current explicit /review command.
               It does not apply to normal tutor turns.
             """
