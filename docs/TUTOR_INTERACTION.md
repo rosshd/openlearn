@@ -65,6 +65,20 @@ The Enter cue belongs under `**Next:**` and must not create pending grading stat
 | Ready to advance | Require passed production or transfer evidence |
 | Quick Learn adequate answer | Affirm briefly and move toward the next uncovered concept |
 
+## Bounded Repeated-Miss Recovery
+
+Repeated misses follow one durable progression for the active concept: attempt, hint, worked example, faded check, then defer.
+Each miss advances exactly one stage, and resuming the topic restores the saved stage instead of restarting the failed prompt.
+The hint gives one targeted cue without revealing the answer.
+The worked example uses a different instance, and the faded check uses a new isomorphic production task with less support.
+After the faded check fails, openLearn clears the stale question, schedules the concept for review, records a `concept_deferred` event, and tells the learner when it will return.
+The tutor must not claim mastery at any active or deferred remediation stage.
+
+A detected prerequisite gap is blocking.
+It remains in `pending_remediation` until the learner earns a correct score of at least 0.7 on that concept or explicitly skips or advances.
+An explicit skip records `remediation_skipped`, clears the learning gate, and preserves the learner's navigation preference when the wording expresses one.
+Recovery records `remediation_recovered`; a later mastery claim still has to satisfy the normal profile gate.
+
 ## Judge Requirements
 
 - Scores must be calibrated across topics.

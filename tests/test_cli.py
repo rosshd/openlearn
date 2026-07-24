@@ -11852,5 +11852,190 @@ class KeylessProviderTests(unittest.TestCase):
         self.assertIn("not required", output)
 
 
+class RepeatedMissProgressionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.home = tempfile.TemporaryDirectory()
+        self.previous_home = os.environ.get("OPENLEARN_HOME")
+        os.environ["OPENLEARN_HOME"] = self.home.name
+        cli._CONFIG_CACHE = None
+        call_silent(cli.cmd_new, Namespace(topic="Pointers", goal="learn pointers"))
+        path = cli.topic_path("pointers")
+        metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+        metadata = dict(metadata)
+        metadata["current_focus"] = "pointer dereference"
+        metadata["pending_question"] = {
+            "kind": "free_response",
+            "question": "What does dereferencing a pointer do?",
+            "focus": "pointer dereference",
+            "concept_id": "pointer-dereference",
+            "created": cli.today(),
+        }
+        cli.write_topic(path, metadata, body)
+
+    def tearDown(self) -> None:
+        if self.previous_home is None:
+            os.environ.pop("OPENLEARN_HOME", None)
+        else:
+            os.environ["OPENLEARN_HOME"] = self.previous_home
+        cli._CONFIG_CACHE = None
+        self.home.cleanup()
+
+    def grade(self, status: str, score: float, *, gap: str | None = None) -> None:
+        update: dict[str, object] = {
+            "message_kind": "answer",
+            "last_answer_status": status,
+            "answer_score": score,
+            "answer_kind": "production",
+            "is_transfer": True,
+            "gameable": False,
+        }
+        if gap is not None:
+            update["answer_gap"] = gap
+        with mock.patch.object(cli, "call_openai_judgment", return_value=json.dumps(update)):
+            cli.update_learning_metadata(
+                cli.read_topic("pointers"),
+                "my attempt",
+                "Tutor response",
+                "test-model",
+            )
+
+    def test_repeated_misses_follow_bounded_progression_and_defer(self) -> None:
+        expected = ["hint", "worked_example", "faded_check", "deferred"]
+
+        for index, stage in enumerate(expected):
+            self.grade("needs_work", 0.1, gap="memory addresses" if index == 0 else None)
+            metadata = cli.read_topic("pointers").metadata
+            self.assertEqual(metadata["pending_remediation"]["stage"], stage)
+            self.assertEqual(
+                metadata["pending_remediation"]["blocking_prerequisite"],
+                "memory addresses",
+            )
+            self.assertIn("Current branch:", cli.tutor_turn_contract(metadata))
+
+        metadata = cli.read_topic("pointers").metadata
+        self.assertNotIn("pending_question", metadata)
+        self.assertEqual(metadata["pending_remediation"]["stage"], "deferred")
+        self.assertTrue(
+            any(
+                item.get("concept") == "pointer dereference"
+                and item.get("difficulty") == "missed"
+                for item in metadata["review_due"]
+                if isinstance(item, dict)
+            )
+        )
+        record = metadata["concept_attempts"]["pointer-dereference"]
+        self.assertFalse(cli.concept_is_mastered(record, cli.mastery_profile(metadata)))
+        events = cli.load_event_log(cli.topic_events_path("pointers"))
+        event_types = [event["event_type"] for event in events]
+        self.assertEqual(event_types.count("concept_deferred"), 1)
+        self.assertIn("prerequisite_blocked", event_types)
+        self.assertIn("scheduled for review", cli.tutor_turn_contract(metadata))
+
+    def test_recovery_clears_block_and_allows_eventual_mastery(self) -> None:
+        self.grade("needs_work", 0.1, gap="memory addresses")
+        self.grade("correct", 1.0)
+
+        recovered = cli.read_topic("pointers").metadata
+        self.assertNotIn("pending_remediation", recovered)
+        self.assertNotIn("last_answer_gap", recovered)
+        self.assertEqual(recovered["concept_attempts"]["pointer-dereference"]["remediation_misses"], 0)
+
+        self.grade("correct", 1.0)
+        self.grade("correct", 1.0)
+        mastered = cli.read_topic("pointers").metadata
+        record = mastered["concept_attempts"]["pointer-dereference"]
+        self.assertTrue(record["mastered"])
+        event_types = [
+            event["event_type"]
+            for event in cli.load_event_log(cli.topic_events_path("pointers"))
+        ]
+        self.assertEqual(event_types.count("remediation_recovered"), 1)
+        self.assertEqual(event_types.count("mastery_changed"), 1)
+
+    def test_explicit_skip_clears_block_and_emits_skip_event(self) -> None:
+        self.grade("needs_work", 0.1, gap="memory addresses")
+
+        cli.save_learner_navigation_preference(
+            cli.read_topic("pointers"),
+            "skip memory addresses and continue",
+        )
+
+        metadata = cli.read_topic("pointers").metadata
+        self.assertNotIn("pending_remediation", metadata)
+        self.assertNotIn("pending_question", metadata)
+        self.assertEqual(metadata["consecutive_misses"], 0)
+        record = metadata["concept_attempts"]["pointer-dereference"]
+        self.assertNotIn("remediation_stage", record)
+        self.assertEqual(record["remediation_misses"], 0)
+        events = cli.load_event_log(cli.topic_events_path("pointers"))
+        skip_events = [
+            event for event in events if event["event_type"] == "remediation_skipped"
+        ]
+        self.assertEqual(len(skip_events), 1)
+        self.assertEqual(skip_events[0]["data"]["reason"], "explicit_navigation")
+
+        self.grade("correct", 1.0)
+        self.grade("correct", 1.0)
+        self.grade("correct", 1.0)
+        mastered = cli.read_topic("pointers").metadata
+        self.assertTrue(mastered["concept_attempts"]["pointer-dereference"]["mastered"])
+
+    def test_defer_updates_strong_ebisu_once_and_repeated_update_is_idempotent(
+        self,
+    ) -> None:
+        strong_model = [20.0, 1.0, 30.0]
+        missed_model = [1.0, 20.0, 1.0]
+        metadata: dict[str, object] = {
+            "review_due": [
+                {
+                    "concept": "pointer dereference",
+                    "due": "2099-01-01",
+                    "difficulty": "easy",
+                    "ebisu_model": strong_model,
+                }
+            ],
+            "pending_question": {"kind": "free_response", "question": "Explain it."},
+        }
+
+        with mock.patch.object(
+            cli,
+            "update_ebisu_model",
+            return_value=missed_model,
+        ) as update_model:
+            events: list[tuple[str, dict[str, object]]] = []
+            for _ in range(4):
+                events = cli.update_remediation_progress(
+                    metadata,
+                    concept_id="pointer-dereference",
+                    focus="pointer dereference",
+                    status="needs_work",
+                    score=0.1,
+                    answer_gap=None,
+                )
+
+            self.assertEqual(update_model.call_count, 1)
+            self.assertEqual(update_model.call_args.args[:2], (strong_model, "missed"))
+            review = metadata["review_due"][0]
+            self.assertEqual(review["ebisu_model"], missed_model)
+            self.assertEqual(review["difficulty"], "missed")
+            self.assertEqual(
+                [event_type for event_type, _data in events],
+                ["remediation_progressed", "concept_deferred"],
+            )
+            deferred = dict(metadata["pending_remediation"])
+            repeated_events = cli.update_remediation_progress(
+                metadata,
+                concept_id="pointer-dereference",
+                focus="pointer dereference",
+                status="needs_work",
+                score=0.1,
+                answer_gap=None,
+            )
+
+        self.assertEqual(repeated_events, [])
+        self.assertEqual(metadata["pending_remediation"], deferred)
+        self.assertEqual(update_model.call_count, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

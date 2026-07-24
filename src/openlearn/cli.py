@@ -107,6 +107,12 @@ OPENAI_RETRY_JITTER_SECONDS = 0.25
 JUDGE_MAX_TOKENS = 512
 JUDGE_TIMEOUT_SECONDS = 20
 JUDGE_MAX_ATTEMPTS = 1
+REMEDIATION_MINIMUM_SCORE = 0.7
+REMEDIATION_STAGE_BY_MISS = {
+    1: "hint",
+    2: "worked_example",
+    3: "faded_check",
+}
 
 
 @dataclass(frozen=True)
@@ -1824,12 +1830,22 @@ def learner_preference_from_advance(prompt: str) -> str:
 
 def clear_learning_gate(metadata: dict[str, object]) -> None:
     metadata["last_answer_status"] = ""
+    metadata["consecutive_misses"] = 0
+    remediation = metadata.get("pending_remediation")
+    if isinstance(remediation, dict):
+        concept_id = remediation.get("concept_id")
+        attempts = metadata.get("concept_attempts")
+        record = attempts.get(concept_id) if isinstance(attempts, dict) else None
+        if isinstance(record, dict):
+            record.pop("remediation_stage", None)
+            record["remediation_misses"] = 0
     for key in (
         "last_answer_gap",
         "last_answer_hint",
         "last_answer_score",
         "pending_hint",
         "pending_question",
+        "pending_remediation",
         "pending_verify",
     ):
         metadata.pop(key, None)
@@ -1840,6 +1856,7 @@ def save_learner_navigation_preference(topic: Topic, prompt: str) -> None:
     if not preference:
         return
     previous_pending_question: dict[str, object] | None = None
+    skipped_remediation: dict[str, object] | None = None
     with file_lock(topic.path):
         raw_metadata, body = parse_topic(topic.path.read_text(encoding="utf-8"))
         metadata = merge_topic_state(
@@ -1848,6 +1865,9 @@ def save_learner_navigation_preference(topic: Topic, prompt: str) -> None:
         pending = metadata.get("pending_question")
         if isinstance(pending, dict):
             previous_pending_question = dict(pending)
+        remediation = metadata.get("pending_remediation")
+        if isinstance(remediation, dict):
+            skipped_remediation = dict(remediation)
         preferences = metadata.get("learner_preferences")
         values = (
             [item for item in preferences if isinstance(item, str) and item.strip()]
@@ -1869,6 +1889,13 @@ def save_learner_navigation_preference(topic: Topic, prompt: str) -> None:
         None,
         reason="navigation_preference",
     )
+    if skipped_remediation is not None:
+        log_remediation_event(
+            topic.slug,
+            "remediation_skipped",
+            skipped_remediation,
+            reason="explicit_navigation",
+        )
 
 
 def restore_learner_preferences_from_history(topic: Topic) -> Topic:
@@ -3590,6 +3617,7 @@ def advance_slide(slug: str, output_func=print, force: bool = False) -> bool:
     coverage_message = ""
     completed_course = False
     previous_pending_question: dict[str, object] | None = None
+    skipped_remediation: dict[str, object] | None = None
     with file_lock(path):
         raw_metadata, body = parse_topic(path.read_text(encoding="utf-8"))
         metadata = merge_topic_state(normalize_topic_metadata(raw_metadata, slug), load_state(slug))
@@ -3598,6 +3626,9 @@ def advance_slide(slug: str, output_func=print, force: bool = False) -> bool:
         pending = metadata.get("pending_question")
         if isinstance(pending, dict):
             previous_pending_question = dict(pending)
+        remediation = metadata.get("pending_remediation")
+        if isinstance(remediation, dict):
+            skipped_remediation = dict(remediation)
         answer_status = metadata.get("last_answer_status")
         tutor_accepted = tutor_response_has_advance_cue(last_lesson_response)
         if answer_status in {"needs_work", "partial"} and not force and not tutor_accepted:
@@ -3726,6 +3757,13 @@ def advance_slide(slug: str, output_func=print, force: bool = False) -> bool:
                 slug,
                 "unit_advanced",
                 {"from_unit": completed_unit, "to_unit": unit},
+            )
+        if skipped_remediation is not None:
+            log_remediation_event(
+                slug,
+                "remediation_skipped",
+                skipped_remediation,
+                reason="explicit_navigation",
             )
 
     updated = read_topic(slug)
@@ -4527,6 +4565,13 @@ def detect_gaming_suspected(
 def concept_is_mastered(record: dict[str, object], profile: dict[str, object]) -> bool:
     if record.get("gaming_suspected") is True:
         return False
+    if record.get("remediation_stage") in {
+        "hint",
+        "worked_example",
+        "faded_check",
+        "deferred",
+    }:
+        return False
     attempts = record.get("attempts")
     correct_sum = record.get("correct_sum")
     if not isinstance(attempts, int) or attempts < 2:
@@ -4622,6 +4667,158 @@ def learner_answer_is_actionable(learner_prompt: str, metadata: dict[str, object
             metadata["last_answer_status"] = "partial"
         return False
     return True
+
+
+def remediation_stage_for_misses(misses: int) -> str:
+    """Return the next bounded remediation move for a concept."""
+    return REMEDIATION_STAGE_BY_MISS.get(max(1, misses), "deferred")
+
+
+def remediation_label(metadata: dict[str, object], concept_id: str, focus: object) -> str:
+    if isinstance(focus, str) and focus.strip():
+        return focus.strip()
+    return concept_label_for_id(metadata, concept_id)
+
+
+def remediation_review_due(metadata: dict[str, object], label: str) -> str:
+    items = metadata.get("review_due")
+    if not isinstance(items, list):
+        return ""
+    key = concept_key(label)
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        concept = item.get("concept")
+        due = item.get("due")
+        if (
+            isinstance(concept, str)
+            and concept_key(concept) == key
+            and isinstance(due, str)
+        ):
+            return due
+    return ""
+
+
+def update_remediation_progress(
+    metadata: dict[str, object],
+    *,
+    concept_id: str,
+    focus: object,
+    status: object,
+    score: float,
+    answer_gap: object,
+) -> list[tuple[str, dict[str, object]]]:
+    """Advance or clear the durable attempt-to-defer remediation state."""
+    if not concept_id or status not in {"correct", "partial", "needs_work"}:
+        return []
+    label = remediation_label(metadata, concept_id, focus)
+    current = metadata.get("pending_remediation")
+    same_concept = isinstance(current, dict) and current.get("concept_id") == concept_id
+    previous = dict(current) if same_concept and isinstance(current, dict) else None
+    minimum_score = (
+        coerce_float(previous.get("minimum_score"), REMEDIATION_MINIMUM_SCORE)
+        if previous is not None
+        else REMEDIATION_MINIMUM_SCORE
+    )
+
+    if status == "correct" and score >= minimum_score:
+        if previous is None:
+            return []
+        metadata.pop("pending_remediation", None)
+        return [
+            (
+                "remediation_recovered",
+                {
+                    **previous,
+                    "from_stage": previous.get("stage", "attempt"),
+                    "to_stage": "recovered",
+                    "score": round(score, 3),
+                    "minimum_score": minimum_score,
+                },
+            )
+        ]
+    if previous is not None and previous.get("stage") == "deferred":
+        metadata["pending_remediation"] = previous
+        metadata.pop("pending_question", None)
+        metadata.pop("pending_hint", None)
+        return []
+
+    prior_misses = coerce_int(previous.get("misses"), 0) if previous is not None else 0
+    misses = prior_misses + 1
+    stage = remediation_stage_for_misses(misses)
+    state: dict[str, object] = {
+        "concept_id": concept_id,
+        "label": label,
+        "stage": stage,
+        "misses": misses,
+        "minimum_score": minimum_score,
+    }
+    previous_gap = previous.get("blocking_prerequisite") if previous is not None else None
+    if isinstance(answer_gap, str) and answer_gap.strip():
+        state["blocking_prerequisite"] = answer_gap.strip()
+    elif isinstance(previous_gap, str) and previous_gap.strip():
+        state["blocking_prerequisite"] = previous_gap.strip()
+
+    events: list[tuple[str, dict[str, object]]] = []
+    previous_stage = previous.get("stage", "attempt") if previous is not None else "attempt"
+    if previous_stage != stage:
+        events.append(
+            (
+                "remediation_progressed",
+                {
+                    **state,
+                    "from_stage": previous_stage,
+                    "to_stage": stage,
+                    "reason": "answer_below_minimum",
+                },
+            )
+        )
+    if "blocking_prerequisite" in state and (
+        previous is None or previous.get("blocking_prerequisite") != state["blocking_prerequisite"]
+    ):
+        events.append(
+            (
+                "prerequisite_blocked",
+                {
+                    **state,
+                    "prerequisite": state["blocking_prerequisite"],
+                    "reason": "answer_gap",
+                },
+            )
+        )
+    if stage == "deferred":
+        metadata.pop("pending_question", None)
+        metadata.pop("pending_hint", None)
+        if previous_stage != "deferred":
+            schedule_review_item(metadata, label, "missed", update_ebisu=True)
+            due = remediation_review_due(metadata, label)
+            if due:
+                state["deferred_review_due"] = due
+            events.append(
+                (
+                    "concept_deferred",
+                    {
+                        **state,
+                        "reason": "bounded_remediation_exhausted",
+                    },
+                )
+            )
+    metadata["pending_remediation"] = state
+    return events
+
+
+def log_remediation_event(
+    slug: str,
+    event_type: str,
+    remediation: dict[str, object],
+    *,
+    reason: str | None = None,
+    event_sink: Callable[[str, str, dict[str, object]], None] | None = None,
+) -> None:
+    data = dict(remediation)
+    if reason is not None:
+        data["reason"] = reason
+    (event_sink or log_event)(slug, event_type, data)
 
 
 def apply_pending_question_answer_key(metadata: dict[str, object], learner_prompt: str) -> None:
@@ -6729,6 +6926,31 @@ def update_learning_metadata(
         else:
             metadata.pop("pending_hint", None)
         update_momentum_counters(metadata)
+        remediation_events: list[tuple[str, dict[str, object]]] = []
+        if (
+            fresh_score
+            and concept_record is not None
+            and concept_id
+            and isinstance(score_val, (int, float))
+        ):
+            remediation_events = update_remediation_progress(
+                metadata,
+                concept_id=concept_id,
+                focus=answer_focus,
+                status=metadata.get("last_answer_status"),
+                score=float(score_val),
+                answer_gap=gap,
+            )
+            pending_remediation = metadata.get("pending_remediation")
+            if (
+                isinstance(pending_remediation, dict)
+                and pending_remediation.get("concept_id") == concept_id
+            ):
+                concept_record["remediation_stage"] = pending_remediation.get("stage")
+                concept_record["remediation_misses"] = pending_remediation.get("misses")
+            elif any(event_type == "remediation_recovered" for event_type, _ in remediation_events):
+                concept_record.pop("remediation_stage", None)
+                concept_record["remediation_misses"] = 0
         if fresh_score:
             update_rolling_pass_rate(metadata)
         score_val = metadata.get("last_answer_score")
@@ -6810,7 +7032,10 @@ def update_learning_metadata(
         quiz_completed_event = update_quiz_history(metadata, previous_metadata, update)
         if quiz_completed_event is None:
             activate_cumulative_quiz_if_due(metadata)
-        if metadata.get("last_answer_status") == "correct":
+        if (
+            metadata.get("last_answer_status") == "correct"
+            and not isinstance(metadata.get("pending_remediation"), dict)
+        ):
             metadata.pop("pending_question", None)
         save_state(topic.slug, state_from_metadata(metadata))
         write_topic_backup(topic.path, current_text)
@@ -6824,6 +7049,11 @@ def update_learning_metadata(
             reason=(
                 "unit_advanced"
                 if unit_advanced_event is not None
+                else "concept_deferred"
+                if any(
+                    event_type == "concept_deferred"
+                    for event_type, _event_data in remediation_events
+                )
                 else "answer_correct"
             ),
             event_sink=emit_event,
@@ -6869,6 +7099,8 @@ def update_learning_metadata(
                     "gameable": gameable,
                 },
             )
+        for event_type, event_data in remediation_events:
+            emit_event(topic.slug, event_type, event_data)
         for event_data in mastery_events:
             emit_event(topic.slug, "mastery_changed", event_data)
         if unit_advanced_event:
@@ -8888,6 +9120,17 @@ def normalize_topic_metadata(metadata: dict[str, object], slug: str) -> dict[str
         normalized.get("pending_question"), dict
     ):
         normalized.pop("pending_question", None)
+    remediation = normalized.get("pending_remediation")
+    if (
+        remediation is not None
+        and (
+            not isinstance(remediation, dict)
+            or remediation.get("stage")
+            not in {"hint", "worked_example", "faded_check", "deferred"}
+            or not isinstance(remediation.get("concept_id"), str)
+        )
+    ):
+        normalized.pop("pending_remediation", None)
     if "active_drill" in normalized and not isinstance(normalized.get("active_drill"), str):
         normalized.pop("active_drill", None)
     if "enter_advance_cue" in normalized and not isinstance(
@@ -9485,6 +9728,9 @@ def pending_verify_prompt(metadata: dict[str, object]) -> str:
 
 
 def pending_hint_prompt(metadata: dict[str, object]) -> str:
+    remediation = metadata.get("pending_remediation")
+    if isinstance(remediation, dict) and remediation.get("stage") != "hint":
+        return ""
     hint = metadata.get("pending_hint")
     if not isinstance(hint, str) or not hint.strip():
         return ""
@@ -9493,6 +9739,48 @@ def pending_hint_prompt(metadata: dict[str, object]) -> str:
         f"try leading with this guiding question: {hint.strip()}\n"
         f"If the learner still cannot answer after the hint, explain clearly."
     )
+
+
+def remediation_turn_branch(metadata: dict[str, object]) -> str:
+    remediation = metadata.get("pending_remediation")
+    if not isinstance(remediation, dict):
+        return ""
+    stage = remediation.get("stage")
+    label = one_line(str(remediation.get("label") or "this concept"))
+    prerequisite = remediation.get("blocking_prerequisite")
+    block = (
+        f" The blocking prerequisite is {one_line(prerequisite)}; keep it active until "
+        f"the learner scores at least {coerce_float(remediation.get('minimum_score'), REMEDIATION_MINIMUM_SCORE):.0%} "
+        "or explicitly skips."
+        if isinstance(prerequisite, str) and prerequisite.strip()
+        else ""
+    )
+    branches = {
+        "hint": (
+            f"Current branch: remediation hint for {label}. Use one **Hint:** move with "
+            "one targeted cue that does not reveal the answer, then ask for one retry. "
+            "Keep the original graded check active."
+        ),
+        "worked_example": (
+            f"Current branch: remediation worked example for {label}. Use one **Example:** "
+            "move with a small complete worked example from a different instance. End with "
+            "one request for the learner to explain or complete the analogous missing step. "
+            "Do not repeat the failed prompt."
+        ),
+        "faded_check": (
+            f"Current branch: faded remediation check for {label}. Use one **Check:** move "
+            "with a new isomorphic problem, remove most scaffolding, and require one "
+            "production attempt. Do not reuse the original wording or reveal the answer."
+        ),
+        "deferred": (
+            f"Current branch: bounded remediation is exhausted for {label}. Use one "
+            "**Next:** move that plainly says this concept is deferred and scheduled for "
+            "review, including the saved return date when present. End with the exact "
+            "Press Enter to continue cue. Do not ask the failed question again or claim mastery."
+        ),
+    }
+    branch = branches.get(stage, "")
+    return f"{branch}{block}" if branch else ""
 
 
 def state_move_policy_prompt(metadata: dict[str, object], tier: str) -> str:
@@ -9510,12 +9798,15 @@ def tutor_turn_contract(
     message_kind = metadata.get("current_turn_message_kind")
     status = metadata.get("last_answer_status")
     misses = metadata.get("consecutive_misses")
+    remediation_branch = remediation_turn_branch(metadata)
     if isinstance(message_kind, str) and message_kind not in {"", "answer"}:
         branch = (
             "Current branch: conversational request or question. Answer the learner's "
             "actual intent briefly. If it is off-topic, make at most one short connection "
             "back to the active goal. Do not turn the redirect into a graded check."
         )
+    elif remediation_branch:
+        branch = remediation_branch
     elif status == "correct":
         branch = (
             "Current branch: correct answer. Affirm the demonstrated reasoning briefly, "
@@ -9700,6 +9991,17 @@ def tier_move_prompt(metadata: dict[str, object], tier: str) -> str:
         lines.append(
             f"- Rolling pass rate: {float(rate):.0%}. Aim the next check near the 80-85% success band by adjusting support and challenge, without changing saved difficulty unless the learner is graded."
         )
+    remediation = metadata.get("pending_remediation")
+    if isinstance(remediation, dict):
+        stage = remediation.get("stage")
+        label = one_line(str(remediation.get("label") or "current concept"))
+        lines.append(
+            f"- Bounded remediation stage: {stage} for {label}. Follow this saved stage "
+            "exactly; do not skip backward, repeat the original prompt, or claim mastery."
+        )
+        due = remediation.get("deferred_review_due")
+        if stage == "deferred" and isinstance(due, str) and due:
+            lines.append(f"- Deferred return date: {due}. Tell the learner when it will return.")
     return "\n".join(lines)
 
 
