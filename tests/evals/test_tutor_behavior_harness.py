@@ -265,6 +265,19 @@ def test_provider_failure_is_preserved_as_failed_evidence(
         raise cli.OpenLearnError("provider unavailable")
 
     monkeypatch.setattr(cli, "call_openai_streaming", fail_provider)
+    monkeypatch.setattr(
+        cli,
+        "call_openai",
+        lambda model, system, user: json.dumps(
+            {
+                "message_kind": "answer",
+                "last_answer_status": "correct",
+                "answer_score": 1.0,
+                "answer_kind": "production",
+                "is_transfer": True,
+            }
+        ),
+    )
 
     outcome = run_evaluation(
         tmp_path / "run",
