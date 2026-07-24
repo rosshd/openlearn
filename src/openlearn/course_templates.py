@@ -36,26 +36,42 @@ def validate_template_id(template_id: str) -> str:
 
 
 def template_resources() -> Traversable:
-    return importlib.resources.files("openlearn").joinpath("templates")
+    try:
+        return importlib.resources.files("openlearn").joinpath("templates")
+    except OSError as exc:
+        raise CourseTemplateError("could not access bundled course templates") from exc
 
 
 def available_course_templates() -> list[CourseTemplate]:
-    root = template_resources()
-    resources = sorted(
-        (
-            resource
-            for resource in root.iterdir()
-            if resource.is_file() and resource.name.endswith(".json")
-        ),
-        key=lambda resource: resource.name,
-    )
+    try:
+        root = template_resources()
+        resources = sorted(
+            (
+                resource
+                for resource in root.iterdir()
+                if resource.is_file() and resource.name.endswith(".json")
+            ),
+            key=lambda resource: resource.name,
+        )
+    except CourseTemplateError:
+        raise
+    except OSError as exc:
+        raise CourseTemplateError("could not access bundled course templates") from exc
     return [_read_course_template(resource) for resource in resources]
 
 
 def load_course_template(template_id: str) -> CourseTemplate:
     template_id = validate_template_id(template_id)
-    resource = template_resources().joinpath(f"{template_id}.json")
-    if not resource.is_file():
+    try:
+        resource = template_resources().joinpath(f"{template_id}.json")
+        exists = resource.is_file()
+    except CourseTemplateError:
+        raise
+    except OSError as exc:
+        raise CourseTemplateError(
+            f"could not access course template '{template_id}'"
+        ) from exc
+    if not exists:
         raise CourseTemplateNotFoundError(f"template '{template_id}' not found")
     template = _read_course_template(resource)
     if template.slug != template_id:
@@ -67,8 +83,18 @@ def load_course_template(template_id: str) -> CourseTemplate:
 
 def _read_course_template(resource: Traversable) -> CourseTemplate:
     try:
-        raw = json.loads(resource.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        text = resource.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise CourseTemplateError(
+            f"could not access course template '{resource.name}'"
+        ) from exc
+    except UnicodeError as exc:
+        raise CourseTemplateError(
+            f"invalid course template '{resource.name}': expected UTF-8 JSON"
+        ) from exc
+    try:
+        raw = json.loads(text)
+    except json.JSONDecodeError as exc:
         raise CourseTemplateError(
             f"invalid course template '{resource.name}': expected UTF-8 JSON"
         ) from exc

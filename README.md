@@ -170,7 +170,7 @@ Transient provider failures such as rate limits, server errors, URL errors, and 
 - `learning-topics/*.md`: user-owned topic notes, course plan, metadata, and session log.
 - `learning-topics/<slug>.state.json`: dynamic learner model and any in-flight REPL answer.
 - `learning-topics/<slug>.events.jsonl`: append-only learning events.
-- `learning-topics/context/<slug>/`: imported source text, manifests, bundles, and summaries.
+- `learning-topics/<slug>/context/`: imported source text, manifests, bundles, and summaries.
 - `learning-topics/drills/<slug>/`: generated drill files.
 - `state.json`: active-topic state.
 - `config.json`: saved provider settings and optional API key.

@@ -91,6 +91,67 @@ class CourseTemplateTests(unittest.TestCase):
 
         self.assertEqual([template.slug for template in templates], ["git", "python-basics"])
 
+    def test_wraps_resource_enumeration_errors(self) -> None:
+        root = mock.Mock()
+        root.iterdir.side_effect = OSError("resource unavailable")
+
+        with mock.patch.object(course_templates, "template_resources", return_value=root):
+            with self.assertRaisesRegex(
+                course_templates.CourseTemplateError,
+                "could not access bundled course templates",
+            ):
+                course_templates.available_course_templates()
+
+    def test_wraps_resource_is_file_errors(self) -> None:
+        resource = mock.Mock()
+        resource.name = "python-basics.json"
+        resource.is_file.side_effect = OSError("resource unavailable")
+        root = mock.Mock()
+        root.iterdir.return_value = [resource]
+
+        with mock.patch.object(course_templates, "template_resources", return_value=root):
+            with self.assertRaisesRegex(
+                course_templates.CourseTemplateError,
+                "could not access bundled course templates",
+            ):
+                course_templates.available_course_templates()
+
+    def test_wraps_resource_read_errors(self) -> None:
+        resource = mock.Mock()
+        resource.name = "python-basics.json"
+        resource.is_file.return_value = True
+        resource.read_text.side_effect = OSError("resource unavailable")
+        root = mock.Mock()
+        root.joinpath.return_value = resource
+
+        with mock.patch.object(course_templates, "template_resources", return_value=root):
+            with self.assertRaisesRegex(
+                course_templates.CourseTemplateError,
+                "could not access course template 'python-basics.json'",
+            ):
+                course_templates.load_course_template("python-basics")
+
+    def test_wraps_resource_decode_errors_as_invalid_content(self) -> None:
+        resource = mock.Mock()
+        resource.name = "python-basics.json"
+        resource.is_file.return_value = True
+        resource.read_text.side_effect = UnicodeDecodeError(
+            "utf-8",
+            b"\xff",
+            0,
+            1,
+            "invalid start byte",
+        )
+        root = mock.Mock()
+        root.joinpath.return_value = resource
+
+        with mock.patch.object(course_templates, "template_resources", return_value=root):
+            with self.assertRaisesRegex(
+                course_templates.CourseTemplateError,
+                "expected UTF-8 JSON",
+            ):
+                course_templates.load_course_template("python-basics")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2174,7 +2174,7 @@ def cmd_new(args: argparse.Namespace, output_func=print) -> int:
     goal = args.goal or (template.goal if template is not None else "")
     explicit_profile = getattr(args, "mastery_profile", None)
     inferred_profile = (
-        infer_mastery_profile_from_goal(args.goal, configured_model())
+        infer_mastery_profile_from_goal(goal, configured_model())
         if not explicit_profile
         else None
     )
@@ -2202,6 +2202,8 @@ def cmd_new(args: argparse.Namespace, output_func=print) -> int:
         "placement_result": {},
         "review_session_active": False,
     }
+    if template is not None:
+        metadata["template_units"] = list(template.units)
     body = f"""# {title}
 
 ## Current Goal
@@ -2220,12 +2222,7 @@ def cmd_new(args: argparse.Namespace, output_func=print) -> int:
     output_func(f"Created {path}")
     output_func(f"Mastery profile: {selected_profile}")
     if template is not None:
-        topic = read_topic(slugify(args.topic))
-        meta = dict(topic.metadata)
-        meta["template_units"] = list(template.units)
-        write_topic(topic.path, meta, topic.body)
-        unit_count = len(meta["template_units"])
-        output_func(f"Template '{template.name}' loaded ({unit_count} units).")
+        output_func(f"Template '{template.name}' loaded ({len(template.units)} units).")
     return 0
 
 

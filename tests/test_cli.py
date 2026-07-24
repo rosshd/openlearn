@@ -432,6 +432,47 @@ class CliStorageTests(unittest.TestCase):
         fresh_template = cli.load_course_template("vim")
         self.assertNotIn("A learner-owned unit", fresh_template.units)
 
+    def test_template_creation_writes_final_metadata_once_before_activation(self) -> None:
+        with (
+            mock.patch.object(cli, "write_topic", side_effect=OSError("disk full")) as write,
+            mock.patch.object(cli, "set_active_topic") as activate,
+        ):
+            with self.assertRaisesRegex(OSError, "disk full"):
+                cli.cmd_new(
+                    Namespace(topic="Atomic Vim", goal="", template="vim"),
+                    output_func=lambda _line: None,
+                )
+
+        self.assertEqual(write.call_count, 1)
+        written_metadata = write.call_args.args[1]
+        self.assertEqual(
+            written_metadata["template_units"],
+            list(cli.load_course_template("vim").units),
+        )
+        self.assertFalse(cli.topic_path("atomic-vim").exists())
+        activate.assert_not_called()
+
+    def test_template_goal_drives_mastery_inference(self) -> None:
+        template_goal = "Edit text efficiently using Vim for real daily work"
+        with (
+            mock.patch.object(cli, "configured_model", return_value="test-model"),
+            mock.patch.object(
+                cli,
+                "infer_mastery_profile_from_goal",
+                return_value="efficient",
+            ) as infer,
+        ):
+            call_silent(
+                cli.cmd_new,
+                Namespace(topic="Goal-Inferred Vim", goal="", template="vim"),
+            )
+
+        infer.assert_called_once_with(template_goal, "test-model")
+        self.assertEqual(
+            cli.read_topic("goal-inferred-vim").metadata["mastery_profile"],
+            "efficient",
+        )
+
     def test_template_flag_unknown_slug_returns_nonzero(self) -> None:
         output = []
 

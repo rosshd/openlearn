@@ -50,7 +50,7 @@ Review it before sharing because the Markdown body and metadata can contain priv
 
 The adjacent files `<slug>.state.json` and `<slug>.events.jsonl` contain machine-managed learner state and learning history.
 They are not required to open the topic and should usually remain private.
-Imported context under `learning-topics/context/<slug>/` and generated drills under `learning-topics/drills/<slug>/` are also separate from the shareable topic file.
+Imported context under `learning-topics/<slug>/context/` and generated drills under `learning-topics/drills/<slug>/` are also separate from the shareable topic file.
 
 After copying a shared file into `learning-topics/`, run `openlearn repair <slug>` if it came from an older openLearn version or contains only minimal metadata.
 The repair command creates `<slug>.md.bak` before rewriting the topic.
