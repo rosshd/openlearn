@@ -151,5 +151,10 @@ The target is deliberately absent from `make check` because it makes live model 
 If live access is missing, mock mode is enabled, or the tutor and judge models match, the command exits with setup instructions instead of reporting a false pass.
 
 Each run writes `evidence/manifest.json`, `evidence/summary.md`, and `evidence/turns.jsonl`.
-Every JSONL record includes the scenario and learner persona, scripted history, live learner message and tutor response, rubric verdict, state delta, emitted learning events, and sanitized model and fixture provenance.
+Every JSONL record includes the scenario and learner persona, scripted history, live learner message and tutor response, rubric version, per-dimension scores and evidence, hard-failure flags, state delta, emitted learning events, and sanitized model and fixture provenance.
+Rubric version `tutor-behavior-v2` scores correctness, relevance, cognitive load, adaptation, feedback specificity, learner action, pacing, and state fidelity separately.
+Any invented state, false mastery, authoritative-source contradiction, privacy leakage, unsafe instruction, or grading of the wrong learner action fails the verdict and caps its aggregate score.
+The judge receives authoritative state from both before and after the turn plus the durable events emitted during it.
+Reviewable good, borderline, and adversarial examples live in `tests/evals/fixtures/tutor_judge_calibration_v2.json`.
+The provider-backed calibration test stays in the opt-in slow lane and requires `OPENLEARN_EVAL_JUDGE_MODEL` to differ from the tutor model.
 Use this lane before tutor-policy changes and as an intentional release check for releases that change tutor behavior.
