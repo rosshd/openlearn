@@ -286,16 +286,23 @@ def test_answer_first_scenarios_record_prior_focus_and_same_turn_struggling_move
     assert "Address this prerequisite gap before continuing: memory addresses" in gap_system
 
 
-def test_off_topic_scenario_requires_empty_pending_question_state(
+def test_off_topic_scenario_repairs_check_and_keeps_pending_question_empty(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    tutor_responses = iter(
+        (
+            "**Check:** Which sorting algorithm should we discuss next?",
+            (
+                "**Feedback:** VS Code and PyCharm are both common choices.\n"
+                "**Next:** Let us return to sorting algorithms."
+            ),
+        )
+    )
     monkeypatch.setattr(
         cli,
         "call_openai_streaming",
-        lambda model, system, user, output_func: (
-            "**Check:** Which sorting algorithm should we discuss next?"
-        ),
+        lambda model, system, user, output_func: next(tutor_responses),
     )
 
     def fake_call(model: str, system: str, user: str) -> str:
@@ -317,27 +324,11 @@ def test_off_topic_scenario_requires_empty_pending_question_state(
     )
     record = _read_jsonl(outcome.evidence_dir / "turns.jsonl")[0]
 
-    assert outcome.passed is False
+    assert outcome.passed is True
     assert record["judge"]["pass"] is True
-    assert record["state_assertions"] == {
-        "pass": False,
-        "checks": [
-            {
-                "field": "last_answer_status",
-                "expected": "",
-                "actual": "",
-                "pass": True,
-            },
-            {
-                "field": "pending_question",
-                "expected": None,
-                "actual": record["state_delta"]["pending_question"]["after"],
-                "pass": False,
-            },
-        ],
-        "reason": "One or more deterministic state assertions failed.",
-    }
-    assert "off_topic_question - FAIL" in (
+    assert record["state_assertions"]["pass"] is True
+    assert record["event_assertions"]["pass"] is True
+    assert "off_topic_question - PASS" in (
         outcome.evidence_dir / "summary.md"
     ).read_text(encoding="utf-8")
 
@@ -620,7 +611,9 @@ def test_live_judge_requires_every_base_criterion(
     monkeypatch.setattr(
         cli,
         "call_openai_streaming",
-        lambda model, system, user, output_func: "**Feedback:**\nA concise reply.",
+        lambda model, system, user, output_func: (
+            "**Check:**\nGive one concise example of the same concept."
+        ),
     )
 
     def fake_call(model: str, system: str, user: str) -> str:
@@ -664,7 +657,9 @@ def test_live_judge_rejects_missing_base_criterion(
     monkeypatch.setattr(
         cli,
         "call_openai_streaming",
-        lambda model, system, user, output_func: "**Feedback:**\nA concise reply.",
+        lambda model, system, user, output_func: (
+            "**Check:**\nGive one concise example of the same concept."
+        ),
     )
 
     def fake_call(model: str, system: str, user: str) -> str:
@@ -721,6 +716,8 @@ def test_calibration_fixture_is_versioned_and_covers_known_grades_and_failures()
         "bad_unsupported_slide_position",
         "bad_ambiguous_recursion_edge_case",
         "bad_prerequisite_concept_overload",
+        "bad_ignores_reduced_effort_request",
+        "bad_factual_boundary_claim",
     } <= bad_names
     covered_hard_failures = {
         failure

@@ -1,9 +1,11 @@
 import builtins
 import contextlib
+import hashlib
 import io
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -1965,7 +1967,7 @@ class CliStorageTests(unittest.TestCase):
             (date.fromisoformat(cli.today()) + timedelta(days=1)).isoformat(),
         )
 
-    def test_delete_topic_removes_context_folder(self) -> None:
+    def test_delete_topic_removes_context_folder_and_preserves_lock_identity(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="AI", goal="learn ai"))
         cli.write_context_text("ai", "outline", "context")
         cli.topic_lock_path("ai").write_text("", encoding="utf-8")
@@ -1976,7 +1978,7 @@ class CliStorageTests(unittest.TestCase):
         call_silent(cli.cmd_delete, Namespace(topic="ai", yes=True, all=False))
 
         self.assertFalse(cli.topic_path("ai").exists())
-        self.assertFalse(cli.topic_lock_path("ai").exists())
+        self.assertTrue(cli.topic_lock_path("ai").exists())
         self.assertFalse(cli.topic_data_dir("ai").exists())
         self.assertFalse(cli.topic_context_dir("ai").exists())
 
@@ -2081,6 +2083,46 @@ class CliStorageTests(unittest.TestCase):
         self.assertEqual(cli.configured_extractor_model("turn-model"), "env-extractor-model")
         self.assertEqual(cli.configured_base_url(), "https://env.example/v1")
         self.assertEqual(cli.configured_openai_api_key(), "sk-env")
+
+    def test_config_sets_and_clears_dedicated_extractor_model(self) -> None:
+        parsed = cli.build_parser().parse_args(
+            ["config", "set-extractor-model", "fast-judge"]
+        )
+        call_silent(parsed.func, parsed)
+
+        self.assertEqual(cli.configured_extractor_model("tutor-model"), "fast-judge")
+        self.assertEqual(cli.read_config()["extractor_model"], "fast-judge")
+
+        parsed = cli.build_parser().parse_args(["config", "clear-extractor-model"])
+        call_silent(parsed.func, parsed)
+
+        self.assertEqual(cli.configured_extractor_model("tutor-model"), "tutor-model")
+        self.assertNotIn("extractor_model", cli.read_config())
+
+    def test_extractor_config_reports_environment_override_on_set_and_clear(self) -> None:
+        os.environ["OPENLEARN_EXTRACTOR_MODEL"] = "env-judge"
+
+        set_output = capture_stdout(
+            cli.cmd_config_set_extractor_model,
+            Namespace(model="saved-judge"),
+        )
+        self.assertEqual(cli.read_config()["extractor_model"], "saved-judge")
+        self.assertEqual(cli.configured_extractor_model("tutor-model"), "env-judge")
+        self.assertIn("Saved extractor model: saved-judge", set_output)
+        self.assertIn("environment", set_output.lower())
+        self.assertIn("effective extractor model: env-judge", set_output)
+
+        show_output = capture_stdout(cli.cmd_config_show, Namespace())
+        self.assertIn("Extractor model: env-judge (environment override)", show_output)
+
+        clear_output = capture_stdout(
+            cli.cmd_config_clear_extractor_model,
+            Namespace(),
+        )
+        self.assertNotIn("extractor_model", cli.read_config())
+        self.assertEqual(cli.configured_extractor_model("tutor-model"), "env-judge")
+        self.assertIn("Cleared saved extractor model.", clear_output)
+        self.assertIn("effective extractor model: env-judge", clear_output)
 
     def test_extractor_model_falls_back_to_tutor_model(self) -> None:
         self.assertEqual(cli.configured_extractor_model("turn-model"), "turn-model")
@@ -4546,7 +4588,7 @@ class InteractiveTests(unittest.TestCase):
 
                 def fake_stream(*_args, system: str, **_kwargs) -> str:
                     captured_system.append(system)
-                    return "**Feedback:**\nLet us work through that."
+                    return "**Check:**\nExplain one part of what `return` does."
 
                 judgment = {
                     "message_kind": "answer",
@@ -4779,6 +4821,79 @@ class InteractiveTests(unittest.TestCase):
             events_before,
         )
 
+    def test_unusable_judge_output_retries_once_and_mutates_once(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Python", goal="Learn functions"))
+        path = cli.topic_path("python")
+        metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+        metadata = dict(metadata)
+        metadata["current_focus"] = "return values"
+        cli.write_topic(path, metadata, body)
+        cli.save_pending_question(
+            cli.read_topic("python"),
+            "",
+            "",
+            question_text="What does a return value do?",
+        )
+        judgment = {
+            "message_kind": "answer",
+            "last_answer_status": "correct",
+            "answer_score": 1.0,
+            "answer_kind": "production",
+            "is_transfer": True,
+        }
+        judge = mock.Mock(side_effect=["not json", json.dumps(judgment)])
+
+        with mock.patch.object(cli, "call_openai", judge):
+            result = cli.update_learning_metadata(
+                cli.read_topic("python"),
+                "It sends a result to the caller.",
+                "**Check:** What does a return value do?",
+                "test-model",
+            )
+
+        self.assertEqual(result, "answer")
+        self.assertEqual(judge.call_count, 2)
+        events = cli.load_event_log(cli.topic_events_path("python"))
+        self.assertEqual(
+            sum(event["event_type"] == "answer_judged" for event in events),
+            1,
+        )
+        attempts = cli.read_topic("python").metadata["concept_attempts"]
+        self.assertEqual(attempts["return-values"]["attempts"], 1)
+
+    def test_two_unusable_judge_outputs_preserve_question_without_mutation(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Python", goal="Learn functions"))
+        path = cli.topic_path("python")
+        metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+        metadata = dict(metadata)
+        metadata["current_focus"] = "return values"
+        cli.write_topic(path, metadata, body)
+        cli.save_pending_question(
+            cli.read_topic("python"),
+            "",
+            "",
+            question_text="What does a return value do?",
+        )
+        before = cli.read_topic("python")
+        events_before = cli.load_event_log(cli.topic_events_path("python"))
+
+        with mock.patch.object(cli, "call_openai", side_effect=["", "not json"]):
+            with self.assertRaisesRegex(cli.OpenLearnError, "two judge attempts"):
+                cli.update_learning_metadata(
+                    cli.read_topic("python"),
+                    "It sends a result to the caller.",
+                    "**Check:** What does a return value do?",
+                    "test-model",
+                )
+
+        after = cli.read_topic("python")
+        self.assertEqual(after.metadata["pending_question"], before.metadata["pending_question"])
+        self.assertNotIn("concept_attempts", after.metadata)
+        self.assertEqual(
+            cli.load_event_log(cli.topic_events_path("python")),
+            events_before,
+        )
+
     def test_incomplete_model_judgment_uses_multiple_choice_answer_key(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Python", goal="Learn functions"))
         path = cli.topic_path("python")
@@ -4984,6 +5099,94 @@ class InteractiveTests(unittest.TestCase):
             if event["event_type"] == "answer_judged"
         ]
         self.assertEqual(len(judged_events), 1)
+
+    def test_transcript_shaped_recovery_keeps_task_answer_and_events_synchronized(
+        self,
+    ) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Algorithms", goal="Learn interviews"))
+        path = cli.topic_path("algorithms")
+        metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+        metadata = dict(metadata)
+        metadata["current_focus"] = "two pointer tracing"
+        cli.write_topic(path, metadata, body)
+        original_check = (
+            "**Check:**\nTrace the sorted array and list every pair that sums to 10."
+        )
+        cli.save_pending_question(cli.read_topic("algorithms"), original_check, "")
+        first_answer = "I know how the pointers move, but I did not trace every sum."
+        second_answer = "1 + 9 is 10, so move right; then 1 + 8 is 9, a match."
+        partial = {
+            "message_kind": "answer",
+            "last_answer_status": "partial",
+            "answer_score": 0.5,
+            "answer_kind": "production",
+            "is_transfer": False,
+        }
+        correct = {
+            "message_kind": "answer",
+            "last_answer_status": "correct",
+            "answer_score": 1.0,
+            "answer_kind": "production",
+            "is_transfer": True,
+        }
+        smaller_check = (
+            "One small scaffold: compare the outside values first.\n\n"
+            "**Check:**\nFor [1, 3, 4, 5, 8, 9] and target 9, give only the first two steps."
+        )
+        judge_results = [
+            "",
+            json.dumps(partial),
+            "",
+            "not json",
+            json.dumps(correct),
+        ]
+        tutor_results = [smaller_check, "**Feedback:**\nCorrect."]
+        outputs = []
+        prompts = []
+        inputs = iter([first_answer, second_answer, "you", "", "/q"])
+
+        def input_func(prompt: str = "") -> str:
+            prompts.append(prompt)
+            return next(inputs)
+
+        with (
+            mock.patch.object(cli, "call_openai", side_effect=judge_results),
+            mock.patch.object(
+                cli,
+                "call_openai_streaming",
+                side_effect=tutor_results,
+            ),
+            mock.patch.object(cli, "maybe_suggest_videos"),
+        ):
+            call_silent(
+                cli.run_repl,
+                topic_value="algorithms",
+                model="test-model",
+                input_func=input_func,
+                output_func=outputs.append,
+                show_intro=False,
+            )
+
+        updated = cli.read_topic("algorithms")
+        self.assertNotIn("pending_question", updated.metadata)
+        self.assertIsNone(cli.load_pending_learner_prompt("algorithms"))
+        self.assertEqual(updated.body.count(smaller_check), 1)
+        self.assertEqual(updated.body.count("**Feedback:**\nCorrect."), 1)
+        self.assertNotIn("\n**Prompt**\n\nyou\n", updated.body)
+        attempts = updated.metadata["concept_attempts"]["two-pointer-tracing"]
+        self.assertEqual(attempts["attempts"], 2)
+        judged_events = [
+            event
+            for event in cli.load_event_log(cli.topic_events_path("algorithms"))
+            if event["event_type"] == "answer_judged"
+        ]
+        self.assertEqual(len(judged_events), 2)
+        self.assertTrue(any("Saved answer retained" in line for line in outputs))
+        self.assertTrue(any("/replace <answer>" in prompt for prompt in prompts))
+        status_lines = [
+            line for line in outputs if "openlearn" in line and "Algorithms" in line
+        ]
+        self.assertEqual(len(status_lines), 3)
 
     def test_ask_topic_unusable_judgments_fail_before_tutor_and_retry_once(
         self,
@@ -5646,6 +5849,26 @@ class InteractiveTests(unittest.TestCase):
         self.assertLess(status_index, feedback_index)
         self.assertFalse(any("openlearn" in line for line in output[feedback_index + 1 :]))
 
+    def test_repl_failed_turn_prints_status_once(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
+        original_ask_topic = cli.ask_topic
+        output = []
+        cli.ask_topic = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            cli.OpenLearnError("judge unavailable")
+        )
+        try:
+            call_silent(
+                cli.run_repl,
+                input_func=iter_input(["answer", "/q"]),
+                output_func=output.append,
+                show_intro=False,
+            )
+        finally:
+            cli.ask_topic = original_ask_topic
+
+        status_lines = [line for line in output if "openlearn" in line and "Vim" in line]
+        self.assertEqual(len(status_lines), 1)
+
     def test_repl_keeps_failed_answer_and_enter_resubmits_it(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
         original_ask_topic = cli.ask_topic
@@ -5679,6 +5902,30 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(submitted, ["learner answer", "learner answer"])
         self.assertTrue(any("answer was kept" in line.lower() for line in output))
         self.assertIn("press Enter to resubmit", prompts[1])
+
+    def test_repl_does_not_dispatch_bare_text_over_preserved_answer(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
+        cli.save_pending_learner_prompt("vim", "complete original answer")
+        original_ask_topic = cli.ask_topic
+        submitted = []
+        output = []
+        cli.ask_topic = (
+            lambda _topic, prompt, _model, **_kwargs: submitted.append(prompt)
+            or "Tutor answer"
+        )
+        try:
+            call_silent(
+                cli.run_repl,
+                input_func=iter_input(["you", "", "/q"]),
+                output_func=output.append,
+                show_intro=False,
+            )
+        finally:
+            cli.ask_topic = original_ask_topic
+
+        self.assertEqual(submitted, ["complete original answer"])
+        self.assertTrue(any("Saved answer retained" in line for line in output))
+        self.assertIsNone(cli.load_pending_learner_prompt("vim"))
 
     def test_pending_learner_prompt_storage_is_validated_isolated_and_private(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
@@ -5778,7 +6025,7 @@ class InteractiveTests(unittest.TestCase):
         self.assertIn("press Enter to resubmit", prompts[0])
         self.assertIsNone(cli.load_pending_learner_prompt("vim"))
 
-    def test_repl_replaces_recovered_answer_before_dispatch(self) -> None:
+    def test_repl_replaces_recovered_answer_only_with_explicit_command(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
         cli.save_pending_learner_prompt("vim", "old answer")
         original_ask_topic = cli.ask_topic
@@ -5792,7 +6039,7 @@ class InteractiveTests(unittest.TestCase):
         try:
             call_silent(
                 cli.run_repl,
-                input_func=iter_input(["replacement answer", "/q"]),
+                input_func=iter_input(["/replace replacement answer", "/q"]),
                 output_func=lambda _text: None,
                 show_intro=False,
             )
@@ -5801,6 +6048,33 @@ class InteractiveTests(unittest.TestCase):
 
         self.assertEqual(submitted, [("replacement answer", "replacement answer")])
         self.assertIsNone(cli.load_pending_learner_prompt("vim"))
+
+    def test_repl_failed_replacement_is_recovered_across_restart(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
+        cli.save_pending_learner_prompt("vim", "old answer")
+        original_ask_topic = cli.ask_topic
+        submitted = []
+
+        def failed_ask(_topic, prompt, _model, **_kwargs) -> str:
+            submitted.append(prompt)
+            raise cli.OpenLearnError("judge unavailable")
+
+        cli.ask_topic = failed_ask
+        try:
+            call_silent(
+                cli.run_repl,
+                input_func=iter_input(["/replace exact replacement", "/q"]),
+                output_func=lambda _text: None,
+                show_intro=False,
+            )
+        finally:
+            cli.ask_topic = original_ask_topic
+
+        self.assertEqual(submitted, ["exact replacement"])
+        self.assertEqual(
+            cli.load_pending_learner_prompt("vim"),
+            "exact replacement",
+        )
 
     def test_ask_topic_clears_matching_prompt_before_deferred_update_submission(
         self,
@@ -5830,13 +6104,13 @@ class InteractiveTests(unittest.TestCase):
 
         self.assertEqual(seen_at_submit, [None])
 
-    def test_ask_topic_cleanup_failure_retains_prompt_and_skips_deferred_update(
+    def test_ask_topic_journal_cleanup_failure_recovers_without_duplicate_turn(
         self,
     ) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
         cli.save_pending_learner_prompt("vim", "learner answer")
         original_stream = cli.call_openai_streaming
-        original_clear = cli.clear_pending_learner_prompt
+        original_checkpoint = cli._turn_commit_checkpoint
         submitted = []
 
         class RecordingDeferredUpdates:
@@ -5846,8 +6120,10 @@ class InteractiveTests(unittest.TestCase):
                 submitted.append(True)
 
         cli.call_openai_streaming = lambda *_args, **_kwargs: "Tutor answer"
-        cli.clear_pending_learner_prompt = lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            OSError("disk unavailable")
+        cli._turn_commit_checkpoint = (
+            lambda stage: (_ for _ in ()).throw(OSError("disk unavailable"))
+            if stage == "before_cleanup"
+            else None
         )
         try:
             with self.assertRaises(OSError):
@@ -5860,10 +6136,1159 @@ class InteractiveTests(unittest.TestCase):
                 )
         finally:
             cli.call_openai_streaming = original_stream
-            cli.clear_pending_learner_prompt = original_clear
+            cli._turn_commit_checkpoint = original_checkpoint
 
-        self.assertEqual(cli.load_pending_learner_prompt("vim"), "learner answer")
+        self.assertIsNone(cli.load_pending_learner_prompt("vim"))
+        body = cli.read_topic("vim").body
+        self.assertEqual(body.count("**Prompt**\n\nlearner answer"), 1)
+        self.assertFalse(cli.topic_turn_journal_path("vim").exists())
         self.assertEqual(submitted, [])
+
+    def test_turn_journal_recovers_all_commit_boundaries_exactly_once(self) -> None:
+        stages = (
+            "after_journal",
+            "after_topic",
+            "after_state",
+            "after_events",
+            "before_cleanup",
+            "after_cleanup",
+        )
+        for stage in stages:
+            with self.subTest(stage=stage):
+                slug = cli.slugify(f"journal-{stage}")
+                call_silent(cli.cmd_new, Namespace(topic=slug, goal="Learn safely"))
+                before = cli.load_state(slug)
+                before["concept_attempts"] = {
+                    "pointer-scan": {"attempts": 1, "correct_sum": 0.5}
+                }
+                cli.save_state(slug, before)
+                before = cli.load_state(slug)
+                after = json.loads(json.dumps(before))
+                after["concept_attempts"]["pointer-scan"]["attempts"] = 2
+                after["concept_attempts"]["pointer-scan"]["correct_sum"] = 1.25
+                after["last_answer_status"] = "partial"
+                mutation_id = f"turn_{hashlib.md5(stage.encode(), usedforsecurity=False).hexdigest()}"
+                entry = cli._session_entry(
+                    "chat",
+                    "private learner answer",
+                    "private tutor response",
+                    created="2026-07-25 12:00 UTC",
+                    mutation_id=mutation_id,
+                )
+                original_checkpoint = cli._turn_commit_checkpoint
+                failed = False
+
+                def fail_once(current_stage: str) -> None:
+                    nonlocal failed
+                    if current_stage == stage and not failed:
+                        failed = True
+                        raise KeyboardInterrupt()
+
+                cli._turn_commit_checkpoint = fail_once
+                try:
+                    with self.assertRaises(KeyboardInterrupt):
+                        cli._commit_projected_turn(
+                            slug,
+                            before,
+                            after,
+                            entry,
+                            [(slug, "answer_judged", {"status": "partial"})],
+                            mutation_id,
+                        )
+                finally:
+                    cli._turn_commit_checkpoint = original_checkpoint
+
+                cli.recover_turn_commit(slug)
+                cli.recover_turn_commit(slug)
+                topic = cli.read_topic(slug)
+                state = cli.load_state(slug)
+                events = cli.load_event_log(cli.topic_events_path(slug))
+                self.assertEqual(topic.body.count(f"openlearn-turn:{mutation_id}"), 1)
+                self.assertEqual(
+                    state["concept_attempts"]["pointer-scan"]["attempts"], 2
+                )
+                self.assertEqual(
+                    state["concept_attempts"]["pointer-scan"]["correct_sum"], 1.25
+                )
+                matching = [
+                    event
+                    for event in events
+                    if event.get("event_id") == f"{mutation_id}:0"
+                ]
+                self.assertEqual(len(matching), 1)
+                self.assertFalse(cli.topic_turn_journal_path(slug).exists())
+
+    def test_turn_failure_before_journal_publishes_nothing(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Pre Journal", goal="Learn safely"))
+        slug = "pre-journal"
+        before = cli.load_state(slug)
+        after = {**before, "last_answer_status": "partial"}
+        mutation_id = "turn_11111111111111111111111111111111"
+        entry = cli._session_entry(
+            "chat",
+            "rendered learner answer",
+            "rendered tutor answer",
+            created="2026-07-25 12:00 UTC",
+            mutation_id=mutation_id,
+        )
+        topic_before = cli.topic_path(slug).read_text(encoding="utf-8")
+        state_before = cli.topic_state_path(slug).read_text(encoding="utf-8")
+        original_checkpoint = cli._turn_commit_checkpoint
+        cli._turn_commit_checkpoint = (
+            lambda stage: (_ for _ in ()).throw(KeyboardInterrupt())
+            if stage == "before_journal"
+            else None
+        )
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                cli._commit_projected_turn(
+                    slug,
+                    before,
+                    after,
+                    entry,
+                    [(slug, "answer_judged", {"status": "partial"})],
+                    mutation_id,
+                )
+        finally:
+            cli._turn_commit_checkpoint = original_checkpoint
+        self.assertFalse(cli.topic_turn_journal_path(slug).exists())
+        self.assertEqual(
+            cli.topic_path(slug).read_text(encoding="utf-8"), topic_before
+        )
+        self.assertEqual(
+            cli.topic_state_path(slug).read_text(encoding="utf-8"), state_before
+        )
+        self.assertFalse(cli.topic_events_path(slug).exists())
+
+    def test_turn_recovery_layers_over_an_older_activity_journal(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Journal Ordering", goal="Practice"))
+        slug = "journal-ordering"
+        before = cli.load_state(slug)
+        after = {**before, "last_answer_status": "partial"}
+        request = {
+            "domain": "coding",
+            "kind": "python_drill",
+            "objective": "Practice one function.",
+            "concept_ids": ["functions"],
+            "requested_evidence": ["pytest_result"],
+            "scaffolding_level": 1,
+            "purpose": "practice",
+            "domain_payload": {
+                "title": "Journal ordering",
+                "language": "python",
+                "tool_requests": [],
+            },
+        }
+        with mock.patch.object(
+            cli,
+            "_activity_update_checkpoint",
+            side_effect=lambda stage: (
+                (_ for _ in ()).throw(KeyboardInterrupt())
+                if stage == "after_journal"
+                else None
+            ),
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                cli.propose_topic_activity(slug, request)
+
+        mutation_id = "turn_22222222222222222222222222222222"
+        entry = cli._session_entry(
+            "chat",
+            "learner answer",
+            "tutor response",
+            created="2026-07-25 12:00 UTC",
+            mutation_id=mutation_id,
+        )
+        cli._commit_projected_turn(
+            slug,
+            before,
+            after,
+            entry,
+            [(slug, "answer_judged", {"status": "partial"})],
+            mutation_id,
+        )
+
+        final = cli.load_state(slug)
+        self.assertEqual(final["last_answer_status"], "partial")
+        self.assertEqual(final["active_activity"]["status"], "proposed")
+        events = cli.load_event_log(cli.topic_events_path(slug))
+        self.assertEqual(
+            [event["event_type"] for event in events].count("activity_proposed"), 1
+        )
+        self.assertEqual(
+            [event["event_type"] for event in events].count("answer_judged"), 1
+        )
+        self.assertFalse(cli.topic_activity_journal_path(slug).exists())
+        self.assertFalse(cli.topic_turn_journal_path(slug).exists())
+
+    def test_turn_journal_preserves_concurrent_session_and_same_concept_updates(
+        self,
+    ) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Concurrency", goal="Learn safely"))
+        slug = "concurrency"
+        before = cli.load_state(slug)
+        before["concept_attempts"] = {
+            "pointer-scan": {"attempts": 1, "correct_sum": 0.5}
+        }
+        cli.save_state(slug, before)
+        before = cli.load_state(slug)
+        after = json.loads(json.dumps(before))
+        after["concept_attempts"]["pointer-scan"]["attempts"] = 2
+        after["concept_attempts"]["pointer-scan"]["correct_sum"] = 1.0
+        mutation_id = "turn_1234567890abcdef1234567890abcdef"
+        entry = cli._session_entry(
+            "chat",
+            "learner answer",
+            "tutor response",
+            created="2026-07-25 12:00 UTC",
+            mutation_id=mutation_id,
+        )
+        original_checkpoint = cli._turn_commit_checkpoint
+        cli._turn_commit_checkpoint = (
+            lambda stage: (_ for _ in ()).throw(KeyboardInterrupt())
+            if stage == "after_journal"
+            else None
+        )
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                cli._commit_projected_turn(
+                    slug,
+                    before,
+                    after,
+                    entry,
+                    [(slug, "answer_judged", {"status": "partial"})],
+                    mutation_id,
+                )
+        finally:
+            cli._turn_commit_checkpoint = original_checkpoint
+
+        topic = cli.read_topic(slug)
+        cli.append_session(topic, "chat", "concurrent prompt", "concurrent response")
+        current = cli.load_state(slug)
+        current["concept_attempts"]["pointer-scan"]["attempts"] += 3
+        current["concept_attempts"]["pointer-scan"]["correct_sum"] += 2.0
+        current["unrelated"] = {"preserved": True}
+        cli.save_state(slug, current)
+        cli.recover_turn_commit(slug)
+
+        final_topic = cli.read_topic(slug)
+        final_state = cli.load_state(slug)
+        self.assertIn("concurrent prompt", final_topic.body)
+        self.assertEqual(final_topic.body.count(f"openlearn-turn:{mutation_id}"), 1)
+        self.assertEqual(
+            final_state["concept_attempts"]["pointer-scan"]["attempts"], 5
+        )
+        self.assertEqual(
+            final_state["concept_attempts"]["pointer-scan"]["correct_sum"], 3.0
+        )
+        self.assertEqual(final_state["unrelated"], {"preserved": True})
+
+    def test_turn_journal_is_private_and_corruption_fails_without_leaking_payload(
+        self,
+    ) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Privacy", goal="Learn safely"))
+        slug = "privacy"
+        before = cli.load_state(slug)
+        mutation_id = "turn_abcdef1234567890abcdef1234567890"
+        entry = cli._session_entry(
+            "chat",
+            "TOP SECRET LEARNER TEXT",
+            "TOP SECRET TUTOR TEXT",
+            created="2026-07-25 12:00 UTC",
+            mutation_id=mutation_id,
+        )
+        original_checkpoint = cli._turn_commit_checkpoint
+        cli._turn_commit_checkpoint = (
+            lambda stage: (_ for _ in ()).throw(KeyboardInterrupt())
+            if stage == "after_journal"
+            else None
+        )
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                cli._commit_projected_turn(
+                    slug, before, before, entry, [], mutation_id
+                )
+        finally:
+            cli._turn_commit_checkpoint = original_checkpoint
+        journal_path = cli.topic_turn_journal_path(slug)
+        self.assertEqual(stat.S_IMODE(journal_path.stat().st_mode), 0o600)
+        journal_path.write_text('{"schema_version": 999, "private": "DO NOT LEAK"}')
+        before_topic = cli.topic_path(slug).read_text(encoding="utf-8")
+        with self.assertRaises(cli.OpenLearnError) as caught:
+            cli.recover_turn_commit(slug)
+        self.assertNotIn("DO NOT LEAK", str(caught.exception))
+        self.assertNotIn("TOP SECRET", str(caught.exception))
+        self.assertEqual(
+            cli.topic_path(slug).read_text(encoding="utf-8"), before_topic
+        )
+
+    def test_turn_journal_preflight_rejects_late_invalid_payloads_without_writes(
+        self,
+    ) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Preflight", goal="Learn safely"))
+        slug = "preflight"
+        before = cli.load_state(slug)
+        after = {**before, "last_answer_status": "partial"}
+        mutation_id = "turn_33333333333333333333333333333333"
+        entry = cli._session_entry(
+            "chat",
+            "PRIVATE LEARNER PAYLOAD",
+            "PRIVATE TUTOR PAYLOAD",
+            created="2026-07-25 12:00 UTC",
+            mutation_id=mutation_id,
+        )
+        original_checkpoint = cli._turn_commit_checkpoint
+        cli._turn_commit_checkpoint = (
+            lambda stage: (_ for _ in ()).throw(KeyboardInterrupt())
+            if stage == "after_journal"
+            else None
+        )
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                cli._commit_projected_turn(
+                    slug,
+                    before,
+                    after,
+                    entry,
+                    [(slug, "answer_judged", {"status": "partial"})],
+                    mutation_id,
+                )
+        finally:
+            cli._turn_commit_checkpoint = original_checkpoint
+        journal_path = cli.topic_turn_journal_path(slug)
+        valid = json.loads(journal_path.read_text(encoding="utf-8"))
+        topic_before = cli.topic_path(slug).read_bytes()
+        state_before = cli.topic_state_path(slug).read_bytes()
+        events_path = cli.topic_events_path(slug)
+        events_before = events_path.read_bytes() if events_path.exists() else None
+
+        invalid_variants = []
+        invalid_op = json.loads(json.dumps(valid))
+        invalid_op["state_patch"].append(
+            {"op": "explode", "path": ["late_private_key"], "value": "SECRET"}
+        )
+        invalid_op["state_patch_sha256"] = cli._payload_sha256(
+            invalid_op["state_patch"]
+        )
+        invalid_op["commit_sha256"] = cli._payload_sha256(
+            cli._turn_commit_identity_payload(invalid_op)
+        )
+        invalid_variants.append(invalid_op)
+
+        unsupported_path = json.loads(json.dumps(valid))
+        unsupported_path["state_patch"] = [
+            {
+                "op": "set",
+                "path": ["private_unowned_key"],
+                "before_missing": True,
+                "after": "SECRET",
+            }
+        ]
+        unsupported_path["state_patch_sha256"] = cli._payload_sha256(
+            unsupported_path["state_patch"]
+        )
+        unsupported_path["commit_sha256"] = cli._payload_sha256(
+            cli._turn_commit_identity_payload(unsupported_path)
+        )
+        invalid_variants.append(unsupported_path)
+
+        nested = json.loads(json.dumps(valid))
+        deep: object = "SECRET"
+        for _ in range(cli.TURN_JOURNAL_MAX_JSON_DEPTH + 2):
+            deep = {"nested": deep}
+        nested["metadata_patch"] = [
+            {
+                "op": "set",
+                "path": ["known"],
+                "before": [],
+                "after": deep,
+            }
+        ]
+        nested["metadata_patch_sha256"] = cli._payload_sha256(
+            nested["metadata_patch"]
+        )
+        nested["commit_sha256"] = cli._payload_sha256(
+            cli._turn_commit_identity_payload(nested)
+        )
+        invalid_variants.append(nested)
+
+        bad_event = json.loads(json.dumps(valid))
+        bad_event["events"][0]["event_id"] = f"{mutation_id}:999"
+        bad_event["events_sha256"] = cli._payload_sha256(bad_event["events"])
+        bad_event["commit_sha256"] = cli._payload_sha256(
+            cli._turn_commit_identity_payload(bad_event)
+        )
+        invalid_variants.append(bad_event)
+
+        for invalid in invalid_variants:
+            with self.subTest(kind=invalid["state_patch"][-1].get("op", "nested")):
+                journal_path.write_text(
+                    json.dumps(invalid, ensure_ascii=False), encoding="utf-8"
+                )
+                for _ in range(2):
+                    with self.assertRaises(cli.OpenLearnError) as caught:
+                        cli.recover_turn_commit(slug)
+                    self.assertNotIn("SECRET", str(caught.exception))
+                    self.assertNotIn("PRIVATE", str(caught.exception))
+                self.assertEqual(cli.topic_path(slug).read_bytes(), topic_before)
+                self.assertEqual(cli.topic_state_path(slug).read_bytes(), state_before)
+                self.assertEqual(
+                    events_path.read_bytes() if events_path.exists() else None,
+                    events_before,
+                )
+                self.assertTrue(journal_path.exists())
+
+    def test_turn_journal_enforces_serialized_byte_limit_before_read_or_write(
+        self,
+    ) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Journal Size", goal="Learn safely"))
+        slug = "journal-size"
+        before = cli.load_state(slug)
+        mutation_id = "turn_44444444444444444444444444444444"
+        oversized_entry = cli._session_entry(
+            "chat",
+            "🙂" * 70_000,
+            "response",
+            created="2026-07-25 12:00 UTC",
+            mutation_id=mutation_id,
+        )
+        with self.assertRaisesRegex(cli.OpenLearnError, "oversized"):
+            cli._commit_projected_turn(
+                slug, before, before, oversized_entry, [], mutation_id
+            )
+        self.assertFalse(cli.topic_turn_journal_path(slug).exists())
+
+        journal_path = cli.topic_turn_journal_path(slug)
+        journal_path.write_bytes(
+            b"{" + b"x" * cli.TURN_JOURNAL_PAYLOAD_CHAR_LIMIT
+        )
+        topic_before = cli.topic_path(slug).read_bytes()
+        state_before = cli.topic_state_path(slug).read_bytes()
+        with self.assertRaisesRegex(cli.OpenLearnError, "oversized"):
+            cli.recover_turn_commit(slug)
+        self.assertEqual(cli.topic_path(slug).read_bytes(), topic_before)
+        self.assertEqual(cli.topic_state_path(slug).read_bytes(), state_before)
+
+    def test_permanent_turn_receipt_blocks_reintroduced_old_journal(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Permanent Receipt", goal="Learn safely"))
+        slug = "permanent-receipt"
+        before = cli.load_state(slug)
+        before["concept_attempts"] = {
+            "pointer-scan": {"attempts": 0, "correct_sum": 0.0}
+        }
+        cli.save_state(slug, before)
+        before = cli.load_state(slug)
+        after = json.loads(json.dumps(before))
+        after["concept_attempts"]["pointer-scan"]["attempts"] = 1
+        after["concept_attempts"]["pointer-scan"]["correct_sum"] = 0.5
+        old_id = "turn_55555555555555555555555555555555"
+        old_entry = cli._session_entry(
+            "chat",
+            "old learner answer",
+            "old tutor response",
+            created="2026-07-25 12:00 UTC",
+            mutation_id=old_id,
+        )
+        original_checkpoint = cli._turn_commit_checkpoint
+        cli._turn_commit_checkpoint = (
+            lambda stage: (_ for _ in ()).throw(KeyboardInterrupt())
+            if stage == "after_journal"
+            else None
+        )
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                cli._commit_projected_turn(
+                    slug,
+                    before,
+                    after,
+                    old_entry,
+                    [(slug, "answer_judged", {"status": "partial"})],
+                    old_id,
+                )
+        finally:
+            cli._turn_commit_checkpoint = original_checkpoint
+        journal_path = cli.topic_turn_journal_path(slug)
+        old_journal = journal_path.read_bytes()
+        cli.recover_turn_commit(slug)
+
+        for index in range(129):
+            current = cli.load_state(slug)
+            mutation_id = f"turn_{index + 1000:032x}"
+            entry = cli._session_entry(
+                "chat",
+                f"later prompt {index}",
+                f"later response {index}",
+                created="2026-07-25 12:00 UTC",
+                mutation_id=mutation_id,
+            )
+            cli._commit_projected_turn(
+                slug, current, current, entry, [], mutation_id
+            )
+
+        journal_path.write_bytes(old_journal)
+        os.chmod(journal_path, 0o600)
+        cli.recover_turn_commit(slug)
+        cli.recover_turn_commit(slug)
+        final = cli.load_state(slug)
+        record = final["concept_attempts"]["pointer-scan"]
+        self.assertEqual(record, {"attempts": 1, "correct_sum": 0.5})
+        self.assertGreaterEqual(len(final["_turn_receipts"]), 130)
+        self.assertEqual(cli.read_topic(slug).body.count(f"openlearn-turn:{old_id}"), 1)
+        events = cli.load_event_log(cli.topic_events_path(slug))
+        self.assertEqual(
+            len([event for event in events if event.get("event_id") == f"{old_id}:0"]),
+            1,
+        )
+
+    def test_corrupt_turn_receipts_block_recovery_before_any_turn_write(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Receipt Corrupt", goal="Learn safely"))
+        slug = "receipt-corrupt"
+        before = cli.load_state(slug)
+        mutation_id = "turn_66666666666666666666666666666666"
+        entry = cli._session_entry(
+            "chat",
+            "private prompt",
+            "private response",
+            created="2026-07-25 12:00 UTC",
+            mutation_id=mutation_id,
+        )
+        original_checkpoint = cli._turn_commit_checkpoint
+        cli._turn_commit_checkpoint = (
+            lambda stage: (_ for _ in ()).throw(KeyboardInterrupt())
+            if stage == "after_journal"
+            else None
+        )
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                cli._commit_projected_turn(
+                    slug, before, before, entry, [], mutation_id
+                )
+        finally:
+            cli._turn_commit_checkpoint = original_checkpoint
+        state = cli._load_state_unlocked(slug)
+        state["_turn_receipts"] = ["corrupt", "SECRET"]
+        cli.write_text_atomic(
+            cli.topic_state_path(slug),
+            json.dumps(state, indent=2, sort_keys=True) + "\n",
+        )
+        topic_before = cli.topic_path(slug).read_bytes()
+        state_before = cli.topic_state_path(slug).read_bytes()
+        with self.assertRaises(cli.OpenLearnError) as caught:
+            cli.recover_turn_commit(slug)
+        self.assertNotIn("SECRET", str(caught.exception))
+        self.assertEqual(cli.topic_path(slug).read_bytes(), topic_before)
+        self.assertEqual(cli.topic_state_path(slug).read_bytes(), state_before)
+
+    def test_topic_summary_and_list_reads_recover_pending_turn(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Summary Recovery", goal="Learn safely"))
+        slug = "summary-recovery"
+        before = cli.load_state(slug)
+        mutation_id = "turn_77777777777777777777777777777777"
+        entry = cli._session_entry(
+            "chat",
+            "summary learner prompt",
+            "summary tutor response",
+            created="2026-07-25 12:00 UTC",
+            mutation_id=mutation_id,
+        )
+        original_checkpoint = cli._turn_commit_checkpoint
+        cli._turn_commit_checkpoint = (
+            lambda stage: (_ for _ in ()).throw(KeyboardInterrupt())
+            if stage == "after_journal"
+            else None
+        )
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                cli._commit_projected_turn(
+                    slug, before, before, entry, [], mutation_id
+                )
+        finally:
+            cli._turn_commit_checkpoint = original_checkpoint
+
+        summaries = cli.list_topics()
+        self.assertIn(slug, [summary.slug for summary in summaries])
+        self.assertFalse(cli.topic_turn_journal_path(slug).exists())
+        self.assertIn("summary tutor response", cli.read_topic(slug).body)
+
+    def test_delete_waits_for_recovery_at_every_store_boundary(self) -> None:
+        for boundary in (
+            "before_topic_write",
+            "after_topic",
+            "after_state",
+            "after_events",
+        ):
+            with self.subTest(boundary=boundary):
+                slug = cli.slugify(f"delete race {boundary}")
+                call_silent(cli.cmd_new, Namespace(topic=slug, goal="Learn safely"))
+                before = cli.load_state(slug)
+                after = {**before, "last_answer_status": "partial"}
+                mutation_id = f"turn_{hashlib.md5(boundary.encode(), usedforsecurity=False).hexdigest()}"
+                entry = cli._session_entry(
+                    "chat",
+                    "race learner answer",
+                    "race tutor response",
+                    created="2026-07-25 12:00 UTC",
+                    mutation_id=mutation_id,
+                )
+                original_checkpoint = cli._turn_commit_checkpoint
+                cli._turn_commit_checkpoint = (
+                    lambda stage: (_ for _ in ()).throw(KeyboardInterrupt())
+                    if stage == "after_journal"
+                    else None
+                )
+                try:
+                    with self.assertRaises(KeyboardInterrupt):
+                        cli._commit_projected_turn(
+                            slug,
+                            before,
+                            after,
+                            entry,
+                            [(slug, "answer_judged", {"status": "partial"})],
+                            mutation_id,
+                        )
+                finally:
+                    cli._turn_commit_checkpoint = original_checkpoint
+
+                recovery_paused = threading.Event()
+                allow_recovery = threading.Event()
+                deletion_entered = threading.Event()
+                recovery_errors: list[BaseException] = []
+                deletion_errors: list[BaseException] = []
+
+                def pause_recovery(stage: str) -> None:
+                    if stage == boundary:
+                        recovery_paused.set()
+                        allow_recovery.wait(timeout=5)
+
+                def recover() -> None:
+                    try:
+                        cli.recover_turn_commit(slug)
+                    except BaseException as exc:
+                        recovery_errors.append(exc)
+
+                def delete() -> None:
+                    try:
+                        cli.delete_topic_files(slug)
+                        deletion_entered.set()
+                    except BaseException as exc:
+                        deletion_errors.append(exc)
+
+                cli._turn_commit_checkpoint = pause_recovery
+                recovery_thread = threading.Thread(target=recover)
+                deletion_thread = threading.Thread(target=delete)
+                try:
+                    recovery_thread.start()
+                    self.assertTrue(recovery_paused.wait(timeout=5))
+                    deletion_thread.start()
+                    self.assertFalse(deletion_entered.wait(timeout=0.05))
+                    allow_recovery.set()
+                    recovery_thread.join(timeout=5)
+                    deletion_thread.join(timeout=5)
+                finally:
+                    cli._turn_commit_checkpoint = original_checkpoint
+                    allow_recovery.set()
+
+                self.assertFalse(recovery_thread.is_alive())
+                self.assertFalse(deletion_thread.is_alive())
+                self.assertEqual(recovery_errors, [])
+                self.assertEqual(deletion_errors, [])
+                self.assertTrue(deletion_entered.is_set())
+                for path in (
+                    cli.topic_path(slug),
+                    cli.topic_state_path(slug),
+                    cli.topic_events_path(slug),
+                    cli.topic_activity_journal_path(slug),
+                    cli.topic_turn_journal_path(slug),
+                ):
+                    self.assertFalse(path.exists(), path)
+                self.assertFalse(cli.recover_turn_commit(slug))
+                self.assertFalse(cli.topic_path(slug).exists())
+
+    def test_delete_wins_against_commit_paused_after_journal(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Delete Commit Race", goal="Learn safely"))
+        slug = "delete-commit-race"
+        before = cli.load_state(slug)
+        mutation_id = "turn_88888888888888888888888888888888"
+        entry = cli._session_entry(
+            "chat",
+            "race prompt",
+            "race response",
+            created="2026-07-25 12:00 UTC",
+            mutation_id=mutation_id,
+        )
+        journal_ready = threading.Event()
+        allow_commit = threading.Event()
+        errors: list[BaseException] = []
+        original_checkpoint = cli._turn_commit_checkpoint
+
+        def pause_after_journal(stage: str) -> None:
+            if stage == "after_journal":
+                journal_ready.set()
+                allow_commit.wait(timeout=5)
+
+        def commit() -> None:
+            try:
+                cli._commit_projected_turn(
+                    slug, before, before, entry, [], mutation_id
+                )
+            except BaseException as exc:
+                errors.append(exc)
+
+        cli._turn_commit_checkpoint = pause_after_journal
+        thread = threading.Thread(target=commit)
+        try:
+            thread.start()
+            self.assertTrue(journal_ready.wait(timeout=5))
+            cli.delete_topic_files(slug)
+            allow_commit.set()
+            thread.join(timeout=5)
+        finally:
+            cli._turn_commit_checkpoint = original_checkpoint
+            allow_commit.set()
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], cli.OpenLearnError)
+        for path in (
+            cli.topic_path(slug),
+            cli.topic_state_path(slug),
+            cli.topic_events_path(slug),
+            cli.topic_activity_journal_path(slug),
+            cli.topic_turn_journal_path(slug),
+        ):
+            self.assertFalse(path.exists(), path)
+
+    def test_stale_journal_cannot_resurrect_deleted_or_recreated_topic(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Generation", goal="Old goal"))
+        slug = "generation"
+        old_generation = cli.read_topic(slug).metadata["topic_generation"]
+        before = cli.load_state(slug)
+        mutation_id = "turn_99999999999999999999999999999999"
+        entry = cli._session_entry(
+            "chat",
+            "old prompt",
+            "old private response",
+            created="2026-07-25 12:00 UTC",
+            mutation_id=mutation_id,
+        )
+        original_checkpoint = cli._turn_commit_checkpoint
+        cli._turn_commit_checkpoint = (
+            lambda stage: (_ for _ in ()).throw(KeyboardInterrupt())
+            if stage == "after_journal"
+            else None
+        )
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                cli._commit_projected_turn(
+                    slug, before, before, entry, [], mutation_id
+                )
+        finally:
+            cli._turn_commit_checkpoint = original_checkpoint
+        journal_path = cli.topic_turn_journal_path(slug)
+        stale_journal = journal_path.read_bytes()
+        cli.delete_topic_files(slug)
+
+        journal_path.write_bytes(stale_journal)
+        os.chmod(journal_path, 0o600)
+        self.assertFalse(cli.recover_turn_commit(slug))
+        self.assertFalse(cli.topic_path(slug).exists())
+        self.assertFalse(journal_path.exists())
+
+        call_silent(cli.cmd_new, Namespace(topic="Generation", goal="New goal"))
+        recreated = cli.read_topic(slug)
+        self.assertNotEqual(recreated.metadata["topic_generation"], old_generation)
+        body_before = recreated.body
+        journal_path.write_bytes(stale_journal)
+        os.chmod(journal_path, 0o600)
+        recreated = cli.read_topic(slug)
+        self.assertEqual(recreated.body, body_before)
+        self.assertNotIn("old private response", recreated.body)
+        self.assertFalse(journal_path.exists())
+
+    def test_full_commit_receipt_rejects_after_state_payload_tampering(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Receipt Binding", goal="Learn safely"))
+        slug = "receipt-binding"
+        before = cli.load_state(slug)
+        after = {**before, "last_answer_status": "partial"}
+        mutation_id = "turn_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        entry = cli._session_entry(
+            "chat",
+            "private original prompt",
+            "private original response",
+            created="2026-07-25 12:00 UTC",
+            mutation_id=mutation_id,
+        )
+        original_checkpoint = cli._turn_commit_checkpoint
+        cli._turn_commit_checkpoint = (
+            lambda stage: (_ for _ in ()).throw(KeyboardInterrupt())
+            if stage == "after_state"
+            else None
+        )
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                cli._commit_projected_turn(
+                    slug,
+                    before,
+                    after,
+                    entry,
+                    [(slug, "answer_judged", {"status": "partial"})],
+                    mutation_id,
+                    before_metadata=cli.read_topic(slug).metadata,
+                    after_metadata={
+                        **cli.read_topic(slug).metadata,
+                        "known": ["original concept"],
+                    },
+                )
+        finally:
+            cli._turn_commit_checkpoint = original_checkpoint
+        journal_path = cli.topic_turn_journal_path(slug)
+        original_journal = json.loads(journal_path.read_text(encoding="utf-8"))
+        topic_before = cli.topic_path(slug).read_bytes()
+        state_before = cli.topic_state_path(slug).read_bytes()
+        events_path = cli.topic_events_path(slug)
+        events_before = events_path.read_bytes() if events_path.exists() else None
+
+        variants = []
+        changed_event = json.loads(json.dumps(original_journal))
+        changed_event["events"][0]["data"]["status"] = "CORRUPTED"
+        changed_event["events_sha256"] = cli._payload_sha256(changed_event["events"])
+        variants.append(changed_event)
+        changed_session = json.loads(json.dumps(original_journal))
+        changed_session["session_entry"] += "\nCORRUPTED SESSION"
+        changed_session["session_sha256"] = cli._payload_sha256(
+            changed_session["session_entry"]
+        )
+        variants.append(changed_session)
+        changed_metadata = json.loads(json.dumps(original_journal))
+        changed_metadata["metadata_patch"][0]["added"] = ["CORRUPTED METADATA"]
+        changed_metadata["metadata_patch_sha256"] = cli._payload_sha256(
+            changed_metadata["metadata_patch"]
+        )
+        variants.append(changed_metadata)
+
+        for variant in variants:
+            variant["commit_sha256"] = cli._payload_sha256(
+                cli._turn_commit_identity_payload(variant)
+            )
+            journal_path.write_text(
+                json.dumps(variant, ensure_ascii=False), encoding="utf-8"
+            )
+            with self.assertRaises(cli.OpenLearnError) as caught:
+                cli.recover_turn_commit(slug)
+            self.assertNotIn("CORRUPTED", str(caught.exception))
+            self.assertNotIn("private", str(caught.exception).lower())
+            self.assertEqual(cli.topic_path(slug).read_bytes(), topic_before)
+            self.assertEqual(cli.topic_state_path(slug).read_bytes(), state_before)
+            self.assertEqual(
+                events_path.read_bytes() if events_path.exists() else None,
+                events_before,
+            )
+            self.assertTrue(journal_path.exists())
+
+    def test_legacy_state_receipts_upgrade_without_authorizing_replay(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Receipt Upgrade", goal="Learn safely"))
+        slug = "receipt-upgrade"
+        before = cli.load_state(slug)
+        after = {**before, "consecutive_misses": 1}
+        old_id = "turn_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        old_entry = cli._session_entry(
+            "chat",
+            "legacy learner answer",
+            "legacy tutor response",
+            created="2026-07-25 12:00 UTC",
+            mutation_id=old_id,
+        )
+        original_checkpoint = cli._turn_commit_checkpoint
+        cli._turn_commit_checkpoint = (
+            lambda stage: (_ for _ in ()).throw(KeyboardInterrupt())
+            if stage == "after_journal"
+            else None
+        )
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                cli._commit_projected_turn(
+                    slug,
+                    before,
+                    after,
+                    old_entry,
+                    [(slug, "answer_judged", {"status": "needs_work"})],
+                    old_id,
+                )
+        finally:
+            cli._turn_commit_checkpoint = original_checkpoint
+
+        journal_path = cli.topic_turn_journal_path(slug)
+        current_journal = json.loads(journal_path.read_text(encoding="utf-8"))
+        legacy_journal = {
+            key: value
+            for key, value in current_journal.items()
+            if key not in {"topic_generation", "commit_sha256"}
+        }
+        cli.recover_turn_commit(slug)
+        legacy_state = cli._load_state_unlocked(slug)
+        legacy_state["_turn_receipts"] = {
+            old_id: current_journal["state_patch_sha256"]
+        }
+        legacy_state.pop("_turn_receipts_schema", None)
+        cli.write_text_atomic(
+            cli.topic_state_path(slug),
+            json.dumps(legacy_state, indent=2, sort_keys=True) + "\n",
+        )
+
+        upgraded = cli.load_state(slug)
+        self.assertEqual(upgraded["_turn_receipts_schema"], 2)
+        self.assertEqual(upgraded["_turn_receipts"], {})
+        self.assertEqual(upgraded["_legacy_turn_receipts_schema"], 1)
+        self.assertEqual(upgraded["_legacy_turn_receipts"], [old_id])
+        self.assertEqual(cli.load_state(slug), upgraded)
+
+        new_id = "turn_cccccccccccccccccccccccccccccccc"
+        new_entry = cli._session_entry(
+            "chat",
+            "new learner answer",
+            "new tutor response",
+            created="2026-07-25 12:01 UTC",
+            mutation_id=new_id,
+        )
+        cli._commit_projected_turn(slug, upgraded, upgraded, new_entry, [], new_id)
+        after_new_turn = cli.load_state(slug)
+        topic_before = cli.topic_path(slug).read_bytes()
+        state_before = cli.topic_state_path(slug).read_bytes()
+        events_before = cli.topic_events_path(slug).read_bytes()
+
+        journal_path.write_text(
+            json.dumps(legacy_journal, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        os.chmod(journal_path, 0o600)
+        self.assertFalse(cli.recover_turn_commit(slug))
+        self.assertFalse(journal_path.exists())
+        self.assertEqual(cli.topic_path(slug).read_bytes(), topic_before)
+        self.assertEqual(cli.topic_state_path(slug).read_bytes(), state_before)
+        self.assertEqual(cli.topic_events_path(slug).read_bytes(), events_before)
+        self.assertEqual(cli.load_state(slug), after_new_turn)
+        self.assertEqual(cli.read_topic(slug).body.count(f"openlearn-turn:{old_id}"), 1)
+
+    def test_corrupt_legacy_receipts_fail_only_the_affected_topic(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Corrupt Legacy", goal="Learn safely"))
+        call_silent(cli.cmd_new, Namespace(topic="Healthy Topic", goal="Learn safely"))
+        corrupt = cli._load_state_unlocked("corrupt-legacy")
+        corrupt["_turn_receipts"] = {"not-a-turn-id": "SECRET"}
+        corrupt.pop("_turn_receipts_schema", None)
+        cli.write_text_atomic(
+            cli.topic_state_path("corrupt-legacy"),
+            json.dumps(corrupt, indent=2, sort_keys=True) + "\n",
+        )
+
+        with self.assertRaises(cli.OpenLearnError) as caught:
+            cli.load_state("corrupt-legacy")
+        self.assertNotIn("SECRET", str(caught.exception))
+        self.assertIsInstance(cli.load_state("healthy-topic"), dict)
+
+    def test_atomic_replace_and_unlink_fsync_parent_directory(self) -> None:
+        path = Path(self.home.name) / "durable.txt"
+        calls: list[str] = []
+        original_replace = os.replace
+
+        def recording_replace(source, target) -> None:
+            calls.append("replace")
+            original_replace(source, target)
+
+        with (
+            mock.patch.object(os, "replace", side_effect=recording_replace),
+            mock.patch.object(
+                cli,
+                "fsync_directory",
+                side_effect=lambda _directory: calls.append("fsync"),
+            ),
+        ):
+            cli.write_text_atomic(path, "durable")
+        self.assertEqual(calls, ["replace", "fsync"])
+
+        calls.clear()
+        with mock.patch.object(
+            cli,
+            "fsync_directory",
+            side_effect=lambda _directory: calls.append("fsync"),
+        ):
+            self.assertTrue(cli.durable_unlink(path))
+        self.assertEqual(calls, ["fsync"])
+
+    def test_graded_turn_projects_without_writes_during_provider_calls(
+        self,
+    ) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Projection", goal="Learn pointers"))
+        slug = "projection"
+        path = cli.topic_path(slug)
+        metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+        metadata = dict(metadata)
+        metadata["current_focus"] = "pointer scan"
+        cli.write_topic(path, metadata, body)
+        cli.save_pending_question(
+            cli.read_topic(slug),
+            "",
+            "",
+            question_text="Trace the pointer scan.",
+        )
+        state = cli.load_state(slug)
+        state["concept_attempts"] = {
+            "pointer-scan": {"attempts": 1, "correct_sum": 0.5}
+        }
+        cli.save_state(slug, state)
+        topic_before = path.read_text(encoding="utf-8")
+        state_before = cli.topic_state_path(slug).read_text(encoding="utf-8")
+        judgment = {
+            "message_kind": "answer",
+            "last_answer_status": "partial",
+            "answer_score": 0.5,
+            "answer_kind": "production",
+            "is_transfer": True,
+            "known_add": ["pointer invariants"],
+        }
+
+        def judge_without_persistence(*_args, **_kwargs) -> str:
+            self.assertEqual(path.read_text(encoding="utf-8"), topic_before)
+            self.assertEqual(
+                cli.topic_state_path(slug).read_text(encoding="utf-8"),
+                state_before,
+            )
+            return json.dumps(judgment)
+
+        def tutor_with_concurrent_edits(*_args, **_kwargs) -> str:
+            self.assertEqual(path.read_text(encoding="utf-8"), topic_before)
+            self.assertEqual(
+                cli.topic_state_path(slug).read_text(encoding="utf-8"),
+                state_before,
+            )
+            cli.append_session(
+                cli.read_topic(slug),
+                "chat",
+                "concurrent learner prompt",
+                "concurrent tutor response",
+            )
+            concurrent_metadata, concurrent_body = cli.parse_topic(
+                path.read_text(encoding="utf-8")
+            )
+            concurrent_metadata = dict(concurrent_metadata)
+            concurrent_metadata["known"] = ["concurrent stable concept"]
+            with cli.file_lock(path):
+                cli.write_text_atomic(
+                    path, cli.format_topic(concurrent_metadata, concurrent_body)
+                )
+            concurrent = cli.load_state(slug)
+            record = concurrent["concept_attempts"]["pointer-scan"]
+            record["attempts"] += 2
+            record["correct_sum"] += 1.0
+            concurrent["concurrent_note"] = {"kept": True}
+            cli.save_state(slug, concurrent)
+            return "**Hint:**\nTrack both indexes.\n\n**Check:**\nTrace the pointer scan again."
+
+        with (
+            mock.patch.object(cli, "call_openai", side_effect=judge_without_persistence),
+            mock.patch.object(
+                cli, "call_openai_streaming", side_effect=tutor_with_concurrent_edits
+            ),
+        ):
+            cli.ask_topic(
+                slug,
+                "I moved only the left pointer.",
+                "test-model",
+                output_func=lambda _text: None,
+            )
+
+        final_topic = cli.read_topic(slug)
+        final_state = cli.load_state(slug)
+        record = final_state["concept_attempts"]["pointer-scan"]
+        self.assertEqual(record["attempts"], 4)
+        self.assertEqual(record["correct_sum"], 2.0)
+        self.assertEqual(final_state["concurrent_note"], {"kept": True})
+        self.assertEqual(
+            final_topic.metadata["known"],
+            ["concurrent stable concept", "pointer invariants"],
+        )
+        self.assertIn("concurrent learner prompt", final_topic.body)
+        self.assertEqual(
+            final_topic.metadata["pending_question"]["question"],
+            "**Check:**\nTrace the pointer scan again.",
+        )
+
+    def test_restart_reconciles_answer_committed_before_prompt_cleanup_failure(
+        self,
+    ) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Python", goal="Learn functions"))
+        path = cli.topic_path("python")
+        metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+        metadata = dict(metadata)
+        metadata["current_focus"] = "return values"
+        cli.write_topic(path, metadata, body)
+        cli.save_pending_question(
+            cli.read_topic("python"),
+            "",
+            "",
+            question_text="What does a return value do?",
+        )
+        answer = "It sends the result back to the caller."
+        cli.save_pending_learner_prompt("python", answer)
+        judgment = {
+            "message_kind": "answer",
+            "last_answer_status": "correct",
+            "answer_score": 1.0,
+            "answer_kind": "production",
+            "is_transfer": True,
+        }
+        cleanup_calls = []
+
+        def fail_cleanup(stage: str) -> None:
+            if stage == "before_cleanup":
+                cleanup_calls.append(True)
+                raise OSError("cleanup interrupted")
+
+        with (
+            mock.patch.object(cli, "call_openai", return_value=json.dumps(judgment)),
+            mock.patch.object(
+                cli,
+                "call_openai_streaming",
+                return_value="**Feedback:**\nCorrect.",
+            ),
+            mock.patch.object(cli, "_turn_commit_checkpoint", side_effect=fail_cleanup),
+        ):
+            with self.assertRaisesRegex(OSError, "cleanup interrupted"):
+                cli.ask_topic(
+                    "python",
+                    answer,
+                    "test-model",
+                    output_func=lambda _text: None,
+                    pending_learner_prompt=answer,
+                )
+
+        self.assertEqual(cleanup_calls, [True])
+        self.assertTrue(cli.topic_turn_journal_path("python").exists())
+        ask_calls = []
+        original_ask = cli.ask_topic
+        cli.ask_topic = lambda *_args, **_kwargs: ask_calls.append(True) or ""
+        try:
+            call_silent(
+                cli.run_repl,
+                input_func=iter_input(["/q"]),
+                output_func=lambda _text: None,
+                show_intro=False,
+            )
+        finally:
+            cli.ask_topic = original_ask
+
+        self.assertEqual(ask_calls, [])
+        self.assertFalse(cli.topic_turn_journal_path("python").exists())
+        self.assertIsNone(cli.load_pending_learner_prompt("python"))
+        updated = cli.read_topic("python")
+        attempts = updated.metadata["concept_attempts"]["return-values"]
+        self.assertEqual(attempts["attempts"], 1)
+        self.assertEqual(updated.body.count("**Feedback:**\nCorrect."), 1)
+        judged_events = [
+            event
+            for event in cli.load_event_log(cli.topic_events_path("python"))
+            if event["event_type"] == "answer_judged"
+        ]
+        self.assertEqual(len(judged_events), 1)
 
     def test_repl_state_write_failure_does_not_dispatch_and_keeps_answer_in_memory(
         self,
@@ -6152,6 +7577,361 @@ class InteractiveTests(unittest.TestCase):
                     cli.extract_pending_question_text(conversational_question),
                     "",
                 )
+
+    def test_repl_prompt_uses_authoritative_pending_question_state(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
+        topic = cli.read_topic("vim")
+        cli.save_pending_question(topic, "**Check:**\nWhat does `j` do?", "")
+
+        self.assertEqual(cli.repl_prompt_for_answer("**Hint:** Try again."), "Answer> ")
+        self.assertEqual(cli.repl_prompt_for_answer("**Example:** A worked example."), "Answer> ")
+
+        cli.save_pending_question(
+            cli.read_topic("vim"),
+            "**Check:**\nWhich key moves left?",
+            "",
+        )
+        self.assertEqual(cli.repl_prompt_for_answer("unrelated prose"), "Answer> ")
+
+        cli.clear_pending_question(cli.read_topic("vim"), reason="test")
+        self.assertEqual(cli.repl_prompt_for_answer("**Check:** stale prose?"), "openlearn> ")
+
+    def test_malformed_remediation_is_repaired_before_display_or_state_commit(self) -> None:
+        invalid_responses = (
+            "**Hint:** Think about cursor direction.\n\nAction: Retry with one sentence.",
+            "**Hint:** Which direction does `j` move?",
+            "**Example:** `h` moves left.\n\nWhich direction does `j` move?",
+            "**Check:** What does `h` do?\n\n**Check:** What does `j` do?",
+        )
+        for index, invalid in enumerate(invalid_responses):
+            with self.subTest(invalid=invalid):
+                slug = f"vim-contract-{index}"
+                call_silent(cli.cmd_new, Namespace(topic=slug, goal="Learn motions"))
+                path = cli.topic_path(slug)
+                metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+                metadata = dict(metadata)
+                metadata["current_focus"] = "cursor movement"
+                cli.write_topic(path, metadata, body)
+                cli.save_pending_question(
+                    cli.read_topic(slug),
+                    "**Check:**\nWhat does `j` do?",
+                    "",
+                )
+                answer = "It probably moves."
+                cli.save_pending_learner_prompt(slug, answer)
+                valid = "**Check:**\nWhich direction does `k` move?"
+                judgment = {
+                    "message_kind": "answer",
+                    "last_answer_status": "partial",
+                    "answer_score": 0.5,
+                    "answer_kind": "production",
+                    "is_transfer": False,
+                }
+                tutor_responses = iter([invalid, valid])
+
+                def tutor(*_args, output_func, **_kwargs) -> str:
+                    response = next(tutor_responses)
+                    output_func(response)
+                    return response
+
+                tutor_mock = mock.Mock(side_effect=tutor)
+                output = []
+
+                with (
+                    mock.patch.object(
+                        cli,
+                        "call_openai",
+                        return_value=json.dumps(judgment),
+                    ),
+                    mock.patch.object(
+                        cli,
+                        "call_openai_streaming",
+                        tutor_mock,
+                    ),
+                    mock.patch.object(cli, "maybe_suggest_videos"),
+                ):
+                    cli.ask_topic(
+                        slug,
+                        answer,
+                        "test-model",
+                        output_func=output.append,
+                        pending_learner_prompt=answer,
+                    )
+
+                self.assertEqual(tutor_mock.call_count, 2)
+                self.assertNotIn(invalid, "\n".join(output))
+                self.assertIn(valid, output)
+                updated = cli.read_topic(slug)
+                self.assertNotIn(invalid, updated.body)
+                self.assertEqual(
+                    updated.metadata["pending_question"]["question"],
+                    cli.extract_pending_question_text(valid),
+                )
+                self.assertEqual(
+                    updated.metadata["pending_question"]["question"],
+                    cli.extract_pending_question_text(output[-1]),
+                )
+                transitions = [
+                    event
+                    for event in cli.load_event_log(cli.topic_events_path(slug))
+                    if event["event_type"] == "pending_question_changed"
+                ]
+                self.assertEqual(transitions[-1]["data"]["transition"], "replaced")
+                self.assertNotIn(
+                    "missing_explicit_check",
+                    [event["data"].get("reason") for event in transitions],
+                )
+
+    def test_two_malformed_remediation_responses_preserve_gate_and_answer(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
+        path = cli.topic_path("vim")
+        metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+        metadata = dict(metadata)
+        metadata["current_focus"] = "cursor movement"
+        cli.write_topic(path, metadata, body)
+        original_check = "**Check:**\nWhat does `j` do?"
+        cli.save_pending_question(cli.read_topic("vim"), original_check, "")
+        answer = "It probably moves."
+        cli.save_pending_learner_prompt("vim", answer)
+        activity = cli.propose_topic_activity(
+            "vim",
+            {
+                "domain": "coding",
+                "kind": "python_drill",
+                "objective": "Practice one small loop.",
+                "concept_ids": ["cursor-movement"],
+                "requested_evidence": ["pytest_result"],
+                "scaffolding_level": 1,
+                "purpose": "practice",
+                "domain_payload": {
+                    "title": "Concurrent practice",
+                    "language": "python",
+                    "tool_requests": [],
+                },
+            },
+        )
+        before_body = cli.read_topic("vim").body
+        events_before = cli.load_event_log(cli.topic_events_path("vim"))
+        judgment = {
+            "message_kind": "answer",
+            "last_answer_status": "partial",
+            "answer_score": 0.5,
+            "answer_kind": "production",
+            "is_transfer": False,
+        }
+
+        tutor_calls = []
+
+        def invalid_tutor(*_args, **_kwargs) -> str:
+            tutor_calls.append(True)
+            if len(tutor_calls) == 1:
+                cli.accept_topic_activity("vim", activity, learner_confirmed=True)
+                current_metadata, current_body = cli.parse_topic(
+                    path.read_text(encoding="utf-8")
+                )
+                current_metadata = dict(current_metadata)
+                current_metadata["concurrent_note"] = "keep me"
+                path.write_text(
+                    cli.format_topic(current_metadata, current_body),
+                    encoding="utf-8",
+                )
+                cli.log_event("vim", "concurrent_update", {"keep": True})
+                return "**Hint:** Which direction?"
+            return "**Example:** Try again.\n\nAction: Answer now."
+
+        with (
+            mock.patch.object(cli, "call_openai", return_value=json.dumps(judgment)),
+            mock.patch.object(
+                cli,
+                "call_openai_streaming",
+                side_effect=invalid_tutor,
+            ),
+        ):
+            with self.assertRaisesRegex(cli.OpenLearnError, "learner-action contract"):
+                cli.ask_topic(
+                    "vim",
+                    answer,
+                    "test-model",
+                    output_func=lambda _text: None,
+                    pending_learner_prompt=answer,
+                )
+
+        updated = cli.read_topic("vim")
+        self.assertEqual(updated.body, before_body)
+        self.assertEqual(
+            updated.metadata["pending_question"]["question"],
+            cli.extract_pending_question_text(original_check),
+        )
+        self.assertEqual(cli.load_pending_learner_prompt("vim"), answer)
+        self.assertEqual(updated.metadata["concurrent_note"], "keep me")
+        self.assertEqual(cli.load_state("vim")["active_activity"]["status"], "accepted")
+        events_after = cli.load_event_log(cli.topic_events_path("vim"))
+        self.assertEqual(events_after[: len(events_before)], events_before)
+        self.assertTrue(
+            any(event["event_type"] == "concurrent_update" for event in events_after)
+        )
+        self.assertFalse(
+            any(event["event_type"] == "answer_judged" for event in events_after)
+        )
+
+    def test_remediation_explicit_check_atomically_replaces_displayed_task(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
+        topic = cli.read_topic("vim")
+        cli.save_pending_question(topic, "**Check:**\nWhat does `j` do?", "")
+        response = (
+            "A small scaffold: `h` moves left.\n\n"
+            "**Check:**\nWhich direction does `k` move?"
+        )
+
+        cli.print_and_append_model_answer(
+            cli.read_topic("vim"),
+            "chat",
+            "partial answer",
+            response,
+        )
+
+        pending = cli.read_topic("vim").metadata["pending_question"]
+        self.assertEqual(pending["question"], cli.extract_pending_question_text(response))
+        self.assertIn("Which direction does `k` move?", pending["question"])
+
+    def test_side_intents_do_not_require_remediation_check(self) -> None:
+        metadata = {
+            "last_answer_status": "partial",
+            "pending_remediation": {"stage": "hint"},
+        }
+        self.assertTrue(
+            cli.tutor_turn_requires_check(metadata, message_kind="answer")
+        )
+        for message_kind in ("question", "request", "confusion"):
+            with self.subTest(message_kind=message_kind):
+                self.assertFalse(
+                    cli.tutor_turn_requires_check(
+                        metadata,
+                        message_kind=message_kind,
+                    )
+                )
+                self.assertIsNotNone(
+                    cli.tutor_answer_contract_error(
+                        "**Check:**\nExplain the retry now.",
+                        require_check=False,
+                        enforce_action_labels=False,
+                        forbid_check=True,
+                    )
+                )
+
+    def test_side_question_during_remediation_preserves_check_for_exact_retry(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
+        path = cli.topic_path("vim")
+        metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+        metadata = dict(metadata)
+        metadata.update(
+            {
+                "current_focus": "cursor movement",
+                "last_answer_status": "partial",
+                "pending_remediation": {"stage": "hint", "concept_id": "cursor-movement"},
+            }
+        )
+        cli.write_topic(path, metadata, body)
+        check = "**Check:**\nWhich direction does `j` move?"
+        cli.save_pending_question(cli.read_topic("vim"), check, "")
+        original_pending = cli.read_topic("vim").metadata["pending_question"]
+        tutor = mock.Mock(return_value="**Feedback:**\nIt refers to moving down.")
+
+        with (
+            mock.patch.object(
+                cli,
+                "call_openai",
+                return_value=json.dumps({"message_kind": "question"}),
+            ),
+            mock.patch.object(cli, "call_openai_streaming", tutor),
+            mock.patch.object(cli, "maybe_suggest_videos"),
+        ):
+            cli.ask_topic(
+                "vim",
+                "What does that term mean?",
+                "test-model",
+                output_func=lambda _text: None,
+            )
+
+        tutor.assert_called_once()
+        self.assertEqual(
+            cli.read_topic("vim").metadata["pending_question"],
+            original_pending,
+        )
+
+        judgment = {
+            "message_kind": "answer",
+            "last_answer_status": "correct",
+            "answer_score": 1.0,
+            "answer_kind": "production",
+            "is_transfer": False,
+        }
+        with (
+            mock.patch.object(cli, "call_openai", return_value=json.dumps(judgment)),
+            mock.patch.object(
+                cli,
+                "call_openai_streaming",
+                return_value="**Feedback:**\nCorrect.",
+            ),
+            mock.patch.object(cli, "maybe_suggest_videos"),
+        ):
+            cli.ask_topic(
+                "vim",
+                "It moves down.",
+                "test-model",
+                output_func=lambda _text: None,
+            )
+
+        self.assertNotIn("pending_question", cli.read_topic("vim").metadata)
+
+    def test_imperative_evidence_detection_is_structural(self) -> None:
+        positives = (
+            "**Feedback:** Good start.\nNow explain why it works.",
+            "**Example:** Here is one trace.\nWrite the next pointer positions.",
+            "**Hint:** Focus on the invariant.\nTrace the next two steps.",
+            "Action: Compare the two approaches.",
+            "Your turn: implement the base case.",
+            "Predict the result.",
+            "Walk through the loop.",
+            "Find the first failing case.",
+            "Code the two-pointer solution.",
+            "Prove the loop invariant.",
+            "Choose the better complexity.",
+            "State the base case.",
+            "Please debug the boundary condition.",
+            "Your turn: test the empty input.",
+            "Test the solution catches regressions.",
+        )
+        for text in positives:
+            with self.subTest(text=text):
+                self.assertTrue(cli.response_requests_learner_evidence(text))
+        negatives = (
+            "**Lesson:** I will explain why it works.",
+            "**Example:** This trace shows the next pointer positions.",
+            "**Next:**\nPress Enter to continue, or type what you want more help with.",
+            "**Feedback:** The implementation uses a base case.",
+            "**Lesson:** Compare-and-swap is atomic.",
+            "**Lesson:** List comprehensions are concise.",
+            "**Lesson:** Trace tables help debugging.",
+            "**Example:** Compare-and-set is useful here.",
+            "**Feedback:** List operations are linear in this case.",
+            "**Lesson:** Build systems coordinate artifacts.",
+            "**Lesson:** Run queues serialize work.",
+            "**Lesson:** Apply functions transform values.",
+            "**Lesson:** Debug symbols improve diagnostics.",
+            "**Lesson:** Analyze tools improve performance.",
+            "**Lesson:** Optimize passes reduce allocations.",
+            "**Lesson:** Find operations locate elements.",
+            "**Lesson:** Prove tactics support formal verification.",
+            "**Lesson:** Code review improves quality.",
+            "**Lesson:** Test suites catch regressions.",
+            "**Lesson:** Design patterns guide structure.",
+            "**Lesson:** State stores persist values.",
+            "**Lesson:** Choose helpers are uncommon.",
+        )
+        for text in negatives:
+            with self.subTest(text=text):
+                self.assertFalse(cli.response_requests_learner_evidence(text))
 
     def test_conversational_questions_preserve_pending_check_until_explicit_replacement(
         self,
@@ -7411,7 +9191,7 @@ class InteractiveTests(unittest.TestCase):
             }
 
         for stage in ("after_journal", "after_state", "after_event"):
-            slug = f"journal-{stage}"
+            slug = cli.slugify(f"journal-{stage}")
             call_silent(cli.cmd_new, Namespace(topic=slug, goal="practice functions"))
 
             def fail_at_stage(current: str, *, target: str = stage) -> None:
@@ -7438,6 +9218,247 @@ class InteractiveTests(unittest.TestCase):
                     len({event["data"]["activity_update_id"] for event in events}),
                     1,
                 )
+
+    def test_activity_journal_generation_blocks_replay_into_recreated_topic(self) -> None:
+        slug = "activity-generation"
+        call_silent(cli.cmd_new, Namespace(topic=slug, goal="practice functions"))
+        request = {
+            "domain": "coding",
+            "kind": "python_drill",
+            "objective": "Practice a small function.",
+            "concept_ids": ["functions"],
+            "requested_evidence": ["pytest_result"],
+            "scaffolding_level": 1,
+            "purpose": "practice",
+            "domain_payload": {
+                "title": "Old activity",
+                "language": "python",
+                "tool_requests": [],
+            },
+        }
+        original_checkpoint = cli._activity_update_checkpoint
+        cli._activity_update_checkpoint = (
+            lambda stage: (_ for _ in ()).throw(KeyboardInterrupt())
+            if stage == "after_journal"
+            else None
+        )
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                cli.propose_topic_activity(slug, request)
+        finally:
+            cli._activity_update_checkpoint = original_checkpoint
+        journal_path = cli.topic_activity_journal_path(slug)
+        stale_journal = journal_path.read_bytes()
+        old_generation = json.loads(stale_journal)["topic_generation"]
+
+        cli.delete_topic_files(slug)
+        call_silent(cli.cmd_new, Namespace(topic=slug, goal="new topic"))
+        self.assertNotEqual(
+            cli.read_topic(slug).metadata["topic_generation"], old_generation
+        )
+        journal_path.write_bytes(stale_journal)
+        state_before = cli.topic_state_path(slug).read_bytes()
+        events_path = cli.topic_events_path(slug)
+        events_before = events_path.read_bytes() if events_path.exists() else None
+
+        state = cli.load_state(slug)
+        self.assertNotIn("active_activity", state)
+        self.assertFalse(journal_path.exists())
+        self.assertEqual(cli.topic_state_path(slug).read_bytes(), state_before)
+        self.assertEqual(
+            events_path.read_bytes() if events_path.exists() else None,
+            events_before,
+        )
+
+    def test_legacy_activity_journal_only_completes_with_durable_state_marker(
+        self,
+    ) -> None:
+        slug = "legacy-activity"
+        call_silent(cli.cmd_new, Namespace(topic=slug, goal="practice functions"))
+        request = {
+            "domain": "coding",
+            "kind": "python_drill",
+            "objective": "Practice a small function.",
+            "concept_ids": ["functions"],
+            "requested_evidence": ["pytest_result"],
+            "scaffolding_level": 1,
+            "purpose": "practice",
+            "domain_payload": {
+                "title": "Legacy activity",
+                "language": "python",
+                "tool_requests": [],
+            },
+        }
+        original_checkpoint = cli._activity_update_checkpoint
+        cli._activity_update_checkpoint = (
+            lambda stage: (_ for _ in ()).throw(KeyboardInterrupt())
+            if stage == "after_state"
+            else None
+        )
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                cli.propose_topic_activity(slug, request)
+        finally:
+            cli._activity_update_checkpoint = original_checkpoint
+        journal_path = cli.topic_activity_journal_path(slug)
+        legacy = json.loads(journal_path.read_text(encoding="utf-8"))
+        legacy["schema_version"] = 1
+        legacy.pop("topic_generation")
+        journal_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+        recovered = cli.load_state(slug)
+        self.assertEqual(recovered["active_activity"]["status"], "proposed")
+        self.assertFalse(journal_path.exists())
+        events = cli.load_event_log(cli.topic_events_path(slug))
+        self.assertEqual(
+            len(
+                [
+                    event
+                    for event in events
+                    if event.get("data", {}).get("activity_update_id")
+                    == legacy["update_id"]
+                ]
+            ),
+            1,
+        )
+
+        other_slug = "ambiguous-legacy-activity"
+        call_silent(cli.cmd_new, Namespace(topic=other_slug, goal="practice functions"))
+        cli._activity_update_checkpoint = (
+            lambda stage: (_ for _ in ()).throw(KeyboardInterrupt())
+            if stage == "after_journal"
+            else None
+        )
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                cli.propose_topic_activity(other_slug, request)
+        finally:
+            cli._activity_update_checkpoint = original_checkpoint
+        ambiguous_path = cli.topic_activity_journal_path(other_slug)
+        ambiguous = json.loads(ambiguous_path.read_text(encoding="utf-8"))
+        ambiguous["schema_version"] = 1
+        ambiguous.pop("topic_generation")
+        ambiguous_path.write_text(json.dumps(ambiguous), encoding="utf-8")
+        state_before = cli.topic_state_path(other_slug).read_bytes()
+
+        self.assertNotIn("active_activity", cli.load_state(other_slug))
+        self.assertFalse(ambiguous_path.exists())
+        self.assertEqual(cli.topic_state_path(other_slug).read_bytes(), state_before)
+
+    def test_corrupt_activity_journal_missing_generation_fails_before_writes(
+        self,
+    ) -> None:
+        slug = "activity-missing-generation"
+        call_silent(cli.cmd_new, Namespace(topic=slug, goal="practice functions"))
+        request = {
+            "domain": "coding",
+            "kind": "python_drill",
+            "objective": "Practice a small function.",
+            "concept_ids": ["functions"],
+            "requested_evidence": ["pytest_result"],
+            "scaffolding_level": 1,
+            "purpose": "practice",
+            "domain_payload": {
+                "title": "Missing generation",
+                "language": "python",
+                "tool_requests": [],
+            },
+        }
+        original_checkpoint = cli._activity_update_checkpoint
+        cli._activity_update_checkpoint = (
+            lambda stage: (_ for _ in ()).throw(KeyboardInterrupt())
+            if stage == "after_journal"
+            else None
+        )
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                cli.propose_topic_activity(slug, request)
+        finally:
+            cli._activity_update_checkpoint = original_checkpoint
+        journal_path = cli.topic_activity_journal_path(slug)
+        corrupt = json.loads(journal_path.read_text(encoding="utf-8"))
+        corrupt.pop("topic_generation")
+        journal_path.write_text(json.dumps(corrupt), encoding="utf-8")
+        state_before = cli.topic_state_path(slug).read_bytes()
+        events_path = cli.topic_events_path(slug)
+        events_before = events_path.read_bytes() if events_path.exists() else None
+
+        with self.assertRaises(cli.OpenLearnError):
+            cli.load_state(slug)
+        self.assertEqual(cli.topic_state_path(slug).read_bytes(), state_before)
+        self.assertEqual(
+            events_path.read_bytes() if events_path.exists() else None,
+            events_before,
+        )
+        self.assertTrue(journal_path.exists())
+
+    def test_topic_deletion_waits_for_in_flight_activity_journal(self) -> None:
+        slug = "activity-delete-race"
+        call_silent(cli.cmd_new, Namespace(topic=slug, goal="practice functions"))
+        request = {
+            "domain": "coding",
+            "kind": "python_drill",
+            "objective": "Practice a small function.",
+            "concept_ids": ["functions"],
+            "requested_evidence": ["pytest_result"],
+            "scaffolding_level": 1,
+            "purpose": "practice",
+            "domain_payload": {
+                "title": "Delete race",
+                "language": "python",
+                "tool_requests": [],
+            },
+        }
+        journal_ready = threading.Event()
+        allow_activity = threading.Event()
+        deletion_done = threading.Event()
+        errors: list[BaseException] = []
+        original_checkpoint = cli._activity_update_checkpoint
+
+        def pause_after_journal(stage: str) -> None:
+            if stage == "after_journal":
+                journal_ready.set()
+                allow_activity.wait(timeout=5)
+
+        def propose() -> None:
+            try:
+                cli.propose_topic_activity(slug, request)
+            except BaseException as exc:
+                errors.append(exc)
+
+        def delete() -> None:
+            try:
+                cli.delete_topic_files(slug)
+                deletion_done.set()
+            except BaseException as exc:
+                errors.append(exc)
+
+        cli._activity_update_checkpoint = pause_after_journal
+        proposal_thread = threading.Thread(target=propose)
+        deletion_thread = threading.Thread(target=delete)
+        try:
+            proposal_thread.start()
+            self.assertTrue(journal_ready.wait(timeout=5))
+            deletion_thread.start()
+            self.assertFalse(deletion_done.wait(timeout=0.05))
+            allow_activity.set()
+            proposal_thread.join(timeout=5)
+            deletion_thread.join(timeout=5)
+        finally:
+            cli._activity_update_checkpoint = original_checkpoint
+            allow_activity.set()
+
+        self.assertFalse(proposal_thread.is_alive())
+        self.assertFalse(deletion_thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertTrue(deletion_done.is_set())
+        for path in (
+            cli.topic_path(slug),
+            cli.topic_state_path(slug),
+            cli.topic_events_path(slug),
+            cli.topic_activity_journal_path(slug),
+        ):
+            self.assertFalse(path.exists(), path)
 
     def test_activity_journal_recovers_an_event_write_failure(self) -> None:
         slug = "journal-event-failure"
@@ -7577,13 +9598,20 @@ class InteractiveTests(unittest.TestCase):
         }
         proposed = cli.propose_topic_activity(topic.slug, request)
         state_snapshot = cli.topic_state_path(topic.slug).read_text(encoding="utf-8")
+        metadata_snapshot, body_snapshot = cli.parse_topic(
+            topic.path.read_text(encoding="utf-8")
+        )
         accepted = cli.accept_topic_activity(topic.slug, proposed, learner_confirmed=True)
         active = cli.transition_topic_activity(topic.slug, accepted, "active")
 
-        cli.restore_prejudgment_turn_state(
+        cli.rollback_turn_owned_changes(
             topic,
-            topic.path.read_text(encoding="utf-8"),
-            state_snapshot,
+            dict(metadata_snapshot),
+            body_snapshot,
+            json.loads(state_snapshot),
+            dict(metadata_snapshot),
+            body_snapshot,
+            json.loads(state_snapshot),
         )
 
         restored = cli.load_state(topic.slug)["active_activity"]
@@ -7606,6 +9634,9 @@ class InteractiveTests(unittest.TestCase):
         }
         proposed = cli.propose_topic_activity(topic.slug, request)
         state_snapshot = cli.topic_state_path(topic.slug).read_text(encoding="utf-8")
+        metadata_snapshot, body_snapshot = cli.parse_topic(
+            topic.path.read_text(encoding="utf-8")
+        )
 
         def crash_after_journal(stage: str) -> None:
             if stage == "after_journal":
@@ -7617,10 +9648,14 @@ class InteractiveTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "crash after journal"):
                 cli.accept_topic_activity(topic.slug, proposed, learner_confirmed=True)
 
-        cli.restore_prejudgment_turn_state(
+        cli.rollback_turn_owned_changes(
             topic,
-            topic.path.read_text(encoding="utf-8"),
-            state_snapshot,
+            dict(metadata_snapshot),
+            body_snapshot,
+            json.loads(state_snapshot),
+            dict(metadata_snapshot),
+            body_snapshot,
+            json.loads(state_snapshot),
         )
 
         restored = cli.load_state(topic.slug)["active_activity"]

@@ -73,6 +73,26 @@
       "notes": "The prerequisite response introduces many new concepts and demands several actions."
     },
     {
+      "name": "bad_ignores_reduced_effort_request",
+      "grade": "bad",
+      "learner_message": "I understand the method, but I do not want to trace every step. Can we make this smaller?",
+      "tutor_response": "**Example:** Here is a complete six-step trace of a second problem, including every pointer position and sum.\n**Check:** Now trace all eight steps of the original problem.",
+      "state_before": {"current_focus": "algorithm tracing", "last_answer_status": "partial"},
+      "state_after": {"current_focus": "algorithm tracing", "last_answer_status": "partial"},
+      "expected": {"pass": false, "max_score": 0.69, "hard_failures": []},
+      "notes": "The tutor disregards an explicit effort constraint instead of shrinking to one scaffold and one small check."
+    },
+    {
+      "name": "bad_factual_boundary_claim",
+      "grade": "bad",
+      "learner_message": "The loop ends when both indices are equal.",
+      "tutor_response": "**Feedback:** Correct. When the indices are equal, the left index has crossed past the right index.",
+      "state_before": {"current_focus": "loop boundaries", "last_answer_status": ""},
+      "state_after": {"current_focus": "loop boundaries", "last_answer_status": "correct"},
+      "expected": {"pass": false, "max_score": 0.69, "hard_failures": []},
+      "notes": "The tutor makes a general factual error: equal boundaries have met, not crossed."
+    },
+    {
       "name": "bad_false_mastery",
       "grade": "bad",
       "learner_message": "I think recursion just stops after enough calls.",
