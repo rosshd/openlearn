@@ -5828,17 +5828,12 @@ def ask_topic(
         else ("" if needs_judgment else classify_ungraded_learner_message(prompt))
     )
     queued_events: list[tuple[str, str, dict[str, object]]] = []
-    topic_before_judgment = topic.path.read_text(encoding="utf-8") if needs_judgment else ""
-    state_path = topic_state_path(topic.slug)
-    state_before_judgment = (
-        state_path.read_text(encoding="utf-8") if needs_judgment and state_path.exists() else None
-    )
-    events_path = topic_events_path(topic.slug)
-    events_before_judgment = (
-        events_path.read_text(encoding="utf-8")
-        if needs_judgment and events_path.exists()
-        else None
-    )
+    raw_before, body_before = parse_topic(topic.path.read_text(encoding="utf-8"))
+    metadata_before = dict(raw_before)
+    state_before = load_state(topic.slug)
+    owned_metadata = dict(metadata_before)
+    owned_body = body_before
+    owned_state = dict(state_before)
 
     def queue_event(slug: str, event_type: str, data: dict[str, object]) -> None:
         queued_events.append((slug, event_type, data))
@@ -5854,6 +5849,9 @@ def ask_topic(
             retry_status=output_func,
         )
         topic = read_topic(topic.slug)
+        owned_metadata, owned_body = parse_topic(topic.path.read_text(encoding="utf-8"))
+        owned_metadata = dict(owned_metadata)
+        owned_state = load_state(topic.slug)
     if message_kind:
         topic = Topic(
             slug=topic.slug,
@@ -5876,8 +5874,9 @@ def ask_topic(
             output_func=output_func,
             event_sink=queue_event if needs_judgment else None,
         )
-        for event_slug, event_type, event_data in queued_events:
-            log_event(event_slug, event_type, event_data)
+        owned_metadata, owned_body = parse_topic(topic.path.read_text(encoding="utf-8"))
+        owned_metadata = dict(owned_metadata)
+        owned_state = load_state(topic.slug)
         if pending_learner_prompt is not None:
             turn_id = consumed_turn_id(
                 pending_learner_prompt,
@@ -5886,14 +5885,18 @@ def ask_topic(
             mark_pending_learner_prompt_consumed(
                 topic.slug, pending_learner_prompt, turn_id
             )
+            owned_state = load_state(topic.slug)
+        log_event_batch(queued_events)
     except (Exception, KeyboardInterrupt):
-        if needs_judgment:
-            restore_prejudgment_turn_state(
-                topic,
-                topic_before_judgment,
-                state_before_judgment,
-            )
-            restore_event_log_snapshot(topic.slug, events_before_judgment)
+        rollback_turn_owned_changes(
+            topic,
+            metadata_before,
+            body_before,
+            state_before,
+            owned_metadata,
+            owned_body,
+            owned_state,
+        )
         raise
     if pending_learner_prompt is not None:
         clear_pending_learner_prompt(topic.slug, expected_prompt=pending_learner_prompt)
@@ -5930,8 +5933,8 @@ def generate_validated_tutor_answer(
     output_func=print,
 ) -> str:
     """Generate, validate, then reveal one tutor response."""
-    require_check = tutor_turn_requires_check(topic.metadata)
     message_kind = topic.metadata.get("current_turn_message_kind")
+    require_check = tutor_turn_requires_check(topic.metadata, message_kind=message_kind)
     enforce_action_labels = message_kind in {None, "", "answer"}
     system = system_prompt(topic)
     candidate = ""
@@ -5964,7 +5967,13 @@ def generate_validated_tutor_answer(
     )
 
 
-def tutor_turn_requires_check(metadata: dict[str, object]) -> bool:
+def tutor_turn_requires_check(
+    metadata: dict[str, object],
+    *,
+    message_kind: object = None,
+) -> bool:
+    if message_kind not in {None, "", "answer"}:
+        return False
     if metadata.get("last_answer_status") not in {"partial", "needs_work"}:
         return False
     remediation = metadata.get("pending_remediation")
@@ -6089,50 +6098,57 @@ def classify_ungraded_learner_message(prompt: str) -> str:
     return "other"
 
 
-def restore_prejudgment_turn_state(
+def rollback_turn_owned_changes(
     topic: Topic,
-    topic_text: str,
-    state_text: str | None,
+    metadata_before: dict[str, object],
+    body_before: str,
+    state_before: dict[str, object],
+    owned_metadata: dict[str, object],
+    owned_body: str,
+    owned_state: dict[str, object],
 ) -> None:
-    """Roll back an uncommitted judgment after tutor generation fails."""
+    """Optimistically undo only values written by the failed turn."""
     if _DRY_RUN:
         return
     with file_lock(topic.path):
-        write_text_atomic(topic.path, topic_text)
+        current_metadata, current_body = parse_topic(topic.path.read_text(encoding="utf-8"))
+        current_metadata = dict(current_metadata)
+        rollback_owned_mapping(current_metadata, metadata_before, owned_metadata)
+        added_body = (
+            owned_body[len(body_before) :]
+            if owned_body.startswith(body_before)
+            else ""
+        )
+        if added_body:
+            index = current_body.rfind(added_body)
+            if index >= 0:
+                current_body = current_body[:index] + current_body[index + len(added_body) :]
+        write_text_atomic(topic.path, format_topic(current_metadata, current_body))
     state_path = topic_state_path(topic.slug)
     with file_lock(state_path):
         _recover_activity_update_locked(topic.slug)
         current_state = _load_state_unlocked(topic.slug)
-        active_activity = current_state.get("active_activity")
-        if active_activity is not None:
-            preserved_activity = _validated_persisted_activity(active_activity)
-            restored_state: dict[str, object] = {}
-            if state_text is not None:
-                try:
-                    snapshot = json.loads(state_text)
-                except json.JSONDecodeError:
-                    snapshot = {}
-                if isinstance(snapshot, dict):
-                    restored_state.update(snapshot)
-            restored_state["active_activity"] = preserved_activity
-            write_text_atomic(
-                state_path, json.dumps(restored_state, indent=2, sort_keys=True) + "\n"
-            )
-        elif state_text is None:
-            with contextlib.suppress(FileNotFoundError):
-                state_path.unlink()
-        else:
-            write_text_atomic(state_path, state_text)
+        rollback_owned_mapping(current_state, state_before, owned_state)
+        write_text_atomic(
+            state_path, json.dumps(current_state, indent=2, sort_keys=True) + "\n"
+        )
 
 
-def restore_event_log_snapshot(slug: str, event_text: str | None) -> None:
-    path = topic_events_path(slug)
-    with file_lock(path):
-        if event_text is None:
-            with contextlib.suppress(FileNotFoundError):
-                path.unlink()
+def rollback_owned_mapping(
+    current: dict[str, object],
+    before: dict[str, object],
+    owned: dict[str, object],
+) -> None:
+    missing = object()
+    for key in set(before) | set(owned):
+        before_value = before.get(key, missing)
+        owned_value = owned.get(key, missing)
+        if before_value == owned_value or current.get(key, missing) != owned_value:
+            continue
+        if before_value is missing:
+            current.pop(key, None)
         else:
-            write_text_atomic(path, event_text)
+            current[key] = before_value
 
 
 def built_in_activity_registry() -> ActivityRegistry:
@@ -7240,14 +7256,34 @@ def extract_pending_question_text(text: str) -> str:
 
 
 def response_requests_learner_evidence(text: str) -> bool:
-    """Detect an answer request that was not safely placed under Check."""
-    return bool(
-        re.search(r"(?im)^\s*(?:\*\*)?Action:(?:\*\*)?\s+\S", text)
-        or re.search(
-            r"(?im)^\s*(?:now |please |your turn\b|tell me\b|try\b|retry\b).*[?]?\s*$",
-            text,
-        )
+    """Detect learner-directed work that must live under an explicit Check."""
+    section_pattern = re.compile(
+        r"(?i)^\s*(?:\*\*)?"
+        r"(Lesson|Feedback|Example|Check|Hint|Next|Action):"
+        r"(?:\*\*)?\s*(.*)$"
     )
+    imperative = re.compile(
+        r"(?i)^(?:(?:now|please)\s+|your turn[:,]?\s*)?"
+        r"(?:explain|write|trace|solve|show|give|compare|derive|implement|"
+        r"walk\s+through|try|retry|predict|calculate|compute|describe|list|"
+        r"identify|apply|run|build|answer|tell\s+me)\b"
+    )
+    active_section = ""
+    for raw_line in text.splitlines():
+        match = section_pattern.match(raw_line)
+        content = raw_line.strip()
+        if match:
+            active_section = match.group(1).casefold()
+            content = match.group(2).strip()
+        if active_section == "check":
+            continue
+        if active_section == "next" and tutor_response_has_enter_advance_cue(raw_line):
+            continue
+        if active_section == "action" and content and not check_is_navigation_prompt(content):
+            return True
+        if imperative.match(content):
+            return True
+    return False
 
 
 def explicit_check_section_count(text: str) -> int:
@@ -9636,6 +9672,31 @@ def log_event(slug: str, event_type: str, data: dict[str, object]) -> None:
             text += "\n"
         text += json.dumps(event, sort_keys=True) + "\n"
         write_text_atomic(path, text)
+
+
+def log_event_batch(events: list[tuple[str, str, dict[str, object]]]) -> None:
+    """Append each turn's queued events with one atomic write per topic."""
+    if not events or _DRY_RUN:
+        return
+    by_slug: dict[str, list[tuple[str, dict[str, object]]]] = {}
+    for slug, event_type, data in events:
+        by_slug.setdefault(slug, []).append((event_type, data))
+    for slug, slug_events in by_slug.items():
+        path = topic_events_path(slug)
+        with file_lock(path):
+            text = path.read_text(encoding="utf-8") if path.exists() else ""
+            if text and not text.endswith("\n"):
+                text += "\n"
+            for event_type, data in slug_events:
+                event = {
+                    "schema_version": EVENT_SCHEMA_VERSION,
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "event_type": event_type,
+                    "slug": slug,
+                    "data": data,
+                }
+                text += json.dumps(event, sort_keys=True) + "\n"
+            write_text_atomic(path, text)
 
 
 def load_event_log(path: Path) -> list[dict[str, object]]:

@@ -6623,6 +6623,23 @@ class InteractiveTests(unittest.TestCase):
         cli.save_pending_question(cli.read_topic("vim"), original_check, "")
         answer = "It probably moves."
         cli.save_pending_learner_prompt("vim", answer)
+        activity = cli.propose_topic_activity(
+            "vim",
+            {
+                "domain": "coding",
+                "kind": "python_drill",
+                "objective": "Practice one small loop.",
+                "concept_ids": ["cursor-movement"],
+                "requested_evidence": ["pytest_result"],
+                "scaffolding_level": 1,
+                "purpose": "practice",
+                "domain_payload": {
+                    "title": "Concurrent practice",
+                    "language": "python",
+                    "tool_requests": [],
+                },
+            },
+        )
         before_body = cli.read_topic("vim").body
         events_before = cli.load_event_log(cli.topic_events_path("vim"))
         judgment = {
@@ -6633,15 +6650,31 @@ class InteractiveTests(unittest.TestCase):
             "is_transfer": False,
         }
 
+        tutor_calls = []
+
+        def invalid_tutor(*_args, **_kwargs) -> str:
+            tutor_calls.append(True)
+            if len(tutor_calls) == 1:
+                cli.accept_topic_activity("vim", activity, learner_confirmed=True)
+                current_metadata, current_body = cli.parse_topic(
+                    path.read_text(encoding="utf-8")
+                )
+                current_metadata = dict(current_metadata)
+                current_metadata["concurrent_note"] = "keep me"
+                path.write_text(
+                    cli.format_topic(current_metadata, current_body),
+                    encoding="utf-8",
+                )
+                cli.log_event("vim", "concurrent_update", {"keep": True})
+                return "**Hint:** Which direction?"
+            return "**Example:** Try again.\n\nAction: Answer now."
+
         with (
             mock.patch.object(cli, "call_openai", return_value=json.dumps(judgment)),
             mock.patch.object(
                 cli,
                 "call_openai_streaming",
-                side_effect=[
-                    "**Hint:** Which direction?",
-                    "**Example:** Try again.\n\nAction: Answer now.",
-                ],
+                side_effect=invalid_tutor,
             ),
         ):
             with self.assertRaisesRegex(cli.OpenLearnError, "learner-action contract"):
@@ -6660,9 +6693,15 @@ class InteractiveTests(unittest.TestCase):
             cli.extract_pending_question_text(original_check),
         )
         self.assertEqual(cli.load_pending_learner_prompt("vim"), answer)
-        self.assertEqual(
-            cli.load_event_log(cli.topic_events_path("vim")),
-            events_before,
+        self.assertEqual(updated.metadata["concurrent_note"], "keep me")
+        self.assertEqual(cli.load_state("vim")["active_activity"]["status"], "accepted")
+        events_after = cli.load_event_log(cli.topic_events_path("vim"))
+        self.assertEqual(events_after[: len(events_before)], events_before)
+        self.assertTrue(
+            any(event["event_type"] == "concurrent_update" for event in events_after)
+        )
+        self.assertFalse(
+            any(event["event_type"] == "answer_judged" for event in events_after)
         )
 
     def test_remediation_explicit_check_atomically_replaces_displayed_task(self) -> None:
@@ -6684,6 +6723,111 @@ class InteractiveTests(unittest.TestCase):
         pending = cli.read_topic("vim").metadata["pending_question"]
         self.assertEqual(pending["question"], cli.extract_pending_question_text(response))
         self.assertIn("Which direction does `k` move?", pending["question"])
+
+    def test_side_intents_do_not_require_remediation_check(self) -> None:
+        metadata = {
+            "last_answer_status": "partial",
+            "pending_remediation": {"stage": "hint"},
+        }
+        self.assertTrue(
+            cli.tutor_turn_requires_check(metadata, message_kind="answer")
+        )
+        for message_kind in ("question", "request", "confusion"):
+            with self.subTest(message_kind=message_kind):
+                self.assertFalse(
+                    cli.tutor_turn_requires_check(
+                        metadata,
+                        message_kind=message_kind,
+                    )
+                )
+
+    def test_side_question_during_remediation_preserves_check_for_exact_retry(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
+        path = cli.topic_path("vim")
+        metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+        metadata = dict(metadata)
+        metadata.update(
+            {
+                "current_focus": "cursor movement",
+                "last_answer_status": "partial",
+                "pending_remediation": {"stage": "hint", "concept_id": "cursor-movement"},
+            }
+        )
+        cli.write_topic(path, metadata, body)
+        check = "**Check:**\nWhich direction does `j` move?"
+        cli.save_pending_question(cli.read_topic("vim"), check, "")
+        original_pending = cli.read_topic("vim").metadata["pending_question"]
+        tutor = mock.Mock(return_value="**Feedback:**\nIt refers to moving down.")
+
+        with (
+            mock.patch.object(
+                cli,
+                "call_openai",
+                return_value=json.dumps({"message_kind": "question"}),
+            ),
+            mock.patch.object(cli, "call_openai_streaming", tutor),
+            mock.patch.object(cli, "maybe_suggest_videos"),
+        ):
+            cli.ask_topic(
+                "vim",
+                "What does that term mean?",
+                "test-model",
+                output_func=lambda _text: None,
+            )
+
+        tutor.assert_called_once()
+        self.assertEqual(
+            cli.read_topic("vim").metadata["pending_question"],
+            original_pending,
+        )
+
+        judgment = {
+            "message_kind": "answer",
+            "last_answer_status": "correct",
+            "answer_score": 1.0,
+            "answer_kind": "production",
+            "is_transfer": False,
+        }
+        with (
+            mock.patch.object(cli, "call_openai", return_value=json.dumps(judgment)),
+            mock.patch.object(
+                cli,
+                "call_openai_streaming",
+                return_value="**Feedback:**\nCorrect.",
+            ),
+            mock.patch.object(cli, "maybe_suggest_videos"),
+        ):
+            cli.ask_topic(
+                "vim",
+                "It moves down.",
+                "test-model",
+                output_func=lambda _text: None,
+            )
+
+        self.assertNotIn("pending_question", cli.read_topic("vim").metadata)
+
+    def test_imperative_evidence_detection_is_structural(self) -> None:
+        positives = (
+            "**Feedback:** Good start.\nNow explain why it works.",
+            "**Example:** Here is one trace.\nWrite the next pointer positions.",
+            "**Hint:** Focus on the invariant.\nTrace the next two steps.",
+            "Action: Compare the two approaches.",
+            "Your turn: implement the base case.",
+            "Predict the result.",
+            "Walk through the loop.",
+        )
+        for text in positives:
+            with self.subTest(text=text):
+                self.assertTrue(cli.response_requests_learner_evidence(text))
+        negatives = (
+            "**Lesson:** I will explain why it works.",
+            "**Example:** This trace shows the next pointer positions.",
+            "**Next:**\nPress Enter to continue, or type what you want more help with.",
+            "**Feedback:** The implementation uses a base case.",
+        )
+        for text in negatives:
+            with self.subTest(text=text):
+                self.assertFalse(cli.response_requests_learner_evidence(text))
 
     def test_conversational_questions_preserve_pending_check_until_explicit_replacement(
         self,
@@ -8109,13 +8253,20 @@ class InteractiveTests(unittest.TestCase):
         }
         proposed = cli.propose_topic_activity(topic.slug, request)
         state_snapshot = cli.topic_state_path(topic.slug).read_text(encoding="utf-8")
+        metadata_snapshot, body_snapshot = cli.parse_topic(
+            topic.path.read_text(encoding="utf-8")
+        )
         accepted = cli.accept_topic_activity(topic.slug, proposed, learner_confirmed=True)
         active = cli.transition_topic_activity(topic.slug, accepted, "active")
 
-        cli.restore_prejudgment_turn_state(
+        cli.rollback_turn_owned_changes(
             topic,
-            topic.path.read_text(encoding="utf-8"),
-            state_snapshot,
+            dict(metadata_snapshot),
+            body_snapshot,
+            json.loads(state_snapshot),
+            dict(metadata_snapshot),
+            body_snapshot,
+            json.loads(state_snapshot),
         )
 
         restored = cli.load_state(topic.slug)["active_activity"]
@@ -8138,6 +8289,9 @@ class InteractiveTests(unittest.TestCase):
         }
         proposed = cli.propose_topic_activity(topic.slug, request)
         state_snapshot = cli.topic_state_path(topic.slug).read_text(encoding="utf-8")
+        metadata_snapshot, body_snapshot = cli.parse_topic(
+            topic.path.read_text(encoding="utf-8")
+        )
 
         def crash_after_journal(stage: str) -> None:
             if stage == "after_journal":
@@ -8149,10 +8303,14 @@ class InteractiveTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "crash after journal"):
                 cli.accept_topic_activity(topic.slug, proposed, learner_confirmed=True)
 
-        cli.restore_prejudgment_turn_state(
+        cli.rollback_turn_owned_changes(
             topic,
-            topic.path.read_text(encoding="utf-8"),
-            state_snapshot,
+            dict(metadata_snapshot),
+            body_snapshot,
+            json.loads(state_snapshot),
+            dict(metadata_snapshot),
+            body_snapshot,
+            json.loads(state_snapshot),
         )
 
         restored = cli.load_state(topic.slug)["active_activity"]
