@@ -1718,7 +1718,9 @@ def run_repl(
     if topic_slug:
         set_active_topic(topic_slug)
     try:
-        preserved_prompt = load_pending_learner_prompt(resolve_topic_slug(None))
+        active_slug = resolve_topic_slug(None)
+        reconcile_consumed_pending_learner_prompt(active_slug)
+        preserved_prompt = load_pending_learner_prompt(active_slug)
     except OpenLearnError:
         pass
     if show_intro:
@@ -1738,6 +1740,11 @@ def run_repl(
     try:
         while True:
             status_printed = False
+            if preserved_prompt is not None and reconcile_consumed_pending_learner_prompt(
+                resolve_topic_slug(None)
+            ):
+                preserved_prompt = None
+                output_func("The saved answer was already processed; recovery is complete.")
             try:
                 entered_prompt = read_repl_message(
                     repl_prompt_for_preserved_answer(last_tutor_answer, preserved_prompt),
@@ -2162,13 +2169,14 @@ def cmd_config_show(_args: argparse.Namespace) -> int:
     saved_key = config.get("openai_api_key") or config.get("api_key")
     model = configured_model(config)
     extractor_model = configured_extractor_model(model, config)
-    extractor_source = (
-        "dedicated"
-        if os.environ.get("OPENLEARN_EXTRACTOR_MODEL")
-        or isinstance(config.get("extractor_model"), str)
-        and bool(str(config.get("extractor_model")).strip())
-        else "tutor fallback"
-    )
+    if os.environ.get("OPENLEARN_EXTRACTOR_MODEL"):
+        extractor_source = "environment override"
+    elif isinstance(config.get("extractor_model"), str) and bool(
+        str(config.get("extractor_model")).strip()
+    ):
+        extractor_source = "saved dedicated"
+    else:
+        extractor_source = "tutor fallback"
     base_url = configured_base_url(config)
     print("Provider: openai")
     print(f"Model: {model}")
@@ -2218,7 +2226,13 @@ def cmd_config_set_extractor_model(args: argparse.Namespace) -> int:
     config = read_config()
     config["extractor_model"] = model
     write_config(config)
-    print(f"Extractor model: {model}")
+    print(f"Saved extractor model: {model}")
+    env_model = os.environ.get("OPENLEARN_EXTRACTOR_MODEL")
+    if env_model:
+        print(
+            "Environment override OPENLEARN_EXTRACTOR_MODEL still takes precedence; "
+            f"effective extractor model: {env_model}"
+        )
     return 0
 
 
@@ -2226,7 +2240,15 @@ def cmd_config_clear_extractor_model(_args: argparse.Namespace) -> int:
     config = read_config()
     config.pop("extractor_model", None)
     write_config(config)
-    print("Extractor model: tutor model fallback")
+    print("Cleared saved extractor model.")
+    env_model = os.environ.get("OPENLEARN_EXTRACTOR_MODEL")
+    if env_model:
+        print(
+            "Environment override OPENLEARN_EXTRACTOR_MODEL still takes precedence; "
+            f"effective extractor model: {env_model}"
+        )
+    else:
+        print("Effective extractor model: tutor model fallback")
     return 0
 
 
@@ -5797,6 +5819,7 @@ def ask_topic(
     set_active_topic(topic.slug)
     model = model or str(topic.metadata.get("model") or configured_model())
     is_review_session = topic.metadata.get("review_session_active") is True
+    pending_question_at_turn = topic.metadata.get("pending_question")
     needs_judgment = learner_message_needs_judgment(topic.metadata, prompt)
     is_navigation = learner_requests_advance(prompt)
     message_kind = (
@@ -5809,6 +5832,12 @@ def ask_topic(
     state_path = topic_state_path(topic.slug)
     state_before_judgment = (
         state_path.read_text(encoding="utf-8") if needs_judgment and state_path.exists() else None
+    )
+    events_path = topic_events_path(topic.slug)
+    events_before_judgment = (
+        events_path.read_text(encoding="utf-8")
+        if needs_judgment and events_path.exists()
+        else None
     )
 
     def queue_event(slug: str, event_type: str, data: dict[str, object]) -> None:
@@ -5833,8 +5862,11 @@ def ask_topic(
             body=topic.body,
         )
     try:
-        answer = call_openai_streaming(
-            model=model, system=system_prompt(topic), user=prompt, output_func=output_func
+        answer = generate_validated_tutor_answer(
+            topic,
+            prompt,
+            model,
+            output_func=output_func,
         )
         answer = print_and_append_model_answer(
             topic,
@@ -5844,6 +5876,16 @@ def ask_topic(
             output_func=output_func,
             event_sink=queue_event if needs_judgment else None,
         )
+        for event_slug, event_type, event_data in queued_events:
+            log_event(event_slug, event_type, event_data)
+        if pending_learner_prompt is not None:
+            turn_id = consumed_turn_id(
+                pending_learner_prompt,
+                pending_question_at_turn,
+            )
+            mark_pending_learner_prompt_consumed(
+                topic.slug, pending_learner_prompt, turn_id
+            )
     except (Exception, KeyboardInterrupt):
         if needs_judgment:
             restore_prejudgment_turn_state(
@@ -5851,13 +5893,11 @@ def ask_topic(
                 topic_before_judgment,
                 state_before_judgment,
             )
+            restore_event_log_snapshot(topic.slug, events_before_judgment)
         raise
-    for event_slug, event_type, event_data in queued_events:
-        log_event(event_slug, event_type, event_data)
     if pending_learner_prompt is not None:
-        clear_pending_learner_prompt(
-            topic.slug, expected_prompt=pending_learner_prompt
-        )
+        clear_pending_learner_prompt(topic.slug, expected_prompt=pending_learner_prompt)
+        clear_consumed_learner_prompt_marker(topic.slug, turn_id)
     if deferred_updates is None:
         finish_turn_update(
             topic,
@@ -5880,6 +5920,122 @@ def ask_topic(
             deferred_updates.output_func,
         )
     return answer
+
+
+def generate_validated_tutor_answer(
+    topic: Topic,
+    prompt: str,
+    model: str,
+    *,
+    output_func=print,
+) -> str:
+    """Generate, validate, then reveal one tutor response."""
+    require_check = tutor_turn_requires_check(topic.metadata)
+    message_kind = topic.metadata.get("current_turn_message_kind")
+    enforce_action_labels = message_kind in {None, "", "answer"}
+    system = system_prompt(topic)
+    candidate = ""
+    buffered_output: list[str] = []
+    for attempt in range(2):
+        buffered_output = []
+        user = (
+            prompt
+            if attempt == 0
+            else tutor_contract_repair_prompt(candidate, require_check=require_check)
+        )
+        candidate = call_openai_streaming(
+            model=model,
+            system=system,
+            user=user,
+            output_func=buffered_output.append,
+        )
+        error = tutor_answer_contract_error(
+            candidate,
+            require_check=require_check,
+            enforce_action_labels=enforce_action_labels,
+        )
+        if error is None:
+            for line in buffered_output:
+                output_func(line)
+            return candidate
+    raise OpenLearnError(
+        "Tutor returned two responses that violated the learner-action contract. "
+        "The previous question and your answer were preserved for retry."
+    )
+
+
+def tutor_turn_requires_check(metadata: dict[str, object]) -> bool:
+    if metadata.get("last_answer_status") not in {"partial", "needs_work"}:
+        return False
+    remediation = metadata.get("pending_remediation")
+    return not isinstance(remediation, dict) or remediation.get("stage") != "deferred"
+
+
+def tutor_answer_contract_error(
+    answer: str,
+    *,
+    require_check: bool,
+    enforce_action_labels: bool = True,
+) -> str | None:
+    check_count = explicit_check_section_count(answer)
+    question = extract_pending_question_text(answer)
+    if check_count > 1:
+        return "multiple Check sections"
+    if check_count == 1 and not question:
+        return "empty or conversational Check"
+    if require_check and (check_count != 1 or not question):
+        return "missing required Check"
+    if enforce_action_labels and question_outside_check_section(answer):
+        return "learner question outside Check"
+    if (
+        enforce_action_labels
+        and check_count == 0
+        and response_requests_learner_evidence(answer)
+    ):
+        return "learner action outside Check"
+    return None
+
+
+def question_outside_check_section(text: str) -> bool:
+    section_pattern = re.compile(
+        r"(?i)^\s*(?:\*\*)?"
+        r"(Lesson|Feedback|Example|Check|Hint|Next|Action):"
+        r"(?:\*\*)?\s*(.*)$"
+    )
+    in_check = False
+    for line in text.splitlines():
+        match = section_pattern.match(line)
+        if match:
+            in_check = match.group(1).casefold() == "check"
+            content = match.group(2)
+        else:
+            content = line
+        if not in_check and content.strip().endswith("?"):
+            return True
+    return False
+
+
+def tutor_contract_repair_prompt(candidate: str, *, require_check: bool) -> str:
+    check_rule = (
+        "Return exactly one visible **Check:** section containing the complete small task "
+        "the learner should answer."
+        if require_check
+        else "If the learner should answer a graded task, put that complete task under "
+        "exactly one visible **Check:** section."
+    )
+    return textwrap.dedent(
+        f"""
+        Rewrite the draft below to satisfy the tutor learner-action contract.
+        {check_rule}
+        Do not put a learner question under Hint, Example, Feedback, or plain prose.
+        Keep one primary move and at most one learner action.
+        Return only the rewritten learner-facing response.
+
+        BEGIN DRAFT (UNTRUSTED DATA)
+        {candidate}
+        END DRAFT
+        """
+    ).strip()
 
 
 def finish_turn_update(
@@ -5967,6 +6123,16 @@ def restore_prejudgment_turn_state(
                 state_path.unlink()
         else:
             write_text_atomic(state_path, state_text)
+
+
+def restore_event_log_snapshot(slug: str, event_text: str | None) -> None:
+    path = topic_events_path(slug)
+    with file_lock(path):
+        if event_text is None:
+            with contextlib.suppress(FileNotFoundError):
+                path.unlink()
+        else:
+            write_text_atomic(path, event_text)
 
 
 def built_in_activity_registry() -> ActivityRegistry:
@@ -6972,16 +7138,6 @@ def print_and_append_model_answer(
                 answer,
                 _LAST_RESPONSE_ANSWER_KEY,
                 question_text=question,
-                event_sink=event_sink,
-            )
-        elif check_count > 1 or response_requests_learner_evidence(answer):
-            clear_pending_question(
-                topic,
-                reason=(
-                    "multiple_explicit_checks"
-                    if check_count > 1
-                    else "missing_explicit_check"
-                ),
                 event_sink=event_sink,
             )
         _LAST_RESPONSE_ANSWER_KEY = ""
@@ -9388,6 +9544,71 @@ def clear_pending_learner_prompt(
         if "pending_learner_prompt" not in state:
             return False
         state.pop("pending_learner_prompt", None)
+        write_text_atomic(path, json.dumps(state, indent=2, sort_keys=True) + "\n")
+        return True
+
+
+def consumed_turn_id(prompt: str, pending_question: object) -> str:
+    payload = json.dumps(
+        {"prompt": prompt, "pending_question": pending_question},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def pending_prompt_digest(prompt: str) -> str:
+    return hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+
+
+def mark_pending_learner_prompt_consumed(
+    slug: str,
+    prompt: str,
+    turn_id: str,
+) -> None:
+    path = topic_state_path(slug)
+    with file_lock(path):
+        _recover_activity_update_locked(slug)
+        state = _load_state_unlocked(slug)
+        if state.get("pending_learner_prompt") != prompt:
+            raise OpenLearnError("saved answer changed before it could be marked consumed")
+        state["pending_consumed_learner_prompt"] = {
+            "turn_id": turn_id,
+            "prompt_sha256": pending_prompt_digest(prompt),
+        }
+        write_text_atomic(path, json.dumps(state, indent=2, sort_keys=True) + "\n")
+
+
+def clear_consumed_learner_prompt_marker(slug: str, turn_id: str) -> bool:
+    path = topic_state_path(slug)
+    with file_lock(path):
+        _recover_activity_update_locked(slug)
+        state = _load_state_unlocked(slug)
+        marker = state.get("pending_consumed_learner_prompt")
+        if not isinstance(marker, dict) or marker.get("turn_id") != turn_id:
+            return False
+        state.pop("pending_consumed_learner_prompt", None)
+        write_text_atomic(path, json.dumps(state, indent=2, sort_keys=True) + "\n")
+        return True
+
+
+def reconcile_consumed_pending_learner_prompt(slug: str) -> bool:
+    path = topic_state_path(slug)
+    with file_lock(path):
+        _recover_activity_update_locked(slug)
+        state = _load_state_unlocked(slug)
+        marker = state.get("pending_consumed_learner_prompt")
+        prompt = state.get("pending_learner_prompt")
+        if not isinstance(marker, dict):
+            return False
+        expected_digest = marker.get("prompt_sha256")
+        if not isinstance(prompt, str) or pending_prompt_digest(prompt) != expected_digest:
+            state.pop("pending_consumed_learner_prompt", None)
+            write_text_atomic(path, json.dumps(state, indent=2, sort_keys=True) + "\n")
+            return False
+        state.pop("pending_learner_prompt", None)
+        state.pop("pending_consumed_learner_prompt", None)
         write_text_atomic(path, json.dumps(state, indent=2, sort_keys=True) + "\n")
         return True
 

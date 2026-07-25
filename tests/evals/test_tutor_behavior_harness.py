@@ -620,7 +620,9 @@ def test_live_judge_requires_every_base_criterion(
     monkeypatch.setattr(
         cli,
         "call_openai_streaming",
-        lambda model, system, user, output_func: "**Feedback:**\nA concise reply.",
+        lambda model, system, user, output_func: (
+            "**Check:**\nGive one concise example of the same concept."
+        ),
     )
 
     def fake_call(model: str, system: str, user: str) -> str:
@@ -664,7 +666,9 @@ def test_live_judge_rejects_missing_base_criterion(
     monkeypatch.setattr(
         cli,
         "call_openai_streaming",
-        lambda model, system, user, output_func: "**Feedback:**\nA concise reply.",
+        lambda model, system, user, output_func: (
+            "**Check:**\nGive one concise example of the same concept."
+        ),
     )
 
     def fake_call(model: str, system: str, user: str) -> str:
