@@ -2082,6 +2082,21 @@ class CliStorageTests(unittest.TestCase):
         self.assertEqual(cli.configured_base_url(), "https://env.example/v1")
         self.assertEqual(cli.configured_openai_api_key(), "sk-env")
 
+    def test_config_sets_and_clears_dedicated_extractor_model(self) -> None:
+        parsed = cli.build_parser().parse_args(
+            ["config", "set-extractor-model", "fast-judge"]
+        )
+        call_silent(parsed.func, parsed)
+
+        self.assertEqual(cli.configured_extractor_model("tutor-model"), "fast-judge")
+        self.assertEqual(cli.read_config()["extractor_model"], "fast-judge")
+
+        parsed = cli.build_parser().parse_args(["config", "clear-extractor-model"])
+        call_silent(parsed.func, parsed)
+
+        self.assertEqual(cli.configured_extractor_model("tutor-model"), "tutor-model")
+        self.assertNotIn("extractor_model", cli.read_config())
+
     def test_extractor_model_falls_back_to_tutor_model(self) -> None:
         self.assertEqual(cli.configured_extractor_model("turn-model"), "turn-model")
 
@@ -4779,6 +4794,79 @@ class InteractiveTests(unittest.TestCase):
             events_before,
         )
 
+    def test_unusable_judge_output_retries_once_and_mutates_once(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Python", goal="Learn functions"))
+        path = cli.topic_path("python")
+        metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+        metadata = dict(metadata)
+        metadata["current_focus"] = "return values"
+        cli.write_topic(path, metadata, body)
+        cli.save_pending_question(
+            cli.read_topic("python"),
+            "",
+            "",
+            question_text="What does a return value do?",
+        )
+        judgment = {
+            "message_kind": "answer",
+            "last_answer_status": "correct",
+            "answer_score": 1.0,
+            "answer_kind": "production",
+            "is_transfer": True,
+        }
+        judge = mock.Mock(side_effect=["not json", json.dumps(judgment)])
+
+        with mock.patch.object(cli, "call_openai", judge):
+            result = cli.update_learning_metadata(
+                cli.read_topic("python"),
+                "It sends a result to the caller.",
+                "**Check:** What does a return value do?",
+                "test-model",
+            )
+
+        self.assertEqual(result, "answer")
+        self.assertEqual(judge.call_count, 2)
+        events = cli.load_event_log(cli.topic_events_path("python"))
+        self.assertEqual(
+            sum(event["event_type"] == "answer_judged" for event in events),
+            1,
+        )
+        attempts = cli.read_topic("python").metadata["concept_attempts"]
+        self.assertEqual(attempts["return-values"]["attempts"], 1)
+
+    def test_two_unusable_judge_outputs_preserve_question_without_mutation(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Python", goal="Learn functions"))
+        path = cli.topic_path("python")
+        metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+        metadata = dict(metadata)
+        metadata["current_focus"] = "return values"
+        cli.write_topic(path, metadata, body)
+        cli.save_pending_question(
+            cli.read_topic("python"),
+            "",
+            "",
+            question_text="What does a return value do?",
+        )
+        before = cli.read_topic("python")
+        events_before = cli.load_event_log(cli.topic_events_path("python"))
+
+        with mock.patch.object(cli, "call_openai", side_effect=["", "not json"]):
+            with self.assertRaisesRegex(cli.OpenLearnError, "two judge attempts"):
+                cli.update_learning_metadata(
+                    cli.read_topic("python"),
+                    "It sends a result to the caller.",
+                    "**Check:** What does a return value do?",
+                    "test-model",
+                )
+
+        after = cli.read_topic("python")
+        self.assertEqual(after.metadata["pending_question"], before.metadata["pending_question"])
+        self.assertNotIn("concept_attempts", after.metadata)
+        self.assertEqual(
+            cli.load_event_log(cli.topic_events_path("python")),
+            events_before,
+        )
+
     def test_incomplete_model_judgment_uses_multiple_choice_answer_key(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Python", goal="Learn functions"))
         path = cli.topic_path("python")
@@ -5646,6 +5734,26 @@ class InteractiveTests(unittest.TestCase):
         self.assertLess(status_index, feedback_index)
         self.assertFalse(any("openlearn" in line for line in output[feedback_index + 1 :]))
 
+    def test_repl_failed_turn_prints_status_once(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
+        original_ask_topic = cli.ask_topic
+        output = []
+        cli.ask_topic = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            cli.OpenLearnError("judge unavailable")
+        )
+        try:
+            call_silent(
+                cli.run_repl,
+                input_func=iter_input(["answer", "/q"]),
+                output_func=output.append,
+                show_intro=False,
+            )
+        finally:
+            cli.ask_topic = original_ask_topic
+
+        status_lines = [line for line in output if "openlearn" in line and "Vim" in line]
+        self.assertEqual(len(status_lines), 1)
+
     def test_repl_keeps_failed_answer_and_enter_resubmits_it(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
         original_ask_topic = cli.ask_topic
@@ -5679,6 +5787,30 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(submitted, ["learner answer", "learner answer"])
         self.assertTrue(any("answer was kept" in line.lower() for line in output))
         self.assertIn("press Enter to resubmit", prompts[1])
+
+    def test_repl_does_not_dispatch_bare_text_over_preserved_answer(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
+        cli.save_pending_learner_prompt("vim", "complete original answer")
+        original_ask_topic = cli.ask_topic
+        submitted = []
+        output = []
+        cli.ask_topic = (
+            lambda _topic, prompt, _model, **_kwargs: submitted.append(prompt)
+            or "Tutor answer"
+        )
+        try:
+            call_silent(
+                cli.run_repl,
+                input_func=iter_input(["you", "", "/q"]),
+                output_func=output.append,
+                show_intro=False,
+            )
+        finally:
+            cli.ask_topic = original_ask_topic
+
+        self.assertEqual(submitted, ["complete original answer"])
+        self.assertTrue(any("Saved answer retained" in line for line in output))
+        self.assertIsNone(cli.load_pending_learner_prompt("vim"))
 
     def test_pending_learner_prompt_storage_is_validated_isolated_and_private(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
@@ -5778,7 +5910,7 @@ class InteractiveTests(unittest.TestCase):
         self.assertIn("press Enter to resubmit", prompts[0])
         self.assertIsNone(cli.load_pending_learner_prompt("vim"))
 
-    def test_repl_replaces_recovered_answer_before_dispatch(self) -> None:
+    def test_repl_replaces_recovered_answer_only_with_explicit_command(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
         cli.save_pending_learner_prompt("vim", "old answer")
         original_ask_topic = cli.ask_topic
@@ -5792,7 +5924,7 @@ class InteractiveTests(unittest.TestCase):
         try:
             call_silent(
                 cli.run_repl,
-                input_func=iter_input(["replacement answer", "/q"]),
+                input_func=iter_input(["/replace replacement answer", "/q"]),
                 output_func=lambda _text: None,
                 show_intro=False,
             )
@@ -5801,6 +5933,33 @@ class InteractiveTests(unittest.TestCase):
 
         self.assertEqual(submitted, [("replacement answer", "replacement answer")])
         self.assertIsNone(cli.load_pending_learner_prompt("vim"))
+
+    def test_repl_failed_replacement_is_recovered_across_restart(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
+        cli.save_pending_learner_prompt("vim", "old answer")
+        original_ask_topic = cli.ask_topic
+        submitted = []
+
+        def failed_ask(_topic, prompt, _model, **_kwargs) -> str:
+            submitted.append(prompt)
+            raise cli.OpenLearnError("judge unavailable")
+
+        cli.ask_topic = failed_ask
+        try:
+            call_silent(
+                cli.run_repl,
+                input_func=iter_input(["/replace exact replacement", "/q"]),
+                output_func=lambda _text: None,
+                show_intro=False,
+            )
+        finally:
+            cli.ask_topic = original_ask_topic
+
+        self.assertEqual(submitted, ["exact replacement"])
+        self.assertEqual(
+            cli.load_pending_learner_prompt("vim"),
+            "exact replacement",
+        )
 
     def test_ask_topic_clears_matching_prompt_before_deferred_update_submission(
         self,
@@ -6152,6 +6311,60 @@ class InteractiveTests(unittest.TestCase):
                     cli.extract_pending_question_text(conversational_question),
                     "",
                 )
+
+    def test_repl_prompt_uses_authoritative_pending_question_state(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
+        topic = cli.read_topic("vim")
+        cli.save_pending_question(topic, "**Check:**\nWhat does `j` do?", "")
+
+        self.assertEqual(cli.repl_prompt_for_answer("**Hint:** Try again."), "Answer> ")
+        self.assertEqual(cli.repl_prompt_for_answer("**Example:** A worked example."), "Answer> ")
+
+        cli.save_pending_question(
+            cli.read_topic("vim"),
+            "**Check:**\nWhich key moves left?",
+            "",
+        )
+        self.assertEqual(cli.repl_prompt_for_answer("unrelated prose"), "Answer> ")
+
+        cli.clear_pending_question(cli.read_topic("vim"), reason="test")
+        self.assertEqual(cli.repl_prompt_for_answer("**Check:** stale prose?"), "openlearn> ")
+
+    def test_unlabeled_remediation_request_clears_stale_check(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
+        topic = cli.read_topic("vim")
+        cli.save_pending_question(topic, "**Check:**\nWhat does `j` do?", "")
+
+        cli.print_and_append_model_answer(
+            cli.read_topic("vim"),
+            "chat",
+            "partial answer",
+            "**Hint:** Think about cursor direction.\n\nAction: Retry with one sentence.",
+        )
+
+        self.assertNotIn("pending_question", cli.read_topic("vim").metadata)
+        events = cli.load_event_log(cli.topic_events_path("vim"))
+        self.assertEqual(events[-1]["data"]["reason"], "missing_explicit_check")
+
+    def test_remediation_explicit_check_atomically_replaces_displayed_task(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="Learn motions"))
+        topic = cli.read_topic("vim")
+        cli.save_pending_question(topic, "**Check:**\nWhat does `j` do?", "")
+        response = (
+            "A small scaffold: `h` moves left.\n\n"
+            "**Check:**\nWhich direction does `k` move?"
+        )
+
+        cli.print_and_append_model_answer(
+            cli.read_topic("vim"),
+            "chat",
+            "partial answer",
+            response,
+        )
+
+        pending = cli.read_topic("vim").metadata["pending_question"]
+        self.assertEqual(pending["question"], cli.extract_pending_question_text(response))
+        self.assertIn("Which direction does `k` move?", pending["question"])
 
     def test_conversational_questions_preserve_pending_check_until_explicit_replacement(
         self,

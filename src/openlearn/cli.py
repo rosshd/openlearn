@@ -123,9 +123,9 @@ REPL_PASTE_CONTINUATION_WAIT_SECONDS = 0.01
 OPENAI_MAX_ATTEMPTS = 3
 OPENAI_RETRY_BASE_DELAY_SECONDS = 0.5
 OPENAI_RETRY_JITTER_SECONDS = 0.25
-JUDGE_MAX_TOKENS = 512
+JUDGE_MAX_TOKENS = 1024
 JUDGE_TIMEOUT_SECONDS = 20
-JUDGE_MAX_ATTEMPTS = 1
+JUDGE_MAX_ATTEMPTS = 2
 REMEDIATION_MINIMUM_SCORE = 0.7
 REMEDIATION_STAGE_BY_MISS = {
     1: "hint",
@@ -456,6 +456,19 @@ def build_parser() -> argparse.ArgumentParser:
     config_set_model = config_sub.add_parser("set-model", help="Save the default model name")
     config_set_model.add_argument("model", help="Model name, for example gpt-4.1-mini")
     config_set_model.set_defaults(func=cmd_config_set_model)
+
+    config_set_extractor_model = config_sub.add_parser(
+        "set-extractor-model",
+        help="Save a dedicated model for answer judging and metadata extraction",
+    )
+    config_set_extractor_model.add_argument("model", help="Model name")
+    config_set_extractor_model.set_defaults(func=cmd_config_set_extractor_model)
+
+    config_clear_extractor_model = config_sub.add_parser(
+        "clear-extractor-model",
+        help="Use the tutor model for answer judging and metadata extraction",
+    )
+    config_clear_extractor_model.set_defaults(func=cmd_config_clear_extractor_model)
 
     config_set_base_url = config_sub.add_parser(
         "set-base-url", help="Save an OpenAI-compatible API base URL"
@@ -1614,15 +1627,17 @@ def repl_prompt() -> str:
     return "Answer> " if topic.metadata.get("pending_question") else "openlearn> "
 
 
-def repl_prompt_for_answer(answer: str | None) -> str:
-    if answer is None:
-        return repl_prompt()
-    return "Answer> " if extract_pending_question_text(answer) else "openlearn> "
+def repl_prompt_for_answer(_answer: str | None) -> str:
+    """Return a prompt derived from durable question state, never tutor prose."""
+    return repl_prompt()
 
 
 def repl_prompt_for_preserved_answer(answer: str | None, preserved_prompt: str | None) -> str:
     if preserved_prompt is not None:
-        return "Answer kept - press Enter to resubmit, or type a replacement> "
+        return (
+            "Answer kept - press Enter to resubmit; /replace <answer> replaces; "
+            "/discard drops it> "
+        )
     return repl_prompt_for_answer(answer)
 
 
@@ -1722,12 +1737,41 @@ def run_repl(
 
     try:
         while True:
+            status_printed = False
             try:
                 entered_prompt = read_repl_message(
                     repl_prompt_for_preserved_answer(last_tutor_answer, preserved_prompt),
                     input_func=input_func,
                 ).strip()
-                prompt = entered_prompt or preserved_prompt or ""
+                if preserved_prompt is not None and entered_prompt:
+                    lowered = entered_prompt.casefold()
+                    if lowered == "/discard":
+                        clear_pending_learner_prompt(
+                            resolve_topic_slug(None), expected_prompt=preserved_prompt
+                        )
+                        preserved_prompt = None
+                        output_func("Saved answer discarded.")
+                        continue
+                    if lowered == "/replace" or lowered.startswith("/replace "):
+                        replacement = entered_prompt[len("/replace") :].lstrip()
+                        if not replacement:
+                            output_func(
+                                "Use /replace <answer>, or press Enter to retry the saved answer."
+                            )
+                            continue
+                        prompt = replacement
+                    elif entered_prompt.startswith("/"):
+                        prompt = entered_prompt
+                    elif learner_requests_advance(entered_prompt):
+                        prompt = entered_prompt
+                    else:
+                        output_func(
+                            "Saved answer retained. Press Enter to retry it, or use "
+                            "/replace <answer> to replace it."
+                        )
+                        continue
+                else:
+                    prompt = entered_prompt or preserved_prompt or ""
             except EOFError:
                 output_func("")
                 break
@@ -1783,6 +1827,7 @@ def run_repl(
                         ) from exc
                     preserved_prompt = prompt
                     print_active_status_bar()
+                    status_printed = True
                     last_tutor_answer = ask_topic(
                         None,
                         prompt,
@@ -1797,7 +1842,8 @@ def run_repl(
                 if failure_prompt and not prompt.startswith("/"):
                     preserved_prompt = failure_prompt
                     exc = OpenLearnError(f"{exc} Your answer was kept; press Enter to resubmit it.")
-                print_active_status_bar()
+                if not status_printed:
+                    print_active_status_bar()
                 print_error(str(exc), output_func)
     finally:
         deferred_updates.close()
@@ -2116,10 +2162,17 @@ def cmd_config_show(_args: argparse.Namespace) -> int:
     saved_key = config.get("openai_api_key") or config.get("api_key")
     model = configured_model(config)
     extractor_model = configured_extractor_model(model, config)
+    extractor_source = (
+        "dedicated"
+        if os.environ.get("OPENLEARN_EXTRACTOR_MODEL")
+        or isinstance(config.get("extractor_model"), str)
+        and bool(str(config.get("extractor_model")).strip())
+        else "tutor fallback"
+    )
     base_url = configured_base_url(config)
     print("Provider: openai")
     print(f"Model: {model}")
-    print(f"Extractor model: {extractor_model}")
+    print(f"Extractor model: {extractor_model} ({extractor_source})")
     print(f"Base URL: {base_url}")
     print(f"Editor: {shlex.join(configured_editor_argv(config))}")
     if env_key:
@@ -2155,6 +2208,25 @@ def cmd_config_set_model(args: argparse.Namespace) -> int:
     config["model"] = model
     write_config(config)
     print(f"Default model: {model}")
+    return 0
+
+
+def cmd_config_set_extractor_model(args: argparse.Namespace) -> int:
+    model = args.model.strip()
+    if not model:
+        raise OpenLearnError("extractor model cannot be empty")
+    config = read_config()
+    config["extractor_model"] = model
+    write_config(config)
+    print(f"Extractor model: {model}")
+    return 0
+
+
+def cmd_config_clear_extractor_model(_args: argparse.Namespace) -> int:
+    config = read_config()
+    config.pop("extractor_model", None)
+    write_config(config)
+    print("Extractor model: tutor model fallback")
     return 0
 
 
@@ -5750,6 +5822,7 @@ def ask_topic(
             model,
             is_review_session=is_review_session,
             event_sink=queue_event,
+            retry_status=output_func,
         )
         topic = read_topic(topic.slug)
     if message_kind:
@@ -6891,12 +6964,26 @@ def print_and_append_model_answer(
         save_current_slide_coverage(topic.slug, answer, _LAST_RESPONSE_COVERED_CONCEPTS)
         _LAST_RESPONSE_COVERED_CONCEPTS = []
     if kind in {"chat", "resume", "next", "lesson", "review"}:
-        save_pending_question(
-            topic,
-            answer,
-            _LAST_RESPONSE_ANSWER_KEY,
-            event_sink=event_sink,
-        )
+        question = extract_pending_question_text(answer)
+        check_count = explicit_check_section_count(answer)
+        if question and check_count == 1:
+            save_pending_question(
+                topic,
+                answer,
+                _LAST_RESPONSE_ANSWER_KEY,
+                question_text=question,
+                event_sink=event_sink,
+            )
+        elif check_count > 1 or response_requests_learner_evidence(answer):
+            clear_pending_question(
+                topic,
+                reason=(
+                    "multiple_explicit_checks"
+                    if check_count > 1
+                    else "missing_explicit_check"
+                ),
+                event_sink=event_sink,
+            )
         _LAST_RESPONSE_ANSWER_KEY = ""
     return answer
 
@@ -6994,6 +7081,51 @@ def extract_pending_question_text(text: str) -> str:
                 break
             return "\n".join(selected).strip()
     return ""
+
+
+def response_requests_learner_evidence(text: str) -> bool:
+    """Detect an answer request that was not safely placed under Check."""
+    return bool(
+        re.search(r"(?im)^\s*(?:\*\*)?Action:(?:\*\*)?\s+\S", text)
+        or re.search(
+            r"(?im)^\s*(?:now |please |your turn\b|tell me\b|try\b|retry\b).*[?]?\s*$",
+            text,
+        )
+    )
+
+
+def explicit_check_section_count(text: str) -> int:
+    return len(
+        re.findall(r"(?im)^\s*(?:\*\*)?Check:(?:\*\*)?(?:\s|$)", text)
+    )
+
+
+def clear_pending_question(
+    topic: Topic,
+    *,
+    reason: str,
+    event_sink: Callable[[str, str, dict[str, object]], None] | None = None,
+) -> None:
+    previous: dict[str, object] | None = None
+    with file_lock(topic.path):
+        raw_metadata, body = parse_topic(topic.path.read_text(encoding="utf-8"))
+        metadata = merge_topic_state(
+            normalize_topic_metadata(raw_metadata, topic.slug), load_state(topic.slug)
+        )
+        pending = metadata.pop("pending_question", None)
+        if isinstance(pending, dict):
+            previous = dict(pending)
+        if previous is None:
+            return
+        save_state(topic.slug, state_from_metadata(metadata))
+        write_text_atomic(topic.path, format_topic(stable_metadata_for_topic(metadata), body))
+    log_pending_question_transition(
+        topic.slug,
+        previous,
+        None,
+        reason=reason,
+        event_sink=event_sink,
+    )
 
 
 def check_is_navigation_prompt(question: str) -> bool:
@@ -7120,46 +7252,73 @@ def update_learning_metadata(
     model: str,
     is_review_session: bool = False,
     event_sink: Callable[[str, str, dict[str, object]], None] | None = None,
+    retry_status: Callable[[str], object] | None = None,
 ) -> str:
     previously_shown_text = last_tutor_lesson_response(topic)
     pending_at_answer = topic.metadata.get("pending_question")
     update_prompt = metadata_update_prompt(topic.metadata, learner_prompt, tutor_answer)
-    try:
-        raw_update = call_openai_judgment(
-            configured_extractor_model(model), METADATA_EXTRACTOR_SYSTEM, update_prompt
+    update: dict[str, object] = {}
+    unusable_reason = "an unusable result"
+    for attempt in range(1, JUDGE_MAX_ATTEMPTS + 1):
+        try:
+            raw_update = call_openai_judgment(
+                configured_extractor_model(model), METADATA_EXTRACTOR_SYSTEM, update_prompt
+            )
+            update = parse_metadata_update(raw_update)
+        except UnusableModelResponse as exc:
+            unusable_reason = str(exc)
+            if attempt < JUDGE_MAX_ATTEMPTS:
+                if retry_status is not None:
+                    retry_status("Judge returned no usable output; retrying once...")
+                continue
+            if isinstance(pending_at_answer, dict):
+                raise OpenLearnError(
+                    "Could not grade your answer after two judge attempts. "
+                    f"{exc} Configure a dedicated judge with "
+                    "`openlearn config set-extractor-model <model>`."
+                ) from exc
+            return ""
+        except OpenLearnError as exc:
+            if isinstance(pending_at_answer, dict):
+                detail = str(exc).replace("OpenAI request failed", "Provider request failed")
+                raise OpenLearnError(
+                    f"Could not grade your answer because the judge is unavailable: {detail}"
+                ) from exc
+            return ""
+        except (ValueError, json.JSONDecodeError):
+            unusable_reason = "The judge returned invalid structured output."
+            update = {}
+
+        message_kind = update.get("message_kind") if update else None
+        if isinstance(message_kind, str) and message_kind != "answer":
+            return message_kind
+        requires_complete_judgment = message_kind == "answer" or isinstance(
+            topic.metadata.get("pending_question"), dict
         )
-        update = parse_metadata_update(raw_update)
-    except OpenLearnError as exc:
-        if isinstance(pending_at_answer, dict):
-            raise OpenLearnError(
-                f"Could not grade your answer because the judge is unavailable: {exc}"
-            ) from exc
-        return ""
-    except (ValueError, json.JSONDecodeError) as exc:
-        if isinstance(pending_at_answer, dict):
-            raise OpenLearnError(
-                "Could not grade your answer because the judge returned an invalid result."
-            ) from exc
-        return ""
+        if update and (
+            not requires_complete_judgment
+            or prepare_current_answer_judgment(topic.metadata, learner_prompt, update)
+        ):
+            break
+        unusable_reason = (
+            "The judge returned an empty or incomplete structured judgment."
+        )
+        update = {}
+        if attempt < JUDGE_MAX_ATTEMPTS and retry_status is not None:
+            retry_status("Judge returned an unusable judgment; retrying once...")
+    else:
+        update = {}
+
     if not update:
         if isinstance(pending_at_answer, dict):
             raise OpenLearnError(
-                "Could not grade your answer because the judge returned an empty result."
+                "Could not grade your answer after two judge attempts. "
+                f"{unusable_reason} Your saved answer can be retried unchanged. "
+                "Configure a dedicated judge with "
+                "`openlearn config set-extractor-model <model>`."
             )
         return ""
     message_kind = update.get("message_kind")
-    if isinstance(message_kind, str) and message_kind != "answer":
-        return message_kind
-    pending = topic.metadata.get("pending_question")
-    requires_complete_judgment = message_kind == "answer" or isinstance(pending, dict)
-    if requires_complete_judgment and not prepare_current_answer_judgment(
-        topic.metadata, learner_prompt, update
-    ):
-        if isinstance(pending_at_answer, dict):
-            raise OpenLearnError(
-                "Could not grade your answer because the judge returned an incomplete result."
-            )
-        return ""
     emit_event = event_sink or log_event
 
     with file_lock(topic.path):
@@ -10291,15 +10450,15 @@ def remediation_turn_branch(metadata: dict[str, object]) -> str:
     )
     branches = {
         "hint": (
-            f"Current branch: remediation hint for {label}. Use one **Hint:** move with "
-            "one targeted cue that does not reveal the answer, then ask for one retry. "
-            "Keep the original graded check active."
+            f"Current branch: remediation hint for {label}. Give one short targeted cue, "
+            "then use the response's sole **Check:** label to visibly restate the exact "
+            "focused task to retry. The visible Check replaces the stored graded check."
         ),
         "worked_example": (
-            f"Current branch: remediation worked example for {label}. Use one **Example:** "
-            "move with a small complete worked example from a different instance. End with "
-            "one request for the learner to explain or complete the analogous missing step. "
-            "Do not repeat the failed prompt."
+            f"Current branch: remediation worked example for {label}. Give a compact "
+            "worked scaffold from a different instance as plain supporting text, then use "
+            "the response's sole **Check:** label for one smaller analogous missing step. "
+            "Do not repeat the failed prompt or narrate a full second problem."
         ),
         "faded_check": (
             f"Current branch: faded remediation check for {label}. Use one **Check:** move "
@@ -10350,18 +10509,21 @@ def tutor_turn_contract(
     elif status == "partial":
         branch = (
             "Current branch: partial answer. Name one correct piece and the single most "
-            "important gap, then request one focused attempt that addresses that gap."
+            "important gap, then use one **Check:** label for the focused attempt that "
+            "addresses that gap."
         )
     elif status == "needs_work" and isinstance(misses, int) and misses >= 2:
         branch = (
             "Current branch: stuck learner. Change approach once with one small worked "
-            "example or concrete scaffold for the current focus, then request one faded "
-            "attempt. Do not repeat the failed question or introduce another concept."
+            "example or concrete scaffold for the current focus, then use one **Check:** "
+            "label for a smaller faded attempt. Do not repeat the failed question or "
+            "introduce another concept."
         )
     elif status == "needs_work":
         branch = (
             "Current branch: incorrect answer. Address one specific misconception with a "
-            "hint or correction, then request one focused retry on that same target."
+            "hint or correction, then use one **Check:** label for one focused retry on "
+            "that same target."
         )
     else:
         branch = (
@@ -10376,7 +10538,12 @@ def tutor_turn_contract(
         - Use exactly one primary bold label in the entire response. A plain Action: line
           may follow, but it must contain the response's only learner action.
         - Give the learner at most one action, question, choice, or continuation cue.
-          If it is a check, make its target and all required context unambiguous.
+          Every action whose response will be judged must appear under exactly one visible
+          **Check:** label containing the complete task with all required context unambiguous
+          and exactly matching what will be stored.
+          Never request graded evidence only under Hint, Example, Feedback, or Action.
+        - Respect an explicit request to reduce effort. Use the smallest useful scaffold
+          and one small Check instead of completing or narrating another full problem.
         - Default to at most 120 words and 8 nonblank lines unless a necessary code sample
           or worked example requires more.
         - Make progress, mastery, environment, tool, and configuration claims only when
@@ -10912,8 +11079,8 @@ def call_openai(
     text = extract_response_text(data)
     text = sanitize_model_output(text)
     if not text:
-        raise OpenLearnError(
-            "OpenAI response did not contain output text; the model may have spent its output budget on reasoning. Try a faster non-reasoning model or increase the token limit."
+        raise UnusableModelResponse(
+            "The provider returned no usable output text."
         )
     return text.strip()
 
@@ -10928,7 +11095,7 @@ def call_openai_judgment(model: str, system: str, user: str) -> str:
         user,
         max_tokens=JUDGE_MAX_TOKENS,
         timeout_seconds=JUDGE_TIMEOUT_SECONDS,
-        max_attempts=JUDGE_MAX_ATTEMPTS,
+        max_attempts=1,
     )
 
 
@@ -11221,4 +11388,10 @@ def today() -> str:
 
 
 class OpenLearnError(Exception):
+    pass
+
+
+class UnusableModelResponse(OpenLearnError):
+    """A successful provider call that contained no usable model output."""
+
     pass

@@ -721,6 +721,8 @@ def test_calibration_fixture_is_versioned_and_covers_known_grades_and_failures()
         "bad_unsupported_slide_position",
         "bad_ambiguous_recursion_edge_case",
         "bad_prerequisite_concept_overload",
+        "bad_ignores_reduced_effort_request",
+        "bad_factual_boundary_claim",
     } <= bad_names
     covered_hard_failures = {
         failure
