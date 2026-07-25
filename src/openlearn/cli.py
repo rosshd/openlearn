@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import copy
 import contextlib
 import getpass
 import hashlib
@@ -126,6 +127,9 @@ OPENAI_RETRY_JITTER_SECONDS = 0.25
 JUDGE_MAX_TOKENS = 1024
 JUDGE_TIMEOUT_SECONDS = 20
 JUDGE_MAX_ATTEMPTS = 2
+TURN_COMMIT_SCHEMA_VERSION = 1
+TURN_APPLIED_MARKER_LIMIT = 128
+TURN_JOURNAL_PAYLOAD_CHAR_LIMIT = 262_144
 REMEDIATION_MINIMUM_SCORE = 0.7
 REMEDIATION_STAGE_BY_MISS = {
     1: "hint",
@@ -5813,13 +5817,14 @@ def ask_topic(
     deferred_updates: DeferredTurnUpdates | None = None,
     pending_learner_prompt: str | None = None,
 ) -> str:
+    global _LAST_RESPONSE_ANSWER_KEY
     topic = read_topic(
         resolve_topic_slug(topic_value) if topic_value is None else slugify(topic_value)
     )
     set_active_topic(topic.slug)
     model = model or str(topic.metadata.get("model") or configured_model())
     is_review_session = topic.metadata.get("review_session_active") is True
-    pending_question_at_turn = topic.metadata.get("pending_question")
+    original_metadata = copy.deepcopy(topic.metadata)
     needs_judgment = learner_message_needs_judgment(topic.metadata, prompt)
     is_navigation = learner_requests_advance(prompt)
     message_kind = (
@@ -5828,15 +5833,15 @@ def ask_topic(
         else ("" if needs_judgment else classify_ungraded_learner_message(prompt))
     )
     queued_events: list[tuple[str, str, dict[str, object]]] = []
-    raw_before, body_before = parse_topic(topic.path.read_text(encoding="utf-8"))
-    metadata_before = dict(raw_before)
-    state_before = load_state(topic.slug)
-    owned_metadata = dict(metadata_before)
-    owned_body = body_before
-    owned_state = dict(state_before)
+    state_before = copy.deepcopy(load_state(topic.slug))
+    projected_metadata = copy.deepcopy(topic.metadata)
 
     def queue_event(slug: str, event_type: str, data: dict[str, object]) -> None:
         queued_events.append((slug, event_type, data))
+
+    def capture_projection(metadata: dict[str, object], _body: str) -> None:
+        nonlocal projected_metadata
+        projected_metadata = copy.deepcopy(metadata)
 
     if needs_judgment:
         message_kind = update_learning_metadata(
@@ -5847,11 +5852,15 @@ def ask_topic(
             is_review_session=is_review_session,
             event_sink=queue_event,
             retry_status=output_func,
+            persist=False,
+            projection_sink=capture_projection,
         )
-        topic = read_topic(topic.slug)
-        owned_metadata, owned_body = parse_topic(topic.path.read_text(encoding="utf-8"))
-        owned_metadata = dict(owned_metadata)
-        owned_state = load_state(topic.slug)
+        topic = Topic(
+            slug=topic.slug,
+            path=topic.path,
+            metadata=projected_metadata,
+            body=topic.body,
+        )
     if message_kind:
         topic = Topic(
             slug=topic.slug,
@@ -5859,48 +5868,91 @@ def ask_topic(
             metadata={**topic.metadata, "current_turn_message_kind": message_kind},
             body=topic.body,
         )
-    try:
-        answer = generate_validated_tutor_answer(
+    answer = sanitize_model_output(
+        generate_validated_tutor_answer(
             topic,
             prompt,
             model,
             output_func=output_func,
         )
-        answer = print_and_append_model_answer(
-            topic,
-            "chat",
-            prompt,
-            answer,
-            output_func=output_func,
-            event_sink=queue_event if needs_judgment else None,
-        )
-        owned_metadata, owned_body = parse_topic(topic.path.read_text(encoding="utf-8"))
-        owned_metadata = dict(owned_metadata)
-        owned_state = load_state(topic.slug)
-        if pending_learner_prompt is not None:
-            turn_id = consumed_turn_id(
-                pending_learner_prompt,
-                pending_question_at_turn,
+    )
+    answer_key = _LAST_RESPONSE_ANSWER_KEY
+    _LAST_RESPONSE_ANSWER_KEY = ""
+    projected_metadata.pop("current_turn_message_kind", None)
+    previous_pending = projected_metadata.get("pending_question")
+    question = extract_pending_question_text(answer)
+    if question and explicit_check_section_count(answer) == 1:
+        pending_question: dict[str, str] = {
+            "kind": (
+                "multiple_choice"
+                if answer_key in {"A", "B", "C", "D"}
+                or any(
+                    re.match(r"(?i)^[A-D][\).:-]\s+", line.strip())
+                    for line in question.splitlines()
+                )
+                else "free_response"
+            ),
+            "question": question.strip(),
+            "created": today(),
+        }
+        if answer_key in {"A", "B", "C", "D"}:
+            pending_question["answer_key"] = answer_key
+        focus = projected_metadata.get("current_focus")
+        if isinstance(focus, str) and focus.strip():
+            pending_question["focus"] = focus.strip()
+            pending_question["concept_id"] = concept_id_for_focus(
+                projected_metadata, focus
             )
-            mark_pending_learner_prompt_consumed(
-                topic.slug, pending_learner_prompt, turn_id
-            )
-            owned_state = load_state(topic.slug)
-        log_event_batch(queued_events)
-    except (Exception, KeyboardInterrupt):
-        rollback_turn_owned_changes(
-            topic,
-            metadata_before,
-            body_before,
-            state_before,
-            owned_metadata,
-            owned_body,
-            owned_state,
+        projected_metadata["pending_question"] = pending_question
+        log_pending_question_transition(
+            topic.slug,
+            dict(previous_pending) if isinstance(previous_pending, dict) else None,
+            pending_question,
+            reason="explicit_check",
+            event_sink=queue_event,
         )
-        raise
-    if pending_learner_prompt is not None:
-        clear_pending_learner_prompt(topic.slug, expected_prompt=pending_learner_prompt)
-        clear_consumed_learner_prompt_marker(topic.slug, turn_id)
+
+    base_dynamic = state_from_metadata(original_metadata)
+    projected_dynamic = state_from_metadata(projected_metadata)
+    state_after = copy.deepcopy(state_before)
+    for key in set(base_dynamic) | set(projected_dynamic):
+        if key in projected_dynamic:
+            state_after[key] = copy.deepcopy(projected_dynamic[key])
+        else:
+            state_after.pop(key, None)
+    if (
+        pending_learner_prompt is not None
+        and state_after.get("pending_learner_prompt") == pending_learner_prompt
+    ):
+        state_after.pop("pending_learner_prompt", None)
+        state_after.pop("pending_consumed_learner_prompt", None)
+
+    mutation_id = f"turn_{uuid4().hex}"
+    created = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    session_entry = _session_entry(
+        "chat", prompt, answer, created=created, mutation_id=mutation_id
+    )
+    projected_body = topic.body.rstrip() + "\n\n" + session_entry + "\n"
+    if tutor_response_has_enter_advance_cue(answer):
+        register_enter_advance_cue(
+            projected_metadata,
+            projected_body,
+            topic.slug,
+            topic.path,
+        )
+        cue_state = state_from_metadata(projected_metadata).get("enter_advance_cue")
+        if cue_state is not None:
+            state_after["enter_advance_cue"] = cue_state
+    _commit_projected_turn(
+        topic.slug,
+        state_before,
+        state_after,
+        session_entry,
+        queued_events,
+        mutation_id,
+        before_metadata=stable_metadata_for_topic(original_metadata),
+        after_metadata=stable_metadata_for_topic(projected_metadata),
+    )
     if deferred_updates is None:
         finish_turn_update(
             topic,
@@ -5935,6 +5987,7 @@ def generate_validated_tutor_answer(
     """Generate, validate, then reveal one tutor response."""
     message_kind = topic.metadata.get("current_turn_message_kind")
     require_check = tutor_turn_requires_check(topic.metadata, message_kind=message_kind)
+    forbid_check = message_kind in {"question", "request", "confusion"}
     enforce_action_labels = message_kind in {None, "", "answer"}
     system = system_prompt(topic)
     candidate = ""
@@ -5944,7 +5997,11 @@ def generate_validated_tutor_answer(
         user = (
             prompt
             if attempt == 0
-            else tutor_contract_repair_prompt(candidate, require_check=require_check)
+            else tutor_contract_repair_prompt(
+                candidate,
+                require_check=require_check,
+                forbid_check=forbid_check,
+            )
         )
         candidate = call_openai_streaming(
             model=model,
@@ -5956,6 +6013,7 @@ def generate_validated_tutor_answer(
             candidate,
             require_check=require_check,
             enforce_action_labels=enforce_action_labels,
+            forbid_check=forbid_check,
         )
         if error is None:
             for line in buffered_output:
@@ -5985,9 +6043,12 @@ def tutor_answer_contract_error(
     *,
     require_check: bool,
     enforce_action_labels: bool = True,
+    forbid_check: bool = False,
 ) -> str | None:
     check_count = explicit_check_section_count(answer)
     question = extract_pending_question_text(answer)
+    if forbid_check and check_count:
+        return "side response must not replace the pending Check"
     if check_count > 1:
         return "multiple Check sections"
     if check_count == 1 and not question:
@@ -6024,8 +6085,17 @@ def question_outside_check_section(text: str) -> bool:
     return False
 
 
-def tutor_contract_repair_prompt(candidate: str, *, require_check: bool) -> str:
+def tutor_contract_repair_prompt(
+    candidate: str,
+    *,
+    require_check: bool,
+    forbid_check: bool = False,
+) -> str:
     check_rule = (
+        "This is an ungraded side response. Do not emit a Check or request learner work; "
+        "answer the question or request briefly while leaving the prior task untouched."
+        if forbid_check
+        else
         "Return exactly one visible **Check:** section containing the complete small task "
         "the learner should answer."
         if require_check
@@ -6143,12 +6213,392 @@ def rollback_owned_mapping(
     for key in set(before) | set(owned):
         before_value = before.get(key, missing)
         owned_value = owned.get(key, missing)
-        if before_value == owned_value or current.get(key, missing) != owned_value:
+        current_value = current.get(key, missing)
+        if before_value == owned_value:
+            continue
+        if (
+            isinstance(before_value, dict)
+            and isinstance(owned_value, dict)
+            and isinstance(current_value, dict)
+        ):
+            rollback_owned_mapping(current_value, before_value, owned_value)
+            continue
+        if current_value != owned_value:
             continue
         if before_value is missing:
             current.pop(key, None)
         else:
             current[key] = before_value
+
+
+def _turn_commit_checkpoint(_stage: str) -> None:
+    """Test seam for simulating process failure at durable turn boundaries."""
+
+
+def _session_entry(
+    kind: str,
+    prompt: str,
+    answer: str,
+    *,
+    created: str,
+    mutation_id: str,
+) -> str:
+    return textwrap.dedent(
+        f"""
+
+        <!-- openlearn-turn:{mutation_id} -->
+        ### {created} - {kind}
+
+        **Prompt**
+
+        {prompt}
+
+        **Response**
+
+        {answer}
+        """
+    ).strip()
+
+
+def _state_projection_patch(
+    before: object,
+    after: object,
+    path: tuple[str, ...] = (),
+) -> list[dict[str, object]]:
+    """Describe only the leaves owned by this turn.
+
+    Numeric attempt counters are represented as increments so a concurrent
+    attempt on the same concept is retained. Other leaves use compare-and-set
+    semantics during recovery and therefore never overwrite an unrelated
+    concurrent edit.
+    """
+    if isinstance(before, dict) and isinstance(after, dict):
+        result: list[dict[str, object]] = []
+        for key in sorted(set(before) | set(after)):
+            child_path = (*path, str(key))
+            if key not in after:
+                result.append(
+                    {"op": "remove", "path": list(child_path), "before": before[key]}
+                )
+            elif key not in before:
+                if isinstance(after[key], dict):
+                    result.extend(_state_projection_patch({}, after[key], child_path))
+                elif (
+                    "concept_attempts" in child_path
+                    and child_path[-1:] in {("attempts",), ("correct_sum",)}
+                    and isinstance(after[key], (int, float))
+                ):
+                    result.append(
+                        {"op": "increment", "path": list(child_path), "delta": after[key]}
+                    )
+                else:
+                    result.append(
+                        {
+                            "op": "set",
+                            "path": list(child_path),
+                            "before_missing": True,
+                            "after": after[key],
+                        }
+                    )
+            else:
+                result.extend(_state_projection_patch(before[key], after[key], child_path))
+        return result
+    if isinstance(before, list) and isinstance(after, list):
+        added = [item for item in after if item not in before]
+        removed = [item for item in before if item not in after]
+        if not added and not removed:
+            return []
+        return [
+            {
+                "op": "list_delta",
+                "path": list(path),
+                "added": added,
+                "removed": removed,
+            }
+        ]
+    if before == after:
+        return []
+    if (
+        "concept_attempts" in path
+        and path[-1:] in {("attempts",), ("correct_sum",)}
+        and isinstance(before, (int, float))
+        and isinstance(after, (int, float))
+    ):
+        return [{"op": "increment", "path": list(path), "delta": after - before}]
+    return [{"op": "set", "path": list(path), "before": before, "after": after}]
+
+
+def _lookup_patch_parent(
+    state: dict[str, object], path: list[str], *, create: bool
+) -> tuple[dict[str, object] | None, str]:
+    current = state
+    for key in path[:-1]:
+        child = current.get(key)
+        if not isinstance(child, dict):
+            if not create:
+                return None, path[-1]
+            child = {}
+            current[key] = child
+        current = child
+    return current, path[-1]
+
+
+def _apply_state_projection_patch(
+    state: dict[str, object], patch: list[dict[str, object]]
+) -> None:
+    missing = object()
+    for operation in patch:
+        raw_path = operation.get("path")
+        if not isinstance(raw_path, list) or not raw_path or not all(
+            isinstance(item, str) and item for item in raw_path
+        ):
+            raise OpenLearnError("saved tutor turn journal has an invalid state patch")
+        parent, key = _lookup_patch_parent(state, raw_path, create=operation.get("op") != "remove")
+        if parent is None:
+            continue
+        current = parent.get(key, missing)
+        op = operation.get("op")
+        if op == "increment":
+            delta = operation.get("delta")
+            if not isinstance(delta, (int, float)):
+                raise OpenLearnError("saved tutor turn journal has an invalid counter patch")
+            current_number = current if isinstance(current, (int, float)) else 0
+            parent[key] = round(current_number + delta, 3)
+        elif op == "remove":
+            if current == operation.get("before"):
+                parent.pop(key, None)
+        elif op == "set":
+            before_missing = operation.get("before_missing") is True
+            if (before_missing and current is missing) or (
+                not before_missing and current == operation.get("before")
+            ):
+                parent[key] = copy.deepcopy(operation.get("after"))
+        elif op == "list_delta":
+            added = operation.get("added")
+            removed = operation.get("removed")
+            if not isinstance(added, list) or not isinstance(removed, list):
+                raise OpenLearnError("saved tutor turn journal has an invalid list patch")
+            values = list(current) if isinstance(current, list) else []
+            values = [item for item in values if item not in removed]
+            for item in added:
+                if item not in values:
+                    values.append(copy.deepcopy(item))
+            parent[key] = values
+        else:
+            raise OpenLearnError("saved tutor turn journal has an invalid state operation")
+
+
+def _validated_turn_journal(slug: str, value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise OpenLearnError("saved tutor turn journal is malformed; move it aside and retry")
+    required = {
+        "schema_version",
+        "mutation_id",
+        "slug",
+        "metadata_patch",
+        "state_patch",
+        "session_entry",
+        "events",
+    }
+    if set(value) != required or value.get("schema_version") != TURN_COMMIT_SCHEMA_VERSION:
+        raise OpenLearnError(
+            "saved tutor turn journal has an unsupported format; move it aside and retry"
+        )
+    mutation_id = value.get("mutation_id")
+    if (
+        value.get("slug") != slug
+        or not isinstance(mutation_id, str)
+        or not re.fullmatch(r"turn_[a-f0-9]{32}", mutation_id)
+    ):
+        raise OpenLearnError("saved tutor turn journal has an invalid identity")
+    if not isinstance(value.get("metadata_patch"), list) or not isinstance(
+        value.get("state_patch"), list
+    ):
+        raise OpenLearnError("saved tutor turn journal has an invalid state patch")
+    session_entry = value.get("session_entry")
+    if not isinstance(session_entry, str) or f"openlearn-turn:{mutation_id}" not in session_entry:
+        raise OpenLearnError("saved tutor turn journal has an invalid session payload")
+    events = value.get("events")
+    if not isinstance(events, list):
+        raise OpenLearnError("saved tutor turn journal has an invalid event batch")
+    for event in events:
+        if (
+            not isinstance(event, dict)
+            or event.get("schema_version") != EVENT_SCHEMA_VERSION
+            or event.get("slug") != slug
+            or not isinstance(event.get("event_type"), str)
+            or not isinstance(event.get("data"), dict)
+            or not isinstance(event.get("event_id"), str)
+        ):
+            raise OpenLearnError("saved tutor turn journal has an invalid event")
+    return value
+
+
+def _read_turn_journal(slug: str) -> dict[str, object] | None:
+    path = topic_turn_journal_path(slug)
+    if not path.exists():
+        return None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise OpenLearnError(
+            "saved tutor turn journal is unreadable; move it aside and retry"
+        ) from exc
+    return _validated_turn_journal(slug, raw)
+
+
+def _apply_turn_journal(slug: str, journal: dict[str, object]) -> None:
+    mutation_id = str(journal["mutation_id"])
+    marker = f"<!-- openlearn-turn:{mutation_id} -->"
+    topic_file = topic_path(slug)
+    state_file = topic_state_path(slug)
+    events_file = topic_events_path(slug)
+    # Lock order is always Markdown, state, then append-only events. The
+    # coordinator lock held by the caller serializes journal cleanup.
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(file_lock(topic_file))
+        stack.enter_context(file_lock(state_file))
+        stack.enter_context(file_lock(events_file))
+
+        topic_text = topic_file.read_text(encoding="utf-8")
+        if marker not in topic_text:
+            raw_metadata, body = parse_topic(topic_text)
+            metadata = dict(raw_metadata)
+            metadata_patch = journal["metadata_patch"]
+            if not isinstance(metadata_patch, list):
+                raise OpenLearnError(
+                    "saved tutor turn journal has an invalid metadata patch"
+                )
+            _apply_state_projection_patch(metadata, metadata_patch)
+            session_entry = str(journal["session_entry"])
+            body = body.rstrip() + "\n\n" + session_entry + "\n"
+            write_text_atomic(topic_file, format_topic(metadata, body))
+        _turn_commit_checkpoint("after_topic")
+
+        # An older interrupted activity transition is logically earlier than
+        # this tutor turn. Finish it first, then layer the exact turn patch on
+        # top so neither journal can rewind the other's state or event.
+        _recover_activity_update_locked(slug)
+        state = _load_state_unlocked(slug)
+        applied = state.get("_applied_turn_mutations")
+        applied_ids = (
+            [item for item in applied if isinstance(item, str)]
+            if isinstance(applied, list)
+            else []
+        )
+        if mutation_id not in applied_ids:
+            patch = journal["state_patch"]
+            if not isinstance(patch, list):
+                raise OpenLearnError("saved tutor turn journal has an invalid state patch")
+            _apply_state_projection_patch(state, patch)
+            applied_ids.append(mutation_id)
+            state["_applied_turn_mutations"] = applied_ids[-TURN_APPLIED_MARKER_LIMIT:]
+            write_text_atomic(state_file, json.dumps(state, indent=2, sort_keys=True) + "\n")
+        _turn_commit_checkpoint("after_state")
+
+        existing_events = events_file.read_text(encoding="utf-8") if events_file.exists() else ""
+        existing_ids: set[str] = set()
+        for line in existing_events.splitlines():
+            try:
+                existing_event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(existing_event, dict) and isinstance(
+                existing_event.get("event_id"), str
+            ):
+                existing_ids.add(str(existing_event["event_id"]))
+        additions: list[str] = []
+        raw_events = journal["events"]
+        if not isinstance(raw_events, list):
+            raise OpenLearnError("saved tutor turn journal has an invalid event batch")
+        for raw_event in raw_events:
+            if not isinstance(raw_event, dict):
+                raise OpenLearnError("saved tutor turn journal has an invalid event")
+            event_id = str(raw_event["event_id"])
+            if event_id not in existing_ids:
+                additions.append(json.dumps(raw_event, sort_keys=True))
+                existing_ids.add(event_id)
+        if additions:
+            text = existing_events
+            if text and not text.endswith("\n"):
+                text += "\n"
+            text += "\n".join(additions) + "\n"
+            write_text_atomic(events_file, text)
+        _turn_commit_checkpoint("after_events")
+
+def recover_turn_commit(slug: str) -> bool:
+    if _DRY_RUN:
+        return False
+    journal_path = topic_turn_journal_path(slug)
+    with file_lock(journal_path):
+        journal = _read_turn_journal(slug)
+    if journal is None:
+        return False
+    _apply_turn_journal(slug, journal)
+    _turn_commit_checkpoint("before_cleanup")
+    with file_lock(journal_path):
+        current = _read_turn_journal(slug)
+        if current is not None and current.get("mutation_id") == journal.get("mutation_id"):
+            journal_path.unlink(missing_ok=True)
+    _turn_commit_checkpoint("after_cleanup")
+    return True
+
+
+def _commit_projected_turn(
+    slug: str,
+    before_state: dict[str, object],
+    after_state: dict[str, object],
+    session_entry: str,
+    queued_events: list[tuple[str, str, dict[str, object]]],
+    mutation_id: str,
+    *,
+    before_metadata: dict[str, object] | None = None,
+    after_metadata: dict[str, object] | None = None,
+) -> None:
+    if _DRY_RUN:
+        return
+    if len(session_entry) > TURN_JOURNAL_PAYLOAD_CHAR_LIMIT:
+        raise OpenLearnError(
+            "Tutor turn is too large to save safely; shorten the answer and retry."
+        )
+    timestamp = datetime.now(timezone.utc).isoformat()
+    events = [
+        {
+            "schema_version": EVENT_SCHEMA_VERSION,
+            "event_id": f"{mutation_id}:{index}",
+            "ts": timestamp,
+            "event_type": event_type,
+            "slug": event_slug,
+            "data": event_data,
+        }
+        for index, (event_slug, event_type, event_data) in enumerate(queued_events)
+        if event_slug == slug
+    ]
+    journal = {
+        "schema_version": TURN_COMMIT_SCHEMA_VERSION,
+        "mutation_id": mutation_id,
+        "slug": slug,
+        "metadata_patch": _state_projection_patch(
+            before_metadata or {}, after_metadata or {}
+        ),
+        "state_patch": _state_projection_patch(before_state, after_state),
+        "session_entry": session_entry,
+        "events": events,
+    }
+    journal_path = topic_turn_journal_path(slug)
+    while True:
+        recover_turn_commit(slug)
+        with file_lock(journal_path):
+            if journal_path.exists():
+                continue
+            _turn_commit_checkpoint("before_journal")
+            write_text_atomic(
+                journal_path, json.dumps(journal, indent=2, sort_keys=True) + "\n"
+            )
+            os.chmod(journal_path, stat.S_IRUSR | stat.S_IWUSR)
+            break
+    _turn_commit_checkpoint("after_journal")
+    recover_turn_commit(slug)
 
 
 def built_in_activity_registry() -> ActivityRegistry:
@@ -7268,6 +7718,10 @@ def response_requests_learner_evidence(text: str) -> bool:
         r"walk\s+through|try|retry|predict|calculate|compute|describe|list|"
         r"identify|apply|run|build|answer|tell\s+me)\b"
     )
+    declarative_noun_phrase = re.compile(
+        r"(?i)^(?:compare-and-[\w-]+|list\s+\w+(?:\s+\w+)?|"
+        r"trace\s+\w+(?:\s+\w+)?)\s+(?:is|are|helps?|supports?|shows?)\b"
+    )
     active_section = ""
     for raw_line in text.splitlines():
         match = section_pattern.match(raw_line)
@@ -7281,7 +7735,7 @@ def response_requests_learner_evidence(text: str) -> bool:
             continue
         if active_section == "action" and content and not check_is_navigation_prompt(content):
             return True
-        if imperative.match(content):
+        if imperative.match(content) and not declarative_noun_phrase.match(content):
             return True
     return False
 
@@ -7445,6 +7899,8 @@ def update_learning_metadata(
     is_review_session: bool = False,
     event_sink: Callable[[str, str, dict[str, object]], None] | None = None,
     retry_status: Callable[[str], object] | None = None,
+    persist: bool = True,
+    projection_sink: Callable[[dict[str, object], str], None] | None = None,
 ) -> str:
     previously_shown_text = last_tutor_lesson_response(topic)
     pending_at_answer = topic.metadata.get("pending_question")
@@ -7513,11 +7969,20 @@ def update_learning_metadata(
     message_kind = update.get("message_kind")
     emit_event = event_sink or log_event
 
-    with file_lock(topic.path):
-        current_text = topic.path.read_text(encoding="utf-8")
+    persistence_context = file_lock(topic.path) if persist else contextlib.nullcontext()
+    with persistence_context:
+        current_text = (
+            topic.path.read_text(encoding="utf-8")
+            if persist
+            else format_topic(stable_metadata_for_topic(topic.metadata), topic.body)
+        )
         raw_metadata, body = parse_topic(current_text)
-        metadata = merge_topic_state(
-            normalize_topic_metadata(raw_metadata, topic.slug), load_state(topic.slug)
+        metadata = (
+            merge_topic_state(
+                normalize_topic_metadata(raw_metadata, topic.slug), load_state(topic.slug)
+            )
+            if persist
+            else dict(topic.metadata)
         )
         metadata = dict(metadata)
         previous_metadata = dict(metadata)
@@ -7799,9 +8264,12 @@ def update_learning_metadata(
             and not isinstance(metadata.get("pending_remediation"), dict)
         ):
             metadata.pop("pending_question", None)
-        save_state(topic.slug, state_from_metadata(metadata))
-        write_topic_backup(topic.path, current_text)
-        write_text_atomic(topic.path, format_topic(stable_metadata_for_topic(metadata), body))
+        if persist:
+            save_state(topic.slug, state_from_metadata(metadata))
+            write_topic_backup(topic.path, current_text)
+            write_text_atomic(topic.path, format_topic(stable_metadata_for_topic(metadata), body))
+        elif projection_sink is not None:
+            projection_sink(dict(metadata), body)
         previous_pending = previous_metadata.get("pending_question")
         current_pending = metadata.get("pending_question")
         log_pending_question_transition(
@@ -8508,6 +8976,10 @@ def topic_state_path(slug: str) -> Path:
 
 def topic_activity_journal_path(slug: str) -> Path:
     return topics_dir() / f".{slug}.activity-update.json"
+
+
+def topic_turn_journal_path(slug: str) -> Path:
+    return topics_dir() / f".{slug}.turn-commit.json"
 
 
 def topic_events_path(slug: str) -> Path:
@@ -9290,6 +9762,7 @@ def read_topic(slug: str) -> Topic:
     path = topic_path(slug)
     if not path.exists():
         raise OpenLearnError(f"topic not found: {slug}")
+    recover_turn_commit(slug)
     text = path.read_text(encoding="utf-8")
     raw_metadata, body = parse_topic(text)
     metadata = normalize_topic_metadata(raw_metadata, slug)
@@ -9532,6 +10005,7 @@ def recover_activity_update(slug: str) -> None:
 
 
 def load_state(slug: str) -> dict[str, object]:
+    recover_turn_commit(slug)
     path = topic_state_path(slug)
     with file_lock(path):
         _recover_activity_update_locked(slug)
@@ -9544,8 +10018,9 @@ def save_state(slug: str, state: dict[str, object]) -> None:
         _recover_activity_update_locked(slug)
         existing = _load_state_unlocked(slug)
         updated = dict(state)
-        if "active_activity" in existing:
-            updated["active_activity"] = existing["active_activity"]
+        for internal_key in ("active_activity", "_applied_turn_mutations"):
+            if internal_key in existing:
+                updated[internal_key] = existing[internal_key]
         write_text_atomic(path, json.dumps(updated, indent=2, sort_keys=True) + "\n")
 
 
@@ -9559,6 +10034,7 @@ def load_pending_learner_prompt(slug: str) -> str | None:
 def save_pending_learner_prompt(slug: str, prompt: str) -> None:
     if not isinstance(prompt, str) or not prompt.strip():
         raise OpenLearnError("pending learner prompt must be non-empty")
+    recover_turn_commit(slug)
     path = topic_state_path(slug)
     with file_lock(path):
         _recover_activity_update_locked(slug)
@@ -9570,6 +10046,7 @@ def save_pending_learner_prompt(slug: str, prompt: str) -> None:
 def clear_pending_learner_prompt(
     slug: str, expected_prompt: str | None = None
 ) -> bool:
+    recover_turn_commit(slug)
     path = topic_state_path(slug)
     with file_lock(path):
         _recover_activity_update_locked(slug)
@@ -9630,6 +10107,7 @@ def clear_consumed_learner_prompt_marker(slug: str, turn_id: str) -> bool:
 
 
 def reconcile_consumed_pending_learner_prompt(slug: str) -> bool:
+    recover_turn_commit(slug)
     path = topic_state_path(slug)
     with file_lock(path):
         _recover_activity_update_locked(slug)
@@ -9702,7 +10180,9 @@ def log_event_batch(events: list[tuple[str, str, dict[str, object]]]) -> None:
 def load_event_log(path: Path) -> list[dict[str, object]]:
     suffix = ".events.jsonl"
     if path.name.endswith(suffix):
-        recover_activity_update(path.name[: -len(suffix)])
+        slug = path.name[: -len(suffix)]
+        recover_turn_commit(slug)
+        recover_activity_update(slug)
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except OSError:
@@ -10379,6 +10859,7 @@ def _select_lock_primitives(platform: str = sys.platform):
 
 
 _flock, _funlock = _select_lock_primitives()
+_FILE_LOCK_DEPTHS = threading.local()
 
 
 @contextlib.contextmanager
@@ -10389,11 +10870,26 @@ def file_lock(path: Path):
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = path.with_name(f".{path.name}.lock")
-    with lock_path.open("w", encoding="utf-8") as lock_file:
-        _flock(lock_file)
+    lock_key = str(lock_path.resolve())
+    depths = getattr(_FILE_LOCK_DEPTHS, "values", None)
+    if depths is None:
+        depths = {}
+        _FILE_LOCK_DEPTHS.values = depths
+    depth = depths.get(lock_key, 0)
+    if depth:
+        depths[lock_key] = depth + 1
         try:
             yield
         finally:
+            depths[lock_key] -= 1
+        return
+    with lock_path.open("w", encoding="utf-8") as lock_file:
+        _flock(lock_file)
+        depths[lock_key] = 1
+        try:
+            yield
+        finally:
+            depths.pop(lock_key, None)
             _funlock(lock_file)
 
 

@@ -20,6 +20,7 @@ state.json
 learning-topics/*.md
 learning-topics/*.state.json
 learning-topics/*.events.jsonl
+learning-topics/.*.turn-commit.json
 learning-topics/*/
 
 !.gitkeep
