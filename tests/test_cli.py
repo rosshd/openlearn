@@ -6985,6 +6985,106 @@ class InteractiveTests(unittest.TestCase):
             )
             self.assertTrue(journal_path.exists())
 
+    def test_legacy_state_receipts_upgrade_without_authorizing_replay(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Receipt Upgrade", goal="Learn safely"))
+        slug = "receipt-upgrade"
+        before = cli.load_state(slug)
+        after = {**before, "consecutive_misses": 1}
+        old_id = "turn_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        old_entry = cli._session_entry(
+            "chat",
+            "legacy learner answer",
+            "legacy tutor response",
+            created="2026-07-25 12:00 UTC",
+            mutation_id=old_id,
+        )
+        original_checkpoint = cli._turn_commit_checkpoint
+        cli._turn_commit_checkpoint = (
+            lambda stage: (_ for _ in ()).throw(KeyboardInterrupt())
+            if stage == "after_journal"
+            else None
+        )
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                cli._commit_projected_turn(
+                    slug,
+                    before,
+                    after,
+                    old_entry,
+                    [(slug, "answer_judged", {"status": "needs_work"})],
+                    old_id,
+                )
+        finally:
+            cli._turn_commit_checkpoint = original_checkpoint
+
+        journal_path = cli.topic_turn_journal_path(slug)
+        current_journal = json.loads(journal_path.read_text(encoding="utf-8"))
+        legacy_journal = {
+            key: value
+            for key, value in current_journal.items()
+            if key not in {"topic_generation", "commit_sha256"}
+        }
+        cli.recover_turn_commit(slug)
+        legacy_state = cli._load_state_unlocked(slug)
+        legacy_state["_turn_receipts"] = {
+            old_id: current_journal["state_patch_sha256"]
+        }
+        legacy_state.pop("_turn_receipts_schema", None)
+        cli.write_text_atomic(
+            cli.topic_state_path(slug),
+            json.dumps(legacy_state, indent=2, sort_keys=True) + "\n",
+        )
+
+        upgraded = cli.load_state(slug)
+        self.assertEqual(upgraded["_turn_receipts_schema"], 2)
+        self.assertEqual(upgraded["_turn_receipts"], {})
+        self.assertEqual(upgraded["_legacy_turn_receipts_schema"], 1)
+        self.assertEqual(upgraded["_legacy_turn_receipts"], [old_id])
+        self.assertEqual(cli.load_state(slug), upgraded)
+
+        new_id = "turn_cccccccccccccccccccccccccccccccc"
+        new_entry = cli._session_entry(
+            "chat",
+            "new learner answer",
+            "new tutor response",
+            created="2026-07-25 12:01 UTC",
+            mutation_id=new_id,
+        )
+        cli._commit_projected_turn(slug, upgraded, upgraded, new_entry, [], new_id)
+        after_new_turn = cli.load_state(slug)
+        topic_before = cli.topic_path(slug).read_bytes()
+        state_before = cli.topic_state_path(slug).read_bytes()
+        events_before = cli.topic_events_path(slug).read_bytes()
+
+        journal_path.write_text(
+            json.dumps(legacy_journal, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        os.chmod(journal_path, 0o600)
+        self.assertFalse(cli.recover_turn_commit(slug))
+        self.assertFalse(journal_path.exists())
+        self.assertEqual(cli.topic_path(slug).read_bytes(), topic_before)
+        self.assertEqual(cli.topic_state_path(slug).read_bytes(), state_before)
+        self.assertEqual(cli.topic_events_path(slug).read_bytes(), events_before)
+        self.assertEqual(cli.load_state(slug), after_new_turn)
+        self.assertEqual(cli.read_topic(slug).body.count(f"openlearn-turn:{old_id}"), 1)
+
+    def test_corrupt_legacy_receipts_fail_only_the_affected_topic(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Corrupt Legacy", goal="Learn safely"))
+        call_silent(cli.cmd_new, Namespace(topic="Healthy Topic", goal="Learn safely"))
+        corrupt = cli._load_state_unlocked("corrupt-legacy")
+        corrupt["_turn_receipts"] = {"not-a-turn-id": "SECRET"}
+        corrupt.pop("_turn_receipts_schema", None)
+        cli.write_text_atomic(
+            cli.topic_state_path("corrupt-legacy"),
+            json.dumps(corrupt, indent=2, sort_keys=True) + "\n",
+        )
+
+        with self.assertRaises(cli.OpenLearnError) as caught:
+            cli.load_state("corrupt-legacy")
+        self.assertNotIn("SECRET", str(caught.exception))
+        self.assertIsInstance(cli.load_state("healthy-topic"), dict)
+
     def test_atomic_replace_and_unlink_fsync_parent_directory(self) -> None:
         path = Path(self.home.name) / "durable.txt"
         calls: list[str] = []
@@ -7800,6 +7900,7 @@ class InteractiveTests(unittest.TestCase):
             "State the base case.",
             "Please debug the boundary condition.",
             "Your turn: test the empty input.",
+            "Test the solution catches regressions.",
         )
         for text in positives:
             with self.subTest(text=text):
@@ -7825,6 +7926,8 @@ class InteractiveTests(unittest.TestCase):
             "**Lesson:** Code review improves quality.",
             "**Lesson:** Test suites catch regressions.",
             "**Lesson:** Design patterns guide structure.",
+            "**Lesson:** State stores persist values.",
+            "**Lesson:** Choose helpers are uncommon.",
         )
         for text in negatives:
             with self.subTest(text=text):
@@ -9115,6 +9218,247 @@ class InteractiveTests(unittest.TestCase):
                     len({event["data"]["activity_update_id"] for event in events}),
                     1,
                 )
+
+    def test_activity_journal_generation_blocks_replay_into_recreated_topic(self) -> None:
+        slug = "activity-generation"
+        call_silent(cli.cmd_new, Namespace(topic=slug, goal="practice functions"))
+        request = {
+            "domain": "coding",
+            "kind": "python_drill",
+            "objective": "Practice a small function.",
+            "concept_ids": ["functions"],
+            "requested_evidence": ["pytest_result"],
+            "scaffolding_level": 1,
+            "purpose": "practice",
+            "domain_payload": {
+                "title": "Old activity",
+                "language": "python",
+                "tool_requests": [],
+            },
+        }
+        original_checkpoint = cli._activity_update_checkpoint
+        cli._activity_update_checkpoint = (
+            lambda stage: (_ for _ in ()).throw(KeyboardInterrupt())
+            if stage == "after_journal"
+            else None
+        )
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                cli.propose_topic_activity(slug, request)
+        finally:
+            cli._activity_update_checkpoint = original_checkpoint
+        journal_path = cli.topic_activity_journal_path(slug)
+        stale_journal = journal_path.read_bytes()
+        old_generation = json.loads(stale_journal)["topic_generation"]
+
+        cli.delete_topic_files(slug)
+        call_silent(cli.cmd_new, Namespace(topic=slug, goal="new topic"))
+        self.assertNotEqual(
+            cli.read_topic(slug).metadata["topic_generation"], old_generation
+        )
+        journal_path.write_bytes(stale_journal)
+        state_before = cli.topic_state_path(slug).read_bytes()
+        events_path = cli.topic_events_path(slug)
+        events_before = events_path.read_bytes() if events_path.exists() else None
+
+        state = cli.load_state(slug)
+        self.assertNotIn("active_activity", state)
+        self.assertFalse(journal_path.exists())
+        self.assertEqual(cli.topic_state_path(slug).read_bytes(), state_before)
+        self.assertEqual(
+            events_path.read_bytes() if events_path.exists() else None,
+            events_before,
+        )
+
+    def test_legacy_activity_journal_only_completes_with_durable_state_marker(
+        self,
+    ) -> None:
+        slug = "legacy-activity"
+        call_silent(cli.cmd_new, Namespace(topic=slug, goal="practice functions"))
+        request = {
+            "domain": "coding",
+            "kind": "python_drill",
+            "objective": "Practice a small function.",
+            "concept_ids": ["functions"],
+            "requested_evidence": ["pytest_result"],
+            "scaffolding_level": 1,
+            "purpose": "practice",
+            "domain_payload": {
+                "title": "Legacy activity",
+                "language": "python",
+                "tool_requests": [],
+            },
+        }
+        original_checkpoint = cli._activity_update_checkpoint
+        cli._activity_update_checkpoint = (
+            lambda stage: (_ for _ in ()).throw(KeyboardInterrupt())
+            if stage == "after_state"
+            else None
+        )
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                cli.propose_topic_activity(slug, request)
+        finally:
+            cli._activity_update_checkpoint = original_checkpoint
+        journal_path = cli.topic_activity_journal_path(slug)
+        legacy = json.loads(journal_path.read_text(encoding="utf-8"))
+        legacy["schema_version"] = 1
+        legacy.pop("topic_generation")
+        journal_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+        recovered = cli.load_state(slug)
+        self.assertEqual(recovered["active_activity"]["status"], "proposed")
+        self.assertFalse(journal_path.exists())
+        events = cli.load_event_log(cli.topic_events_path(slug))
+        self.assertEqual(
+            len(
+                [
+                    event
+                    for event in events
+                    if event.get("data", {}).get("activity_update_id")
+                    == legacy["update_id"]
+                ]
+            ),
+            1,
+        )
+
+        other_slug = "ambiguous-legacy-activity"
+        call_silent(cli.cmd_new, Namespace(topic=other_slug, goal="practice functions"))
+        cli._activity_update_checkpoint = (
+            lambda stage: (_ for _ in ()).throw(KeyboardInterrupt())
+            if stage == "after_journal"
+            else None
+        )
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                cli.propose_topic_activity(other_slug, request)
+        finally:
+            cli._activity_update_checkpoint = original_checkpoint
+        ambiguous_path = cli.topic_activity_journal_path(other_slug)
+        ambiguous = json.loads(ambiguous_path.read_text(encoding="utf-8"))
+        ambiguous["schema_version"] = 1
+        ambiguous.pop("topic_generation")
+        ambiguous_path.write_text(json.dumps(ambiguous), encoding="utf-8")
+        state_before = cli.topic_state_path(other_slug).read_bytes()
+
+        self.assertNotIn("active_activity", cli.load_state(other_slug))
+        self.assertFalse(ambiguous_path.exists())
+        self.assertEqual(cli.topic_state_path(other_slug).read_bytes(), state_before)
+
+    def test_corrupt_activity_journal_missing_generation_fails_before_writes(
+        self,
+    ) -> None:
+        slug = "activity-missing-generation"
+        call_silent(cli.cmd_new, Namespace(topic=slug, goal="practice functions"))
+        request = {
+            "domain": "coding",
+            "kind": "python_drill",
+            "objective": "Practice a small function.",
+            "concept_ids": ["functions"],
+            "requested_evidence": ["pytest_result"],
+            "scaffolding_level": 1,
+            "purpose": "practice",
+            "domain_payload": {
+                "title": "Missing generation",
+                "language": "python",
+                "tool_requests": [],
+            },
+        }
+        original_checkpoint = cli._activity_update_checkpoint
+        cli._activity_update_checkpoint = (
+            lambda stage: (_ for _ in ()).throw(KeyboardInterrupt())
+            if stage == "after_journal"
+            else None
+        )
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                cli.propose_topic_activity(slug, request)
+        finally:
+            cli._activity_update_checkpoint = original_checkpoint
+        journal_path = cli.topic_activity_journal_path(slug)
+        corrupt = json.loads(journal_path.read_text(encoding="utf-8"))
+        corrupt.pop("topic_generation")
+        journal_path.write_text(json.dumps(corrupt), encoding="utf-8")
+        state_before = cli.topic_state_path(slug).read_bytes()
+        events_path = cli.topic_events_path(slug)
+        events_before = events_path.read_bytes() if events_path.exists() else None
+
+        with self.assertRaises(cli.OpenLearnError):
+            cli.load_state(slug)
+        self.assertEqual(cli.topic_state_path(slug).read_bytes(), state_before)
+        self.assertEqual(
+            events_path.read_bytes() if events_path.exists() else None,
+            events_before,
+        )
+        self.assertTrue(journal_path.exists())
+
+    def test_topic_deletion_waits_for_in_flight_activity_journal(self) -> None:
+        slug = "activity-delete-race"
+        call_silent(cli.cmd_new, Namespace(topic=slug, goal="practice functions"))
+        request = {
+            "domain": "coding",
+            "kind": "python_drill",
+            "objective": "Practice a small function.",
+            "concept_ids": ["functions"],
+            "requested_evidence": ["pytest_result"],
+            "scaffolding_level": 1,
+            "purpose": "practice",
+            "domain_payload": {
+                "title": "Delete race",
+                "language": "python",
+                "tool_requests": [],
+            },
+        }
+        journal_ready = threading.Event()
+        allow_activity = threading.Event()
+        deletion_done = threading.Event()
+        errors: list[BaseException] = []
+        original_checkpoint = cli._activity_update_checkpoint
+
+        def pause_after_journal(stage: str) -> None:
+            if stage == "after_journal":
+                journal_ready.set()
+                allow_activity.wait(timeout=5)
+
+        def propose() -> None:
+            try:
+                cli.propose_topic_activity(slug, request)
+            except BaseException as exc:
+                errors.append(exc)
+
+        def delete() -> None:
+            try:
+                cli.delete_topic_files(slug)
+                deletion_done.set()
+            except BaseException as exc:
+                errors.append(exc)
+
+        cli._activity_update_checkpoint = pause_after_journal
+        proposal_thread = threading.Thread(target=propose)
+        deletion_thread = threading.Thread(target=delete)
+        try:
+            proposal_thread.start()
+            self.assertTrue(journal_ready.wait(timeout=5))
+            deletion_thread.start()
+            self.assertFalse(deletion_done.wait(timeout=0.05))
+            allow_activity.set()
+            proposal_thread.join(timeout=5)
+            deletion_thread.join(timeout=5)
+        finally:
+            cli._activity_update_checkpoint = original_checkpoint
+            allow_activity.set()
+
+        self.assertFalse(proposal_thread.is_alive())
+        self.assertFalse(deletion_thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertTrue(deletion_done.is_set())
+        for path in (
+            cli.topic_path(slug),
+            cli.topic_state_path(slug),
+            cli.topic_events_path(slug),
+            cli.topic_activity_journal_path(slug),
+        ):
+            self.assertFalse(path.exists(), path)
 
     def test_activity_journal_recovers_an_event_write_failure(self) -> None:
         slug = "journal-event-failure"

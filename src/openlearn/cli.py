@@ -6732,8 +6732,7 @@ def _validated_turn_journal(slug: str, value: object) -> dict[str, object]:
     return normalized
 
 
-def _read_turn_journal(slug: str) -> dict[str, object] | None:
-    path = topic_turn_journal_path(slug)
+def _read_turn_journal_payload(path: Path) -> object | None:
     if not path.exists():
         return None
     flags = os.O_RDONLY
@@ -6773,35 +6772,161 @@ def _read_turn_journal(slug: str) -> dict[str, object] | None:
         raise OpenLearnError(
             "saved tutor turn journal is unreadable; move it aside and retry"
         ) from exc
+    return raw
+
+
+def _read_turn_journal(slug: str) -> dict[str, object] | None:
+    raw = _read_turn_journal_payload(topic_turn_journal_path(slug))
+    if raw is None:
+        return None
     return _validated_turn_journal(slug, raw)
 
 
-def _validated_turn_receipts(state: dict[str, object]) -> dict[str, str]:
-    raw = state.get("_turn_receipts")
-    if raw is None:
-        return {}
-    if state.get("_turn_receipts_schema") != 2:
-        raise OpenLearnError(
-            "saved tutor turn receipts use an unsafe legacy format; "
-            "repair the state file before retrying"
-        )
+def _validated_receipt_mapping(raw: object) -> dict[str, str]:
     if not isinstance(raw, dict):
         raise OpenLearnError(
             "saved tutor turn receipts are corrupt; repair the state file before retrying"
         )
     receipts: dict[str, str] = {}
-    for mutation_id, patch_hash in raw.items():
+    for mutation_id, digest in raw.items():
         if (
             not isinstance(mutation_id, str)
             or not re.fullmatch(r"turn_[a-f0-9]{32}", mutation_id)
-            or not isinstance(patch_hash, str)
-            or not re.fullmatch(r"[a-f0-9]{64}", patch_hash)
+            or not isinstance(digest, str)
+            or not re.fullmatch(r"[a-f0-9]{64}", digest)
         ):
             raise OpenLearnError(
                 "saved tutor turn receipts are corrupt; repair the state file before retrying"
             )
-        receipts[mutation_id] = patch_hash
+        receipts[mutation_id] = digest
     return receipts
+
+
+def _validated_legacy_turn_receipt_ids(state: dict[str, object]) -> set[str]:
+    raw = state.get("_legacy_turn_receipts")
+    if raw is None:
+        if state.get("_legacy_turn_receipts_schema") is not None:
+            raise OpenLearnError(
+                "saved legacy tutor turn receipts are corrupt; "
+                "repair the state file before retrying"
+            )
+        return set()
+    if state.get("_legacy_turn_receipts_schema") != 1 or not isinstance(raw, list):
+        raise OpenLearnError(
+            "saved legacy tutor turn receipts are corrupt; "
+            "repair the state file before retrying"
+        )
+    receipt_ids: set[str] = set()
+    for mutation_id in raw:
+        if (
+            not isinstance(mutation_id, str)
+            or not re.fullmatch(r"turn_[a-f0-9]{32}", mutation_id)
+        ):
+            raise OpenLearnError(
+                "saved legacy tutor turn receipts are corrupt; "
+                "repair the state file before retrying"
+            )
+        receipt_ids.add(mutation_id)
+    if len(receipt_ids) != len(raw):
+        raise OpenLearnError(
+            "saved legacy tutor turn receipts are corrupt; "
+            "repair the state file before retrying"
+        )
+    return receipt_ids
+
+
+def _normalized_turn_receipt_state(
+    state: dict[str, object],
+) -> tuple[dict[str, object], dict[str, str], set[str], bool]:
+    raw = state.get("_turn_receipts")
+    schema = state.get("_turn_receipts_schema")
+    legacy_ids = _validated_legacy_turn_receipt_ids(state)
+    if raw is None:
+        if schema is not None:
+            raise OpenLearnError(
+                "saved tutor turn receipts are corrupt; repair the state file before retrying"
+            )
+        return state, {}, legacy_ids, False
+    if schema == 2:
+        return state, _validated_receipt_mapping(raw), legacy_ids, False
+    if schema is not None:
+        raise OpenLearnError(
+            "saved tutor turn receipts use an unsupported format; "
+            "repair the state file before retrying"
+        )
+
+    # Version 6a1c006 stored state-patch hashes without a schema marker. Those
+    # hashes cannot authorize replaying the session, metadata, or event parts
+    # of a turn. Preserve only the IDs as permanent consumed tombstones.
+    legacy_mapping = _validated_receipt_mapping(raw)
+    migrated = dict(state)
+    legacy_ids.update(legacy_mapping)
+    migrated["_turn_receipts"] = {}
+    migrated["_turn_receipts_schema"] = 2
+    migrated["_legacy_turn_receipts"] = sorted(legacy_ids)
+    migrated["_legacy_turn_receipts_schema"] = 1
+    return migrated, {}, legacy_ids, True
+
+
+def _validated_turn_receipts(state: dict[str, object]) -> dict[str, str]:
+    _normalized, receipts, _legacy_ids, migrated = _normalized_turn_receipt_state(state)
+    if migrated:
+        raise OpenLearnError(
+            "saved tutor turn receipts require migration before turn recovery"
+        )
+    return receipts
+
+
+def _migrate_legacy_turn_receipts(slug: str) -> tuple[str | None, set[str]]:
+    with file_lock(topic_path(slug)), file_lock(topic_state_path(slug)):
+        if (
+            not topic_path(slug).exists()
+            or topic_deletion_tombstone_path(slug).exists()
+        ):
+            return None, set()
+        state = _load_state_unlocked(slug)
+        migrated, _receipts, legacy_ids, changed = _normalized_turn_receipt_state(state)
+        if changed:
+            write_text_atomic(
+                topic_state_path(slug),
+                json.dumps(migrated, indent=2, sort_keys=True) + "\n",
+            )
+        generation = None
+        if legacy_ids:
+            with contextlib.suppress(OpenLearnError):
+                generation = current_topic_generation(slug)
+        return generation, legacy_ids
+
+
+def _legacy_turn_journal_mutation_id(slug: str, value: object) -> str | None:
+    if not isinstance(value, dict):
+        return None
+    required = {
+        "schema_version",
+        "phase",
+        "mutation_id",
+        "slug",
+        "metadata_patch",
+        "metadata_patch_sha256",
+        "state_patch",
+        "state_patch_sha256",
+        "session_entry",
+        "session_sha256",
+        "events",
+        "events_sha256",
+    }
+    if set(value) != required:
+        return None
+    upgraded = dict(value)
+    upgraded["topic_generation"] = f"topic_{'0' * 32}"
+    upgraded["commit_sha256"] = _payload_sha256(
+        _turn_commit_identity_payload(upgraded)
+    )
+    try:
+        validated = _validated_turn_journal(slug, upgraded)
+    except OpenLearnError:
+        return None
+    return str(validated["mutation_id"])
 
 
 def _apply_turn_journal(slug: str, journal: dict[str, object]) -> bool:
@@ -6909,11 +7034,25 @@ def _apply_turn_journal(slug: str, journal: dict[str, object]) -> bool:
 def recover_turn_commit(slug: str) -> bool:
     if _DRY_RUN:
         return False
+    receipt_generation, legacy_receipt_ids = _migrate_legacy_turn_receipts(slug)
     journal_path = topic_turn_journal_path(slug)
     with file_lock(journal_path):
-        journal = _read_turn_journal(slug)
-    if journal is None:
-        return False
+        raw_journal = _read_turn_journal_payload(journal_path)
+        if raw_journal is None:
+            return False
+        if legacy_receipt_ids and current_topic_generation(slug) != receipt_generation:
+            legacy_receipt_ids = set()
+        try:
+            journal = _validated_turn_journal(slug, raw_journal)
+        except OpenLearnError:
+            legacy_mutation_id = _legacy_turn_journal_mutation_id(slug, raw_journal)
+            if legacy_mutation_id not in legacy_receipt_ids:
+                raise
+            durable_unlink(journal_path)
+            return False
+        if str(journal["mutation_id"]) in legacy_receipt_ids:
+            durable_unlink(journal_path)
+            return False
     applied = _apply_turn_journal(slug, journal)
     _turn_commit_checkpoint("before_cleanup")
     with file_lock(journal_path):
@@ -7036,10 +7175,14 @@ def _activity_update_journal(
     event_type: str,
     event_data: dict[str, object],
 ) -> dict[str, object]:
+    generation = current_topic_generation(slug)
+    if generation is None:
+        raise OpenLearnError("topic was deleted before the practice activity was saved")
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "update_id": f"activity_update_{uuid4().hex}",
         "slug": slug,
+        "topic_generation": generation,
         "state_after": state_after,
         "event_type": event_type,
         "event_data": event_data,
@@ -8129,19 +8272,33 @@ def response_requests_learner_evidence(text: str) -> bool:
         r"(?:\*\*)?\s*(.*)$"
     )
     imperative = re.compile(
-        r"(?i)^(?:(?:now|please)\s+|your turn[:,]?\s*)?"
-        r"(?:explain|write|trace|solve|show|give|compare|derive|implement|"
+        r"(?i)^(?P<direction>(?:now|please)\s+|your turn[:,]?\s*)?"
+        r"(?P<verb>explain|write|trace|solve|show|give|compare|derive|implement|"
         r"walk\s+through|try|retry|predict|calculate|compute|describe|list|"
         r"identify|apply|run|build|find|code|prove|choose|state|design|debug|"
         r"test|analy[sz]e|optimi[sz]e|answer|tell\s+me)\b"
     )
-    declarative_noun_phrase = re.compile(
-        r"(?i)^(?:(?:compare-and-[\w-]+|list|trace|build|run|apply|state|"
-        r"code|test|design|debug|analy[sz]e|optimi[sz]e|find|prove)"
-        r"\s+(?:[\w-]+\s+){0,2})"
-        r"(?:is|are|helps?|supports?|shows?|makes?|creates?|coordinates?|serializes?|"
-        r"transforms?|models?|represents?|executes?|produces?|describes?|improves?|"
-        r"reduces?|locates?|catch(?:es)?|guides?)\b"
+    learner_object = re.compile(
+        r"(?i)^\s+(?:the|a|an|this|that|these|those|your|our|my|its|his|her|"
+        r"their|each|every|some|any|it|them|us|me|why|how|whether|what|where|"
+        r"when)\b"
+    )
+    declarative_noun_subject = re.compile(
+        r"(?i)^(?:"
+        r"[\w]+-and-[\w-]+\s+"
+        r"(?:is|are|was|were|has|have|can|could|will|would|should|"
+        r"[\w-]+(?:s|es))\b"
+        r"|"
+        r"[\w-]+\s+(?:"
+        r"[\w-]+s\s+"
+        r"(?!(?:in|on|at|to|from|for|with|without|by|of|as|than|below|above)\b)"
+        r"[\w-]+\s+\S+"
+        r"|"
+        r"[\w-]+\s+"
+        r"(?:is|are|was|were|has|have|can|could|will|would|should|"
+        r"[\w-]+(?:s|es))\b"
+        r")"
+        r")"
     )
     active_section = ""
     for raw_line in text.splitlines():
@@ -8156,8 +8313,15 @@ def response_requests_learner_evidence(text: str) -> bool:
             continue
         if active_section == "action" and content and not check_is_navigation_prompt(content):
             return True
-        if imperative.match(content) and not declarative_noun_phrase.match(content):
-            return True
+        imperative_match = imperative.match(content)
+        if imperative_match:
+            remainder = content[imperative_match.end() :]
+            if (
+                imperative_match.group("direction")
+                or learner_object.match(remainder)
+                or not declarative_noun_subject.match(content)
+            ):
+                return True
     return False
 
 
@@ -10350,13 +10514,20 @@ def _validated_activity_journal(slug: str, value: object) -> dict[str, object]:
         "schema_version",
         "update_id",
         "slug",
+        "topic_generation",
         "state_after",
         "event_type",
         "event_data",
         "event_ts",
     }:
         raise OpenLearnError("practice activity update journal is malformed")
-    if value.get("schema_version") != 1 or value.get("slug") != slug:
+    topic_generation = value.get("topic_generation")
+    if (
+        value.get("schema_version") != 2
+        or value.get("slug") != slug
+        or not isinstance(topic_generation, str)
+        or not re.fullmatch(r"topic_[a-f0-9]{32}", topic_generation)
+    ):
         raise OpenLearnError("practice activity update journal has invalid identity")
     update_id = value.get("update_id")
     if not isinstance(update_id, str) or not re.fullmatch(
@@ -10382,6 +10553,48 @@ def _validated_activity_journal(slug: str, value: object) -> dict[str, object]:
     return value
 
 
+def _validated_legacy_activity_journal(
+    slug: str, value: object
+) -> dict[str, object] | None:
+    if not isinstance(value, dict):
+        return None
+    required = {
+        "schema_version",
+        "update_id",
+        "slug",
+        "state_after",
+        "event_type",
+        "event_data",
+        "event_ts",
+    }
+    if set(value) != required or value.get("schema_version") != 1:
+        return None
+    upgraded = dict(value)
+    upgraded["schema_version"] = 2
+    upgraded["topic_generation"] = f"topic_{'0' * 32}"
+    try:
+        return _validated_activity_journal(slug, upgraded)
+    except OpenLearnError:
+        return None
+
+
+def _activity_event_exists(slug: str, update_id: str) -> bool:
+    path = topic_events_path(slug)
+    with file_lock(path):
+        if not path.exists():
+            return False
+        existing = path.read_text(encoding="utf-8")
+        for line in existing.splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            data = event.get("data") if isinstance(event, dict) else None
+            if isinstance(data, dict) and data.get("activity_update_id") == update_id:
+                return True
+    return False
+
+
 def _append_activity_event_once(slug: str, journal: dict[str, object]) -> None:
     if _DRY_RUN:
         return
@@ -10391,14 +10604,8 @@ def _append_activity_event_once(slug: str, journal: dict[str, object]) -> None:
         existing = ""
         if path.exists():
             existing = path.read_text(encoding="utf-8")
-        for line in existing.splitlines():
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            data = event.get("data") if isinstance(event, dict) else None
-            if isinstance(data, dict) and data.get("activity_update_id") == update_id:
-                return
+        if _activity_event_exists(slug, update_id):
+            return
         raw_data = journal.get("event_data")
         if not isinstance(raw_data, dict):
             raise OpenLearnError("practice activity update journal has invalid event data")
@@ -10428,6 +10635,32 @@ def _recover_activity_update_locked(slug: str) -> None:
         raw = json.loads(journal_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise OpenLearnError("practice activity update journal is unreadable") from exc
+    if (
+        isinstance(raw, dict)
+        and raw.get("schema_version") == 2
+        and raw.get("slug") == slug
+        and isinstance(raw.get("topic_generation"), str)
+        and re.fullmatch(r"topic_[a-f0-9]{32}", str(raw["topic_generation"]))
+        and raw["topic_generation"] != current_topic_generation(slug)
+    ):
+        durable_unlink(journal_path)
+        return
+    legacy_journal = _validated_legacy_activity_journal(slug, raw)
+    if legacy_journal is not None:
+        update_id = str(legacy_journal["update_id"])
+        raw_state_after = legacy_journal.get("state_after")
+        if not isinstance(raw_state_after, dict):
+            raise OpenLearnError("practice activity update journal has invalid state")
+        current_state = _load_state_unlocked(slug)
+        if current_state == raw_state_after:
+            _append_activity_event_once(slug, legacy_journal)
+        elif not _activity_event_exists(slug, update_id):
+            # A generation-free journal with no durable state or event marker
+            # cannot be tied to this incarnation of the topic. Never replay it.
+            durable_unlink(journal_path)
+            return
+        durable_unlink(journal_path)
+        return
     journal = _validated_activity_journal(slug, raw)
     raw_state_after = journal.get("state_after")
     if not isinstance(raw_state_after, dict):
@@ -10475,6 +10708,8 @@ def save_state(slug: str, state: dict[str, object]) -> None:
             "active_activity",
             "_turn_receipts",
             "_turn_receipts_schema",
+            "_legacy_turn_receipts",
+            "_legacy_turn_receipts_schema",
         ):
             if internal_key in existing:
                 updated[internal_key] = existing[internal_key]
