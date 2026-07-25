@@ -6422,6 +6422,282 @@ class InteractiveTests(unittest.TestCase):
             cli.topic_path(slug).read_text(encoding="utf-8"), before_topic
         )
 
+    def test_turn_journal_preflight_rejects_late_invalid_payloads_without_writes(
+        self,
+    ) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Preflight", goal="Learn safely"))
+        slug = "preflight"
+        before = cli.load_state(slug)
+        after = {**before, "last_answer_status": "partial"}
+        mutation_id = "turn_33333333333333333333333333333333"
+        entry = cli._session_entry(
+            "chat",
+            "PRIVATE LEARNER PAYLOAD",
+            "PRIVATE TUTOR PAYLOAD",
+            created="2026-07-25 12:00 UTC",
+            mutation_id=mutation_id,
+        )
+        original_checkpoint = cli._turn_commit_checkpoint
+        cli._turn_commit_checkpoint = (
+            lambda stage: (_ for _ in ()).throw(KeyboardInterrupt())
+            if stage == "after_journal"
+            else None
+        )
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                cli._commit_projected_turn(
+                    slug,
+                    before,
+                    after,
+                    entry,
+                    [(slug, "answer_judged", {"status": "partial"})],
+                    mutation_id,
+                )
+        finally:
+            cli._turn_commit_checkpoint = original_checkpoint
+        journal_path = cli.topic_turn_journal_path(slug)
+        valid = json.loads(journal_path.read_text(encoding="utf-8"))
+        topic_before = cli.topic_path(slug).read_bytes()
+        state_before = cli.topic_state_path(slug).read_bytes()
+        events_path = cli.topic_events_path(slug)
+        events_before = events_path.read_bytes() if events_path.exists() else None
+
+        invalid_variants = []
+        invalid_op = json.loads(json.dumps(valid))
+        invalid_op["state_patch"].append(
+            {"op": "explode", "path": ["late_private_key"], "value": "SECRET"}
+        )
+        invalid_op["state_patch_sha256"] = cli._payload_sha256(
+            invalid_op["state_patch"]
+        )
+        invalid_variants.append(invalid_op)
+
+        unsupported_path = json.loads(json.dumps(valid))
+        unsupported_path["state_patch"] = [
+            {
+                "op": "set",
+                "path": ["private_unowned_key"],
+                "before_missing": True,
+                "after": "SECRET",
+            }
+        ]
+        unsupported_path["state_patch_sha256"] = cli._payload_sha256(
+            unsupported_path["state_patch"]
+        )
+        invalid_variants.append(unsupported_path)
+
+        nested = json.loads(json.dumps(valid))
+        deep: object = "SECRET"
+        for _ in range(cli.TURN_JOURNAL_MAX_JSON_DEPTH + 2):
+            deep = {"nested": deep}
+        nested["metadata_patch"] = [
+            {
+                "op": "set",
+                "path": ["known"],
+                "before": [],
+                "after": deep,
+            }
+        ]
+        nested["metadata_patch_sha256"] = cli._payload_sha256(
+            nested["metadata_patch"]
+        )
+        invalid_variants.append(nested)
+
+        bad_event = json.loads(json.dumps(valid))
+        bad_event["events"][0]["event_id"] = f"{mutation_id}:999"
+        bad_event["events_sha256"] = cli._payload_sha256(bad_event["events"])
+        invalid_variants.append(bad_event)
+
+        for invalid in invalid_variants:
+            with self.subTest(kind=invalid["state_patch"][-1].get("op", "nested")):
+                journal_path.write_text(
+                    json.dumps(invalid, ensure_ascii=False), encoding="utf-8"
+                )
+                for _ in range(2):
+                    with self.assertRaises(cli.OpenLearnError) as caught:
+                        cli.recover_turn_commit(slug)
+                    self.assertNotIn("SECRET", str(caught.exception))
+                    self.assertNotIn("PRIVATE", str(caught.exception))
+                self.assertEqual(cli.topic_path(slug).read_bytes(), topic_before)
+                self.assertEqual(cli.topic_state_path(slug).read_bytes(), state_before)
+                self.assertEqual(
+                    events_path.read_bytes() if events_path.exists() else None,
+                    events_before,
+                )
+                self.assertTrue(journal_path.exists())
+
+    def test_turn_journal_enforces_serialized_byte_limit_before_read_or_write(
+        self,
+    ) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Journal Size", goal="Learn safely"))
+        slug = "journal-size"
+        before = cli.load_state(slug)
+        mutation_id = "turn_44444444444444444444444444444444"
+        oversized_entry = cli._session_entry(
+            "chat",
+            "🙂" * 70_000,
+            "response",
+            created="2026-07-25 12:00 UTC",
+            mutation_id=mutation_id,
+        )
+        with self.assertRaisesRegex(cli.OpenLearnError, "oversized"):
+            cli._commit_projected_turn(
+                slug, before, before, oversized_entry, [], mutation_id
+            )
+        self.assertFalse(cli.topic_turn_journal_path(slug).exists())
+
+        journal_path = cli.topic_turn_journal_path(slug)
+        journal_path.write_bytes(
+            b"{" + b"x" * cli.TURN_JOURNAL_PAYLOAD_CHAR_LIMIT
+        )
+        topic_before = cli.topic_path(slug).read_bytes()
+        state_before = cli.topic_state_path(slug).read_bytes()
+        with self.assertRaisesRegex(cli.OpenLearnError, "oversized"):
+            cli.recover_turn_commit(slug)
+        self.assertEqual(cli.topic_path(slug).read_bytes(), topic_before)
+        self.assertEqual(cli.topic_state_path(slug).read_bytes(), state_before)
+
+    def test_permanent_turn_receipt_blocks_reintroduced_old_journal(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Permanent Receipt", goal="Learn safely"))
+        slug = "permanent-receipt"
+        before = cli.load_state(slug)
+        before["concept_attempts"] = {
+            "pointer-scan": {"attempts": 0, "correct_sum": 0.0}
+        }
+        cli.save_state(slug, before)
+        before = cli.load_state(slug)
+        after = json.loads(json.dumps(before))
+        after["concept_attempts"]["pointer-scan"]["attempts"] = 1
+        after["concept_attempts"]["pointer-scan"]["correct_sum"] = 0.5
+        old_id = "turn_55555555555555555555555555555555"
+        old_entry = cli._session_entry(
+            "chat",
+            "old learner answer",
+            "old tutor response",
+            created="2026-07-25 12:00 UTC",
+            mutation_id=old_id,
+        )
+        original_checkpoint = cli._turn_commit_checkpoint
+        cli._turn_commit_checkpoint = (
+            lambda stage: (_ for _ in ()).throw(KeyboardInterrupt())
+            if stage == "after_journal"
+            else None
+        )
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                cli._commit_projected_turn(
+                    slug,
+                    before,
+                    after,
+                    old_entry,
+                    [(slug, "answer_judged", {"status": "partial"})],
+                    old_id,
+                )
+        finally:
+            cli._turn_commit_checkpoint = original_checkpoint
+        journal_path = cli.topic_turn_journal_path(slug)
+        old_journal = journal_path.read_bytes()
+        cli.recover_turn_commit(slug)
+
+        for index in range(129):
+            current = cli.load_state(slug)
+            mutation_id = f"turn_{index + 1000:032x}"
+            entry = cli._session_entry(
+                "chat",
+                f"later prompt {index}",
+                f"later response {index}",
+                created="2026-07-25 12:00 UTC",
+                mutation_id=mutation_id,
+            )
+            cli._commit_projected_turn(
+                slug, current, current, entry, [], mutation_id
+            )
+
+        journal_path.write_bytes(old_journal)
+        os.chmod(journal_path, 0o600)
+        cli.recover_turn_commit(slug)
+        cli.recover_turn_commit(slug)
+        final = cli.load_state(slug)
+        record = final["concept_attempts"]["pointer-scan"]
+        self.assertEqual(record, {"attempts": 1, "correct_sum": 0.5})
+        self.assertGreaterEqual(len(final["_turn_receipts"]), 130)
+        self.assertEqual(cli.read_topic(slug).body.count(f"openlearn-turn:{old_id}"), 1)
+        events = cli.load_event_log(cli.topic_events_path(slug))
+        self.assertEqual(
+            len([event for event in events if event.get("event_id") == f"{old_id}:0"]),
+            1,
+        )
+
+    def test_corrupt_turn_receipts_block_recovery_before_any_turn_write(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Receipt Corrupt", goal="Learn safely"))
+        slug = "receipt-corrupt"
+        before = cli.load_state(slug)
+        mutation_id = "turn_66666666666666666666666666666666"
+        entry = cli._session_entry(
+            "chat",
+            "private prompt",
+            "private response",
+            created="2026-07-25 12:00 UTC",
+            mutation_id=mutation_id,
+        )
+        original_checkpoint = cli._turn_commit_checkpoint
+        cli._turn_commit_checkpoint = (
+            lambda stage: (_ for _ in ()).throw(KeyboardInterrupt())
+            if stage == "after_journal"
+            else None
+        )
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                cli._commit_projected_turn(
+                    slug, before, before, entry, [], mutation_id
+                )
+        finally:
+            cli._turn_commit_checkpoint = original_checkpoint
+        state = cli._load_state_unlocked(slug)
+        state["_turn_receipts"] = ["corrupt", "SECRET"]
+        cli.write_text_atomic(
+            cli.topic_state_path(slug),
+            json.dumps(state, indent=2, sort_keys=True) + "\n",
+        )
+        topic_before = cli.topic_path(slug).read_bytes()
+        state_before = cli.topic_state_path(slug).read_bytes()
+        with self.assertRaises(cli.OpenLearnError) as caught:
+            cli.recover_turn_commit(slug)
+        self.assertNotIn("SECRET", str(caught.exception))
+        self.assertEqual(cli.topic_path(slug).read_bytes(), topic_before)
+        self.assertEqual(cli.topic_state_path(slug).read_bytes(), state_before)
+
+    def test_topic_summary_and_list_reads_recover_pending_turn(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Summary Recovery", goal="Learn safely"))
+        slug = "summary-recovery"
+        before = cli.load_state(slug)
+        mutation_id = "turn_77777777777777777777777777777777"
+        entry = cli._session_entry(
+            "chat",
+            "summary learner prompt",
+            "summary tutor response",
+            created="2026-07-25 12:00 UTC",
+            mutation_id=mutation_id,
+        )
+        original_checkpoint = cli._turn_commit_checkpoint
+        cli._turn_commit_checkpoint = (
+            lambda stage: (_ for _ in ()).throw(KeyboardInterrupt())
+            if stage == "after_journal"
+            else None
+        )
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                cli._commit_projected_turn(
+                    slug, before, before, entry, [], mutation_id
+                )
+        finally:
+            cli._turn_commit_checkpoint = original_checkpoint
+
+        summaries = cli.list_topics()
+        self.assertIn(slug, [summary.slug for summary in summaries])
+        self.assertFalse(cli.topic_turn_journal_path(slug).exists())
+        self.assertIn("summary tutor response", cli.read_topic(slug).body)
+
     def test_graded_turn_projects_without_writes_during_provider_calls(
         self,
     ) -> None:
@@ -7201,6 +7477,13 @@ class InteractiveTests(unittest.TestCase):
             "Your turn: implement the base case.",
             "Predict the result.",
             "Walk through the loop.",
+            "Find the first failing case.",
+            "Code the two-pointer solution.",
+            "Prove the loop invariant.",
+            "Choose the better complexity.",
+            "State the base case.",
+            "Please debug the boundary condition.",
+            "Your turn: test the empty input.",
         )
         for text in positives:
             with self.subTest(text=text):
@@ -7215,6 +7498,9 @@ class InteractiveTests(unittest.TestCase):
             "**Lesson:** Trace tables help debugging.",
             "**Example:** Compare-and-set is useful here.",
             "**Feedback:** List operations are linear in this case.",
+            "**Lesson:** Build systems coordinate artifacts.",
+            "**Lesson:** Run queues serialize work.",
+            "**Lesson:** Apply functions transform values.",
         )
         for text in negatives:
             with self.subTest(text=text):

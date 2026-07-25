@@ -10,6 +10,7 @@ import io
 import importlib
 import importlib.resources
 import json
+import math
 import os
 import random
 import re
@@ -128,8 +129,22 @@ JUDGE_MAX_TOKENS = 1024
 JUDGE_TIMEOUT_SECONDS = 20
 JUDGE_MAX_ATTEMPTS = 2
 TURN_COMMIT_SCHEMA_VERSION = 1
-TURN_APPLIED_MARKER_LIMIT = 128
 TURN_JOURNAL_PAYLOAD_CHAR_LIMIT = 262_144
+TURN_JOURNAL_MAX_PATCH_OPS = 4096
+TURN_JOURNAL_MAX_EVENTS = 256
+TURN_JOURNAL_MAX_JSON_DEPTH = 20
+TURN_JOURNAL_MAX_PATH_DEPTH = 16
+TURN_JOURNAL_MAX_PATH_COMPONENT_CHARS = 128
+TURN_METADATA_PATCH_KEYS = {
+    "known",
+    "weak_spots",
+    "review_due",
+    "current_focus",
+    "current_unit",
+    "current_slide",
+    "last_video_focus",
+    "course_units",
+}
 REMEDIATION_MINIMUM_SCORE = 0.7
 REMEDIATION_STAGE_BY_MISS = {
     1: "hint",
@@ -5196,6 +5211,10 @@ def cmd_delete(args: argparse.Namespace) -> int:
 
 def delete_topic_files(slug: str) -> None:
     topic_path(slug).unlink(missing_ok=True)
+    topic_state_path(slug).unlink(missing_ok=True)
+    topic_events_path(slug).unlink(missing_ok=True)
+    topic_activity_journal_path(slug).unlink(missing_ok=True)
+    topic_turn_journal_path(slug).unlink(missing_ok=True)
     topic_lock_path(slug).unlink(missing_ok=True)
     data_dir = topic_data_dir(slug)
     if data_dir.exists():
@@ -6335,7 +6354,7 @@ def _lookup_patch_parent(
     for key in path[:-1]:
         child = current.get(key)
         if not isinstance(child, dict):
-            if not create:
+            if not create or key in current:
                 return None, path[-1]
             child = {}
             current[key] = child
@@ -6362,7 +6381,12 @@ def _apply_state_projection_patch(
             delta = operation.get("delta")
             if not isinstance(delta, (int, float)):
                 raise OpenLearnError("saved tutor turn journal has an invalid counter patch")
-            current_number = current if isinstance(current, (int, float)) else 0
+            if current is missing:
+                current_number: int | float = 0
+            elif isinstance(current, bool) or not isinstance(current, (int, float)):
+                continue
+            else:
+                current_number = current
             parent[key] = round(current_number + delta, 3)
         elif op == "remove":
             if current == operation.get("before"):
@@ -6388,19 +6412,153 @@ def _apply_state_projection_patch(
             raise OpenLearnError("saved tutor turn journal has an invalid state operation")
 
 
+def _canonical_json_bytes(value: object) -> bytes:
+    try:
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise OpenLearnError("saved tutor turn journal contains invalid JSON values") from exc
+
+
+def _payload_sha256(value: object) -> str:
+    return hashlib.sha256(_canonical_json_bytes(value)).hexdigest()
+
+
+def _validate_bounded_json(value: object, *, depth: int = 0) -> None:
+    if depth > TURN_JOURNAL_MAX_JSON_DEPTH:
+        raise OpenLearnError("saved tutor turn journal exceeds the nesting limit")
+    if value is None or isinstance(value, (str, bool, int)):
+        return
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise OpenLearnError("saved tutor turn journal contains a non-finite number")
+        return
+    if isinstance(value, list):
+        for item in value:
+            _validate_bounded_json(item, depth=depth + 1)
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise OpenLearnError("saved tutor turn journal contains a non-string key")
+            _validate_bounded_json(item, depth=depth + 1)
+        return
+    raise OpenLearnError("saved tutor turn journal contains an unsupported value")
+
+
+def _validated_projection_patch(value: object, *, label: str) -> list[dict[str, object]]:
+    if not isinstance(value, list) or len(value) > TURN_JOURNAL_MAX_PATCH_OPS:
+        raise OpenLearnError(f"saved tutor turn journal has an invalid {label} patch")
+    normalized: list[dict[str, object]] = []
+    for operation in value:
+        if not isinstance(operation, dict):
+            raise OpenLearnError(f"saved tutor turn journal has an invalid {label} operation")
+        op = operation.get("op")
+        path = operation.get("path")
+        if (
+            not isinstance(path, list)
+            or not 1 <= len(path) <= TURN_JOURNAL_MAX_PATH_DEPTH
+            or not all(
+                isinstance(item, str)
+                and 0 < len(item) <= TURN_JOURNAL_MAX_PATH_COMPONENT_CHARS
+                for item in path
+            )
+        ):
+            raise OpenLearnError(f"saved tutor turn journal has an invalid {label} path")
+        top_level_key = str(path[0])
+        if label == "metadata" and top_level_key not in TURN_METADATA_PATCH_KEYS:
+            raise OpenLearnError(
+                "saved tutor turn journal targets unsupported topic metadata"
+            )
+        if label == "state" and not (
+            is_dynamic_metadata_key(top_level_key) or top_level_key == "unit_state"
+        ):
+            raise OpenLearnError("saved tutor turn journal targets unsupported state")
+        if op == "increment":
+            if set(operation) != {"op", "path", "delta"}:
+                raise OpenLearnError(
+                    f"saved tutor turn journal has an invalid {label} counter operation"
+                )
+            delta = operation.get("delta")
+            if (
+                isinstance(delta, bool)
+                or not isinstance(delta, (int, float))
+                or not math.isfinite(float(delta))
+            ):
+                raise OpenLearnError(
+                    f"saved tutor turn journal has an invalid {label} counter"
+                )
+            if not (
+                label == "state"
+                and "concept_attempts" in path
+                and path[-1] in {"attempts", "correct_sum"}
+            ):
+                raise OpenLearnError(
+                    "saved tutor turn journal targets an unsupported counter"
+                )
+        elif op == "remove":
+            if set(operation) != {"op", "path", "before"}:
+                raise OpenLearnError(
+                    f"saved tutor turn journal has an invalid {label} remove operation"
+                )
+        elif op == "set":
+            allowed = {"op", "path", "after", "before", "before_missing"}
+            if not set(operation) <= allowed or not {"op", "path", "after"} <= set(
+                operation
+            ):
+                raise OpenLearnError(
+                    f"saved tutor turn journal has an invalid {label} set operation"
+                )
+            before_missing = operation.get("before_missing") is True
+            if before_missing == ("before" in operation):
+                raise OpenLearnError(
+                    f"saved tutor turn journal has an ambiguous {label} set operation"
+                )
+            if "before_missing" in operation and operation.get("before_missing") is not True:
+                raise OpenLearnError(
+                    f"saved tutor turn journal has an invalid {label} set marker"
+                )
+        elif op == "list_delta":
+            if set(operation) != {"op", "path", "added", "removed"} or not isinstance(
+                operation.get("added"), list
+            ) or not isinstance(operation.get("removed"), list):
+                raise OpenLearnError(
+                    f"saved tutor turn journal has an invalid {label} list operation"
+                )
+        else:
+            raise OpenLearnError(f"saved tutor turn journal has an invalid {label} operation")
+        _validate_bounded_json(operation)
+        normalized.append(copy.deepcopy(operation))
+    return normalized
+
+
 def _validated_turn_journal(slug: str, value: object) -> dict[str, object]:
     if not isinstance(value, dict):
         raise OpenLearnError("saved tutor turn journal is malformed; move it aside and retry")
     required = {
         "schema_version",
+        "phase",
         "mutation_id",
         "slug",
         "metadata_patch",
+        "metadata_patch_sha256",
         "state_patch",
+        "state_patch_sha256",
         "session_entry",
+        "session_sha256",
         "events",
+        "events_sha256",
     }
-    if set(value) != required or value.get("schema_version") != TURN_COMMIT_SCHEMA_VERSION:
+    if (
+        set(value) != required
+        or value.get("schema_version") != TURN_COMMIT_SCHEMA_VERSION
+        or value.get("phase") != "prepared"
+    ):
         raise OpenLearnError(
             "saved tutor turn journal has an unsupported format; move it aside and retry"
         )
@@ -6411,40 +6569,130 @@ def _validated_turn_journal(slug: str, value: object) -> dict[str, object]:
         or not re.fullmatch(r"turn_[a-f0-9]{32}", mutation_id)
     ):
         raise OpenLearnError("saved tutor turn journal has an invalid identity")
-    if not isinstance(value.get("metadata_patch"), list) or not isinstance(
-        value.get("state_patch"), list
-    ):
-        raise OpenLearnError("saved tutor turn journal has an invalid state patch")
+    metadata_patch = _validated_projection_patch(
+        value.get("metadata_patch"), label="metadata"
+    )
+    state_patch = _validated_projection_patch(value.get("state_patch"), label="state")
     session_entry = value.get("session_entry")
-    if not isinstance(session_entry, str) or f"openlearn-turn:{mutation_id}" not in session_entry:
+    marker = f"<!-- openlearn-turn:{mutation_id} -->"
+    if not isinstance(session_entry, str) or session_entry.count(marker) != 1:
         raise OpenLearnError("saved tutor turn journal has an invalid session payload")
+    if len(session_entry.encode("utf-8")) > TURN_JOURNAL_PAYLOAD_CHAR_LIMIT:
+        raise OpenLearnError("saved tutor turn journal is oversized")
     events = value.get("events")
-    if not isinstance(events, list):
+    if not isinstance(events, list) or len(events) > TURN_JOURNAL_MAX_EVENTS:
         raise OpenLearnError("saved tutor turn journal has an invalid event batch")
-    for event in events:
+    normalized_events: list[dict[str, object]] = []
+    for index, event in enumerate(events):
+        expected_event_id = f"{mutation_id}:{index}"
         if (
             not isinstance(event, dict)
+            or set(event)
+            != {
+                "schema_version",
+                "event_id",
+                "ts",
+                "event_type",
+                "slug",
+                "data",
+            }
             or event.get("schema_version") != EVENT_SCHEMA_VERSION
             or event.get("slug") != slug
+            or event.get("event_id") != expected_event_id
             or not isinstance(event.get("event_type"), str)
+            or not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", str(event["event_type"]))
+            or parse_event_ts(event.get("ts")) is None
             or not isinstance(event.get("data"), dict)
-            or not isinstance(event.get("event_id"), str)
         ):
             raise OpenLearnError("saved tutor turn journal has an invalid event")
-    return value
+        _validate_bounded_json(event)
+        normalized_events.append(copy.deepcopy(event))
+    hashes = (
+        ("metadata_patch_sha256", metadata_patch),
+        ("state_patch_sha256", state_patch),
+        ("session_sha256", session_entry),
+        ("events_sha256", normalized_events),
+    )
+    for field, payload in hashes:
+        digest = value.get(field)
+        if (
+            not isinstance(digest, str)
+            or not re.fullmatch(r"[a-f0-9]{64}", digest)
+            or digest != _payload_sha256(payload)
+        ):
+            raise OpenLearnError("saved tutor turn journal failed its integrity check")
+    normalized = dict(value)
+    normalized["metadata_patch"] = metadata_patch
+    normalized["state_patch"] = state_patch
+    normalized["events"] = normalized_events
+    return normalized
 
 
 def _read_turn_journal(slug: str) -> dict[str, object] | None:
     path = topic_turn_journal_path(slug)
     if not path.exists():
         return None
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        descriptor = os.open(path, flags)
+        try:
+            file_stat = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(file_stat.st_mode)
+                or file_stat.st_size > TURN_JOURNAL_PAYLOAD_CHAR_LIMIT
+            ):
+                raise OpenLearnError(
+                    "saved tutor turn journal is oversized or not a regular file; "
+                    "move it aside and retry"
+                )
+            chunks: list[bytes] = []
+            remaining = TURN_JOURNAL_PAYLOAD_CHAR_LIMIT + 1
+            while remaining:
+                chunk = os.read(descriptor, min(65_536, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            encoded = b"".join(chunks)
+            if len(encoded) > TURN_JOURNAL_PAYLOAD_CHAR_LIMIT:
+                raise OpenLearnError(
+                    "saved tutor turn journal is oversized; move it aside and retry"
+                )
+        finally:
+            os.close(descriptor)
+        raw = json.loads(encoded.decode("utf-8"))
+    except OpenLearnError:
+        raise
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise OpenLearnError(
             "saved tutor turn journal is unreadable; move it aside and retry"
         ) from exc
     return _validated_turn_journal(slug, raw)
+
+
+def _validated_turn_receipts(state: dict[str, object]) -> dict[str, str]:
+    raw = state.get("_turn_receipts")
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise OpenLearnError(
+            "saved tutor turn receipts are corrupt; repair the state file before retrying"
+        )
+    receipts: dict[str, str] = {}
+    for mutation_id, patch_hash in raw.items():
+        if (
+            not isinstance(mutation_id, str)
+            or not re.fullmatch(r"turn_[a-f0-9]{32}", mutation_id)
+            or not isinstance(patch_hash, str)
+            or not re.fullmatch(r"[a-f0-9]{64}", patch_hash)
+        ):
+            raise OpenLearnError(
+                "saved tutor turn receipts are corrupt; repair the state file before retrying"
+            )
+        receipts[mutation_id] = patch_hash
+    return receipts
 
 
 def _apply_turn_journal(slug: str, journal: dict[str, object]) -> None:
@@ -6461,6 +6709,36 @@ def _apply_turn_journal(slug: str, journal: dict[str, object]) -> None:
         stack.enter_context(file_lock(events_file))
 
         topic_text = topic_file.read_text(encoding="utf-8")
+        raw_state = _load_state_unlocked(slug)
+        _validated_turn_receipts(raw_state)
+        # Simulate every operation before the first durable turn write. This
+        # guarantees malformed journals cannot publish even a session prefix.
+        raw_metadata_for_validation, _body_for_validation = parse_topic(topic_text)
+        metadata_validation = dict(raw_metadata_for_validation)
+        _apply_state_projection_patch(
+            metadata_validation, copy.deepcopy(journal["metadata_patch"])
+        )
+        state_validation = copy.deepcopy(raw_state)
+        _apply_state_projection_patch(
+            state_validation, copy.deepcopy(journal["state_patch"])
+        )
+        # An older interrupted activity transition is logically earlier than
+        # this tutor turn. Finish it only after the turn journal itself has
+        # passed complete validation, then revalidate the resulting state.
+        _recover_activity_update_locked(slug)
+        state = _load_state_unlocked(slug)
+        receipts = _validated_turn_receipts(state)
+        state_after_validation = copy.deepcopy(state)
+        _apply_state_projection_patch(
+            state_after_validation, copy.deepcopy(journal["state_patch"])
+        )
+        state_patch_hash = str(journal["state_patch_sha256"])
+        existing_receipt = receipts.get(mutation_id)
+        if existing_receipt is not None and existing_receipt != state_patch_hash:
+            raise OpenLearnError(
+                "saved tutor turn receipt conflicts with the pending journal; "
+                "move the journal aside and retry"
+            )
         if marker not in topic_text:
             raw_metadata, body = parse_topic(topic_text)
             metadata = dict(raw_metadata)
@@ -6475,24 +6753,13 @@ def _apply_turn_journal(slug: str, journal: dict[str, object]) -> None:
             write_text_atomic(topic_file, format_topic(metadata, body))
         _turn_commit_checkpoint("after_topic")
 
-        # An older interrupted activity transition is logically earlier than
-        # this tutor turn. Finish it first, then layer the exact turn patch on
-        # top so neither journal can rewind the other's state or event.
-        _recover_activity_update_locked(slug)
-        state = _load_state_unlocked(slug)
-        applied = state.get("_applied_turn_mutations")
-        applied_ids = (
-            [item for item in applied if isinstance(item, str)]
-            if isinstance(applied, list)
-            else []
-        )
-        if mutation_id not in applied_ids:
+        if existing_receipt is None:
             patch = journal["state_patch"]
             if not isinstance(patch, list):
                 raise OpenLearnError("saved tutor turn journal has an invalid state patch")
             _apply_state_projection_patch(state, patch)
-            applied_ids.append(mutation_id)
-            state["_applied_turn_mutations"] = applied_ids[-TURN_APPLIED_MARKER_LIMIT:]
+            receipts[mutation_id] = state_patch_hash
+            state["_turn_receipts"] = receipts
             write_text_atomic(state_file, json.dumps(state, indent=2, sort_keys=True) + "\n")
         _turn_commit_checkpoint("after_state")
 
@@ -6557,10 +6824,6 @@ def _commit_projected_turn(
 ) -> None:
     if _DRY_RUN:
         return
-    if len(session_entry) > TURN_JOURNAL_PAYLOAD_CHAR_LIMIT:
-        raise OpenLearnError(
-            "Tutor turn is too large to save safely; shorten the answer and retry."
-        )
     timestamp = datetime.now(timezone.utc).isoformat()
     events = [
         {
@@ -6574,17 +6837,39 @@ def _commit_projected_turn(
         for index, (event_slug, event_type, event_data) in enumerate(queued_events)
         if event_slug == slug
     ]
+    metadata_patch = _state_projection_patch(
+        before_metadata or {}, after_metadata or {}
+    )
+    state_patch = _state_projection_patch(before_state, after_state)
     journal = {
         "schema_version": TURN_COMMIT_SCHEMA_VERSION,
+        "phase": "prepared",
         "mutation_id": mutation_id,
         "slug": slug,
-        "metadata_patch": _state_projection_patch(
-            before_metadata or {}, after_metadata or {}
-        ),
-        "state_patch": _state_projection_patch(before_state, after_state),
+        "metadata_patch": metadata_patch,
+        "metadata_patch_sha256": _payload_sha256(metadata_patch),
+        "state_patch": state_patch,
+        "state_patch_sha256": _payload_sha256(state_patch),
         "session_entry": session_entry,
+        "session_sha256": _payload_sha256(session_entry),
         "events": events,
+        "events_sha256": _payload_sha256(events),
     }
+    _validated_turn_journal(slug, journal)
+    encoded_journal = (
+        json.dumps(
+            journal,
+            ensure_ascii=False,
+            allow_nan=False,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("utf-8")
+    if len(encoded_journal) > TURN_JOURNAL_PAYLOAD_CHAR_LIMIT:
+        raise OpenLearnError(
+            "Tutor turn is too large to save safely; shorten the answer and retry."
+        )
     journal_path = topic_turn_journal_path(slug)
     while True:
         recover_turn_commit(slug)
@@ -6592,9 +6877,7 @@ def _commit_projected_turn(
             if journal_path.exists():
                 continue
             _turn_commit_checkpoint("before_journal")
-            write_text_atomic(
-                journal_path, json.dumps(journal, indent=2, sort_keys=True) + "\n"
-            )
+            write_text_atomic(journal_path, encoded_journal.decode("utf-8"))
             os.chmod(journal_path, stat.S_IRUSR | stat.S_IWUSR)
             break
     _turn_commit_checkpoint("after_journal")
@@ -7716,11 +7999,14 @@ def response_requests_learner_evidence(text: str) -> bool:
         r"(?i)^(?:(?:now|please)\s+|your turn[:,]?\s*)?"
         r"(?:explain|write|trace|solve|show|give|compare|derive|implement|"
         r"walk\s+through|try|retry|predict|calculate|compute|describe|list|"
-        r"identify|apply|run|build|answer|tell\s+me)\b"
+        r"identify|apply|run|build|find|code|prove|choose|state|design|debug|"
+        r"test|analy[sz]e|optimi[sz]e|answer|tell\s+me)\b"
     )
     declarative_noun_phrase = re.compile(
-        r"(?i)^(?:compare-and-[\w-]+|list\s+\w+(?:\s+\w+)?|"
-        r"trace\s+\w+(?:\s+\w+)?)\s+(?:is|are|helps?|supports?|shows?)\b"
+        r"(?i)^(?:(?:compare-and-[\w-]+|list|trace|build|run|apply|state|"
+        r"code|test|design)\s+(?:[\w-]+\s+){0,2})"
+        r"(?:is|are|helps?|supports?|shows?|makes?|creates?|coordinates?|serializes?|"
+        r"transforms?|models?|represents?|executes?|produces?|describes?)\b"
     )
     active_section = ""
     for raw_line in text.splitlines():
@@ -10018,7 +10304,7 @@ def save_state(slug: str, state: dict[str, object]) -> None:
         _recover_activity_update_locked(slug)
         existing = _load_state_unlocked(slug)
         updated = dict(state)
-        for internal_key in ("active_activity", "_applied_turn_mutations"):
+        for internal_key in ("active_activity", "_turn_receipts"):
             if internal_key in existing:
                 updated[internal_key] = existing[internal_key]
         write_text_atomic(path, json.dumps(updated, indent=2, sort_keys=True) + "\n")
@@ -10916,6 +11202,7 @@ def write_text_atomic(path: Path, text: str) -> None:
 def read_topic_summary(path: Path) -> TopicSummary:
     if not path.exists():
         raise OpenLearnError(f"topic not found: {path.stem}")
+    recover_turn_commit(path.stem)
     return TopicSummary(
         slug=path.stem,
         path=path,
@@ -10924,6 +11211,8 @@ def read_topic_summary(path: Path) -> TopicSummary:
 
 
 def read_topic_metadata(path: Path) -> dict[str, object]:
+    if path.suffix == ".md" and path.parent == topics_dir():
+        recover_turn_commit(path.stem)
     with path.open("r", encoding="utf-8") as file:
         if file.readline() != "---\n":
             return {}
