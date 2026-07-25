@@ -4,6 +4,7 @@ import argparse
 import ast
 import copy
 import contextlib
+import errno
 import getpass
 import hashlib
 import io
@@ -2335,6 +2336,7 @@ def cmd_new(args: argparse.Namespace, output_func=print) -> int:
     metadata = {
         "topic": title,
         "slug": slug,
+        "topic_generation": f"topic_{uuid4().hex}",
         "mastery_profile": selected_profile,
         "current_focus": "",
         "course_started": False,
@@ -2370,7 +2372,19 @@ def cmd_new(args: argparse.Namespace, output_func=print) -> int:
 ## Session Log
 
 """
-    write_topic(path, metadata, body)
+    with topic_store_locks(slug, include_journal=True):
+        if path.exists():
+            raise OpenLearnError(f"topic already exists: {slug}")
+        durable_unlink(topic_state_path(slug))
+        durable_unlink(topic_events_path(slug))
+        durable_unlink(topic_activity_journal_path(slug))
+        durable_unlink(topic_turn_journal_path(slug))
+        data_dir = topic_data_dir(slug)
+        if data_dir.exists():
+            shutil.rmtree(data_dir)
+            fsync_directory(data_dir.parent)
+        durable_unlink(topic_deletion_tombstone_path(slug))
+        write_topic(path, metadata, body)
     set_active_topic(slug)
     output_func(f"Created {path}")
     output_func(f"Mastery profile: {selected_profile}")
@@ -5210,15 +5224,71 @@ def cmd_delete(args: argparse.Namespace) -> int:
 
 
 def delete_topic_files(slug: str) -> None:
-    topic_path(slug).unlink(missing_ok=True)
-    topic_state_path(slug).unlink(missing_ok=True)
-    topic_events_path(slug).unlink(missing_ok=True)
-    topic_activity_journal_path(slug).unlink(missing_ok=True)
-    topic_turn_journal_path(slug).unlink(missing_ok=True)
-    topic_lock_path(slug).unlink(missing_ok=True)
-    data_dir = topic_data_dir(slug)
-    if data_dir.exists():
-        shutil.rmtree(data_dir)
+    with topic_store_locks(slug, include_journal=True):
+        generation = current_topic_generation(slug)
+        tombstone = {
+            "schema_version": 1,
+            "slug": slug,
+            "deleted_generation": generation,
+            "deletion_id": f"deletion_{uuid4().hex}",
+            "deleted_at": datetime.now(timezone.utc).isoformat(),
+        }
+        tombstone_path = topic_deletion_tombstone_path(slug)
+        write_text_atomic(
+            tombstone_path,
+            json.dumps(tombstone, indent=2, sort_keys=True) + "\n",
+        )
+        os.chmod(tombstone_path, stat.S_IRUSR | stat.S_IWUSR)
+        _topic_delete_checkpoint("after_tombstone")
+        durable_unlink(topic_path(slug))
+        _topic_delete_checkpoint("after_topic")
+        durable_unlink(topic_state_path(slug))
+        durable_unlink(topic_activity_journal_path(slug))
+        _topic_delete_checkpoint("after_state")
+        durable_unlink(topic_events_path(slug))
+        _topic_delete_checkpoint("after_events")
+        durable_unlink(topic_turn_journal_path(slug))
+        _topic_delete_checkpoint("after_journals")
+        data_dir = topic_data_dir(slug)
+        if data_dir.exists():
+            shutil.rmtree(data_dir)
+            fsync_directory(data_dir.parent)
+
+
+def _topic_delete_checkpoint(_stage: str) -> None:
+    """Test seam for deterministic delete/recovery interleavings."""
+
+
+def legacy_topic_generation(slug: str, metadata: dict[str, object]) -> str:
+    identity = {
+        "slug": slug,
+        "created": metadata.get("created"),
+        "topic": metadata.get("topic"),
+    }
+    digest = hashlib.sha256(_canonical_json_bytes(identity)).hexdigest()[:32]
+    return f"topic_{digest}"
+
+
+def topic_generation_from_metadata(
+    slug: str, metadata: dict[str, object]
+) -> str:
+    value = metadata.get("topic_generation")
+    if isinstance(value, str) and re.fullmatch(r"topic_[a-f0-9]{32}", value):
+        return value
+    return legacy_topic_generation(slug, metadata)
+
+
+def current_topic_generation(slug: str) -> str | None:
+    path = topic_path(slug)
+    if not path.exists():
+        return None
+    metadata, _body = parse_topic(path.read_text(encoding="utf-8"))
+    return topic_generation_from_metadata(slug, metadata)
+
+
+def raise_if_topic_tombstoned(slug: str) -> None:
+    if topic_deletion_tombstone_path(slug).exists():
+        raise OpenLearnError(f"topic was deleted: {slug}")
 
 
 def cmd_list(_args: argparse.Namespace) -> int:
@@ -6429,6 +6499,23 @@ def _payload_sha256(value: object) -> str:
     return hashlib.sha256(_canonical_json_bytes(value)).hexdigest()
 
 
+def _turn_commit_identity_payload(journal: dict[str, object]) -> dict[str, object]:
+    return {
+        key: journal[key]
+        for key in (
+            "schema_version",
+            "phase",
+            "mutation_id",
+            "slug",
+            "topic_generation",
+            "metadata_patch",
+            "state_patch",
+            "session_entry",
+            "events",
+        )
+    }
+
+
 def _validate_bounded_json(value: object, *, depth: int = 0) -> None:
     if depth > TURN_JOURNAL_MAX_JSON_DEPTH:
         raise OpenLearnError("saved tutor turn journal exceeds the nesting limit")
@@ -6545,6 +6632,7 @@ def _validated_turn_journal(slug: str, value: object) -> dict[str, object]:
         "phase",
         "mutation_id",
         "slug",
+        "topic_generation",
         "metadata_patch",
         "metadata_patch_sha256",
         "state_patch",
@@ -6553,6 +6641,7 @@ def _validated_turn_journal(slug: str, value: object) -> dict[str, object]:
         "session_sha256",
         "events",
         "events_sha256",
+        "commit_sha256",
     }
     if (
         set(value) != required
@@ -6563,10 +6652,13 @@ def _validated_turn_journal(slug: str, value: object) -> dict[str, object]:
             "saved tutor turn journal has an unsupported format; move it aside and retry"
         )
     mutation_id = value.get("mutation_id")
+    topic_generation = value.get("topic_generation")
     if (
         value.get("slug") != slug
         or not isinstance(mutation_id, str)
         or not re.fullmatch(r"turn_[a-f0-9]{32}", mutation_id)
+        or not isinstance(topic_generation, str)
+        or not re.fullmatch(r"topic_[a-f0-9]{32}", topic_generation)
     ):
         raise OpenLearnError("saved tutor turn journal has an invalid identity")
     metadata_patch = _validated_projection_patch(
@@ -6621,6 +6713,18 @@ def _validated_turn_journal(slug: str, value: object) -> dict[str, object]:
             or digest != _payload_sha256(payload)
         ):
             raise OpenLearnError("saved tutor turn journal failed its integrity check")
+    commit_digest = value.get("commit_sha256")
+    normalized_for_digest = dict(value)
+    normalized_for_digest["metadata_patch"] = metadata_patch
+    normalized_for_digest["state_patch"] = state_patch
+    normalized_for_digest["events"] = normalized_events
+    if (
+        not isinstance(commit_digest, str)
+        or not re.fullmatch(r"[a-f0-9]{64}", commit_digest)
+        or commit_digest
+        != _payload_sha256(_turn_commit_identity_payload(normalized_for_digest))
+    ):
+        raise OpenLearnError("saved tutor turn journal failed its commit integrity check")
     normalized = dict(value)
     normalized["metadata_patch"] = metadata_patch
     normalized["state_patch"] = state_patch
@@ -6676,6 +6780,11 @@ def _validated_turn_receipts(state: dict[str, object]) -> dict[str, str]:
     raw = state.get("_turn_receipts")
     if raw is None:
         return {}
+    if state.get("_turn_receipts_schema") != 2:
+        raise OpenLearnError(
+            "saved tutor turn receipts use an unsafe legacy format; "
+            "repair the state file before retrying"
+        )
     if not isinstance(raw, dict):
         raise OpenLearnError(
             "saved tutor turn receipts are corrupt; repair the state file before retrying"
@@ -6695,19 +6804,20 @@ def _validated_turn_receipts(state: dict[str, object]) -> dict[str, str]:
     return receipts
 
 
-def _apply_turn_journal(slug: str, journal: dict[str, object]) -> None:
+def _apply_turn_journal(slug: str, journal: dict[str, object]) -> bool:
     mutation_id = str(journal["mutation_id"])
     marker = f"<!-- openlearn-turn:{mutation_id} -->"
     topic_file = topic_path(slug)
     state_file = topic_state_path(slug)
     events_file = topic_events_path(slug)
-    # Lock order is always Markdown, state, then append-only events. The
-    # coordinator lock held by the caller serializes journal cleanup.
-    with contextlib.ExitStack() as stack:
-        stack.enter_context(file_lock(topic_file))
-        stack.enter_context(file_lock(state_file))
-        stack.enter_context(file_lock(events_file))
-
+    # Lock order is always Markdown, state, then append-only events.
+    with topic_store_locks(slug):
+        if (
+            topic_deletion_tombstone_path(slug).exists()
+            or not topic_file.exists()
+            or current_topic_generation(slug) != journal["topic_generation"]
+        ):
+            return False
         topic_text = topic_file.read_text(encoding="utf-8")
         raw_state = _load_state_unlocked(slug)
         _validated_turn_receipts(raw_state)
@@ -6732,9 +6842,9 @@ def _apply_turn_journal(slug: str, journal: dict[str, object]) -> None:
         _apply_state_projection_patch(
             state_after_validation, copy.deepcopy(journal["state_patch"])
         )
-        state_patch_hash = str(journal["state_patch_sha256"])
+        commit_hash = str(journal["commit_sha256"])
         existing_receipt = receipts.get(mutation_id)
-        if existing_receipt is not None and existing_receipt != state_patch_hash:
+        if existing_receipt is not None and existing_receipt != commit_hash:
             raise OpenLearnError(
                 "saved tutor turn receipt conflicts with the pending journal; "
                 "move the journal aside and retry"
@@ -6750,6 +6860,7 @@ def _apply_turn_journal(slug: str, journal: dict[str, object]) -> None:
             _apply_state_projection_patch(metadata, metadata_patch)
             session_entry = str(journal["session_entry"])
             body = body.rstrip() + "\n\n" + session_entry + "\n"
+            _turn_commit_checkpoint("before_topic_write")
             write_text_atomic(topic_file, format_topic(metadata, body))
         _turn_commit_checkpoint("after_topic")
 
@@ -6758,8 +6869,9 @@ def _apply_turn_journal(slug: str, journal: dict[str, object]) -> None:
             if not isinstance(patch, list):
                 raise OpenLearnError("saved tutor turn journal has an invalid state patch")
             _apply_state_projection_patch(state, patch)
-            receipts[mutation_id] = state_patch_hash
+            receipts[mutation_id] = commit_hash
             state["_turn_receipts"] = receipts
+            state["_turn_receipts_schema"] = 2
             write_text_atomic(state_file, json.dumps(state, indent=2, sort_keys=True) + "\n")
         _turn_commit_checkpoint("after_state")
 
@@ -6792,6 +6904,7 @@ def _apply_turn_journal(slug: str, journal: dict[str, object]) -> None:
             text += "\n".join(additions) + "\n"
             write_text_atomic(events_file, text)
         _turn_commit_checkpoint("after_events")
+    return True
 
 def recover_turn_commit(slug: str) -> bool:
     if _DRY_RUN:
@@ -6801,14 +6914,14 @@ def recover_turn_commit(slug: str) -> bool:
         journal = _read_turn_journal(slug)
     if journal is None:
         return False
-    _apply_turn_journal(slug, journal)
+    applied = _apply_turn_journal(slug, journal)
     _turn_commit_checkpoint("before_cleanup")
     with file_lock(journal_path):
         current = _read_turn_journal(slug)
         if current is not None and current.get("mutation_id") == journal.get("mutation_id"):
-            journal_path.unlink(missing_ok=True)
+            durable_unlink(journal_path)
     _turn_commit_checkpoint("after_cleanup")
-    return True
+    return applied
 
 
 def _commit_projected_turn(
@@ -6825,6 +6938,13 @@ def _commit_projected_turn(
     if _DRY_RUN:
         return
     timestamp = datetime.now(timezone.utc).isoformat()
+    generation = (
+        topic_generation_from_metadata(slug, before_metadata)
+        if before_metadata is not None
+        else current_topic_generation(slug)
+    )
+    if generation is None:
+        raise OpenLearnError("topic was deleted before the tutor turn could be saved")
     events = [
         {
             "schema_version": EVENT_SCHEMA_VERSION,
@@ -6846,6 +6966,7 @@ def _commit_projected_turn(
         "phase": "prepared",
         "mutation_id": mutation_id,
         "slug": slug,
+        "topic_generation": generation,
         "metadata_patch": metadata_patch,
         "metadata_patch_sha256": _payload_sha256(metadata_patch),
         "state_patch": state_patch,
@@ -6855,6 +6976,9 @@ def _commit_projected_turn(
         "events": events,
         "events_sha256": _payload_sha256(events),
     }
+    journal["commit_sha256"] = _payload_sha256(
+        _turn_commit_identity_payload(journal)
+    )
     _validated_turn_journal(slug, journal)
     encoded_journal = (
         json.dumps(
@@ -6881,7 +7005,8 @@ def _commit_projected_turn(
             os.chmod(journal_path, stat.S_IRUSR | stat.S_IWUSR)
             break
     _turn_commit_checkpoint("after_journal")
-    recover_turn_commit(slug)
+    if not recover_turn_commit(slug):
+        raise OpenLearnError("topic changed or was deleted before the tutor turn could be saved")
 
 
 def built_in_activity_registry() -> ActivityRegistry:
@@ -6940,7 +7065,7 @@ def _persist_activity_update_locked(
     _activity_update_checkpoint("after_state")
     _append_activity_event_once(slug, journal)
     _activity_update_checkpoint("after_event")
-    journal_path.unlink(missing_ok=True)
+    durable_unlink(journal_path)
 
 
 def _assert_activity_cas(
@@ -6964,8 +7089,12 @@ def _commit_activity_change(
     *,
     changed: bool,
 ) -> dict[str, object]:
-    path = topic_state_path(slug)
-    with file_lock(path):
+    with file_lock(topic_path(slug)), file_lock(topic_state_path(slug)):
+        if (
+            not topic_path(slug).exists()
+            or topic_deletion_tombstone_path(slug).exists()
+        ):
+            raise OpenLearnError("topic was deleted during the practice activity")
         _recover_activity_update_locked(slug)
         state = _load_state_unlocked(slug)
         _assert_activity_cas(state.get("active_activity"), expected)
@@ -6984,8 +7113,12 @@ def propose_topic_activity(slug: str, request: dict[str, object]) -> dict[str, o
     except ActivityContractError as exc:
         raise OpenLearnError(str(exc)) from exc
     _validated_persisted_activity(activity)
-    path = topic_state_path(slug)
-    with file_lock(path):
+    with file_lock(topic_path(slug)), file_lock(topic_state_path(slug)):
+        if (
+            not topic_path(slug).exists()
+            or topic_deletion_tombstone_path(slug).exists()
+        ):
+            raise OpenLearnError("topic was deleted before the practice activity was saved")
         _recover_activity_update_locked(slug)
         state = _load_state_unlocked(slug)
         existing = state.get("active_activity")
@@ -8004,9 +8137,11 @@ def response_requests_learner_evidence(text: str) -> bool:
     )
     declarative_noun_phrase = re.compile(
         r"(?i)^(?:(?:compare-and-[\w-]+|list|trace|build|run|apply|state|"
-        r"code|test|design)\s+(?:[\w-]+\s+){0,2})"
+        r"code|test|design|debug|analy[sz]e|optimi[sz]e|find|prove)"
+        r"\s+(?:[\w-]+\s+){0,2})"
         r"(?:is|are|helps?|supports?|shows?|makes?|creates?|coordinates?|serializes?|"
-        r"transforms?|models?|represents?|executes?|produces?|describes?)\b"
+        r"transforms?|models?|represents?|executes?|produces?|describes?|improves?|"
+        r"reduces?|locates?|catch(?:es)?|guides?)\b"
     )
     active_section = ""
     for raw_line in text.splitlines():
@@ -9268,6 +9403,10 @@ def topic_turn_journal_path(slug: str) -> Path:
     return topics_dir() / f".{slug}.turn-commit.json"
 
 
+def topic_deletion_tombstone_path(slug: str) -> Path:
+    return topics_dir() / f".{slug}.deleted.json"
+
+
 def topic_events_path(slug: str) -> Path:
     return topics_dir() / f"{slug}.events.jsonl"
 
@@ -9275,6 +9414,22 @@ def topic_events_path(slug: str) -> Path:
 def topic_lock_path(slug: str) -> Path:
     path = topic_path(slug)
     return path.with_name(f".{path.name}.lock")
+
+
+@contextlib.contextmanager
+def topic_store_locks(slug: str, *, include_journal: bool = False):
+    """Acquire topic stores in the one canonical order.
+
+    Lock files are stable synchronization identities and are intentionally
+    never deleted while the topic may be in use.
+    """
+    with contextlib.ExitStack() as stack:
+        if include_journal:
+            stack.enter_context(file_lock(topic_turn_journal_path(slug)))
+        stack.enter_context(file_lock(topic_path(slug)))
+        stack.enter_context(file_lock(topic_state_path(slug)))
+        stack.enter_context(file_lock(topic_events_path(slug)))
+        yield
 
 
 def topic_data_dir(slug: str) -> Path:
@@ -10046,9 +10201,11 @@ def open_context_file(path: Path) -> None:
 
 def read_topic(slug: str) -> Topic:
     path = topic_path(slug)
-    if not path.exists():
+    if not path.exists() or topic_deletion_tombstone_path(slug).exists():
         raise OpenLearnError(f"topic not found: {slug}")
     recover_turn_commit(slug)
+    if not path.exists() or topic_deletion_tombstone_path(slug).exists():
+        raise OpenLearnError(f"topic not found: {slug}")
     text = path.read_text(encoding="utf-8")
     raw_metadata, body = parse_topic(text)
     metadata = normalize_topic_metadata(raw_metadata, slug)
@@ -10281,30 +10438,44 @@ def _recover_activity_update_locked(slug: str) -> None:
             topic_state_path(slug), json.dumps(state_after, indent=2, sort_keys=True) + "\n"
         )
     _append_activity_event_once(slug, journal)
-    journal_path.unlink(missing_ok=True)
+    durable_unlink(journal_path)
 
 
 def recover_activity_update(slug: str) -> None:
-    path = topic_state_path(slug)
-    with file_lock(path):
+    with file_lock(topic_path(slug)), file_lock(topic_state_path(slug)):
+        if (
+            not topic_path(slug).exists()
+            or topic_deletion_tombstone_path(slug).exists()
+        ):
+            durable_unlink(topic_activity_journal_path(slug))
+            return
         _recover_activity_update_locked(slug)
 
 
 def load_state(slug: str) -> dict[str, object]:
     recover_turn_commit(slug)
-    path = topic_state_path(slug)
-    with file_lock(path):
+    with file_lock(topic_path(slug)), file_lock(topic_state_path(slug)):
+        if (
+            not topic_path(slug).exists()
+            or topic_deletion_tombstone_path(slug).exists()
+        ):
+            return {}
         _recover_activity_update_locked(slug)
         return _load_state_unlocked(slug)
 
 
 def save_state(slug: str, state: dict[str, object]) -> None:
     path = topic_state_path(slug)
-    with file_lock(path):
+    with file_lock(topic_path(slug)), file_lock(path):
+        raise_if_topic_tombstoned(slug)
         _recover_activity_update_locked(slug)
         existing = _load_state_unlocked(slug)
         updated = dict(state)
-        for internal_key in ("active_activity", "_turn_receipts"):
+        for internal_key in (
+            "active_activity",
+            "_turn_receipts",
+            "_turn_receipts_schema",
+        ):
             if internal_key in existing:
                 updated[internal_key] = existing[internal_key]
         write_text_atomic(path, json.dumps(updated, indent=2, sort_keys=True) + "\n")
@@ -10322,7 +10493,8 @@ def save_pending_learner_prompt(slug: str, prompt: str) -> None:
         raise OpenLearnError("pending learner prompt must be non-empty")
     recover_turn_commit(slug)
     path = topic_state_path(slug)
-    with file_lock(path):
+    with file_lock(topic_path(slug)), file_lock(path):
+        raise_if_topic_tombstoned(slug)
         _recover_activity_update_locked(slug)
         state = _load_state_unlocked(slug)
         state["pending_learner_prompt"] = prompt
@@ -10334,7 +10506,8 @@ def clear_pending_learner_prompt(
 ) -> bool:
     recover_turn_commit(slug)
     path = topic_state_path(slug)
-    with file_lock(path):
+    with file_lock(topic_path(slug)), file_lock(path):
+        raise_if_topic_tombstoned(slug)
         _recover_activity_update_locked(slug)
         state = _load_state_unlocked(slug)
         current = state.get("pending_learner_prompt")
@@ -10367,7 +10540,8 @@ def mark_pending_learner_prompt_consumed(
     turn_id: str,
 ) -> None:
     path = topic_state_path(slug)
-    with file_lock(path):
+    with file_lock(topic_path(slug)), file_lock(path):
+        raise_if_topic_tombstoned(slug)
         _recover_activity_update_locked(slug)
         state = _load_state_unlocked(slug)
         if state.get("pending_learner_prompt") != prompt:
@@ -10381,7 +10555,8 @@ def mark_pending_learner_prompt_consumed(
 
 def clear_consumed_learner_prompt_marker(slug: str, turn_id: str) -> bool:
     path = topic_state_path(slug)
-    with file_lock(path):
+    with file_lock(topic_path(slug)), file_lock(path):
+        raise_if_topic_tombstoned(slug)
         _recover_activity_update_locked(slug)
         state = _load_state_unlocked(slug)
         marker = state.get("pending_consumed_learner_prompt")
@@ -10395,7 +10570,8 @@ def clear_consumed_learner_prompt_marker(slug: str, turn_id: str) -> bool:
 def reconcile_consumed_pending_learner_prompt(slug: str) -> bool:
     recover_turn_commit(slug)
     path = topic_state_path(slug)
-    with file_lock(path):
+    with file_lock(topic_path(slug)), file_lock(path):
+        raise_if_topic_tombstoned(slug)
         _recover_activity_update_locked(slug)
         state = _load_state_unlocked(slug)
         marker = state.get("pending_consumed_learner_prompt")
@@ -10424,7 +10600,8 @@ def log_event(slug: str, event_type: str, data: dict[str, object]) -> None:
         "slug": slug,
         "data": data,
     }
-    with file_lock(path):
+    with file_lock(topic_path(slug)), file_lock(path):
+        raise_if_topic_tombstoned(slug)
         existing = ""
         if path.exists():
             try:
@@ -10447,7 +10624,8 @@ def log_event_batch(events: list[tuple[str, str, dict[str, object]]]) -> None:
         by_slug.setdefault(slug, []).append((event_type, data))
     for slug, slug_events in by_slug.items():
         path = topic_events_path(slug)
-        with file_lock(path):
+        with file_lock(topic_path(slug)), file_lock(path):
+            raise_if_topic_tombstoned(slug)
             text = path.read_text(encoding="utf-8") if path.exists() else ""
             if text and not text.endswith("\n"):
                 text += "\n"
@@ -10833,6 +11011,7 @@ def migrate_topic_state_if_needed(
 
 def write_topic(path: Path, metadata: dict[str, object], body: str) -> None:
     with file_lock(path):
+        raise_if_topic_tombstoned(path.stem)
         normalized = normalize_topic_metadata(metadata, path.stem)
         save_state(path.stem, state_from_metadata(normalized))
         write_text_atomic(path, format_topic(stable_metadata_for_topic(normalized), body))
@@ -10848,6 +11027,7 @@ def normalize_topic_metadata(metadata: dict[str, object], slug: str) -> dict[str
     normalized.setdefault("level", "beginner")
     normalized.setdefault("model", configured_model())
     normalized.setdefault("created", today())
+    normalized["topic_generation"] = topic_generation_from_metadata(slug, normalized)
     normalized.setdefault("last_reviewed", "")
     normalized.setdefault("last_video_focus", None)
     normalized.setdefault("goal", "")
@@ -11193,16 +11373,52 @@ def write_text_atomic(path: Path, text: str) -> None:
             temp_file.flush()
             os.fsync(temp_file.fileno())
         os.replace(temp_name, path)
+        fsync_directory(path.parent)
     finally:
         if temp_name:
             with contextlib.suppress(FileNotFoundError):
                 Path(temp_name).unlink()
 
 
+def fsync_directory(directory: Path) -> None:
+    """Best-effort durability for directory entry changes on supported hosts."""
+    if os.name == "nt":
+        return
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    descriptor = -1
+    try:
+        descriptor = os.open(directory, flags)
+        os.fsync(descriptor)
+    except OSError as exc:
+        if exc.errno not in {
+            errno.EACCES,
+            errno.EBADF,
+            errno.EINVAL,
+            getattr(errno, "ENOTSUP", errno.EINVAL),
+        }:
+            raise
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def durable_unlink(path: Path) -> bool:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return False
+    fsync_directory(path.parent)
+    return True
+
+
 def read_topic_summary(path: Path) -> TopicSummary:
-    if not path.exists():
+    if not path.exists() or topic_deletion_tombstone_path(path.stem).exists():
         raise OpenLearnError(f"topic not found: {path.stem}")
     recover_turn_commit(path.stem)
+    if not path.exists() or topic_deletion_tombstone_path(path.stem).exists():
+        raise OpenLearnError(f"topic not found: {path.stem}")
     return TopicSummary(
         slug=path.stem,
         path=path,

@@ -1967,7 +1967,7 @@ class CliStorageTests(unittest.TestCase):
             (date.fromisoformat(cli.today()) + timedelta(days=1)).isoformat(),
         )
 
-    def test_delete_topic_removes_context_folder(self) -> None:
+    def test_delete_topic_removes_context_folder_and_preserves_lock_identity(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="AI", goal="learn ai"))
         cli.write_context_text("ai", "outline", "context")
         cli.topic_lock_path("ai").write_text("", encoding="utf-8")
@@ -1978,7 +1978,7 @@ class CliStorageTests(unittest.TestCase):
         call_silent(cli.cmd_delete, Namespace(topic="ai", yes=True, all=False))
 
         self.assertFalse(cli.topic_path("ai").exists())
-        self.assertFalse(cli.topic_lock_path("ai").exists())
+        self.assertTrue(cli.topic_lock_path("ai").exists())
         self.assertFalse(cli.topic_data_dir("ai").exists())
         self.assertFalse(cli.topic_context_dir("ai").exists())
 
@@ -6470,6 +6470,9 @@ class InteractiveTests(unittest.TestCase):
         invalid_op["state_patch_sha256"] = cli._payload_sha256(
             invalid_op["state_patch"]
         )
+        invalid_op["commit_sha256"] = cli._payload_sha256(
+            cli._turn_commit_identity_payload(invalid_op)
+        )
         invalid_variants.append(invalid_op)
 
         unsupported_path = json.loads(json.dumps(valid))
@@ -6483,6 +6486,9 @@ class InteractiveTests(unittest.TestCase):
         ]
         unsupported_path["state_patch_sha256"] = cli._payload_sha256(
             unsupported_path["state_patch"]
+        )
+        unsupported_path["commit_sha256"] = cli._payload_sha256(
+            cli._turn_commit_identity_payload(unsupported_path)
         )
         invalid_variants.append(unsupported_path)
 
@@ -6501,11 +6507,17 @@ class InteractiveTests(unittest.TestCase):
         nested["metadata_patch_sha256"] = cli._payload_sha256(
             nested["metadata_patch"]
         )
+        nested["commit_sha256"] = cli._payload_sha256(
+            cli._turn_commit_identity_payload(nested)
+        )
         invalid_variants.append(nested)
 
         bad_event = json.loads(json.dumps(valid))
         bad_event["events"][0]["event_id"] = f"{mutation_id}:999"
         bad_event["events_sha256"] = cli._payload_sha256(bad_event["events"])
+        bad_event["commit_sha256"] = cli._payload_sha256(
+            cli._turn_commit_identity_payload(bad_event)
+        )
         invalid_variants.append(bad_event)
 
         for invalid in invalid_variants:
@@ -6697,6 +6709,310 @@ class InteractiveTests(unittest.TestCase):
         self.assertIn(slug, [summary.slug for summary in summaries])
         self.assertFalse(cli.topic_turn_journal_path(slug).exists())
         self.assertIn("summary tutor response", cli.read_topic(slug).body)
+
+    def test_delete_waits_for_recovery_at_every_store_boundary(self) -> None:
+        for boundary in (
+            "before_topic_write",
+            "after_topic",
+            "after_state",
+            "after_events",
+        ):
+            with self.subTest(boundary=boundary):
+                slug = cli.slugify(f"delete race {boundary}")
+                call_silent(cli.cmd_new, Namespace(topic=slug, goal="Learn safely"))
+                before = cli.load_state(slug)
+                after = {**before, "last_answer_status": "partial"}
+                mutation_id = f"turn_{hashlib.md5(boundary.encode(), usedforsecurity=False).hexdigest()}"
+                entry = cli._session_entry(
+                    "chat",
+                    "race learner answer",
+                    "race tutor response",
+                    created="2026-07-25 12:00 UTC",
+                    mutation_id=mutation_id,
+                )
+                original_checkpoint = cli._turn_commit_checkpoint
+                cli._turn_commit_checkpoint = (
+                    lambda stage: (_ for _ in ()).throw(KeyboardInterrupt())
+                    if stage == "after_journal"
+                    else None
+                )
+                try:
+                    with self.assertRaises(KeyboardInterrupt):
+                        cli._commit_projected_turn(
+                            slug,
+                            before,
+                            after,
+                            entry,
+                            [(slug, "answer_judged", {"status": "partial"})],
+                            mutation_id,
+                        )
+                finally:
+                    cli._turn_commit_checkpoint = original_checkpoint
+
+                recovery_paused = threading.Event()
+                allow_recovery = threading.Event()
+                deletion_entered = threading.Event()
+                recovery_errors: list[BaseException] = []
+                deletion_errors: list[BaseException] = []
+
+                def pause_recovery(stage: str) -> None:
+                    if stage == boundary:
+                        recovery_paused.set()
+                        allow_recovery.wait(timeout=5)
+
+                def recover() -> None:
+                    try:
+                        cli.recover_turn_commit(slug)
+                    except BaseException as exc:
+                        recovery_errors.append(exc)
+
+                def delete() -> None:
+                    try:
+                        cli.delete_topic_files(slug)
+                        deletion_entered.set()
+                    except BaseException as exc:
+                        deletion_errors.append(exc)
+
+                cli._turn_commit_checkpoint = pause_recovery
+                recovery_thread = threading.Thread(target=recover)
+                deletion_thread = threading.Thread(target=delete)
+                try:
+                    recovery_thread.start()
+                    self.assertTrue(recovery_paused.wait(timeout=5))
+                    deletion_thread.start()
+                    self.assertFalse(deletion_entered.wait(timeout=0.05))
+                    allow_recovery.set()
+                    recovery_thread.join(timeout=5)
+                    deletion_thread.join(timeout=5)
+                finally:
+                    cli._turn_commit_checkpoint = original_checkpoint
+                    allow_recovery.set()
+
+                self.assertFalse(recovery_thread.is_alive())
+                self.assertFalse(deletion_thread.is_alive())
+                self.assertEqual(recovery_errors, [])
+                self.assertEqual(deletion_errors, [])
+                self.assertTrue(deletion_entered.is_set())
+                for path in (
+                    cli.topic_path(slug),
+                    cli.topic_state_path(slug),
+                    cli.topic_events_path(slug),
+                    cli.topic_activity_journal_path(slug),
+                    cli.topic_turn_journal_path(slug),
+                ):
+                    self.assertFalse(path.exists(), path)
+                self.assertFalse(cli.recover_turn_commit(slug))
+                self.assertFalse(cli.topic_path(slug).exists())
+
+    def test_delete_wins_against_commit_paused_after_journal(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Delete Commit Race", goal="Learn safely"))
+        slug = "delete-commit-race"
+        before = cli.load_state(slug)
+        mutation_id = "turn_88888888888888888888888888888888"
+        entry = cli._session_entry(
+            "chat",
+            "race prompt",
+            "race response",
+            created="2026-07-25 12:00 UTC",
+            mutation_id=mutation_id,
+        )
+        journal_ready = threading.Event()
+        allow_commit = threading.Event()
+        errors: list[BaseException] = []
+        original_checkpoint = cli._turn_commit_checkpoint
+
+        def pause_after_journal(stage: str) -> None:
+            if stage == "after_journal":
+                journal_ready.set()
+                allow_commit.wait(timeout=5)
+
+        def commit() -> None:
+            try:
+                cli._commit_projected_turn(
+                    slug, before, before, entry, [], mutation_id
+                )
+            except BaseException as exc:
+                errors.append(exc)
+
+        cli._turn_commit_checkpoint = pause_after_journal
+        thread = threading.Thread(target=commit)
+        try:
+            thread.start()
+            self.assertTrue(journal_ready.wait(timeout=5))
+            cli.delete_topic_files(slug)
+            allow_commit.set()
+            thread.join(timeout=5)
+        finally:
+            cli._turn_commit_checkpoint = original_checkpoint
+            allow_commit.set()
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], cli.OpenLearnError)
+        for path in (
+            cli.topic_path(slug),
+            cli.topic_state_path(slug),
+            cli.topic_events_path(slug),
+            cli.topic_activity_journal_path(slug),
+            cli.topic_turn_journal_path(slug),
+        ):
+            self.assertFalse(path.exists(), path)
+
+    def test_stale_journal_cannot_resurrect_deleted_or_recreated_topic(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Generation", goal="Old goal"))
+        slug = "generation"
+        old_generation = cli.read_topic(slug).metadata["topic_generation"]
+        before = cli.load_state(slug)
+        mutation_id = "turn_99999999999999999999999999999999"
+        entry = cli._session_entry(
+            "chat",
+            "old prompt",
+            "old private response",
+            created="2026-07-25 12:00 UTC",
+            mutation_id=mutation_id,
+        )
+        original_checkpoint = cli._turn_commit_checkpoint
+        cli._turn_commit_checkpoint = (
+            lambda stage: (_ for _ in ()).throw(KeyboardInterrupt())
+            if stage == "after_journal"
+            else None
+        )
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                cli._commit_projected_turn(
+                    slug, before, before, entry, [], mutation_id
+                )
+        finally:
+            cli._turn_commit_checkpoint = original_checkpoint
+        journal_path = cli.topic_turn_journal_path(slug)
+        stale_journal = journal_path.read_bytes()
+        cli.delete_topic_files(slug)
+
+        journal_path.write_bytes(stale_journal)
+        os.chmod(journal_path, 0o600)
+        self.assertFalse(cli.recover_turn_commit(slug))
+        self.assertFalse(cli.topic_path(slug).exists())
+        self.assertFalse(journal_path.exists())
+
+        call_silent(cli.cmd_new, Namespace(topic="Generation", goal="New goal"))
+        recreated = cli.read_topic(slug)
+        self.assertNotEqual(recreated.metadata["topic_generation"], old_generation)
+        body_before = recreated.body
+        journal_path.write_bytes(stale_journal)
+        os.chmod(journal_path, 0o600)
+        recreated = cli.read_topic(slug)
+        self.assertEqual(recreated.body, body_before)
+        self.assertNotIn("old private response", recreated.body)
+        self.assertFalse(journal_path.exists())
+
+    def test_full_commit_receipt_rejects_after_state_payload_tampering(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Receipt Binding", goal="Learn safely"))
+        slug = "receipt-binding"
+        before = cli.load_state(slug)
+        after = {**before, "last_answer_status": "partial"}
+        mutation_id = "turn_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        entry = cli._session_entry(
+            "chat",
+            "private original prompt",
+            "private original response",
+            created="2026-07-25 12:00 UTC",
+            mutation_id=mutation_id,
+        )
+        original_checkpoint = cli._turn_commit_checkpoint
+        cli._turn_commit_checkpoint = (
+            lambda stage: (_ for _ in ()).throw(KeyboardInterrupt())
+            if stage == "after_state"
+            else None
+        )
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                cli._commit_projected_turn(
+                    slug,
+                    before,
+                    after,
+                    entry,
+                    [(slug, "answer_judged", {"status": "partial"})],
+                    mutation_id,
+                    before_metadata=cli.read_topic(slug).metadata,
+                    after_metadata={
+                        **cli.read_topic(slug).metadata,
+                        "known": ["original concept"],
+                    },
+                )
+        finally:
+            cli._turn_commit_checkpoint = original_checkpoint
+        journal_path = cli.topic_turn_journal_path(slug)
+        original_journal = json.loads(journal_path.read_text(encoding="utf-8"))
+        topic_before = cli.topic_path(slug).read_bytes()
+        state_before = cli.topic_state_path(slug).read_bytes()
+        events_path = cli.topic_events_path(slug)
+        events_before = events_path.read_bytes() if events_path.exists() else None
+
+        variants = []
+        changed_event = json.loads(json.dumps(original_journal))
+        changed_event["events"][0]["data"]["status"] = "CORRUPTED"
+        changed_event["events_sha256"] = cli._payload_sha256(changed_event["events"])
+        variants.append(changed_event)
+        changed_session = json.loads(json.dumps(original_journal))
+        changed_session["session_entry"] += "\nCORRUPTED SESSION"
+        changed_session["session_sha256"] = cli._payload_sha256(
+            changed_session["session_entry"]
+        )
+        variants.append(changed_session)
+        changed_metadata = json.loads(json.dumps(original_journal))
+        changed_metadata["metadata_patch"][0]["added"] = ["CORRUPTED METADATA"]
+        changed_metadata["metadata_patch_sha256"] = cli._payload_sha256(
+            changed_metadata["metadata_patch"]
+        )
+        variants.append(changed_metadata)
+
+        for variant in variants:
+            variant["commit_sha256"] = cli._payload_sha256(
+                cli._turn_commit_identity_payload(variant)
+            )
+            journal_path.write_text(
+                json.dumps(variant, ensure_ascii=False), encoding="utf-8"
+            )
+            with self.assertRaises(cli.OpenLearnError) as caught:
+                cli.recover_turn_commit(slug)
+            self.assertNotIn("CORRUPTED", str(caught.exception))
+            self.assertNotIn("private", str(caught.exception).lower())
+            self.assertEqual(cli.topic_path(slug).read_bytes(), topic_before)
+            self.assertEqual(cli.topic_state_path(slug).read_bytes(), state_before)
+            self.assertEqual(
+                events_path.read_bytes() if events_path.exists() else None,
+                events_before,
+            )
+            self.assertTrue(journal_path.exists())
+
+    def test_atomic_replace_and_unlink_fsync_parent_directory(self) -> None:
+        path = Path(self.home.name) / "durable.txt"
+        calls: list[str] = []
+        original_replace = os.replace
+
+        def recording_replace(source, target) -> None:
+            calls.append("replace")
+            original_replace(source, target)
+
+        with (
+            mock.patch.object(os, "replace", side_effect=recording_replace),
+            mock.patch.object(
+                cli,
+                "fsync_directory",
+                side_effect=lambda _directory: calls.append("fsync"),
+            ),
+        ):
+            cli.write_text_atomic(path, "durable")
+        self.assertEqual(calls, ["replace", "fsync"])
+
+        calls.clear()
+        with mock.patch.object(
+            cli,
+            "fsync_directory",
+            side_effect=lambda _directory: calls.append("fsync"),
+        ):
+            self.assertTrue(cli.durable_unlink(path))
+        self.assertEqual(calls, ["fsync"])
 
     def test_graded_turn_projects_without_writes_during_provider_calls(
         self,
@@ -7501,6 +7817,14 @@ class InteractiveTests(unittest.TestCase):
             "**Lesson:** Build systems coordinate artifacts.",
             "**Lesson:** Run queues serialize work.",
             "**Lesson:** Apply functions transform values.",
+            "**Lesson:** Debug symbols improve diagnostics.",
+            "**Lesson:** Analyze tools improve performance.",
+            "**Lesson:** Optimize passes reduce allocations.",
+            "**Lesson:** Find operations locate elements.",
+            "**Lesson:** Prove tactics support formal verification.",
+            "**Lesson:** Code review improves quality.",
+            "**Lesson:** Test suites catch regressions.",
+            "**Lesson:** Design patterns guide structure.",
         )
         for text in negatives:
             with self.subTest(text=text):
@@ -8764,7 +9088,7 @@ class InteractiveTests(unittest.TestCase):
             }
 
         for stage in ("after_journal", "after_state", "after_event"):
-            slug = f"journal-{stage}"
+            slug = cli.slugify(f"journal-{stage}")
             call_silent(cli.cmd_new, Namespace(topic=slug, goal="practice functions"))
 
             def fail_at_stage(current: str, *, target: str = stage) -> None:
