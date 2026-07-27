@@ -61,6 +61,34 @@ Recovery verifies that same generation again under the topic lock immediately be
 Profile edits invalidate affected recommendations and mark completed placement stale without deleting attempt events.
 Topics without the adjacent file behave exactly as ordinary topics and receive no interview prompts.
 
+## Interview Skill Graph
+
+`openlearn.interview_skills` owns the versioned static interview-readiness model.
+The bundled `coding-interview-v1.json` graph is canonical, while the algorithms course template is only a presentation seed.
+The graph uses stable category-prefixed IDs for concepts, patterns, process skills, and communication skills.
+It declares blocking and supporting prerequisite edges, versioned evidence policies, transfer expectations, and primary or supporting problem references.
+Validation rejects unknown references, duplicate identities, invalid problem roles, and cycles before the graph can be used.
+
+Learner-specific evidence remains outside the graph in caller-owned append-only event history.
+Each evidence record carries the graph and mastery-policy versions under which it was observed.
+An immutable registry resolves that exact graph-and-policy bundle before deciding whether the observation qualified at the time.
+Problem roles, explicit-check rules, and canonical transfer families therefore come from the historical bundle rather than the current graph or caller input.
+Current assessment may explicitly apply current mastery minimums to already-qualified older evidence without rewriting the original record.
+Evidence for a retired stable ID remains inspectable as orphaned history instead of being deleted or silently mapped to another skill.
+Ordinary topics do not load the graph, receive graph metadata, or acquire interview-only learner state.
+
+The deterministic assessment surface separates readiness from selection.
+Readiness is `ready`, `provisional`, `weak`, or `unassessed`.
+Selection is `ready`, `blocked`, `weak`, `due`, or `unassessed`, with learner-visible reasons for missing evidence, prerequisite blocks, hint-dependent work, and delayed-retrieval failures.
+Evidence provenance uses closed assistance and completion values, and independent mastery rejects copied structure, partial code, worked examples, editorials, incomplete attempts, and prompted production.
+Delayed retrieval uses the source bundle's skill policy and a qualifying prior observation from that same bundle before current aggregate mastery minimums are applied.
+Passing counts and latest-failure due status use that same source-qualified delayed-observation collection, including independent, unassisted, novel, and complete provenance.
+Transfer breadth is derived from stable problem IDs and canonical source-graph families, so repeated attempts, family renames, or caller-supplied labels cannot manufacture novelty.
+Distinct problems in one canonical family still count as one transfer context.
+Repeated append-only delivery of an identical evidence ID is idempotent, while conflicting records with the same ID fail validation.
+Blocking prerequisites propagate through the graph and require each prerequisite to be selection-ready.
+Blocking is a selection constraint rather than an instruction to drill indefinitely.
+
 ## Practice Activities
 
 `openlearn.activities` defines the versioned, domain-neutral contract for hands-on practice.

@@ -1,0 +1,625 @@
+{
+  "schema_version": 1,
+  "graph_id": "coding-interview",
+  "graph_version": "1.0.0",
+  "mastery_policy_version": "interview-mastery-v1",
+  "evidence_policies": [
+    {
+      "id": "concept-v1",
+      "minimum": {
+        "recognition": 0,
+        "explanation": 1,
+        "production": 0,
+        "transfer": 1,
+        "delayed_retrieval": 1
+      },
+      "inferable_kinds": ["explanation", "transfer", "delayed_retrieval"],
+      "explicit_check_kinds": ["recognition", "explanation", "production", "transfer", "delayed_retrieval"],
+      "transfer": {
+        "minimum_novel_contexts": 1,
+        "minimum_delay_days": 7,
+        "due_after_days": 60
+      }
+    },
+    {
+      "id": "explicit-concept-v1",
+      "minimum": {
+        "recognition": 0,
+        "explanation": 1,
+        "production": 0,
+        "transfer": 1,
+        "delayed_retrieval": 1
+      },
+      "inferable_kinds": [],
+      "explicit_check_kinds": ["recognition", "explanation", "production", "transfer", "delayed_retrieval"],
+      "transfer": {
+        "minimum_novel_contexts": 1,
+        "minimum_delay_days": 7,
+        "due_after_days": 60
+      }
+    },
+    {
+      "id": "pattern-v1",
+      "minimum": {
+        "recognition": 0,
+        "explanation": 1,
+        "production": 1,
+        "transfer": 1,
+        "delayed_retrieval": 1
+      },
+      "inferable_kinds": ["explanation", "production", "transfer", "delayed_retrieval"],
+      "explicit_check_kinds": ["recognition", "explanation", "production", "transfer", "delayed_retrieval"],
+      "transfer": {
+        "minimum_novel_contexts": 1,
+        "minimum_delay_days": 7,
+        "due_after_days": 45
+      }
+    },
+    {
+      "id": "process-v1",
+      "minimum": {
+        "recognition": 0,
+        "explanation": 0,
+        "production": 1,
+        "transfer": 1,
+        "delayed_retrieval": 1
+      },
+      "inferable_kinds": [],
+      "explicit_check_kinds": ["recognition", "explanation", "production", "transfer", "delayed_retrieval"],
+      "transfer": {
+        "minimum_novel_contexts": 1,
+        "minimum_delay_days": 7,
+        "due_after_days": 45
+      }
+    },
+    {
+      "id": "communication-v1",
+      "minimum": {
+        "recognition": 0,
+        "explanation": 1,
+        "production": 1,
+        "transfer": 1,
+        "delayed_retrieval": 1
+      },
+      "inferable_kinds": [],
+      "explicit_check_kinds": ["recognition", "explanation", "production", "transfer", "delayed_retrieval"],
+      "transfer": {
+        "minimum_novel_contexts": 1,
+        "minimum_delay_days": 7,
+        "due_after_days": 45
+      }
+    }
+  ],
+  "skills": [
+    {
+      "id": "concept.constraint-reading",
+      "name": "Constraint reading",
+      "category": "concept",
+      "description": "Translate input bounds and guarantees into viable complexity and representation choices.",
+      "prerequisites": [],
+      "evidence_policy": "explicit-concept-v1",
+      "curriculum_unit": "Foundations and constraints",
+      "curriculum_order": 10
+    },
+    {
+      "id": "concept.complexity-analysis",
+      "name": "Complexity analysis",
+      "category": "concept",
+      "description": "Derive and communicate time and space bounds for a concrete implementation.",
+      "prerequisites": [{"skill_id": "concept.constraint-reading", "kind": "supporting"}],
+      "evidence_policy": "explicit-concept-v1",
+      "curriculum_unit": "Foundations and constraints",
+      "curriculum_order": 20
+    },
+    {
+      "id": "concept.arrays-strings",
+      "name": "Arrays and strings",
+      "category": "concept",
+      "description": "Reason about indexed sequences, mutation, traversal, and boundary conditions.",
+      "prerequisites": [],
+      "evidence_policy": "concept-v1",
+      "curriculum_unit": "Linear structures",
+      "curriculum_order": 30
+    },
+    {
+      "id": "concept.hashing",
+      "name": "Hashing",
+      "category": "concept",
+      "description": "Use maps and sets with accurate lookup, collision, and space reasoning.",
+      "prerequisites": [{"skill_id": "concept.arrays-strings", "kind": "supporting"}],
+      "evidence_policy": "concept-v1",
+      "curriculum_unit": "Linear structures",
+      "curriculum_order": 40
+    },
+    {
+      "id": "concept.linked-structures",
+      "name": "Linked structures",
+      "category": "concept",
+      "description": "Manipulate node references while preserving reachability and structural invariants.",
+      "prerequisites": [],
+      "evidence_policy": "concept-v1",
+      "curriculum_unit": "Linear structures",
+      "curriculum_order": 50
+    },
+    {
+      "id": "concept.stacks-queues",
+      "name": "Stacks and queues",
+      "category": "concept",
+      "description": "Select and implement LIFO and FIFO structures for traversal and ordering constraints.",
+      "prerequisites": [{"skill_id": "concept.arrays-strings", "kind": "supporting"}],
+      "evidence_policy": "concept-v1",
+      "curriculum_unit": "Linear structures",
+      "curriculum_order": 60
+    },
+    {
+      "id": "pattern.two-pointers",
+      "name": "Two pointers",
+      "category": "pattern",
+      "description": "Maintain two coordinated positions to reduce repeated sequence work.",
+      "prerequisites": [{"skill_id": "concept.arrays-strings", "kind": "blocking"}],
+      "evidence_policy": "pattern-v1",
+      "curriculum_unit": "Sequence patterns",
+      "curriculum_order": 70
+    },
+    {
+      "id": "pattern.sliding-window",
+      "name": "Sliding window",
+      "category": "pattern",
+      "description": "Recognize and maintain a contiguous-range invariant while endpoints move.",
+      "prerequisites": [
+        {"skill_id": "concept.arrays-strings", "kind": "blocking"},
+        {"skill_id": "concept.hashing", "kind": "blocking"}
+      ],
+      "evidence_policy": "pattern-v1",
+      "curriculum_unit": "Sequence patterns",
+      "curriculum_order": 80
+    },
+    {
+      "id": "pattern.prefix-suffix-aggregation",
+      "name": "Prefix and suffix aggregation",
+      "category": "pattern",
+      "description": "Precompute directional summaries to answer range or exclusion questions efficiently.",
+      "prerequisites": [{"skill_id": "concept.arrays-strings", "kind": "blocking"}],
+      "evidence_policy": "pattern-v1",
+      "curriculum_unit": "Sequence patterns",
+      "curriculum_order": 90
+    },
+    {
+      "id": "pattern.intervals",
+      "name": "Intervals",
+      "category": "pattern",
+      "description": "Sort, merge, sweep, and compare ranges with correct endpoint semantics.",
+      "prerequisites": [{"skill_id": "concept.arrays-strings", "kind": "blocking"}],
+      "evidence_policy": "pattern-v1",
+      "curriculum_unit": "Sequence patterns",
+      "curriculum_order": 100
+    },
+    {
+      "id": "pattern.binary-search",
+      "name": "Binary search",
+      "category": "pattern",
+      "description": "Define a monotonic predicate and shrink an index or answer search space safely.",
+      "prerequisites": [
+        {"skill_id": "concept.arrays-strings", "kind": "blocking"},
+        {"skill_id": "concept.constraint-reading", "kind": "supporting"}
+      ],
+      "evidence_policy": "pattern-v1",
+      "curriculum_unit": "Search-space reduction",
+      "curriculum_order": 110
+    },
+    {
+      "id": "concept.trees",
+      "name": "Trees",
+      "category": "concept",
+      "description": "Reason about rooted hierarchy, paths, subtrees, traversal state, and tree invariants.",
+      "prerequisites": [{"skill_id": "concept.recursion", "kind": "supporting"}],
+      "evidence_policy": "concept-v1",
+      "curriculum_unit": "Trees and priority structures",
+      "curriculum_order": 120
+    },
+    {
+      "id": "concept.heaps",
+      "name": "Heaps",
+      "category": "concept",
+      "description": "Maintain partial ordering for repeated extremum selection and bounded top-k work.",
+      "prerequisites": [{"skill_id": "concept.arrays-strings", "kind": "blocking"}],
+      "evidence_policy": "concept-v1",
+      "curriculum_unit": "Trees and priority structures",
+      "curriculum_order": 130
+    },
+    {
+      "id": "concept.tries",
+      "name": "Tries",
+      "category": "concept",
+      "description": "Represent shared prefixes and reason about branching string searches.",
+      "prerequisites": [
+        {"skill_id": "concept.trees", "kind": "blocking"},
+        {"skill_id": "concept.arrays-strings", "kind": "supporting"}
+      ],
+      "evidence_policy": "concept-v1",
+      "curriculum_unit": "Trees and priority structures",
+      "curriculum_order": 140
+    },
+    {
+      "id": "concept.graphs",
+      "name": "Graphs",
+      "category": "concept",
+      "description": "Model vertices and edges and choose representations that match traversal needs.",
+      "prerequisites": [{"skill_id": "concept.hashing", "kind": "supporting"}],
+      "evidence_policy": "concept-v1",
+      "curriculum_unit": "Graph traversal",
+      "curriculum_order": 150
+    },
+    {
+      "id": "pattern.bfs",
+      "name": "Breadth-first search",
+      "category": "pattern",
+      "description": "Traverse by frontier layers for reachability and unweighted shortest paths.",
+      "prerequisites": [
+        {"skill_id": "concept.graphs", "kind": "blocking"},
+        {"skill_id": "concept.stacks-queues", "kind": "blocking"}
+      ],
+      "evidence_policy": "pattern-v1",
+      "curriculum_unit": "Graph traversal",
+      "curriculum_order": 160
+    },
+    {
+      "id": "pattern.dfs",
+      "name": "Depth-first search",
+      "category": "pattern",
+      "description": "Traverse deeply while managing visited state, recursion, and postorder work.",
+      "prerequisites": [
+        {"skill_id": "concept.graphs", "kind": "blocking"},
+        {"skill_id": "concept.recursion", "kind": "supporting"}
+      ],
+      "evidence_policy": "pattern-v1",
+      "curriculum_unit": "Graph traversal",
+      "curriculum_order": 170
+    },
+    {
+      "id": "concept.union-find",
+      "name": "Union-find",
+      "category": "concept",
+      "description": "Maintain dynamic connectivity with disjoint sets, path compression, and rank.",
+      "prerequisites": [{"skill_id": "concept.graphs", "kind": "blocking"}],
+      "evidence_policy": "concept-v1",
+      "curriculum_unit": "Advanced graph patterns",
+      "curriculum_order": 180
+    },
+    {
+      "id": "pattern.topological-ordering",
+      "name": "Topological ordering",
+      "category": "pattern",
+      "description": "Recognize dependency DAGs and construct or reject a valid ordering.",
+      "prerequisites": [
+        {"skill_id": "concept.graphs", "kind": "blocking"},
+        {"skill_id": "pattern.bfs", "kind": "supporting"},
+        {"skill_id": "pattern.dfs", "kind": "supporting"}
+      ],
+      "evidence_policy": "pattern-v1",
+      "curriculum_unit": "Advanced graph patterns",
+      "curriculum_order": 190
+    },
+    {
+      "id": "concept.shortest-paths",
+      "name": "Shortest paths",
+      "category": "concept",
+      "description": "Match edge assumptions to BFS or weighted shortest-path algorithms.",
+      "prerequisites": [
+        {"skill_id": "concept.graphs", "kind": "blocking"},
+        {"skill_id": "concept.heaps", "kind": "blocking"},
+        {"skill_id": "pattern.bfs", "kind": "supporting"}
+      ],
+      "evidence_policy": "concept-v1",
+      "curriculum_unit": "Advanced graph patterns",
+      "curriculum_order": 200
+    },
+    {
+      "id": "concept.recursion",
+      "name": "Recursion",
+      "category": "concept",
+      "description": "Define shrinking subproblems, base cases, return contracts, and call-stack cost.",
+      "prerequisites": [],
+      "evidence_policy": "concept-v1",
+      "curriculum_unit": "Recursive search",
+      "curriculum_order": 210
+    },
+    {
+      "id": "pattern.backtracking",
+      "name": "Backtracking",
+      "category": "pattern",
+      "description": "Explore a choice tree with reversible state and sound pruning.",
+      "prerequisites": [{"skill_id": "concept.recursion", "kind": "blocking"}],
+      "evidence_policy": "pattern-v1",
+      "curriculum_unit": "Recursive search",
+      "curriculum_order": 220
+    },
+    {
+      "id": "pattern.greedy",
+      "name": "Greedy reasoning",
+      "category": "pattern",
+      "description": "Justify a locally optimal choice with an invariant or exchange argument.",
+      "prerequisites": [
+        {"skill_id": "concept.constraint-reading", "kind": "supporting"},
+        {"skill_id": "process.counterexample-construction", "kind": "supporting"}
+      ],
+      "evidence_policy": "pattern-v1",
+      "curriculum_unit": "Optimization patterns",
+      "curriculum_order": 230
+    },
+    {
+      "id": "concept.dynamic-programming-state",
+      "name": "Dynamic programming state",
+      "category": "concept",
+      "description": "Define state, transitions, base cases, evaluation order, and space requirements.",
+      "prerequisites": [{"skill_id": "concept.recursion", "kind": "blocking"}],
+      "evidence_policy": "concept-v1",
+      "curriculum_unit": "Optimization patterns",
+      "curriculum_order": 240
+    },
+    {
+      "id": "pattern.dynamic-programming",
+      "name": "Dynamic programming",
+      "category": "pattern",
+      "description": "Recognize overlapping subproblems and independently derive a reusable recurrence.",
+      "prerequisites": [
+        {"skill_id": "concept.dynamic-programming-state", "kind": "blocking"},
+        {"skill_id": "concept.recursion", "kind": "supporting"}
+      ],
+      "evidence_policy": "pattern-v1",
+      "curriculum_unit": "Optimization patterns",
+      "curriculum_order": 250
+    },
+    {
+      "id": "process.edge-case-design",
+      "name": "Edge-case design",
+      "category": "process",
+      "description": "Generate boundary, degenerate, duplicate, empty, and adversarial cases from the contract.",
+      "prerequisites": [{"skill_id": "concept.constraint-reading", "kind": "supporting"}],
+      "evidence_policy": "process-v1",
+      "curriculum_unit": "Correctness process",
+      "curriculum_order": 260
+    },
+    {
+      "id": "process.testing",
+      "name": "Testing",
+      "category": "process",
+      "description": "Turn examples and edge cases into checks that distinguish correct from plausible code.",
+      "prerequisites": [{"skill_id": "process.edge-case-design", "kind": "blocking"}],
+      "evidence_policy": "process-v1",
+      "curriculum_unit": "Correctness process",
+      "curriculum_order": 270
+    },
+    {
+      "id": "process.debugging",
+      "name": "Debugging",
+      "category": "process",
+      "description": "Localize a failing invariant and make a targeted correction using observed behavior.",
+      "prerequisites": [{"skill_id": "process.testing", "kind": "supporting"}],
+      "evidence_policy": "process-v1",
+      "curriculum_unit": "Correctness process",
+      "curriculum_order": 280
+    },
+    {
+      "id": "process.counterexample-construction",
+      "name": "Counterexample construction",
+      "category": "process",
+      "description": "Construct the smallest input that falsifies an incorrect claim or invariant.",
+      "prerequisites": [{"skill_id": "process.edge-case-design", "kind": "supporting"}],
+      "evidence_policy": "process-v1",
+      "curriculum_unit": "Correctness process",
+      "curriculum_order": 290
+    },
+    {
+      "id": "communication.problem-clarification",
+      "name": "Problem clarification",
+      "category": "communication",
+      "description": "Ask bounded questions that resolve input, output, constraint, and ambiguity assumptions.",
+      "prerequisites": [],
+      "evidence_policy": "communication-v1",
+      "curriculum_unit": "Interview communication",
+      "curriculum_order": 300
+    },
+    {
+      "id": "communication.plan",
+      "name": "Plan communication",
+      "category": "communication",
+      "description": "State an actionable approach, invariant, data structures, and tradeoffs before coding.",
+      "prerequisites": [{"skill_id": "communication.problem-clarification", "kind": "supporting"}],
+      "evidence_policy": "communication-v1",
+      "curriculum_unit": "Interview communication",
+      "curriculum_order": 310
+    },
+    {
+      "id": "communication.complexity-explanation",
+      "name": "Complexity explanation",
+      "category": "communication",
+      "description": "Explain concrete time and space costs accurately and respond to challenges.",
+      "prerequisites": [{"skill_id": "concept.complexity-analysis", "kind": "blocking"}],
+      "evidence_policy": "communication-v1",
+      "curriculum_unit": "Interview communication",
+      "curriculum_order": 320
+    },
+    {
+      "id": "communication.follow-up-adaptation",
+      "name": "Follow-up adaptation",
+      "category": "communication",
+      "description": "Update the plan and implementation when constraints or requirements change.",
+      "prerequisites": [{"skill_id": "communication.plan", "kind": "blocking"}],
+      "evidence_policy": "communication-v1",
+      "curriculum_unit": "Interview communication",
+      "curriculum_order": 330
+    }
+  ],
+  "problems": [
+    {
+      "id": "problem.minimum-window-substring",
+      "title": "Minimum covering window",
+      "transfer_family": "window-counts",
+      "skills": [
+        {"skill_id": "pattern.sliding-window", "role": "primary"},
+        {"skill_id": "concept.arrays-strings", "role": "supporting"},
+        {"skill_id": "concept.hashing", "role": "supporting"},
+        {"skill_id": "concept.complexity-analysis", "role": "supporting"},
+        {"skill_id": "process.edge-case-design", "role": "supporting"},
+        {"skill_id": "communication.plan", "role": "supporting"}
+      ]
+    },
+    {
+      "id": "problem.longest-repeating-replacement",
+      "title": "Longest repeating replacement window",
+      "transfer_family": "window-invariant",
+      "skills": [
+        {"skill_id": "pattern.sliding-window", "role": "primary"},
+        {"skill_id": "concept.arrays-strings", "role": "supporting"},
+        {"skill_id": "concept.hashing", "role": "supporting"},
+        {"skill_id": "process.counterexample-construction", "role": "supporting"}
+      ]
+    },
+    {
+      "id": "problem.rotated-array-search",
+      "title": "Search a rotated sorted array",
+      "transfer_family": "monotonic-partition",
+      "skills": [
+        {"skill_id": "pattern.binary-search", "role": "primary"},
+        {"skill_id": "concept.arrays-strings", "role": "supporting"},
+        {"skill_id": "process.edge-case-design", "role": "supporting"},
+        {"skill_id": "communication.complexity-explanation", "role": "supporting"}
+      ]
+    },
+    {
+      "id": "problem.course-order",
+      "title": "Course dependency order",
+      "transfer_family": "dependency-dag",
+      "skills": [
+        {"skill_id": "pattern.topological-ordering", "role": "primary"},
+        {"skill_id": "concept.graphs", "role": "supporting"},
+        {"skill_id": "pattern.bfs", "role": "supporting"},
+        {"skill_id": "pattern.dfs", "role": "supporting"}
+      ]
+    },
+    {
+      "id": "problem.word-search",
+      "title": "Grid word search",
+      "transfer_family": "choice-tree-grid",
+      "skills": [
+        {"skill_id": "pattern.backtracking", "role": "primary"},
+        {"skill_id": "concept.recursion", "role": "supporting"},
+        {"skill_id": "pattern.dfs", "role": "supporting"},
+        {"skill_id": "process.debugging", "role": "supporting"}
+      ]
+    },
+    {
+      "id": "problem.coin-change",
+      "title": "Minimum coin change",
+      "transfer_family": "unbounded-choice-dp",
+      "skills": [
+        {"skill_id": "pattern.dynamic-programming", "role": "primary"},
+        {"skill_id": "concept.dynamic-programming-state", "role": "supporting"},
+        {"skill_id": "pattern.greedy", "role": "supporting"},
+        {"skill_id": "process.counterexample-construction", "role": "supporting"}
+      ]
+    },
+    {
+      "id": "problem.network-delay",
+      "title": "Network delay",
+      "transfer_family": "weighted-shortest-path",
+      "skills": [
+        {"skill_id": "concept.shortest-paths", "role": "primary"},
+        {"skill_id": "concept.graphs", "role": "supporting"},
+        {"skill_id": "concept.heaps", "role": "supporting"},
+        {"skill_id": "concept.complexity-analysis", "role": "supporting"}
+      ]
+    },
+    {
+      "id": "problem.merge-intervals",
+      "title": "Merge overlapping intervals",
+      "transfer_family": "sorted-interval-sweep",
+      "skills": [
+        {"skill_id": "pattern.intervals", "role": "primary"},
+        {"skill_id": "concept.arrays-strings", "role": "supporting"},
+        {"skill_id": "process.edge-case-design", "role": "supporting"}
+      ]
+    },
+    {
+      "id": "problem.connected-components",
+      "title": "Dynamic connected components",
+      "transfer_family": "disjoint-connectivity",
+      "skills": [
+        {"skill_id": "concept.union-find", "role": "primary"},
+        {"skill_id": "concept.graphs", "role": "supporting"},
+        {"skill_id": "concept.complexity-analysis", "role": "supporting"}
+      ]
+    },
+    {
+      "id": "problem.top-k-stream",
+      "title": "Top-k stream",
+      "transfer_family": "bounded-priority",
+      "skills": [
+        {"skill_id": "concept.heaps", "role": "primary"},
+        {"skill_id": "concept.constraint-reading", "role": "supporting"},
+        {"skill_id": "communication.follow-up-adaptation", "role": "supporting"}
+      ]
+    },
+    {
+      "id": "problem.prefix-product",
+      "title": "Product except self",
+      "transfer_family": "bidirectional-aggregation",
+      "skills": [
+        {"skill_id": "pattern.prefix-suffix-aggregation", "role": "primary"},
+        {"skill_id": "concept.arrays-strings", "role": "supporting"},
+        {"skill_id": "concept.complexity-analysis", "role": "supporting"}
+      ]
+    },
+    {
+      "id": "problem.reverse-linked-list",
+      "title": "Reverse a linked list",
+      "transfer_family": "pointer-rewiring",
+      "skills": [
+        {"skill_id": "concept.linked-structures", "role": "primary"},
+        {"skill_id": "process.testing", "role": "supporting"},
+        {"skill_id": "communication.plan", "role": "supporting"}
+      ]
+    },
+    {
+      "id": "problem.validate-brackets",
+      "title": "Validate nested brackets",
+      "transfer_family": "stack-nesting",
+      "skills": [
+        {"skill_id": "concept.stacks-queues", "role": "primary"},
+        {"skill_id": "concept.arrays-strings", "role": "supporting"},
+        {"skill_id": "process.testing", "role": "supporting"}
+      ]
+    },
+    {
+      "id": "problem.autocomplete",
+      "title": "Prefix autocomplete",
+      "transfer_family": "prefix-tree",
+      "skills": [
+        {"skill_id": "concept.tries", "role": "primary"},
+        {"skill_id": "concept.trees", "role": "supporting"},
+        {"skill_id": "concept.hashing", "role": "supporting"}
+      ]
+    },
+    {
+      "id": "problem.lowest-common-ancestor",
+      "title": "Lowest common ancestor",
+      "transfer_family": "tree-postorder",
+      "skills": [
+        {"skill_id": "concept.trees", "role": "primary"},
+        {"skill_id": "concept.recursion", "role": "supporting"},
+        {"skill_id": "pattern.dfs", "role": "supporting"}
+      ]
+    },
+    {
+      "id": "problem.pair-sum-sorted",
+      "title": "Pair sum in sorted input",
+      "transfer_family": "converging-pointers",
+      "skills": [
+        {"skill_id": "pattern.two-pointers", "role": "primary"},
+        {"skill_id": "concept.arrays-strings", "role": "supporting"},
+        {"skill_id": "communication.problem-clarification", "role": "supporting"}
+      ]
+    }
+  ]
+}

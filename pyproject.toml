@@ -49,7 +49,7 @@ package-dir = { "" = "src" }
 version = { attr = "openlearn.__version__" }
 
 [tool.setuptools.package-data]
-openlearn = ["templates/*.json", "drills.json"]
+openlearn = ["templates/*.json", "interview_skill_graphs/*.json", "drills.json"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
