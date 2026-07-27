@@ -58,6 +58,19 @@ Cancellation and adapter failures preserve the surrounding tutor session.
 The learner can continue chatting and use manual `/drill` and `/check` fallbacks without a generic shell, arbitrary executable, or arbitrary path permission.
 Activity state and its teaching evidence recover together after an interrupted write through the durable activity-update journal.
 
+Coding drills use one allow-listed `start_coding_drill` action with validated objective, language, difficulty, scaffolding level, source metadata, and practice-or-mastery purpose.
+The action cannot contain commands, executable names, or filesystem paths.
+The visible tutor turn only offers the activity; the application captures consent separately before creating the topic-owned workspace or launching the configured editor.
+
+Scaffolding ranges from an unaided inert function stub through a planning prompt, partial TODO cues, and worked-example cues from a different instance.
+Failed test attempts return bounded test output and the saved learner artifact to the tutor, which gives targeted feedback and reveals at most the next progressive hint before a retry.
+Passing tests remains candidate production evidence.
+A mastery-check drill requires separately judged explanation, reflection, or later unaided transfer before normal mastery policy can advance.
+
+Original, curated, and licensed exercises preserve source and license metadata independently of the workspace format.
+Official LeetCode integration is link-out only: openLearn validates the official HTTPS problem URL, opens it after consent, and creates a local learner-owned solution scaffold without copying the remote statement, examples, or tests.
+The durable manual dogfood flow for Neovim and a graphical IDE is in `manual-tests/tutor-coding-drills.md`.
+
 ## Learner State
 
 | Scope | Examples |
