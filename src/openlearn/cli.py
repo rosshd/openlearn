@@ -25,6 +25,7 @@ import tempfile
 import textwrap
 import threading
 import time
+import webbrowser
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -50,7 +51,13 @@ from openlearn.activities import (
     transition_activity,
     validate_activity,
 )
-from openlearn.coding_activities import CodingActivityAdapter
+from openlearn.coding_activities import (
+    CodingActivityAdapter,
+    CodingDrillAction,
+    extract_coding_drill_action,
+    parse_coding_drill_action,
+    suppress_coding_drill_action,
+)
 from openlearn.course_templates import (
     CourseTemplateError,
     CourseTemplateNotFoundError,
@@ -246,6 +253,7 @@ configure_readline()
 
 _CONFIG_CACHE: dict[str, object] | None = None
 _LAST_RESPONSE_ANSWER_KEY = ""
+_LAST_RESPONSE_CODING_DRILL_ACTION: CodingDrillAction | None = None
 _DRY_RUN = False
 
 
@@ -1919,6 +1927,7 @@ def run_repl(
                         None,
                         prompt,
                         model,
+                        input_func=input_func,
                         output_func=output_func,
                         deferred_updates=deferred_updates,
                         pending_learner_prompt=prompt,
@@ -2235,6 +2244,7 @@ def handle_repl_command(
             None,
             " ".join(args),
             model,
+            input_func=input_func,
             output_func=output_func,
             deferred_updates=deferred_updates,
         )
@@ -6713,11 +6723,12 @@ def ask_topic(
     topic_value: str | None,
     prompt: str,
     model: str | None = None,
+    input_func=input,
     output_func=print,
     deferred_updates: DeferredTurnUpdates | None = None,
     pending_learner_prompt: str | None = None,
 ) -> str:
-    global _LAST_RESPONSE_ANSWER_KEY
+    global _LAST_RESPONSE_ANSWER_KEY, _LAST_RESPONSE_CODING_DRILL_ACTION
     topic = read_topic(
         resolve_topic_slug(topic_value) if topic_value is None else slugify(topic_value)
     )
@@ -6777,7 +6788,9 @@ def ask_topic(
         )
     )
     answer_key = _LAST_RESPONSE_ANSWER_KEY
+    coding_drill_action = _LAST_RESPONSE_CODING_DRILL_ACTION
     _LAST_RESPONSE_ANSWER_KEY = ""
+    _LAST_RESPONSE_CODING_DRILL_ACTION = None
     projected_metadata.pop("current_turn_message_kind", None)
     previous_pending = projected_metadata.get("pending_question")
     question = extract_pending_question_text(answer)
@@ -6853,6 +6866,13 @@ def ask_topic(
         before_metadata=stable_metadata_for_topic(original_metadata),
         after_metadata=stable_metadata_for_topic(projected_metadata),
     )
+    if coding_drill_action is not None:
+        orchestrate_tutor_coding_drill(
+            read_topic(topic.slug),
+            coding_drill_action,
+            input_func=input_func,
+            output_func=output_func,
+        )
     if deferred_updates is None:
         finish_turn_update(
             topic,
@@ -8194,6 +8214,150 @@ def coding_drill_concept_ids(topic: Topic) -> list[str]:
     return [concept_key(str(topic.metadata.get("topic") or topic.slug))]
 
 
+def parse_tutor_coding_drill_action(payload: dict[str, object]) -> CodingDrillAction:
+    """CLI-facing parser that translates contract failures into product errors."""
+    try:
+        return parse_coding_drill_action(payload)
+    except ActivityContractError as exc:
+        raise OpenLearnError(f"invalid tutor coding drill action: {exc}") from exc
+
+
+def tutor_drill_resources(action: CodingDrillAction) -> list[dict[str, str]]:
+    source = action.source
+    license_value = source.get("license")
+    if not license_value:
+        license_value = "official-link-only" if source["kind"] == "official_link" else "AGPL-3.0-or-later"
+    resource = {
+        "resource_id": f"coding_{source['kind']}",
+        "source": source["name"],
+        "license": license_value,
+    }
+    if "uri" in source:
+        resource["uri"] = source["uri"]
+    return [resource]
+
+
+def tutor_drill_activity_request(
+    topic: Topic, action: CodingDrillAction
+) -> dict[str, object]:
+    tool_requests = [
+        {"action": "create_drill_workspace", "payload": {}},
+        {"action": "open_configured_editor", "payload": {}},
+    ]
+    if action.source["kind"] == "official_link":
+        tool_requests.append({"action": "open_official_problem_link", "payload": {}})
+        requested_evidence = ["artifact_snapshot"]
+    else:
+        tool_requests.append({"action": "run_drill_tests", "payload": {}})
+        requested_evidence = ["pytest_result"]
+    return {
+        "domain": "coding",
+        "kind": "python_drill",
+        "objective": action.objective,
+        "concept_ids": coding_drill_concept_ids(topic),
+        "requested_evidence": requested_evidence,
+        "scaffolding_level": action.scaffolding_level,
+        "purpose": action.purpose,
+        "domain_payload": {
+            "title": action.title,
+            "language": action.language,
+            "difficulty": action.difficulty,
+            "plan_prompt": action.plan_prompt,
+            "todo_steps": list(action.todo_steps),
+            "worked_example": action.worked_example,
+            "hints": list(action.hints),
+            "reflection_prompt": action.reflection_prompt,
+            "transfer_prompt": action.transfer_prompt,
+            "tool_requests": tool_requests,
+        },
+        "resources": tutor_drill_resources(action),
+    }
+
+
+def orchestrate_tutor_coding_drill(
+    topic: Topic,
+    action: CodingDrillAction,
+    *,
+    input_func=input,
+    output_func=print,
+) -> dict[str, object]:
+    """Offer, consent, materialize, and launch one model-selected coding drill."""
+    previous = active_topic_activity(topic.slug, domain="coding", kind="python_drill")
+    if action.source["kind"] != "official_link":
+        validate_drill_data(action.drill)
+    else:
+        validate_inert_function_stub(str(action.drill["function_stub"]))
+    purpose_label = "mastery check" if action.purpose == "mastery_check" else "practice drill"
+    replacement = previous is not None and previous.get("status") == "active"
+    replacement_text = " and replace the active drill" if replacement else ""
+    accepted = input_func(
+        f"Start {purpose_label} '{action.title}'{replacement_text} and open your "
+        "configured editor? [y/N] "
+    )
+    if accepted.strip().casefold() not in {"y", "yes"}:
+        if replacement:
+            output_func("Drill cancelled. Your active drill is unchanged.")
+            assert previous is not None
+            return previous
+        activity = propose_topic_activity(
+            topic.slug, tutor_drill_activity_request(topic, action)
+        )
+        activity = transition_topic_activity(topic.slug, activity, "cancelled", reason="learner declined")
+        output_func("Drill cancelled. Continue chatting or use /drill when you are ready.")
+        return activity
+    if replacement:
+        assert previous is not None
+        transition_topic_activity(
+            topic.slug,
+            previous,
+            "abandoned",
+            reason="replaced by an accepted tutor-selected drill",
+        )
+    activity = propose_topic_activity(
+        topic.slug, tutor_drill_activity_request(topic, action)
+    )
+    activity = accept_topic_activity(topic.slug, activity, learner_confirmed=True)
+    try:
+        path = write_tutor_drill_file(topic.slug, action)
+        save_active_drill(topic.slug, path)
+    except (OSError, OpenLearnError) as exc:
+        transition_topic_activity(topic.slug, activity, "failed", reason=str(exc))
+        raise OpenLearnError(f"could not create drill workspace: {exc}") from exc
+    activity = transition_topic_activity(topic.slug, activity, "active")
+    output_func(f"Drill saved: {path}")
+    try:
+        editor = open_drill_in_editor(path)
+        output_func(f"Opened in {editor}. Make a genuine attempt, then type /check.")
+    except OpenLearnError as exc:
+        log_activity_tool_failure(topic.slug, activity, "open_configured_editor", exc)
+        output_func(str(exc))
+    if action.source["kind"] == "official_link":
+        try:
+            open_official_problem_link(action.source["uri"])
+            output_func("Opened the official problem link in your browser.")
+        except OpenLearnError as exc:
+            log_activity_tool_failure(topic.slug, activity, "open_official_problem_link", exc)
+            output_func(str(exc))
+    return activity
+
+
+def log_activity_tool_failure(
+    slug: str,
+    activity: dict[str, object],
+    tool_action: str,
+    error: Exception,
+) -> None:
+    log_event(
+        slug,
+        "activity_tool_failed",
+        {
+            **activity_event_data(activity),
+            "tool_action": tool_action,
+            "error": str(error)[:500],
+        },
+    )
+
+
 def ensure_coding_drill_activity(topic: Topic, drill_path: Path) -> dict[str, object]:
     """Migrate a legacy active drill into the activity contract on explicit /check."""
     existing = active_topic_activity(topic.slug, domain="coding", kind="python_drill")
@@ -8292,6 +8456,29 @@ def cmd_check(args: argparse.Namespace, output_func=print) -> int:
     topic = read_topic(resolve_topic_slug(args.topic))
     drill_path = active_drill_path(topic)
     activity = ensure_coding_drill_activity(topic, drill_path)
+    payload_namespace = activity.get("domain_payload")
+    coding_payload = (
+        payload_namespace.get("coding")
+        if isinstance(payload_namespace, dict)
+        else {}
+    )
+    if not isinstance(coding_payload, dict):
+        coding_payload = {}
+    tool_requests = coding_payload.get("tool_requests")
+    tool_actions = {
+        item.get("action")
+        for item in tool_requests
+        if isinstance(item, dict) and isinstance(item.get("action"), str)
+    } if isinstance(tool_requests, list) else set()
+    if "run_drill_tests" not in tool_actions:
+        return check_linked_coding_drill(
+            topic,
+            activity,
+            drill_path,
+            coding_payload,
+            args.model,
+            output_func,
+        )
     enable_drill_tests(drill_path)
     try:
         result = subprocess.run(
@@ -8303,29 +8490,208 @@ def cmd_check(args: argparse.Namespace, output_func=print) -> int:
         transition_topic_activity(topic.slug, activity, "failed", reason=str(exc))
         raise OpenLearnError(f"could not run drill tests: {exc}") from exc
     output = "\n".join(part for part in [result.stdout.strip(), result.stderr.strip()] if part)
+    refs = activity.get("evidence_refs")
+    attempt_number = len(refs) + 1 if isinstance(refs, list) else 1
+    hints = coding_payload.get("hints")
+    hint_values = (
+        [item for item in hints if isinstance(item, str) and item.strip()]
+        if isinstance(hints, list)
+        else []
+    )
+    hint_stage = (
+        min(attempt_number, len(hint_values)) if result.returncode != 0 else 0
+    )
+    try:
+        artifact_excerpt = drill_path.read_text(encoding="utf-8")[:8_000]
+    except OSError as exc:
+        transition_topic_activity(topic.slug, activity, "failed", reason=str(exc))
+        raise OpenLearnError(f"could not read the saved drill attempt: {exc}") from exc
     activity = record_topic_activity_evidence(
         topic.slug,
         activity,
         "pytest_result",
-        {"return_code": result.returncode, "summary": output[:4_000]},
+        {
+            "return_code": result.returncode,
+            "summary": output[:4_000],
+            "artifact_excerpt": artifact_excerpt,
+            "attempt_number": attempt_number,
+            "hint_stage": hint_stage,
+            "tests_passed": result.returncode == 0,
+        },
     )
     if result.returncode == 0:
         activity = transition_topic_activity(topic.slug, activity, "completed")
-    user = (
-        "The learner attempted a practice activity. Activity completion and test "
-        "output are candidate evidence only; do not claim mastery or advance solely "
-        "because the activity completed. "
-        f"Pytest return code: {result.returncode}\n\n"
-        f"Here is the pytest output:\n{output or '(no output)'}\n\n"
-        "Give specific feedback on what failed and why. If tests passed, briefly "
-        "reinforce the key idea and suggest one small next practice step."
+    purpose = str(activity.get("purpose"))
+    reflection = str(
+        coding_payload.get("reflection_prompt")
+        or "Explain one edge case and why the implementation handles it."
     )
+    transfer = str(coding_payload.get("transfer_prompt") or "")
+    selected_hint = hint_values[hint_stage - 1] if hint_stage else ""
+    feedback_contract = (
+        "Tests passed, but this is a mastery check and tests alone are not mastery "
+        "evidence. Use one **Check:** with the reflection prompt below so explanation "
+        "quality is judged separately. Mention the later transfer task when supplied."
+        if result.returncode == 0 and purpose == "mastery_check"
+        else "Tests passed on a practice attempt. Use one **Feedback:** move, reinforce "
+        "the key idea briefly, and invite the reflection without grading it or claiming mastery."
+        if result.returncode == 0
+        else "Tests failed. Use one **Feedback:** move with targeted feedback tied to the "
+        "artifact and test output, reveal only the selected progressive hint, and ask for "
+        "one retry with /check. Do not reveal a complete solution."
+    )
+    user = textwrap.dedent(
+        f"""
+        The learner completed coding-drill attempt {attempt_number}.
+        Drill purpose: {purpose}.
+        Activity completion and test output are candidate evidence only; do not claim mastery
+        or advance solely because tests passed.
+        {feedback_contract}
+
+        Pytest return code: {result.returncode}
+        Test output:
+        {output or "(no output)"}
+
+        Saved learner artifact:
+        {artifact_excerpt}
+
+        Selected hint stage {hint_stage}: {selected_hint or "(none)"}
+        Reflection prompt: {reflection}
+        Related transfer task: {transfer or "(none)"}
+        """
+    ).strip()
     model = args.model or str(topic.metadata.get("model") or configured_model())
     answer = call_openai_streaming(
         model=model, system=system_prompt(topic), user=user, output_func=output_func
     )
     print_and_append_model_answer(topic, "check", user, answer, output_func=output_func)
+    if result.returncode == 0:
+        register_mastery_drill_reflection(
+            topic,
+            activity,
+            answer,
+            fallback_question=reflection,
+            output_func=output_func,
+        )
     return result.returncode
+
+
+def check_linked_coding_drill(
+    topic: Topic,
+    activity: dict[str, object],
+    drill_path: Path,
+    coding_payload: dict[str, object],
+    model: str | None,
+    output_func=print,
+) -> int:
+    """Return artifact feedback for official link-outs that intentionally have no tests."""
+    try:
+        artifact_excerpt = drill_path.read_text(encoding="utf-8")[:8_000]
+    except OSError as exc:
+        transition_topic_activity(topic.slug, activity, "failed", reason=str(exc))
+        raise OpenLearnError(f"could not read the saved drill attempt: {exc}") from exc
+    refs = activity.get("evidence_refs")
+    attempt_number = len(refs) + 1 if isinstance(refs, list) else 1
+    activity = record_topic_activity_evidence(
+        topic.slug,
+        activity,
+        "artifact_snapshot",
+        {"artifact_excerpt": artifact_excerpt, "attempt_number": attempt_number},
+    )
+    reflection = str(
+        coding_payload.get("reflection_prompt")
+        or "Explain the approach, one edge case, and its complexity."
+    )
+    purpose = str(activity.get("purpose"))
+    response_rule = (
+        "Use one **Check:** containing the reflection prompt so understanding is judged "
+        "separately from the artifact."
+        if purpose == "mastery_check"
+        else "Use one **Feedback:** move and invite the reflection without grading it."
+    )
+    user = textwrap.dedent(
+        f"""
+        The learner saved attempt {attempt_number} for an official-link coding drill.
+        This source intentionally has no copied local statement, examples, or tests.
+        Review only the bounded learner-owned artifact below.
+        Do not claim mastery or completion from the saved artifact.
+        {response_rule}
+
+        Saved learner artifact:
+        {artifact_excerpt}
+
+        Reflection prompt: {reflection}
+        """
+    ).strip()
+    selected_model = model or str(topic.metadata.get("model") or configured_model())
+    answer = call_openai_streaming(
+        model=selected_model,
+        system=system_prompt(topic),
+        user=user,
+        output_func=output_func,
+    )
+    print_and_append_model_answer(topic, "check", user, answer, output_func=output_func)
+    register_mastery_drill_reflection(
+        topic,
+        activity,
+        answer,
+        fallback_question=reflection,
+        output_func=output_func,
+    )
+    return 0
+
+
+def register_mastery_drill_reflection(
+    topic: Topic,
+    activity: dict[str, object],
+    answer: str,
+    *,
+    fallback_question: str,
+    output_func=print,
+) -> None:
+    """Register a mastery reflection as the next normally judged learner answer."""
+    global _LAST_RESPONSE_ANSWER_KEY
+    if activity.get("purpose") != "mastery_check":
+        return
+    question = extract_pending_question_text(answer)
+    used_fallback = False
+    if not question or explicit_check_section_count(answer) != 1:
+        fallback = fallback_question.strip()
+        question = f"**Check:**\n{fallback}" if fallback else ""
+        if question:
+            used_fallback = True
+            output_func(question)
+            append_session(
+                topic,
+                "check",
+                "Validated coding-drill reflection prompt.",
+                question,
+            )
+    if not question:
+        return
+    concept_ids = activity.get("concept_ids")
+    concept_id = (
+        str(concept_ids[0])
+        if isinstance(concept_ids, list)
+        and concept_ids
+        and isinstance(concept_ids[0], str)
+        else ""
+    )
+    focus = topic.metadata.get("current_focus")
+    focus_value = (
+        focus.strip()
+        if isinstance(focus, str) and focus.strip()
+        else str(activity.get("objective") or "").strip()
+    )
+    save_pending_question(
+        topic,
+        answer,
+        "" if used_fallback else _LAST_RESPONSE_ANSWER_KEY,
+        question_text=question,
+        focus_override=focus_value,
+        concept_id_override=concept_id,
+    )
+    _LAST_RESPONSE_ANSWER_KEY = ""
 
 
 def drill_generation_prompt(topic: Topic) -> str:
@@ -8490,6 +8856,102 @@ def write_drill_file(slug: str, drill: dict[str, object]) -> Path:
     return path
 
 
+def write_tutor_drill_file(slug: str, action: CodingDrillAction) -> Path:
+    path = unique_drill_path(slug, action.title)
+    if action.source["kind"] == "official_link":
+        content = render_official_link_drill_file(action)
+    else:
+        content = render_scaffolded_drill_file(action)
+    write_text_atomic(path, content)
+    return path
+
+
+def render_scaffolded_drill_file(action: CodingDrillAction) -> str:
+    validated = validate_drill_data(action.drill)
+    if action.todo_steps:
+        validated["function_stub"] = function_stub_with_todos(
+            str(validated["function_stub"]),
+            action.todo_steps,
+        )
+    rendered = render_drill_file(validated)
+    guidance: list[str] = []
+    if action.plan_prompt and action.scaffolding_level >= 1:
+        guidance.extend(["Plan before coding:", action.plan_prompt])
+    if action.worked_example is not None:
+        trace = action.worked_example["trace"]
+        assert isinstance(trace, list)
+        guidance.extend(
+            [
+                "",
+                "Worked example trace (different instance):",
+                f"Input: {action.worked_example['input']}",
+                *[f"- {step}" for step in trace],
+                f"Result: {action.worked_example['result']}",
+                "Now fade this trace and implement the target function yourself.",
+            ]
+        )
+    if action.hints and action.scaffolding_level >= 2:
+        guidance.extend(["", f"First hint: {action.hints[0]}"])
+    if not guidance:
+        return rendered
+    insertion = "\n".join(guidance) + "\n\n"
+    return rendered.replace(
+        "Run openlearn /check when you are ready to test your solution.\n",
+        insertion + "Run openlearn /check when you are ready to test your solution.\n",
+        1,
+    )
+
+
+def function_stub_with_todos(function_stub: str, todo_steps: tuple[str, ...]) -> str:
+    """Insert validated comment-only TODO structure before the inert body statement."""
+    module = ast.parse(function_stub, mode="exec")
+    function = module.body[0]
+    assert isinstance(function, ast.FunctionDef)
+    statement = function.body[-1]
+    lines = function_stub.splitlines()
+    index = statement.lineno - 1
+    indentation = lines[index][: len(lines[index]) - len(lines[index].lstrip())]
+    comments = [
+        f"{indentation}# TODO {number}: {step}"
+        for number, step in enumerate(todo_steps, start=1)
+    ]
+    return "\n".join([*lines[:index], *comments, *lines[index:]])
+
+
+def render_official_link_drill_file(action: CodingDrillAction) -> str:
+    function_stub = str(action.drill["function_stub"]).rstrip()
+    validate_inert_function_stub(function_stub)
+    if action.todo_steps:
+        function_stub = function_stub_with_todos(function_stub, action.todo_steps)
+    plan = (
+        f"\nPlan before coding:\n{action.plan_prompt}\n" if action.plan_prompt else ""
+    )
+    worked = ""
+    if action.worked_example is not None:
+        trace = action.worked_example["trace"]
+        assert isinstance(trace, list)
+        worked_lines = [
+            "",
+            "Worked example trace (tutor-created different instance):",
+            f"Input: {action.worked_example['input']}",
+            *[f"- {step}" for step in trace],
+            f"Result: {action.worked_example['result']}",
+            "Now fade this trace and implement the official problem yourself.",
+        ]
+        worked = "\n".join(worked_lines) + "\n"
+    return (
+        '"""\n'
+        f"{action.title}\n\n"
+        f"Read the problem only at its official URL:\n{action.source['uri']}\n"
+        f"{plan}\n"
+        f"{worked}"
+        "This local file contains only your solution scaffold and bounded tutor-created "
+        "guidance, not the remote problem statement, examples, or tests.\n"
+        '"""\n\n'
+        f"{function_stub}\n"
+    )
+
+
 def unique_drill_path(slug: str, title: str) -> Path:
     directory = topic_drill_dir(slug)
     path = directory / drill_filename(title)
@@ -8585,6 +9047,23 @@ def open_drill_in_editor(path: Path) -> str:
             f"Could not open drill with {editor_label}: {exc}. Open manually: {path}"
         ) from exc
     return editor_label
+
+
+def open_official_problem_link(uri: str) -> None:
+    try:
+        parsed = urlparse(uri)
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname not in {"leetcode.com", "www.leetcode.com"}
+            or not parsed.path.startswith("/problems/")
+        ):
+            raise OpenLearnError("official problem URL is not allow-listed")
+        if not webbrowser.open(uri, new=2):
+            raise OpenLearnError(f"Could not open the official problem link. Open manually: {uri}")
+    except OSError as exc:
+        raise OpenLearnError(
+            f"Could not open the official problem link: {exc}. Open manually: {uri}"
+        ) from exc
 
 
 def curated_drill(topic: Topic) -> dict[str, object]:
@@ -9018,6 +9497,8 @@ def save_pending_question(
     answer_key: str,
     question_text: str | None = None,
     event_sink: Callable[[str, str, dict[str, object]], None] | None = None,
+    focus_override: str = "",
+    concept_id_override: str = "",
 ) -> None:
     has_answer_key = answer_key in {"A", "B", "C", "D"}
     question = (
@@ -9037,10 +9518,14 @@ def save_pending_question(
     }
     if has_answer_key:
         pending_question["answer_key"] = answer_key
-    focus = topic.metadata.get("current_focus")
+    focus = focus_override or topic.metadata.get("current_focus")
     if isinstance(focus, str) and focus.strip():
         pending_question["focus"] = focus.strip()
-        pending_question["concept_id"] = concept_id_for_focus(topic.metadata, focus)
+        pending_question["concept_id"] = (
+            concept_id_override.strip()
+            if concept_id_override.strip()
+            else concept_id_for_focus(topic.metadata, focus)
+        )
     previous_pending_question: dict[str, object] | None = None
     with file_lock(topic.path):
         raw_metadata, body = parse_topic(topic.path.read_text(encoding="utf-8"))
@@ -12606,6 +13091,7 @@ def system_prompt(
     pending_prompt = pending_question_prompt(topic.metadata)
     verify_prompt = pending_verify_prompt(topic.metadata)
     hint_prompt = pending_hint_prompt(topic.metadata)
+    coding_drill_prompt = coding_drill_action_prompt(topic.metadata)
     tier = difficulty_tier(topic.metadata)
     move_prompt = tier_move_prompt(topic.metadata, tier)
     turn_contract = tutor_turn_contract(topic.metadata, assessment_mode=assessment_mode)
@@ -12689,6 +13175,8 @@ def system_prompt(
 
         {quiz_prompt}
 
+        {coding_drill_prompt}
+
         {quick_learn_prompt}
 
         Do not keep printing full progress summaries after every answer. Mention
@@ -12734,6 +13222,62 @@ def system_prompt(
 
         Recent session history:
         {recent_sessions or "(none)"}
+        """
+    ).strip()
+
+
+def coding_drill_action_prompt(metadata: dict[str, object]) -> str:
+    """Describe the one allow-listed hands-on action without granting generic tools."""
+    if metadata.get("hands_on_drills", True) is False:
+        return "Tutor-selected coding drills are disabled. Do not emit an activity action."
+    return textwrap.dedent(
+        """
+        Optional coding-drill action:
+        When one small coding drill is the single best next teaching move, offer it in the
+        learner-facing response without asking a question, then append exactly one hidden
+        marker with this JSON shape:
+        <!-- openlearn-action: {
+          "action": "start_coding_drill",
+          "objective": "one current learning objective",
+          "title": "short original exercise title",
+          "language": "python",
+          "difficulty": 1,
+          "scaffolding_level": 0,
+          "purpose": "practice",
+          "source": {"kind": "generated", "name": "openLearn original"},
+          "plan_prompt": "optional short prediction before coding",
+          "todo_steps": [],
+          "worked_example": null,
+          "hints": ["up to three progressive hints"],
+          "reflection_prompt": "one edge-case, complexity, or debugging reflection",
+          "transfer_prompt": "optional related novel transfer task",
+          "drill": {
+            "title": "same title",
+            "description": "bounded learner-facing original problem",
+            "function_stub": "def solve(...):\\n    pass",
+            "test_cases": [{"input": [], "expected": null}]
+          }
+        } -->
+        Use difficulty 1-3 and these exact scaffolding contracts:
+        - Level 0 is unaided: empty plan_prompt and todo_steps, worked_example=null.
+        - Level 1 requires one plan_prompt, empty todo_steps, worked_example=null.
+        - Level 2 requires a plan_prompt plus 1-4 one-line todo_steps and no worked example.
+        - Level 3 adds worked_example={"input":"...","trace":["..."],"result":"..."}
+          with 1-6 bounded one-line trace steps from a different instance.
+        TODO and worked fields are learner-facing text only, never executable code.
+        Distinguish purpose=practice from purpose=mastery_check. Use a mastery
+        check only when the learner explicitly requested assessment; accepting a drill
+        never makes passing tests sufficient for mastery. Require learner-authored work before
+        a complete solution, and never place a complete solution in the action.
+        The application separately asks for consent; do not claim a workspace or app is
+        already open. Never emit commands, executable names, filesystem paths, or extra
+        fields. Never copy or scrape LeetCode content. Prefer original generated content or
+        curated/licensed content with its license. For an official LeetCode link-out, use
+        source={"kind":"official_link","name":"LeetCode official problem","uri":
+        "https://leetcode.com/problems/<slug>/"} and an empty test_cases list; include only
+        a generic local scaffold, not the remote statement, examples, or tests.
+        Do not emit the marker when a conversational answer, hint, or ordinary check is the
+        better single move. The marker is metadata, not a second learner action.
         """
     ).strip()
 
@@ -13495,11 +14039,13 @@ def call_openai_streaming(
     retry_jitter: Callable[[float, float], float] = random.uniform,
     retry_status: Callable[[str], object] | None = None,
 ) -> str:
-    global _LAST_RESPONSE_ANSWER_KEY, _LAST_RESPONSE_COVERED_CONCEPTS
+    global _LAST_RESPONSE_ANSWER_KEY
+    global _LAST_RESPONSE_CODING_DRILL_ACTION, _LAST_RESPONSE_COVERED_CONCEPTS
     if _DRY_RUN:
         raise DryRunPrompt(model, system, user)
     if capture_answer_key:
         _LAST_RESPONSE_ANSWER_KEY = ""
+    _LAST_RESPONSE_CODING_DRILL_ACTION = None
     _LAST_RESPONSE_COVERED_CONCEPTS = []
 
     # If call_openai has been monkeypatched, prefer it (test hook).
@@ -13508,7 +14054,14 @@ def call_openai_streaming(
         _LAST_RESPONSE_COVERED_CONCEPTS = extract_covered_concepts(raw_text)
         if capture_answer_key:
             _LAST_RESPONSE_ANSWER_KEY = extract_answer_key(raw_text)
-        text = sanitize_model_output(raw_text)
+        try:
+            visible_text, _LAST_RESPONSE_CODING_DRILL_ACTION = extract_coding_drill_action(
+                raw_text
+            )
+        except ActivityContractError:
+            visible_text = suppress_coding_drill_action(raw_text)
+            _LAST_RESPONSE_CODING_DRILL_ACTION = None
+        text = sanitize_model_output(visible_text)
         if not text:
             raise OpenLearnError(
                 "OpenAI response did not contain output text; try a faster non-reasoning model or increase the token limit."
@@ -13522,7 +14075,12 @@ def call_openai_streaming(
         _LAST_RESPONSE_COVERED_CONCEPTS = extract_covered_concepts(raw)
         if capture_answer_key:
             _LAST_RESPONSE_ANSWER_KEY = extract_answer_key(raw)
-        text = sanitize_model_output(raw)
+        try:
+            visible_text, _LAST_RESPONSE_CODING_DRILL_ACTION = extract_coding_drill_action(raw)
+        except ActivityContractError:
+            visible_text = suppress_coding_drill_action(raw)
+            _LAST_RESPONSE_CODING_DRILL_ACTION = None
+        text = sanitize_model_output(visible_text)
         if not text:
             raise OpenLearnError(
                 "OpenAI response did not contain output text; try a faster non-reasoning model or increase the token limit."
@@ -13630,7 +14188,12 @@ def call_openai_streaming(
     _LAST_RESPONSE_COVERED_CONCEPTS = extract_covered_concepts(raw_text)
     if capture_answer_key:
         _LAST_RESPONSE_ANSWER_KEY = extract_answer_key(raw_text)
-    text = sanitize_model_output(raw_text)
+    try:
+        visible_text, _LAST_RESPONSE_CODING_DRILL_ACTION = extract_coding_drill_action(raw_text)
+    except ActivityContractError:
+        visible_text = suppress_coding_drill_action(raw_text)
+        _LAST_RESPONSE_CODING_DRILL_ACTION = None
+    text = sanitize_model_output(visible_text)
     if not text:
         raise OpenLearnError(
             "OpenAI response did not contain output text; try a faster non-reasoning model or increase the token limit."
