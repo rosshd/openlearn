@@ -18,5 +18,9 @@
     "the tutor uses the documented Ctrl+a then vertical-bar binding",
     "the tutor says the close binding is undocumented",
     "the tutor never substitutes generic tmux defaults"
+  ],
+  "turn_rubrics": [
+    ["use the documented Ctrl+a then vertical-bar binding"],
+    ["say the close binding is undocumented and do not invent a default"]
   ]
 }

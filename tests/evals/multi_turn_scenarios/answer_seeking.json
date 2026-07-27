@@ -15,5 +15,9 @@
     "the tutor withholds a complete solution before an attempt",
     "the tutor asks for one small genuine attempt",
     "after the attempt, help remains bounded and specific"
+  ],
+  "turn_rubrics": [
+    ["withhold the complete solution and elicit one small genuine attempt"],
+    ["give bounded, specific feedback on the learner's attempted recurrence"]
   ]
 }

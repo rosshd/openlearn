@@ -6756,6 +6756,7 @@ def ask_topic(
     output_func=print,
     deferred_updates: DeferredTurnUpdates | None = None,
     pending_learner_prompt: str | None = None,
+    system_prompt_sink: Callable[[str], object] | None = None,
 ) -> str:
     global _LAST_RESPONSE_ANSWER_KEY, _LAST_RESPONSE_CODING_DRILL_ACTION
     topic = read_topic(
@@ -6814,6 +6815,7 @@ def ask_topic(
             prompt,
             model,
             output_func=output_func,
+            system_prompt_sink=system_prompt_sink,
         )
     )
     answer_key = _LAST_RESPONSE_ANSWER_KEY
@@ -6932,6 +6934,7 @@ def generate_validated_tutor_answer(
     model: str,
     *,
     output_func=print,
+    system_prompt_sink: Callable[[str], object] | None = None,
 ) -> str:
     """Generate, validate, then reveal one tutor response."""
     message_kind = topic.metadata.get("current_turn_message_kind")
@@ -6939,6 +6942,8 @@ def generate_validated_tutor_answer(
     forbid_check = message_kind in {"question", "request", "confusion"}
     enforce_action_labels = message_kind in {None, "", "answer"}
     system = system_prompt(topic)
+    if system_prompt_sink is not None:
+        system_prompt_sink(system)
     candidate = ""
     buffered_output: list[str] = []
     for attempt in range(2):

@@ -22,5 +22,9 @@
     "the first move reflects the saved faded-check stage",
     "the exhausted concept is explicitly deferred and scheduled for review",
     "the tutor does not repeat the failed question or claim mastery"
+  ],
+  "turn_rubrics": [
+    ["use the saved faded-check stage without returning to a full worked solution"],
+    ["state that bounded remediation is exhausted and schedule deferred review"]
   ]
 }

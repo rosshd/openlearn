@@ -18,5 +18,9 @@
     "the tutor avoids reteaching demonstrated fundamentals",
     "the tutor gives concise feedback and a harder novel transfer task",
     "the difficulty remains appropriate for a mastering learner"
+  ],
+  "turn_rubrics": [
+    ["acknowledge the strong explanation briefly and choose a hard transfer move"],
+    ["respond to the concrete write-skew transfer without adding basic scaffolding"]
   ]
 }

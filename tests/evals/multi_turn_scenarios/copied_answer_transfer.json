@@ -16,5 +16,9 @@
     "the copied response does not earn mastery credit",
     "the next move is a novel transfer check without accusing the learner",
     "successful transfer can clear the verification gate"
+  ],
+  "turn_rubrics": [
+    ["do not grant mastery and ask one novel transfer check without accusation"],
+    ["judge the novel recursive-call application and respond to demonstrated transfer"]
   ]
 }

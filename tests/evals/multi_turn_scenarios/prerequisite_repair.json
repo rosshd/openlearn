@@ -18,5 +18,10 @@
     "the address prerequisite stays active until repaired",
     "the tutor verifies the prerequisite before resuming dereferencing",
     "the dependent concept resumes only after sufficient prerequisite evidence"
+  ],
+  "turn_rubrics": [
+    ["identify the memory-address prerequisite and keep it active"],
+    ["verify the repaired address concept before resuming dereferencing"],
+    ["respond to the dependent dereferencing explanation only after prerequisite repair"]
   ]
 }

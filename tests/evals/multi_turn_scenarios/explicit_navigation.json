@@ -23,5 +23,9 @@
     "explicit navigation is not graded as an answer",
     "the stale question and remediation gate are cleared",
     "the durable skip preference constrains the next move"
+  ],
+  "turn_rubrics": [
+    ["honor explicit navigation without grading and clear the stale learning gate"],
+    ["use the durable skip preference while introducing only the next useful concept"]
   ]
 }

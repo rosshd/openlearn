@@ -16,5 +16,9 @@
     "the tutor answers the detour briefly without grading it",
     "the active binary-search concept remains intact",
     "the next move responds cleanly to the learner's return"
+  ],
+  "turn_rubrics": [
+    ["answer the editor detour briefly without grading or losing the active focus"],
+    ["respond to the learner's return to the binary-search invariant"]
   ]
 }
