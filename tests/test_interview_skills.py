@@ -297,6 +297,52 @@ def test_delayed_transfer_failure_is_due() -> None:
     assert any("latest delayed retrieval failed" in reason for reason in skill.reasons)
 
 
+@pytest.mark.parametrize(
+    "case",
+    ["no_prior", "too_early", "assisted", "non_novel"],
+)
+def test_unqualified_failed_delayed_observation_does_not_make_skill_due(
+    case: str,
+) -> None:
+    graph = interview_skills.load_default_graph()
+    evidence = [
+        record
+        for record in _evidence("advanced_learner")
+        if not (
+            record["skill_id"] == "pattern.sliding-window"
+            and record["kind"] == "delayed_retrieval"
+        )
+    ]
+    failed = deepcopy(
+        next(
+            record
+            for record in _evidence("delayed_transfer_failure")
+            if record["skill_id"] == "pattern.sliding-window"
+        )
+    )
+    if case == "no_prior":
+        evidence = [
+            record
+            for record in evidence
+            if record["skill_id"] != "pattern.sliding-window"
+        ]
+    elif case == "too_early":
+        failed["observed_at"] = "2026-06-02T12:00:00+00:00"
+    elif case == "assisted":
+        failed["independent"] = False
+        failed["assistance"] = "worked_example"
+    else:
+        failed["novel_context"] = False
+    evidence.append(failed)
+
+    skill = interview_skills.assess_skills(graph, evidence, now=NOW)[
+        "pattern.sliding-window"
+    ]
+
+    assert skill.selection_status != "due"
+    assert not any("latest delayed retrieval failed" in reason for reason in skill.reasons)
+
+
 def test_early_delayed_retrieval_does_not_satisfy_the_delay_contract() -> None:
     graph = interview_skills.load_default_graph()
     evidence = _evidence("advanced_learner")
@@ -535,6 +581,63 @@ def test_repeated_same_problem_cannot_manufacture_transfer_breadth() -> None:
 
     assert skill.qualifying_counts["transfer"] == 1
     assert skill.readiness == "provisional"
+
+
+def test_identical_evidence_id_replay_counts_once_under_raised_minimum() -> None:
+    raw = _versioned_graph("2.0.0", "interview-mastery-v2")
+    pattern_policy = next(
+        item for item in raw["evidence_policies"] if item["id"] == "pattern-v1"
+    )
+    pattern_policy["minimum"]["production"] = 2
+    graph = interview_skills.validate_graph(raw)
+    evidence = _with_versions(
+        _evidence("advanced_learner"),
+        graph.graph_version,
+        graph.mastery_policy_version,
+    )
+    production = next(
+        record
+        for record in evidence
+        if record["skill_id"] == "pattern.sliding-window"
+        and record["kind"] == "production"
+    )
+    evidence.append(deepcopy(production))
+
+    skill = interview_skills.assess_skills(graph, evidence, now=NOW)[
+        "pattern.sliding-window"
+    ]
+
+    assert skill.qualifying_counts["production"] == 1
+    assert skill.readiness == "provisional"
+
+
+def test_conflicting_duplicate_evidence_id_fails_deterministically() -> None:
+    raw = _versioned_graph("2.0.0", "interview-mastery-v2")
+    pattern_policy = next(
+        item for item in raw["evidence_policies"] if item["id"] == "pattern-v1"
+    )
+    pattern_policy["minimum"]["production"] = 2
+    graph = interview_skills.validate_graph(raw)
+    evidence = _with_versions(
+        _evidence("advanced_learner"),
+        graph.graph_version,
+        graph.mastery_policy_version,
+    )
+    production = next(
+        record
+        for record in evidence
+        if record["skill_id"] == "pattern.sliding-window"
+        and record["kind"] == "production"
+    )
+    conflict = deepcopy(production)
+    conflict["observed_at"] = "2026-06-02T12:00:00+00:00"
+    evidence.append(conflict)
+
+    with pytest.raises(
+        interview_skills.EvidenceRecordError,
+        match="conflicting duplicate evidence_id",
+    ):
+        interview_skills.assess_skills(graph, evidence, now=NOW)
 
 
 def test_same_problem_family_rename_across_versions_is_one_transfer_context() -> None:

@@ -540,6 +540,32 @@ def partition_evidence(
     return tuple(current), tuple(orphaned)
 
 
+def deduplicate_evidence(
+    evidence: Iterable[Mapping[str, object]],
+) -> tuple[Mapping[str, object], ...]:
+    unique: list[Mapping[str, object]] = []
+    seen: dict[str, Mapping[str, object]] = {}
+    for record in evidence:
+        evidence_id = record.get("evidence_id")
+        if (
+            not isinstance(evidence_id, str)
+            or not evidence_id.strip()
+            or evidence_id != evidence_id.strip()
+        ):
+            raise EvidenceRecordError(
+                "evidence evidence_id must be trimmed non-empty text"
+            )
+        prior = seen.get(evidence_id)
+        if prior is None:
+            seen[evidence_id] = record
+            unique.append(record)
+        elif prior != record:
+            raise EvidenceRecordError(
+                f"conflicting duplicate evidence_id: {evidence_id}"
+            )
+    return tuple(unique)
+
+
 def _parse_timestamp(value: object) -> datetime | None:
     if not isinstance(value, str):
         return None
@@ -669,14 +695,27 @@ def _record_targets_skill(
     return True, None
 
 
-def _validated_context(
+def _delayed_observation_candidate(
     registry: SkillGraphRegistry,
+    skill: InterviewSkill,
     record: Mapping[str, object],
-) -> ValidatedEvidenceRecord | None:
+) -> tuple[ValidatedEvidenceRecord | None, str | None]:
     try:
-        return validate_evidence_record(record, registry)
-    except EvidenceRecordError:
-        return None
+        context = validate_evidence_record(record, registry)
+    except EvidenceRecordError as exc:
+        return None, str(exc)
+    if context.skill.skill_id != skill.skill_id:
+        return None, "evidence stable skill identity does not match"
+    targets_skill, reason = _record_targets_skill(context, record)
+    if not targets_skill:
+        return None, reason
+    if record.get("completion_state") != "complete":
+        return None, "incomplete delayed observation is not a retrieval check"
+    if record.get("independent") is not True or record.get("assistance") != "none":
+        return None, "assisted delayed observation is not an independent retrieval check"
+    if record.get("novel_context") is not True:
+        return None, "non-novel delayed observation is not a transfer retrieval check"
+    return context, None
 
 
 def _source_delay_satisfied(
@@ -754,7 +793,8 @@ def assess_skills(
         raise SkillGraphError("assessment graph is absent from the registry") from exc
     if registered_current != graph:
         raise SkillGraphError("assessment graph does not match its registered bundle")
-    current, _orphaned = partition_evidence(graph, evidence)
+    unique_evidence = deduplicate_evidence(evidence)
+    current, _orphaned = partition_evidence(graph, unique_evidence)
     by_skill: dict[str, list[Mapping[str, object]]] = {
         skill.skill_id: [] for skill in graph.skills
     }
@@ -780,8 +820,20 @@ def assess_skills(
         ] = {
             kind: [] for kind in EVIDENCE_KINDS
         }
+        delayed_candidates: list[
+            tuple[Mapping[str, object], ValidatedEvidenceRecord]
+        ] = []
         rejection_reasons: list[str] = []
         for record in records:
+            if record.get("kind") == "delayed_retrieval":
+                context, reason = _delayed_observation_candidate(
+                    registry, skill, record
+                )
+                if context is not None:
+                    delayed_candidates.append((record, context))
+                elif reason and reason not in rejection_reasons:
+                    rejection_reasons.append(reason)
+                continue
             qualifies, reason, context = _record_qualifies(registry, skill, record)
             if qualifies and context is not None:
                 qualifying[str(record["kind"])].append((record, context))
@@ -792,17 +844,21 @@ def assess_skills(
             for kind in ("explanation", "production", "transfer")
             for record, context in qualifying[kind]
         ]
-        if qualifying["delayed_retrieval"]:
-            qualifying["delayed_retrieval"] = [
-                delayed
-                for delayed in qualifying["delayed_retrieval"]
-                if _source_delay_satisfied(delayed, prior_qualifying)
-            ]
-            if not qualifying["delayed_retrieval"]:
-                rejection_reasons.append(
-                    "delayed retrieval occurred before the policy delay from its source bundle "
-                    "or without source-qualified prior evidence"
-                )
+        delayed_observations = [
+            delayed
+            for delayed in delayed_candidates
+            if _source_delay_satisfied(delayed, prior_qualifying)
+        ]
+        if delayed_candidates and not delayed_observations:
+            rejection_reasons.append(
+                "delayed retrieval occurred before the policy delay from its source bundle "
+                "or without source-qualified prior evidence"
+            )
+        qualifying["delayed_retrieval"] = [
+            delayed
+            for delayed in delayed_observations
+            if delayed[0].get("outcome") == "pass"
+        ]
         counts = {kind: len(items) for kind, items in qualifying.items()}
         for kind in ("transfer", "delayed_retrieval"):
             counts[kind] = _distinct_problem_context_count(qualifying[kind])
@@ -812,18 +868,9 @@ def assess_skills(
             skill.evidence_policy.transfer.minimum_novel_contexts,
         )
         meets = all(counts[kind] >= required[kind] for kind in EVIDENCE_KINDS)
-        delayed_records = [
-            (record, context)
-            for record in records
-            if record.get("kind") == "delayed_retrieval"
-            and _parse_timestamp(record.get("observed_at")) is not None
-            and (context := _validated_context(registry, record)) is not None
-            and context.skill.skill_id == skill.skill_id
-            and _record_targets_skill(context, record)[0]
-            and record.get("completion_state") == "complete"
-        ]
         latest_delayed_failed = bool(
-            delayed_records and delayed_records[-1][0].get("outcome") == "fail"
+            delayed_observations
+            and delayed_observations[-1][0].get("outcome") == "fail"
         )
         qualified_delayed_timestamps = [
             timestamp

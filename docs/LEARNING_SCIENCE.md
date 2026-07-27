@@ -44,6 +44,8 @@ Use `.claude/skills/openlearn-tutor-policy/` for implementation rules.
 - Count distinct transfer families instead of raw repetitions so near-duplicate problems do not simulate broad transfer.
 - Resolve stable problem identity and transfer families from the versioned problem definition instead of trusting learner-event labels.
 - Evaluate historical delay against the source skill policy and source-qualified prior evidence before applying current aggregate mastery minimums.
+- Apply the same delayed-retrieval provenance gate to success credit and failure-based due state.
+- Make evidence replay idempotent by stable ID and reject conflicting duplicate observations.
 - Keep complexity, edge-case, process, and communication evidence explicit and separate from algorithm correctness.
 - Preserve evidence with its graph and mastery-policy versions, and resolve historical qualification from that immutable bundle so later role or policy changes do not rewrite learning history.
 - Use prerequisite blocks to prioritize bounded remediation, then defer when exhausted instead of trapping the learner in repetitive practice.
