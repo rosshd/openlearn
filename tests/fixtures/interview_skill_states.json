@@ -10,7 +10,8 @@
       "outcome": "pass",
       "observed_at": "2026-05-01T12:00:00+00:00",
       "independent": true,
-      "hint_level": "none",
+      "assistance": "none",
+      "completion_state": "complete",
       "novel_context": false,
       "explicit_check": true,
       "transfer_family": "window-counts"
@@ -25,7 +26,8 @@
       "outcome": "pass",
       "observed_at": "2026-05-03T12:00:00+00:00",
       "independent": true,
-      "hint_level": "none",
+      "assistance": "none",
+      "completion_state": "complete",
       "novel_context": true,
       "explicit_check": true,
       "transfer_family": "converging-pointers"
@@ -40,10 +42,11 @@
       "outcome": "pass",
       "observed_at": "2026-06-15T12:00:00+00:00",
       "independent": true,
-      "hint_level": "none",
+      "assistance": "none",
+      "completion_state": "complete",
       "novel_context": true,
       "explicit_check": true,
-      "transfer_family": "window-counts-delayed"
+      "transfer_family": "window-counts"
     },
     {
       "evidence_id": "ev-hashing-explanation",
@@ -55,7 +58,8 @@
       "outcome": "pass",
       "observed_at": "2026-05-01T12:00:00+00:00",
       "independent": true,
-      "hint_level": "none",
+      "assistance": "none",
+      "completion_state": "complete",
       "novel_context": false,
       "explicit_check": true,
       "transfer_family": "window-counts"
@@ -70,7 +74,8 @@
       "outcome": "pass",
       "observed_at": "2026-05-03T12:00:00+00:00",
       "independent": true,
-      "hint_level": "none",
+      "assistance": "none",
+      "completion_state": "complete",
       "novel_context": true,
       "explicit_check": true,
       "transfer_family": "window-invariant"
@@ -85,10 +90,11 @@
       "outcome": "pass",
       "observed_at": "2026-06-15T12:00:00+00:00",
       "independent": true,
-      "hint_level": "none",
+      "assistance": "none",
+      "completion_state": "complete",
       "novel_context": true,
       "explicit_check": true,
-      "transfer_family": "window-counts-delayed"
+      "transfer_family": "window-counts"
     },
     {
       "evidence_id": "ev-advanced-plan",
@@ -100,7 +106,8 @@
       "outcome": "pass",
       "observed_at": "2026-06-01T12:00:00+00:00",
       "independent": true,
-      "hint_level": "none",
+      "assistance": "none",
+      "completion_state": "complete",
       "novel_context": false,
       "explicit_check": false,
       "transfer_family": "window-counts"
@@ -115,22 +122,24 @@
       "outcome": "pass",
       "observed_at": "2026-06-01T12:15:00+00:00",
       "independent": true,
-      "hint_level": "none",
+      "assistance": "none",
+      "completion_state": "complete",
       "novel_context": false,
       "explicit_check": false,
       "transfer_family": "window-counts"
     },
     {
       "evidence_id": "ev-advanced-transfer",
-      "graph_version": "0.9.0",
-      "mastery_policy_version": "interview-mastery-v0",
+      "graph_version": "1.0.0",
+      "mastery_policy_version": "interview-mastery-v1",
       "skill_id": "pattern.sliding-window",
       "problem_id": "problem.longest-repeating-replacement",
       "kind": "transfer",
       "outcome": "pass",
       "observed_at": "2026-06-03T12:00:00+00:00",
       "independent": true,
-      "hint_level": "none",
+      "assistance": "none",
+      "completion_state": "complete",
       "novel_context": true,
       "explicit_check": false,
       "transfer_family": "window-invariant"
@@ -145,10 +154,11 @@
       "outcome": "pass",
       "observed_at": "2026-06-15T12:00:00+00:00",
       "independent": true,
-      "hint_level": "none",
+      "assistance": "none",
+      "completion_state": "complete",
       "novel_context": true,
       "explicit_check": false,
-      "transfer_family": "window-counts-delayed"
+      "transfer_family": "window-counts"
     }
   ],
   "prerequisite_gap": [
@@ -162,7 +172,8 @@
       "outcome": "pass",
       "observed_at": "2026-06-01T12:00:00+00:00",
       "independent": true,
-      "hint_level": "none",
+      "assistance": "none",
+      "completion_state": "complete",
       "novel_context": false,
       "explicit_check": false,
       "transfer_family": "window-counts"
@@ -179,7 +190,8 @@
       "outcome": "pass",
       "observed_at": "2026-06-01T12:00:00+00:00",
       "independent": false,
-      "hint_level": "partial",
+      "assistance": "partial_code",
+      "completion_state": "partial",
       "novel_context": false,
       "explicit_check": false,
       "transfer_family": "window-counts"
@@ -196,10 +208,11 @@
       "outcome": "fail",
       "observed_at": "2026-07-20T12:00:00+00:00",
       "independent": true,
-      "hint_level": "none",
+      "assistance": "none",
+      "completion_state": "complete",
       "novel_context": true,
       "explicit_check": false,
-      "transfer_family": "window-counts-delayed"
+      "transfer_family": "window-counts"
     }
   ]
 }

@@ -71,13 +71,18 @@ Validation rejects unknown references, duplicate identities, invalid problem rol
 
 Learner-specific evidence remains outside the graph in caller-owned append-only event history.
 Each evidence record carries the graph and mastery-policy versions under which it was observed.
-Current assessment may apply the current policy to older evidence without rewriting the original record.
+An immutable registry resolves that exact graph-and-policy bundle before deciding whether the observation qualified at the time.
+Problem roles, explicit-check rules, and canonical transfer families therefore come from the historical bundle rather than the current graph or caller input.
+Current assessment may explicitly apply current mastery minimums to already-qualified older evidence without rewriting the original record.
 Evidence for a retired stable ID remains inspectable as orphaned history instead of being deleted or silently mapped to another skill.
 Ordinary topics do not load the graph, receive graph metadata, or acquire interview-only learner state.
 
 The deterministic assessment surface separates readiness from selection.
 Readiness is `ready`, `provisional`, `weak`, or `unassessed`.
 Selection is `ready`, `blocked`, `weak`, `due`, or `unassessed`, with learner-visible reasons for missing evidence, prerequisite blocks, hint-dependent work, and delayed-retrieval failures.
+Evidence provenance uses closed assistance and completion values, and independent mastery rejects copied structure, partial code, worked examples, editorials, incomplete attempts, and prompted production.
+Transfer breadth is derived from the canonical problem family in the source graph, so repeated attempts or caller-supplied labels cannot manufacture novelty.
+Blocking prerequisites propagate through the graph and require each prerequisite to be selection-ready.
 Blocking is a selection constraint rather than an instruction to drill indefinitely.
 
 ## Practice Activities

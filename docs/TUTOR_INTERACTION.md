@@ -82,13 +82,15 @@ Complexity, edge-case, testing, debugging, and communication claims always requi
 
 Pattern readiness requires unaided production, novel transfer, and delayed retrieval under the skill's current policy.
 Recognition, editorial reading, a worked example, copied structure, partial code, or hint-dependent success can guide the next move but cannot satisfy independent production or transfer.
-Repeated success in one transfer family counts once, so near-duplicate problems do not manufacture breadth.
+Assistance and completion provenance use closed validated values rather than free-form model labels.
+Repeated success in one canonical problem family counts once, so near-duplicate problems and spoofed family labels do not manufacture breadth.
 Communication evidence remains separate from algorithm correctness even when both come from one interview attempt.
 
 The tutor may present a skill as ready, provisional, weak, due, unassessed, or blocked only with the deterministic assessment's learner-visible reasons.
 A failed latest delayed check makes the skill due and provisional even when older evidence was strong.
-A blocking prerequisite changes selection priority but still follows bounded remediation and deferral instead of endless drilling.
-Graph and mastery-policy versions remain attached to historical evidence when the canonical graph changes.
+A blocking prerequisite must itself be selection-ready, so blocks propagate through longer prerequisite chains.
+Blocking still follows bounded remediation and deferral instead of endless drilling.
+Graph and mastery-policy versions remain attached to historical evidence when the canonical graph changes, and historical qualification is resolved against that exact immutable bundle.
 
 ## Learner State
 

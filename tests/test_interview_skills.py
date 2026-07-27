@@ -30,6 +30,27 @@ def _evidence(*names: str) -> list[dict[str, object]]:
     ]
 
 
+def _versioned_graph(
+    graph_version: str,
+    mastery_policy_version: str,
+) -> dict[str, object]:
+    raw = _graph_dict()
+    raw["graph_version"] = graph_version
+    raw["mastery_policy_version"] = mastery_policy_version
+    return raw
+
+
+def _with_versions(
+    evidence: list[dict[str, object]],
+    graph_version: str,
+    mastery_policy_version: str,
+) -> list[dict[str, object]]:
+    for record in evidence:
+        record["graph_version"] = graph_version
+        record["mastery_policy_version"] = mastery_policy_version
+    return evidence
+
+
 def test_default_graph_has_versioned_stable_contract_and_all_skill_domains() -> None:
     graph = interview_skills.load_default_graph()
 
@@ -96,7 +117,7 @@ def test_problem_roles_bound_inference_and_explicit_checks() -> None:
     )
 
 
-def test_advanced_learner_is_ready_and_old_version_evidence_is_preserved() -> None:
+def test_advanced_learner_is_ready() -> None:
     graph = interview_skills.load_default_graph()
     assessments = interview_skills.assess_skills(
         graph,
@@ -107,9 +128,126 @@ def test_advanced_learner_is_ready_and_old_version_evidence_is_preserved() -> No
 
     assert skill.readiness == "ready"
     assert skill.selection_status == "ready"
-    assert "0.9.0" in skill.evidence_graph_versions
-    assert "interview-mastery-v0" in skill.evidence_policy_versions
+    assert skill.evidence_graph_versions == ("1.0.0",)
+    assert skill.evidence_policy_versions == ("interview-mastery-v1",)
     assert any("qualifying transfer" in reason for reason in skill.reasons)
+
+
+def test_historical_evidence_uses_record_graph_roles_after_role_change() -> None:
+    historical = interview_skills.load_default_graph()
+    current_raw = _versioned_graph("2.0.0", "interview-mastery-v2")
+    problem = next(
+        item
+        for item in current_raw["problems"]
+        if item["id"] == "problem.longest-repeating-replacement"
+    )
+    for ref in problem["skills"]:
+        if ref["skill_id"] == "pattern.sliding-window":
+            ref["role"] = "supporting"
+        elif ref["skill_id"] == "concept.arrays-strings":
+            ref["role"] = "primary"
+    current = interview_skills.validate_graph(current_raw)
+    registry = interview_skills.SkillGraphRegistry.from_graphs(
+        (historical, current)
+    )
+
+    skill = interview_skills.assess_skills(
+        current,
+        _evidence("advanced_learner"),
+        registry=registry,
+        now=NOW,
+    )["pattern.sliding-window"]
+
+    assert skill.readiness == "ready"
+    assert any("reassessed" in reason.lower() for reason in skill.reasons)
+
+
+def test_historical_evidence_uses_record_policy_after_policy_change() -> None:
+    historical = interview_skills.load_default_graph()
+    current_raw = _versioned_graph("2.0.0", "interview-mastery-v2")
+    pattern_policy = next(
+        item
+        for item in current_raw["evidence_policies"]
+        if item["id"] == "pattern-v1"
+    )
+    pattern_policy["inferable_kinds"].remove("production")
+    current = interview_skills.validate_graph(current_raw)
+    registry = interview_skills.SkillGraphRegistry.from_graphs(
+        (historical, current)
+    )
+
+    skill = interview_skills.assess_skills(
+        current,
+        _evidence("advanced_learner"),
+        registry=registry,
+        now=NOW,
+    )["pattern.sliding-window"]
+
+    assert skill.qualifying_counts["production"] == 1
+    assert skill.readiness == "ready"
+
+
+def test_removed_problem_does_not_invalidate_versioned_historical_evidence() -> None:
+    historical = interview_skills.load_default_graph()
+    current_raw = _versioned_graph("2.0.0", "interview-mastery-v2")
+    current_raw["problems"] = [
+        problem
+        for problem in current_raw["problems"]
+        if problem["id"] != "problem.longest-repeating-replacement"
+    ]
+    current = interview_skills.validate_graph(current_raw)
+    registry = interview_skills.SkillGraphRegistry.from_graphs(
+        (historical, current)
+    )
+
+    skill = interview_skills.assess_skills(
+        current,
+        _evidence("advanced_learner"),
+        registry=registry,
+        now=NOW,
+    )["pattern.sliding-window"]
+
+    assert skill.qualifying_counts["transfer"] == 1
+    assert skill.readiness == "ready"
+
+
+def test_removed_skill_evidence_remains_validated_orphaned_history() -> None:
+    historical = interview_skills.load_default_graph()
+    current_raw = _versioned_graph("2.0.0", "interview-mastery-v2")
+    current_raw["skills"] = [
+        skill
+        for skill in current_raw["skills"]
+        if skill["id"] != "concept.tries"
+    ]
+    current_raw["problems"] = [
+        problem
+        for problem in current_raw["problems"]
+        if problem["id"] != "problem.autocomplete"
+    ]
+    current = interview_skills.validate_graph(current_raw)
+    registry = interview_skills.SkillGraphRegistry.from_graphs(
+        (historical, current)
+    )
+    record = deepcopy(_evidence("advanced_learner")[0])
+    record.update(
+        {
+            "evidence_id": "ev-retired-tries",
+            "skill_id": "concept.tries",
+            "problem_id": "problem.autocomplete",
+            "kind": "explanation",
+            "explicit_check": True,
+            "transfer_family": "prefix-tree",
+        }
+    )
+
+    validated = interview_skills.validate_evidence_record(record, registry)
+    current_evidence, orphaned = interview_skills.partition_evidence(
+        current, (record,)
+    )
+
+    assert validated.skill.skill_id == "concept.tries"
+    assert current_evidence == ()
+    assert orphaned == (record,)
 
 
 def test_prerequisite_gap_blocks_without_discarding_candidate_evidence() -> None:
@@ -192,7 +330,7 @@ def test_nonqualifying_recent_attempt_does_not_hide_due_retrieval() -> None:
     recent_hinted["evidence_id"] = "ev-recent-hinted-retrieval"
     recent_hinted["observed_at"] = "2026-08-09T12:00:00+00:00"
     recent_hinted["independent"] = False
-    recent_hinted["hint_level"] = "worked"
+    recent_hinted["assistance"] = "worked_example"
     evidence.append(recent_hinted)
 
     skill = interview_skills.assess_skills(
@@ -238,6 +376,137 @@ def test_unknown_historical_skill_evidence_is_retained_as_orphaned_history() -> 
 
     assert len(current) == len(evidence) - 1
     assert orphaned == (orphan,)
+
+
+@pytest.mark.parametrize(
+    ("assistance", "completion_state"),
+    [
+        ("copied_structure", "complete"),
+        ("partial_code", "partial"),
+        ("worked_example", "complete"),
+        ("editorial", "complete"),
+    ],
+)
+def test_assisted_or_incomplete_production_never_earns_independent_credit(
+    assistance: str,
+    completion_state: str,
+) -> None:
+    graph = interview_skills.load_default_graph()
+    evidence = [
+        record
+        for record in _evidence("advanced_learner")
+        if record["skill_id"] != "pattern.sliding-window"
+        or record["kind"] != "production"
+    ]
+    production = deepcopy(
+        next(
+            record
+            for record in _evidence("advanced_learner")
+            if record["skill_id"] == "pattern.sliding-window"
+            and record["kind"] == "production"
+        )
+    )
+    production["assistance"] = assistance
+    production["completion_state"] = completion_state
+    production["independent"] = True
+    evidence.append(production)
+
+    skill = interview_skills.assess_skills(graph, evidence, now=NOW)[
+        "pattern.sliding-window"
+    ]
+
+    assert skill.qualifying_counts["production"] == 0
+    assert skill.readiness == "provisional"
+    assert any("assistance" in reason.lower() for reason in skill.reasons)
+
+
+def test_unknown_assistance_provenance_is_rejected() -> None:
+    graph = interview_skills.load_default_graph()
+    registry = interview_skills.SkillGraphRegistry.from_graphs((graph,))
+    record = deepcopy(_evidence("advanced_learner")[0])
+    record["assistance"] = "some_help"
+
+    with pytest.raises(interview_skills.EvidenceRecordError, match="assistance"):
+        interview_skills.validate_evidence_record(record, registry)
+
+
+def test_spoofed_transfer_family_does_not_earn_credit() -> None:
+    graph = interview_skills.load_default_graph()
+    evidence = _evidence("advanced_learner")
+    transfer = next(
+        record
+        for record in evidence
+        if record["skill_id"] == "pattern.sliding-window"
+        and record["kind"] == "transfer"
+    )
+    transfer["transfer_family"] = "invented-breadth"
+
+    skill = interview_skills.assess_skills(graph, evidence, now=NOW)[
+        "pattern.sliding-window"
+    ]
+
+    assert skill.qualifying_counts["transfer"] == 0
+    assert skill.readiness == "provisional"
+    assert any("transfer family" in reason.lower() for reason in skill.reasons)
+
+
+def test_repeated_same_problem_cannot_manufacture_transfer_breadth() -> None:
+    raw = _versioned_graph("2.0.0", "interview-mastery-v2")
+    pattern_policy = next(
+        item for item in raw["evidence_policies"] if item["id"] == "pattern-v1"
+    )
+    pattern_policy["transfer"]["minimum_novel_contexts"] = 2
+    graph = interview_skills.validate_graph(raw)
+    evidence = _with_versions(
+        _evidence("advanced_learner"),
+        graph.graph_version,
+        graph.mastery_policy_version,
+    )
+    transfer = next(
+        record
+        for record in evidence
+        if record["skill_id"] == "pattern.sliding-window"
+        and record["kind"] == "transfer"
+    )
+    duplicate = deepcopy(transfer)
+    duplicate["evidence_id"] = "ev-duplicate-transfer"
+    duplicate["observed_at"] = "2026-06-04T12:00:00+00:00"
+    evidence.append(duplicate)
+
+    skill = interview_skills.assess_skills(graph, evidence, now=NOW)[
+        "pattern.sliding-window"
+    ]
+
+    assert skill.qualifying_counts["transfer"] == 1
+    assert skill.readiness == "provisional"
+
+
+def test_blocking_prerequisites_propagate_through_three_level_chain() -> None:
+    raw = _versioned_graph("2.0.0", "interview-mastery-v2")
+    hashing = next(item for item in raw["skills"] if item["id"] == "concept.hashing")
+    hashing["prerequisites"] = [
+        {"skill_id": "concept.arrays-strings", "kind": "blocking"}
+    ]
+    graph = interview_skills.validate_graph(raw)
+    evidence = _with_versions(
+        [
+            record
+            for record in _evidence("advanced_learner")
+            if record["skill_id"] != "concept.arrays-strings"
+        ],
+        graph.graph_version,
+        graph.mastery_policy_version,
+    )
+
+    assessments = interview_skills.assess_skills(graph, evidence, now=NOW)
+
+    assert assessments["concept.hashing"].readiness == "ready"
+    assert assessments["concept.hashing"].selection_status == "blocked"
+    assert assessments["pattern.sliding-window"].selection_status == "blocked"
+    assert any(
+        "concept.hashing" in reason
+        for reason in assessments["pattern.sliding-window"].reasons
+    )
 
 
 def test_algorithms_template_seeds_from_graph_without_defining_the_graph() -> None:

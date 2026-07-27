@@ -29,6 +29,33 @@ SKILL_CATEGORIES = ("concept", "pattern", "process", "communication")
 PREREQUISITE_KINDS = ("blocking", "supporting")
 PROBLEM_ROLES = ("primary", "supporting")
 SELECTION_STATUSES = ("ready", "blocked", "weak", "due", "unassessed")
+ASSISTANCE_TYPES = (
+    "none",
+    "prompt",
+    "partial_code",
+    "worked_example",
+    "editorial",
+    "copied_structure",
+)
+COMPLETION_STATES = ("complete", "partial")
+EVIDENCE_RECORD_FIELDS = frozenset(
+    {
+        "evidence_id",
+        "graph_version",
+        "mastery_policy_version",
+        "skill_id",
+        "problem_id",
+        "kind",
+        "outcome",
+        "observed_at",
+        "independent",
+        "assistance",
+        "completion_state",
+        "novel_context",
+        "explicit_check",
+        "transfer_family",
+    }
+)
 SKILL_ID_PATTERN = re.compile(
     r"(?:concept|pattern|process|communication)\.[a-z0-9]+(?:-[a-z0-9]+)*"
 )
@@ -36,6 +63,10 @@ SKILL_ID_PATTERN = re.compile(
 
 class SkillGraphError(ValueError):
     """The canonical interview graph or supplied evidence is malformed."""
+
+
+class EvidenceRecordError(ValueError):
+    """A learner evidence record cannot be verified against its source graph."""
 
 
 @dataclass(frozen=True)
@@ -106,6 +137,66 @@ class InterviewSkillGraph:
             if problem.problem_id == problem_id:
                 return problem
         raise SkillGraphError(f"unknown problem: {problem_id}")
+
+
+@dataclass(frozen=True)
+class ValidatedEvidenceRecord:
+    graph: InterviewSkillGraph
+    skill: InterviewSkill
+    problem: InterviewProblem
+
+
+@dataclass(frozen=True)
+class SkillGraphRegistry:
+    """Immutable graph and policy bundles used to verify evidence at observation time."""
+
+    graph_id: str
+    _graphs: Mapping[tuple[str, str], InterviewSkillGraph]
+
+    @classmethod
+    def from_graphs(
+        cls,
+        graphs: Iterable[InterviewSkillGraph],
+    ) -> SkillGraphRegistry:
+        values = tuple(graphs)
+        if not values:
+            raise SkillGraphError("skill graph registry requires at least one graph")
+        graph_id = values[0].graph_id
+        indexed: dict[tuple[str, str], InterviewSkillGraph] = {}
+        for graph in values:
+            if graph.graph_id != graph_id:
+                raise SkillGraphError("skill graph registry cannot mix graph identities")
+            key = (graph.graph_version, graph.mastery_policy_version)
+            if key in indexed:
+                raise SkillGraphError(
+                    "skill graph registry contains a duplicate graph and policy version"
+                )
+            indexed[key] = graph
+        return cls(graph_id=graph_id, _graphs=MappingProxyType(indexed))
+
+    def graph(
+        self,
+        graph_version: object,
+        mastery_policy_version: object,
+    ) -> InterviewSkillGraph:
+        if not isinstance(graph_version, str) or not isinstance(
+            mastery_policy_version, str
+        ):
+            raise EvidenceRecordError(
+                "evidence graph and mastery-policy versions must be text"
+            )
+        try:
+            return self._graphs[(graph_version, mastery_policy_version)]
+        except KeyError as exc:
+            raise EvidenceRecordError(
+                "evidence graph and mastery-policy version is unavailable"
+            ) from exc
+
+    def contains(self, graph: InterviewSkillGraph) -> bool:
+        return (
+            self._graphs.get((graph.graph_version, graph.mastery_policy_version))
+            is graph
+        )
 
 
 @dataclass(frozen=True)
@@ -461,61 +552,149 @@ def _parse_timestamp(value: object) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
-def _record_qualifies(
-    graph: InterviewSkillGraph,
-    skill: InterviewSkill,
+def validate_evidence_record(
     record: Mapping[str, object],
-) -> tuple[bool, str | None]:
+    registry: SkillGraphRegistry,
+) -> ValidatedEvidenceRecord:
+    if set(record) != EVIDENCE_RECORD_FIELDS:
+        raise EvidenceRecordError("evidence record fields are invalid")
+    for field in (
+        "evidence_id",
+        "graph_version",
+        "mastery_policy_version",
+        "skill_id",
+        "problem_id",
+        "observed_at",
+        "transfer_family",
+    ):
+        value = record.get(field)
+        if not isinstance(value, str) or not value.strip() or value != value.strip():
+            raise EvidenceRecordError(f"evidence {field} must be trimmed non-empty text")
     kind = record.get("kind")
     if kind not in EVIDENCE_KINDS:
-        return False, None
-    targets_skill, reason = _record_targets_skill(graph, skill, record)
-    if not targets_skill:
-        return False, reason
-    if record.get("outcome") != "pass":
-        return False, None
-    if kind in {"production", "transfer", "delayed_retrieval"} and (
-        record.get("independent") is not True or record.get("hint_level") != "none"
-    ):
-        return False, "hint-dependent or copied success defers mastery credit"
-    if kind in {"transfer", "delayed_retrieval"} and record.get("novel_context") is not True:
-        return False, "near-duplicate success does not qualify as broad transfer"
+        raise EvidenceRecordError("evidence kind is invalid")
+    if record.get("outcome") not in {"pass", "fail"}:
+        raise EvidenceRecordError("evidence outcome is invalid")
+    if record.get("assistance") not in ASSISTANCE_TYPES:
+        raise EvidenceRecordError("evidence assistance provenance is invalid")
+    if record.get("completion_state") not in COMPLETION_STATES:
+        raise EvidenceRecordError("evidence completion state is invalid")
+    for field in ("independent", "novel_context", "explicit_check"):
+        if not isinstance(record.get(field), bool):
+            raise EvidenceRecordError(f"evidence {field} must be boolean")
     if _parse_timestamp(record.get("observed_at")) is None:
-        return False, "evidence timestamp is invalid"
-    return True, None
+        raise EvidenceRecordError("evidence timestamp is invalid")
+    graph = registry.graph(
+        record.get("graph_version"), record.get("mastery_policy_version")
+    )
+    try:
+        skill = graph.skill(str(record["skill_id"]))
+    except SkillGraphError as exc:
+        raise EvidenceRecordError("evidence skill is absent from its source graph") from exc
+    try:
+        problem = graph.problem(str(record["problem_id"]))
+    except SkillGraphError as exc:
+        raise EvidenceRecordError(
+            "evidence problem is absent from its source graph"
+        ) from exc
+    if not any(ref.skill_id == skill.skill_id for ref in problem.skills):
+        raise EvidenceRecordError("evidence problem does not reference its skill")
+    if record.get("transfer_family") != problem.transfer_family:
+        raise EvidenceRecordError(
+            "evidence transfer family does not match its source problem"
+        )
+    return ValidatedEvidenceRecord(graph=graph, skill=skill, problem=problem)
+
+
+def _record_qualifies(
+    registry: SkillGraphRegistry,
+    skill: InterviewSkill,
+    record: Mapping[str, object],
+) -> tuple[bool, str | None, ValidatedEvidenceRecord | None]:
+    try:
+        context = validate_evidence_record(record, registry)
+    except EvidenceRecordError as exc:
+        return False, str(exc), None
+    if context.skill.skill_id != skill.skill_id:
+        return False, "evidence stable skill identity does not match", context
+    targets_skill, reason = _record_targets_skill(context, record)
+    if not targets_skill:
+        return False, reason, context
+    if record.get("outcome") != "pass":
+        return False, None, context
+    assistance = record.get("assistance")
+    if assistance in {
+        "partial_code",
+        "worked_example",
+        "editorial",
+        "copied_structure",
+    }:
+        return (
+            False,
+            f"hint-dependent {assistance} assistance defers mastery credit",
+            context,
+        )
+    if record.get("completion_state") != "complete":
+        return False, "incomplete evidence defers mastery credit", context
+    kind = record["kind"]
+    if kind in {"production", "transfer", "delayed_retrieval"} and (
+        record.get("independent") is not True or assistance != "none"
+    ):
+        return False, "prompted assistance defers independent mastery credit", context
+    if kind in {"transfer", "delayed_retrieval"} and record.get("novel_context") is not True:
+        return (
+            False,
+            "near-duplicate success does not qualify as broad transfer",
+            context,
+        )
+    return True, None, context
 
 
 def _record_targets_skill(
-    graph: InterviewSkillGraph,
-    skill: InterviewSkill,
+    context: ValidatedEvidenceRecord,
     record: Mapping[str, object],
 ) -> tuple[bool, str | None]:
     kind = record.get("kind")
     if kind not in EVIDENCE_KINDS:
         return False, None
     explicit = record.get("explicit_check") is True
-    problem_id = record.get("problem_id")
-    if not isinstance(problem_id, str):
-        return False, "evidence has no valid problem reference"
-    try:
-        problem = graph.problem(problem_id)
-    except SkillGraphError:
-        return False, "evidence references a problem outside the current graph"
     allowed = inferable_skills(
-        problem, kind, explicit_check=explicit, graph=graph
+        context.problem,
+        kind,
+        explicit_check=explicit,
+        graph=context.graph,
     )
-    if skill.skill_id not in allowed:
+    if context.skill.skill_id not in allowed:
         return False, "supporting problem participation does not award skill credit"
     return True, None
+
+
+def _validated_context(
+    registry: SkillGraphRegistry,
+    record: Mapping[str, object],
+) -> ValidatedEvidenceRecord | None:
+    try:
+        return validate_evidence_record(record, registry)
+    except EvidenceRecordError:
+        return None
 
 
 def assess_skills(
     graph: InterviewSkillGraph,
     evidence: Iterable[Mapping[str, object]],
     *,
+    registry: SkillGraphRegistry | None = None,
     now: datetime | None = None,
 ) -> dict[str, SkillAssessment]:
     now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    registry = registry or SkillGraphRegistry.from_graphs((graph,))
+    current_key = (graph.graph_version, graph.mastery_policy_version)
+    try:
+        registered_current = registry.graph(*current_key)
+    except EvidenceRecordError as exc:
+        raise SkillGraphError("assessment graph is absent from the registry") from exc
+    if registered_current != graph:
+        raise SkillGraphError("assessment graph does not match its registered bundle")
     current, _orphaned = partition_evidence(graph, evidence)
     by_skill: dict[str, list[Mapping[str, object]]] = {
         skill.skill_id: [] for skill in graph.skills
@@ -537,20 +716,22 @@ def assess_skills(
                 str(item.get("evidence_id", "")),
             ),
         )
-        qualifying: dict[str, list[Mapping[str, object]]] = {
+        qualifying: dict[
+            str, list[tuple[Mapping[str, object], ValidatedEvidenceRecord]]
+        ] = {
             kind: [] for kind in EVIDENCE_KINDS
         }
         rejection_reasons: list[str] = []
         for record in records:
-            qualifies, reason = _record_qualifies(graph, skill, record)
-            if qualifies:
-                qualifying[str(record["kind"])].append(record)
+            qualifies, reason, context = _record_qualifies(registry, skill, record)
+            if qualifies and context is not None:
+                qualifying[str(record["kind"])].append((record, context))
             elif reason and reason not in rejection_reasons:
                 rejection_reasons.append(reason)
         prior_qualifying = [
             record
             for kind in ("explanation", "production", "transfer")
-            for record in qualifying[kind]
+            for record, _context in qualifying[kind]
         ]
         if qualifying["delayed_retrieval"]:
             if prior_qualifying:
@@ -564,8 +745,8 @@ def assess_skills(
                     days=skill.evidence_policy.transfer.minimum_delay_days
                 )
                 qualifying["delayed_retrieval"] = [
-                    record
-                    for record in qualifying["delayed_retrieval"]
+                    (record, context)
+                    for record, context in qualifying["delayed_retrieval"]
                     if (
                         timestamp := _parse_timestamp(record.get("observed_at"))
                     )
@@ -581,9 +762,8 @@ def assess_skills(
         counts = {kind: len(items) for kind, items in qualifying.items()}
         for kind in ("transfer", "delayed_retrieval"):
             families = {
-                str(item.get("transfer_family"))
-                for item in qualifying[kind]
-                if item.get("transfer_family")
+                context.problem.transfer_family
+                for _record, context in qualifying[kind]
             }
             counts[kind] = len(families)
         required = dict(skill.evidence_policy.minimum)
@@ -593,18 +773,21 @@ def assess_skills(
         )
         meets = all(counts[kind] >= required[kind] for kind in EVIDENCE_KINDS)
         delayed_records = [
-            record
+            (record, context)
             for record in records
             if record.get("kind") == "delayed_retrieval"
             and _parse_timestamp(record.get("observed_at")) is not None
-            and _record_targets_skill(graph, skill, record)[0]
+            and (context := _validated_context(registry, record)) is not None
+            and context.skill.skill_id == skill.skill_id
+            and _record_targets_skill(context, record)[0]
+            and record.get("completion_state") == "complete"
         ]
         latest_delayed_failed = bool(
-            delayed_records and delayed_records[-1].get("outcome") == "fail"
+            delayed_records and delayed_records[-1][0].get("outcome") == "fail"
         )
         qualified_delayed_timestamps = [
             timestamp
-            for record in qualifying["delayed_retrieval"]
+            for record, _context in qualifying["delayed_retrieval"]
             if (timestamp := _parse_timestamp(record.get("observed_at"))) is not None
         ]
         stale = bool(
@@ -664,6 +847,18 @@ def assess_skills(
                 }
             )
         )
+        if any(
+            (
+                record.get("graph_version"),
+                record.get("mastery_policy_version"),
+            )
+            != current_key
+            for record in records
+        ):
+            reasons.append(
+                "Historical evidence qualification was preserved from its source "
+                "graph and reassessed against the current mastery minimums."
+            )
         base[skill.skill_id] = (
             readiness,
             counts,
@@ -673,33 +868,48 @@ def assess_skills(
             due,
         )
 
-    assessments: dict[str, SkillAssessment] = {}
-    for skill in graph.skills:
-        readiness, counts, reasons, versions, policy_versions, due = base[
-            skill.skill_id
+    skill_by_id = {skill.skill_id: skill for skill in graph.skills}
+    status_cache: dict[str, tuple[str, tuple[str, ...]]] = {}
+
+    def selection(skill_id: str) -> tuple[str, tuple[str, ...]]:
+        if skill_id in status_cache:
+            return status_cache[skill_id]
+        skill = skill_by_id[skill_id]
+        readiness, _counts, _reasons, _versions, _policy_versions, due = base[
+            skill_id
         ]
         blockers = [
             prerequisite.skill_id
             for prerequisite in skill.prerequisites
             if prerequisite.kind == "blocking"
-            and base[prerequisite.skill_id][0] != "ready"
+            and selection(prerequisite.skill_id)[0] != "ready"
         ]
         if blockers:
-            selection_status = "blocked"
+            value = ("blocked", tuple(sorted(blockers)))
+        elif due:
+            value = ("due", ())
+        elif readiness == "ready":
+            value = ("ready", ())
+        elif readiness == "unassessed":
+            value = ("unassessed", ())
+        else:
+            value = ("weak", ())
+        status_cache[skill_id] = value
+        return value
+
+    assessments: dict[str, SkillAssessment] = {}
+    for skill in graph.skills:
+        readiness, counts, reasons, versions, policy_versions, _due = base[
+            skill.skill_id
+        ]
+        selection_status, blockers = selection(skill.skill_id)
+        if blockers:
             reasons.append(
                 "Blocked by blocking prerequisite"
                 + ("s " if len(blockers) > 1 else " ")
-                + ", ".join(sorted(blockers))
+                + ", ".join(blockers)
                 + "."
             )
-        elif due:
-            selection_status = "due"
-        elif readiness == "ready":
-            selection_status = "ready"
-        elif readiness == "unassessed":
-            selection_status = "unassessed"
-        else:
-            selection_status = "weak"
         assessments[skill.skill_id] = SkillAssessment(
             skill_id=skill.skill_id,
             readiness=readiness,
