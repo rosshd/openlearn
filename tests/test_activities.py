@@ -274,6 +274,16 @@ class ActivityContractTests(unittest.TestCase):
                 "interview_observation",
                 {"stage": "system_design", "response": "Try a cache."},
             )
+        with self.assertRaisesRegex(ActivityContractError, "requires language=python"):
+            adapter.validate_request(
+                "interview_problem",
+                {
+                    "title": "Unsupported rubric",
+                    "language": "javascript",
+                    "problem_id": "first_unique_window_v1",
+                    "tool_requests": [],
+                },
+            )
 
     def test_placement_purpose_remains_domain_neutral(self) -> None:
         activity = propose_activity(

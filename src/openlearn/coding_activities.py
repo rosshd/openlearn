@@ -29,6 +29,10 @@ class CodingActivityAdapter:
         if kind == "python_drill" and language != "python":
             raise ActivityContractError("python_drill requires language=python")
         if kind == "interview_problem":
+            if language.strip().lower() != "python":
+                raise ActivityContractError(
+                    "interview_problem rubric currently requires language=python"
+                )
             problem_id = payload.get("problem_id")
             if (
                 not isinstance(problem_id, str)

@@ -411,8 +411,7 @@ def edit_profile(
     value = load_profile(path)
     current = value["profile"]
     assert isinstance(current, dict)
-    merged = {**current, **changes}
-    normalized = _normalized_profile(merged)
+    normalized = normalize_profile_update(current, changes)
     if normalized == current:
         return value
     current_revision = value["profile_revision"]
@@ -440,6 +439,13 @@ def edit_profile(
         },
     )
     return value
+
+
+def normalize_profile_update(
+    current: Mapping[str, object], changes: Mapping[str, object]
+) -> dict[str, object]:
+    """Validate a proposed edit without mutating placement or storage."""
+    return _normalized_profile({**current, **changes})
 
 
 def clear_profile(
@@ -566,7 +572,13 @@ def record_placement_evidence(
     )
     observations = placement.get("observations")
     assert isinstance(observations, dict)
-    observations[stage] = _evidence_observation(stage, response)
+    profile = value["profile"]
+    assert isinstance(profile, dict)
+    observations[stage] = _evidence_observation(
+        stage,
+        response,
+        coding_language=str(profile.get("coding_language") or ""),
+    )
     placement["updated_at"] = _timestamp(now)
     index = PLACEMENT_STAGES.index(stage)
     if index + 1 < len(PLACEMENT_STAGES):
@@ -628,7 +640,9 @@ def complete_with_baseline(
     return value
 
 
-def _evidence_observation(stage: str, response: str) -> dict[str, object]:
+def _evidence_observation(
+    stage: str, response: str, *, coding_language: str
+) -> dict[str, object]:
     normalized = response.lower()
     skipped = "skipped" in normalized or "less demanding baseline" in normalized
     non_attempt = bool(
@@ -645,7 +659,15 @@ def _evidence_observation(stage: str, response: str) -> dict[str, object]:
         term in normalized for term in ("set", "dict", "map", "window", "index")
     ):
         signals.append("named_data_structure_or_strategy")
-    if not skipped and not non_attempt and stage == "implementation":
+    unsupported_implementation_language = (
+        stage == "implementation" and coding_language.strip().lower() != "python"
+    )
+    if (
+        not skipped
+        and not non_attempt
+        and stage == "implementation"
+        and not unsupported_implementation_language
+    ):
         try:
             tree = ast.parse(response)
         except SyntaxError:
@@ -663,6 +685,8 @@ def _evidence_observation(stage: str, response: str) -> dict[str, object]:
             for node in ast.walk(function)
         ):
             signals.append("produced_return_path")
+    if unsupported_implementation_language:
+        signals.append("unsupported_language_for_rubric")
     if not skipped and not non_attempt and stage == "tests" and any(
         term in normalized for term in ("empty", "edge", "duplicate", "no match", "assert")
     ):
@@ -692,7 +716,7 @@ def _evidence_observation(stage: str, response: str) -> dict[str, object]:
     required = required_by_stage.get(stage, set())
     status = (
         "uncertain"
-        if skipped
+        if skipped or unsupported_implementation_language
         else "not_observed"
         if non_attempt or (required and not required <= set(signals))
         else "observed"

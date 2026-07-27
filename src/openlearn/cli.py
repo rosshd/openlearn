@@ -2369,6 +2369,10 @@ def interview_profile_path(slug: str) -> Path:
     return topics_dir() / f"{slug}.interview.json"
 
 
+def interview_edit_journal_path(slug: str) -> Path:
+    return topics_dir() / f".{slug}.interview-edit.json"
+
+
 def default_interview_profile_values() -> dict[str, object]:
     return {
         "role_family": "general SWE",
@@ -2408,10 +2412,135 @@ def interview_profile_write_lock(slug: str):
         yield
 
 
+def _validated_interview_edit_journal(
+    slug: str, value: object
+) -> dict[str, object]:
+    if not isinstance(value, dict) or set(value) != {
+        "schema_version",
+        "slug",
+        "topic_generation",
+        "profile_revision",
+        "field",
+        "value",
+    }:
+        raise OpenLearnError("saved interview profile edit is malformed")
+    if (
+        value.get("schema_version") != 1
+        or value.get("slug") != slug
+        or not isinstance(value.get("topic_generation"), str)
+        or not re.fullmatch(r"topic_[a-f0-9]{32}", str(value["topic_generation"]))
+        or not isinstance(value.get("profile_revision"), int)
+        or isinstance(value.get("profile_revision"), bool)
+        or value.get("field") not in interview_prep.PROFILE_FIELDS
+    ):
+        raise OpenLearnError("saved interview profile edit has invalid identity")
+    return dict(value)
+
+
+def _write_interview_edit_journal(
+    slug: str,
+    *,
+    profile_revision: int,
+    field: str,
+    value: object,
+) -> None:
+    generation = current_topic_generation(slug)
+    if generation is None:
+        raise OpenLearnError("topic was deleted before the interview profile edit")
+    journal = {
+        "schema_version": 1,
+        "slug": slug,
+        "topic_generation": generation,
+        "profile_revision": profile_revision,
+        "field": field,
+        "value": value,
+    }
+    _validated_interview_edit_journal(slug, journal)
+    path = interview_edit_journal_path(slug)
+    with file_lock(path):
+        if path.exists():
+            raise OpenLearnError(
+                "another interview profile edit is pending recovery; retry the command"
+            )
+        write_text_atomic(path, json.dumps(journal, indent=2, sort_keys=True) + "\n")
+
+
+def recover_interview_profile_edit(slug: str) -> bool:
+    journal_path = interview_edit_journal_path(slug)
+    with file_lock(journal_path):
+        if not journal_path.exists():
+            return False
+        try:
+            raw = json.loads(journal_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise OpenLearnError("saved interview profile edit is unreadable") from exc
+        journal = _validated_interview_edit_journal(slug, raw)
+    if (
+        not topic_path(slug).exists()
+        or topic_deletion_tombstone_path(slug).exists()
+        or current_topic_generation(slug) != journal["topic_generation"]
+    ):
+        durable_unlink(journal_path)
+        raise OpenLearnError("topic changed or was deleted during interview profile edit")
+    try:
+        current = interview_prep.load_profile(interview_profile_path(slug))
+        profile = current["profile"]
+        placement = current["placement"]
+        assert isinstance(profile, dict) and isinstance(placement, dict)
+        if current["profile_revision"] != journal["profile_revision"]:
+            normalized = interview_prep.normalize_profile_update(
+                profile, {str(journal["field"]): journal["value"]}
+            )
+            if normalized == profile:
+                durable_unlink(journal_path)
+                return True
+            raise OpenLearnError(
+                "interview profile changed while a saved edit was pending"
+            )
+        normalized = interview_prep.normalize_profile_update(
+            profile, {str(journal["field"]): journal["value"]}
+        )
+    except ValueError as exc:
+        raise OpenLearnError(str(exc)) from exc
+    if normalized == profile:
+        durable_unlink(journal_path)
+        return True
+    if placement.get("status") == "in_progress":
+        activity = _current_interview_activity(slug)
+        if activity is None:
+            raise OpenLearnError(
+                "interview placement activity is missing during profile edit recovery"
+            )
+        if activity.get("status") == "active":
+            transition_topic_activity(
+                slug, activity, "abandoned", reason="interview_profile_edited"
+            )
+        elif (
+            activity.get("status") != "abandoned"
+            or activity.get("status_reason") != "interview_profile_edited"
+        ):
+            raise OpenLearnError(
+                "interview placement cannot be safely recovered for this profile edit"
+            )
+        _interview_edit_checkpoint("after_activity_abandoned")
+    queued_events: list[tuple[str, dict[str, object]]] = []
+    with interview_profile_write_lock(slug):
+        interview_prep.edit_profile(
+            interview_profile_path(slug),
+            {str(journal["field"]): journal["value"]},
+            lambda event_type, data: queued_events.append((event_type, data)),
+        )
+    for event_type, data in queued_events:
+        log_event(slug, event_type, data)
+    durable_unlink(journal_path)
+    return True
+
+
 def _load_interview_profile(slug: str) -> dict[str, object]:
     if not topic_path(slug).exists():
         raise OpenLearnError(f"topic not found: {slug}")
     try:
+        recover_interview_profile_edit(slug)
         with file_lock(interview_profile_path(slug)):
             return interview_prep.load_profile(interview_profile_path(slug))
     except ValueError as exc:
@@ -2478,36 +2607,40 @@ def cmd_interview_profile(args: argparse.Namespace, output_func=print) -> int:
     return 0
 
 
+def _interview_edit_checkpoint(_stage: str) -> None:
+    """Test seam for interruption between activity and profile transactions."""
+
+
 def cmd_interview_edit(args: argparse.Namespace, output_func=print) -> int:
     slug = resolve_topic_slug(args.topic)
-    path = interview_profile_path(slug)
-    current_profile = _load_interview_profile(slug)
-    current_placement = current_profile["placement"]
-    assert isinstance(current_placement, dict)
-    if current_placement.get("status") == "in_progress":
-        activity = _current_interview_activity(slug)
-        if activity is not None and activity.get("status") == "active":
-            transition_topic_activity(
-                slug, activity, "abandoned", reason="interview_profile_edited"
-            )
     value: object = args.value
     if args.field in {"weekly_minutes", "session_minutes"}:
         try:
             value = int(args.value)
         except ValueError as exc:
             raise OpenLearnError(f"{args.field} must be a positive integer") from exc
+    current_profile = _load_interview_profile(slug)
+    current_values = current_profile["profile"]
+    assert isinstance(current_values, dict)
     try:
-        queued_events: list[tuple[str, dict[str, object]]] = []
-        with interview_profile_write_lock(slug):
-            updated = interview_prep.edit_profile(
-                path,
-                {args.field: value},
-                lambda event_type, data: queued_events.append((event_type, data)),
-            )
+        proposed_values = interview_prep.normalize_profile_update(
+            current_values, {args.field: value}
+        )
     except ValueError as exc:
         raise OpenLearnError(str(exc)) from exc
-    for event_type, data in queued_events:
-        log_event(slug, event_type, data)
+    if proposed_values == current_values:
+        output_func(f"No change to {args.field}; placement remains resumable.")
+        return 0
+    revision = current_profile["profile_revision"]
+    assert isinstance(revision, int)
+    _write_interview_edit_journal(
+        slug,
+        profile_revision=revision,
+        field=args.field,
+        value=value,
+    )
+    recover_interview_profile_edit(slug)
+    updated = _load_interview_profile(slug)
     placement = updated["placement"]
     assert isinstance(placement, dict)
     output_func(f"Updated {args.field}; profile revision {updated['profile_revision']}.")
@@ -2585,10 +2718,7 @@ def _print_placement_status(value: dict[str, object], output_func=print) -> None
         output_func(f"Next evidence: {placement['next_stage']}")
 
 
-def interview_placement_activity_request(
-    profile: dict[str, object],
-) -> dict[str, object]:
-    language = str(profile.get("coding_language") or "python")
+def interview_placement_activity_request() -> dict[str, object]:
     return {
         "domain": "coding",
         "kind": "interview_problem",
@@ -2599,7 +2729,7 @@ def interview_placement_activity_request(
         "purpose": "placement",
         "domain_payload": {
             "title": interview_prep.PLACEMENT_PROBLEM["title"],
-            "language": language,
+            "language": "python",
             "problem_id": interview_prep.PLACEMENT_PROBLEM["problem_id"],
             "tool_requests": [],
         },
@@ -2727,17 +2857,11 @@ def sync_interview_placement(slug: str) -> dict[str, object]:
     return profile_value
 
 
-def _begin_interview_activity(
-    slug: str, profile_value: dict[str, object]
-) -> dict[str, object]:
+def _begin_interview_activity(slug: str) -> dict[str, object]:
     current = _current_interview_activity(slug)
     if current is not None and current.get("status") == "active":
         return current
-    profile = profile_value["profile"]
-    assert isinstance(profile, dict)
-    activity = propose_topic_activity(
-        slug, interview_placement_activity_request(profile)
-    )
+    activity = propose_topic_activity(slug, interview_placement_activity_request())
     activity = accept_topic_activity(slug, activity, learner_confirmed=True)
     return transition_topic_activity(slug, activity, "active")
 
@@ -2785,7 +2909,7 @@ def cmd_interview_placement(
         placement = value["placement"]
         assert isinstance(placement, dict)
         if placement.get("status") != "in_progress":
-            activity = _begin_interview_activity(slug, value)
+            activity = _begin_interview_activity(slug)
             with interview_profile_write_lock(slug):
                 value = interview_prep.start_placement(
                     path,
@@ -2803,7 +2927,19 @@ def cmd_interview_placement(
             stage = placement.get("next_stage")
             if not isinstance(stage, str):
                 break
-            output_func(f"\n{INTERVIEW_PLACEMENT_PROMPTS[stage]}")
+            stage_prompt = INTERVIEW_PLACEMENT_PROMPTS[stage]
+            profile = value["profile"]
+            assert isinstance(profile, dict)
+            language = str(profile.get("coding_language") or "").strip()
+            if stage == "implementation" and language.lower() != "python":
+                stage_prompt += (
+                    f"\nRubric {interview_prep.PLACEMENT_RUBRIC_VERSION} validates "
+                    f"implementation structure only for Python. {language or 'Your preferred language'} "
+                    "code will remain uncertain, not failed. To opt into scored implementation "
+                    f"evidence, stop and run 'openlearn interview edit {slug} "
+                    "coding_language python', then start a new placement."
+                )
+            output_func(f"\n{stage_prompt}")
             try:
                 response = input_func(f"{stage}> ")
             except (EOFError, KeyboardInterrupt):
@@ -2940,6 +3076,8 @@ def cmd_new(args: argparse.Namespace, output_func=print) -> int:
             raise OpenLearnError(f"topic already exists: {slug}")
         durable_unlink(topic_state_path(slug))
         durable_unlink(topic_events_path(slug))
+        durable_unlink(interview_profile_path(slug))
+        durable_unlink(interview_edit_journal_path(slug))
         durable_unlink(topic_activity_journal_path(slug))
         durable_unlink(topic_turn_journal_path(slug))
         data_dir = topic_data_dir(slug)
@@ -5872,6 +6010,7 @@ def delete_topic_files(slug: str) -> None:
         _topic_delete_checkpoint("after_topic")
         durable_unlink(topic_state_path(slug))
         durable_unlink(interview_profile_path(slug))
+        durable_unlink(interview_edit_journal_path(slug))
         durable_unlink(topic_activity_journal_path(slug))
         _topic_delete_checkpoint("after_state")
         durable_unlink(topic_events_path(slug))

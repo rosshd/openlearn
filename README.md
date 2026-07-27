@@ -120,6 +120,8 @@ Placement observes clarification, planning, implementation, testing, complexity 
 Its result is provisional, names uncertainty across prerequisite, coding-fluency, reasoning, and interview-process gaps, and never grants mastery.
 Interruptions are resumable, while explicit discard or profile clearing preserves append-only attempt evidence.
 During placement, `/skip` leaves only the current evidence axis uncertain and continues, while `/baseline` ends the attempt with an explicit reduced-demand provisional baseline.
+Coding placement rubric v1 validates implementation structure only for Python.
+Learners who prefer another language may still complete placement, but their implementation evidence remains uncertain unless they edit the profile to opt into Python and rerun it.
 
 For assessment material, Quick Learn creates a separate focused topic and begins teaching without placement or outline approval:
 
