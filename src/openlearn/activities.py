@@ -21,7 +21,7 @@ ACTIVITY_STATUSES = {
     "cancelled",
     "failed",
 }
-ACTIVITY_PURPOSES = {"practice", "mastery_check"}
+ACTIVITY_PURPOSES = {"practice", "mastery_check", "placement"}
 TERMINAL_ACTIVITY_STATUSES = {"completed", "abandoned", "cancelled", "failed"}
 ACTIVITY_TRANSITIONS = {
     "proposed": {"accepted", "cancelled"},
@@ -120,7 +120,9 @@ def propose_activity(
         raise ActivityContractError("requested_evidence must not be empty")
     purpose = request.get("purpose")
     if purpose not in ACTIVITY_PURPOSES:
-        raise ActivityContractError("activity purpose must be practice or mastery_check")
+        raise ActivityContractError(
+            "activity purpose must be practice, mastery_check, or placement"
+        )
     scaffolding = request.get("scaffolding_level", 0)
     if not isinstance(scaffolding, int) or isinstance(scaffolding, bool) or not 0 <= scaffolding <= 3:
         raise ActivityContractError("scaffolding_level must be an integer from 0 to 3")

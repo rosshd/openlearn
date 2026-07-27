@@ -219,6 +219,96 @@ class ActivityContractTests(unittest.TestCase):
         self.assertNotIn("mastery", completed)
         self.assertEqual(completed["evidence_refs"], [])
 
+    def test_interview_placement_uses_validated_lifecycle_and_evidence(self) -> None:
+        activity = propose_activity(
+            {
+                "domain": "coding",
+                "kind": "interview_problem",
+                "objective": "Calibrate coding interview readiness.",
+                "concept_ids": ["coding_interview_baseline"],
+                "requested_evidence": ["interview_observation"],
+                "scaffolding_level": 0,
+                "purpose": "placement",
+                "domain_payload": {
+                    "title": "First unique window",
+                    "language": "python",
+                    "problem_id": "first_unique_window_v1",
+                    "tool_requests": [],
+                },
+                "resources": [
+                    {
+                        "resource_id": "first_unique_window_v1",
+                        "source": "openLearn original problem bank",
+                        "license": "AGPL-3.0-or-later",
+                    }
+                ],
+            },
+            self.registry,
+            activity_id=FIXED_ID,
+        )
+        activity, _ = accept_activity(activity, learner_confirmed=True)
+        activity, _ = transition_activity(activity, "active")
+        evidence = self.registry.adapter_for("coding").validate_evidence(
+            "interview_observation",
+            {"stage": "implementation", "response": "def solve():\n    return -1"},
+        )
+        activity, _ = attach_evidence_reference(activity, "evidence_abc123")
+        activity, _ = transition_activity(activity, "completed")
+
+        self.assertEqual(activity["purpose"], "placement")
+        self.assertEqual(evidence["stage"], "implementation")
+        self.assertEqual(activity["status"], "completed")
+        self.assertNotIn("mastery", activity)
+
+    def test_interview_activity_rejects_tools_and_malformed_evidence(self) -> None:
+        adapter = self.registry.adapter_for("coding")
+        with self.assertRaisesRegex(ActivityContractError, "does not permit tool"):
+            adapter.validate_request(
+                "interview_problem",
+                {
+                    "title": "Unsafe",
+                    "language": "python",
+                    "problem_id": "unsafe",
+                    "tool_requests": [
+                        {"action": "run_drill_tests", "payload": {}}
+                    ],
+                },
+            )
+        with self.assertRaisesRegex(ActivityContractError, "invalid interview"):
+            adapter.validate_evidence(
+                "interview_observation",
+                {"stage": "system_design", "response": "Try a cache."},
+            )
+        with self.assertRaisesRegex(ActivityContractError, "requires language=python"):
+            adapter.validate_request(
+                "interview_problem",
+                {
+                    "title": "Unsupported rubric",
+                    "language": "javascript",
+                    "problem_id": "first_unique_window_v1",
+                    "tool_requests": [],
+                },
+            )
+
+    def test_placement_purpose_remains_domain_neutral(self) -> None:
+        activity = propose_activity(
+            {
+                "domain": "instrument",
+                "kind": "timed_repetition",
+                "objective": "Calibrate a starting tempo.",
+                "concept_ids": ["steady_tempo"],
+                "requested_evidence": ["timer_result"],
+                "scaffolding_level": 0,
+                "purpose": "placement",
+                "domain_payload": {"duration_seconds": 30, "tempo_bpm": 60},
+            },
+            self.registry,
+            activity_id=FIXED_ID,
+        )
+
+        self.assertEqual(activity["domain"], "instrument")
+        self.assertEqual(activity["purpose"], "placement")
+
     def test_tutor_drill_action_is_narrow_typed_and_stripped_from_visible_text(self) -> None:
         raw = (
             "**Example:**\nA small hash-map drill would make the tradeoff observable.\n"

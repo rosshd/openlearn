@@ -275,6 +275,549 @@ class CliStorageTests(unittest.TestCase):
         self.assertNotIn("description", topic.metadata)
         self.assertNotIn("## Description", topic.body)
         self.assertIn("Understand AI fundamentals", topic.body)
+        self.assertFalse(cli.interview_profile_path("intro-ai").exists())
+        self.assertNotIn("interview", json.dumps(topic.metadata).lower())
+
+    def test_interview_prep_new_is_explicit_and_offers_deferrable_placement(self) -> None:
+        output: list[str] = []
+
+        result = cli.cmd_new(
+            Namespace(
+                topic="Interview Prep",
+                goal="Prepare for backend interviews",
+                interview_prep=True,
+                mastery_profile=None,
+                template=None,
+            ),
+            output_func=output.append,
+        )
+
+        self.assertEqual(result, 0)
+        profile = cli.interview_prep.load_profile(
+            cli.interview_profile_path("interview-prep")
+        )
+        self.assertEqual(profile["placement"]["status"], "not_started")
+        topic = cli.read_topic("interview-prep")
+        self.assertFalse(
+            any(key.startswith("interview") for key in topic.metadata)
+        )
+        self.assertTrue(any("defer" in line for line in output))
+
+    def test_interview_profile_commands_create_edit_inspect_defer_and_clear(self) -> None:
+        call_silent(
+            cli.cmd_new,
+            Namespace(topic="Algorithms", goal="Practice algorithms"),
+        )
+        setup = Namespace(
+            topic="algorithms",
+            role_family="backend",
+            target_level="senior",
+            interview_date="",
+            coding_language="python",
+            weekly_minutes=120,
+            session_minutes=30,
+            data_structures_experience="intermediate",
+            algorithms_experience="rusty",
+            interview_experience="limited",
+            target_notes="",
+            accessibility_preferences="no timers",
+        )
+
+        self.assertEqual(cli.cmd_interview_setup(setup, output_func=lambda _line: None), 0)
+        output: list[str] = []
+        cli.cmd_interview_profile(Namespace(topic="algorithms"), output_func=output.append)
+        self.assertTrue(any("backend" in line for line in output))
+
+        cli.cmd_interview_edit(
+            Namespace(topic="algorithms", field="weekly_minutes", value="60"),
+            output_func=lambda _line: None,
+        )
+        profile = cli.interview_prep.load_profile(
+            cli.interview_profile_path("algorithms")
+        )
+        self.assertEqual(profile["profile"]["weekly_minutes"], 60)
+
+        deferred_output: list[str] = []
+        cli.cmd_interview_placement(
+            Namespace(topic="algorithms", action="defer"),
+            output_func=deferred_output.append,
+        )
+        self.assertTrue(any("deferred" in line for line in deferred_output))
+
+        cli.cmd_interview_clear(
+            Namespace(topic="algorithms", yes=True),
+            output_func=lambda _line: None,
+        )
+        self.assertFalse(cli.interview_profile_path("algorithms").exists())
+
+    def test_interview_placement_cli_interrupts_resumes_and_stays_provisional(self) -> None:
+        call_silent(
+            cli.cmd_new,
+            Namespace(
+                topic="Algorithms",
+                goal="Practice algorithms",
+                interview_prep=True,
+                mastery_profile=None,
+                template=None,
+            ),
+        )
+        first_inputs = iter(["Some Python experience", "/stop"])
+        first_output: list[str] = []
+
+        cli.cmd_interview_placement(
+            Namespace(topic="algorithms", action="start"),
+            input_func=lambda _prompt: next(first_inputs),
+            output_func=first_output.append,
+        )
+
+        interrupted = cli.interview_prep.load_profile(
+            cli.interview_profile_path("algorithms")
+        )
+        self.assertEqual(interrupted["placement"]["status"], "in_progress")
+        self.assertEqual(interrupted["placement"]["next_stage"], "clarification")
+        self.assertTrue(any("saved" in line.lower() for line in first_output))
+
+        remaining = iter(
+            [
+                "Can width exceed the text length?",
+                "Scan each window with a set.",
+                "def first_unique_window(text, width): return -1",
+                "Empty, duplicates, and a matching window.",
+                "O(n * width) time and O(width) space.",
+                "Use last-seen positions.",
+            ]
+        )
+        cli.cmd_interview_placement(
+            Namespace(topic="algorithms", action="resume"),
+            input_func=lambda _prompt: next(remaining),
+            output_func=lambda _line: None,
+        )
+
+        completed = cli.interview_prep.load_profile(
+            cli.interview_profile_path("algorithms")
+        )
+        self.assertEqual(completed["placement"]["status"], "provisional")
+        self.assertFalse(completed["placement"]["result"]["mastery_update_applied"])
+        self.assertEqual(cli.load_state("algorithms").get("concept_attempts"), None)
+
+        activity = cli._current_interview_activity("algorithms")
+        self.assertEqual(activity["status"], "completed")
+        self.assertEqual(activity["purpose"], "placement")
+        self.assertEqual(len(activity["evidence_refs"]), 7)
+        evidence_events = [
+            event
+            for event in cli.load_event_log(cli.topic_events_path("algorithms"))
+            if event.get("event_type") == "activity_evidence_recorded"
+        ]
+        self.assertTrue(evidence_events)
+        self.assertTrue(
+            all(
+                event["data"]["evidence_kind"] == "interview_observation"
+                and event["data"]["mastery_update_applied"] is False
+                for event in evidence_events
+            )
+        )
+
+    def test_interview_placement_recovers_activity_evidence_after_fault(self) -> None:
+        call_silent(
+            cli.cmd_new,
+            Namespace(
+                topic="Algorithms",
+                goal="Practice algorithms",
+                interview_prep=True,
+                mastery_profile=None,
+                template=None,
+            ),
+        )
+        cli.cmd_interview_placement(
+            Namespace(topic="algorithms", action="start"),
+            input_func=lambda _prompt: "/stop",
+            output_func=lambda _line: None,
+        )
+        original_checkpoint = cli._activity_update_checkpoint
+
+        def fail_after_event(stage: str) -> None:
+            if stage == "after_event":
+                raise RuntimeError("simulated process exit after activity event")
+
+        cli._activity_update_checkpoint = fail_after_event
+        try:
+            with self.assertRaisesRegex(RuntimeError, "simulated process exit"):
+                cli.cmd_interview_placement(
+                    Namespace(topic="algorithms", action="resume"),
+                    input_func=lambda _prompt: "I write Python weekly.",
+                    output_func=lambda _line: None,
+                )
+        finally:
+            cli._activity_update_checkpoint = original_checkpoint
+
+        cli.cmd_interview_placement(
+            Namespace(topic="algorithms", action="resume"),
+            input_func=lambda _prompt: "/stop",
+            output_func=lambda _line: None,
+        )
+        profile = cli.interview_prep.load_profile(
+            cli.interview_profile_path("algorithms")
+        )
+        self.assertEqual(profile["placement"]["next_stage"], "clarification")
+        self.assertEqual(len(profile["placement"]["evidence_refs"]), 1)
+        evidence_events = [
+            event
+            for event in cli.load_event_log(cli.topic_events_path("algorithms"))
+            if event.get("event_type") == "activity_evidence_recorded"
+        ]
+        self.assertEqual(len(evidence_events), 1)
+
+    def test_noop_interview_edit_preserves_active_resumable_placement(self) -> None:
+        call_silent(
+            cli.cmd_new,
+            Namespace(
+                topic="Algorithms",
+                goal="Practice algorithms",
+                interview_prep=True,
+                mastery_profile=None,
+                template=None,
+            ),
+        )
+        cli.cmd_interview_placement(
+            Namespace(topic="algorithms", action="start"),
+            input_func=lambda _prompt: "/stop",
+            output_func=lambda _line: None,
+        )
+        before = cli.interview_prep.load_profile(
+            cli.interview_profile_path("algorithms")
+        )
+        activity_before = cli._current_interview_activity("algorithms")
+        output: list[str] = []
+
+        cli.cmd_interview_edit(
+            Namespace(topic="algorithms", field="weekly_minutes", value="120"),
+            output_func=output.append,
+        )
+
+        after = cli.interview_prep.load_profile(
+            cli.interview_profile_path("algorithms")
+        )
+        activity_after = cli._current_interview_activity("algorithms")
+        self.assertEqual(after, before)
+        self.assertEqual(activity_after, activity_before)
+        self.assertEqual(activity_after["status"], "active")
+        self.assertTrue(any("No change" in line for line in output))
+
+    def test_invalid_interview_edit_preserves_active_resumable_placement(self) -> None:
+        call_silent(
+            cli.cmd_new,
+            Namespace(
+                topic="Algorithms",
+                goal="Practice algorithms",
+                interview_prep=True,
+                mastery_profile=None,
+                template=None,
+            ),
+        )
+        cli.cmd_interview_placement(
+            Namespace(topic="algorithms", action="start"),
+            input_func=lambda _prompt: "/stop",
+            output_func=lambda _line: None,
+        )
+        before = cli.interview_prep.load_profile(
+            cli.interview_profile_path("algorithms")
+        )
+        activity_before = cli._current_interview_activity("algorithms")
+
+        with self.assertRaisesRegex(cli.OpenLearnError, "between 1 and 10080"):
+            cli.cmd_interview_edit(
+                Namespace(topic="algorithms", field="weekly_minutes", value="-1"),
+                output_func=lambda _line: None,
+            )
+
+        after = cli.interview_prep.load_profile(
+            cli.interview_profile_path("algorithms")
+        )
+        activity_after = cli._current_interview_activity("algorithms")
+        self.assertEqual(after, before)
+        self.assertEqual(activity_after, activity_before)
+        self.assertEqual(activity_after["status"], "active")
+
+    def test_interview_edit_recovers_after_abandonment_interruption(self) -> None:
+        call_silent(
+            cli.cmd_new,
+            Namespace(
+                topic="Algorithms",
+                goal="Practice algorithms",
+                interview_prep=True,
+                mastery_profile=None,
+                template=None,
+            ),
+        )
+        cli.cmd_interview_placement(
+            Namespace(topic="algorithms", action="start"),
+            input_func=lambda _prompt: "/stop",
+            output_func=lambda _line: None,
+        )
+        original_checkpoint = cli._interview_edit_checkpoint
+
+        def fail_after_abandonment(stage: str) -> None:
+            if stage == "after_activity_abandoned":
+                raise RuntimeError("simulated edit interruption")
+
+        cli._interview_edit_checkpoint = fail_after_abandonment
+        try:
+            with self.assertRaisesRegex(RuntimeError, "simulated edit interruption"):
+                cli.cmd_interview_edit(
+                    Namespace(topic="algorithms", field="weekly_minutes", value="60"),
+                    output_func=lambda _line: None,
+                )
+        finally:
+            cli._interview_edit_checkpoint = original_checkpoint
+
+        interrupted = cli.interview_prep.load_profile(
+            cli.interview_profile_path("algorithms")
+        )
+        self.assertEqual(interrupted["placement"]["status"], "in_progress")
+        self.assertEqual(
+            cli._current_interview_activity("algorithms")["status"], "abandoned"
+        )
+
+        cli.cmd_interview_profile(
+            Namespace(topic="algorithms"),
+            output_func=lambda _line: None,
+        )
+        recovered = cli.interview_prep.load_profile(
+            cli.interview_profile_path("algorithms")
+        )
+        self.assertEqual(recovered["profile"]["weekly_minutes"], 60)
+        self.assertEqual(recovered["placement"]["status"], "not_started")
+
+    def test_stale_edit_journal_cannot_mutate_recreated_topic_generation(self) -> None:
+        call_silent(
+            cli.cmd_new,
+            Namespace(
+                topic="Algorithms",
+                goal="Generation A",
+                interview_prep=True,
+                mastery_profile=None,
+                template=None,
+            ),
+        )
+        generation_a = cli.current_topic_generation("algorithms")
+        cli.cmd_interview_placement(
+            Namespace(topic="algorithms", action="start"),
+            input_func=lambda _prompt: "/stop",
+            output_func=lambda _line: None,
+        )
+        abandoned = threading.Event()
+        release = threading.Event()
+        errors: list[BaseException] = []
+        original_checkpoint = cli._interview_edit_checkpoint
+
+        def pause_after_abandonment(stage: str) -> None:
+            if stage == "after_activity_abandoned":
+                abandoned.set()
+                release.wait(timeout=5)
+
+        cli._interview_edit_checkpoint = pause_after_abandonment
+
+        def edit_generation_a() -> None:
+            try:
+                cli.cmd_interview_edit(
+                    Namespace(topic="algorithms", field="weekly_minutes", value="60"),
+                    output_func=lambda _line: None,
+                )
+            except BaseException as exc:
+                errors.append(exc)
+
+        edit_thread = threading.Thread(target=edit_generation_a)
+        try:
+            edit_thread.start()
+            self.assertTrue(abandoned.wait(timeout=5))
+            cli.delete_topic_files("algorithms")
+            call_silent(
+                cli.cmd_new,
+                Namespace(
+                    topic="Algorithms",
+                    goal="Generation B",
+                    interview_prep=True,
+                    mastery_profile=None,
+                    template=None,
+                ),
+            )
+            generation_b = cli.current_topic_generation("algorithms")
+            self.assertNotEqual(generation_b, generation_a)
+            release.set()
+            edit_thread.join(timeout=5)
+        finally:
+            cli._interview_edit_checkpoint = original_checkpoint
+            release.set()
+
+        self.assertFalse(edit_thread.is_alive())
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], cli.OpenLearnError)
+        self.assertIn("generation changed", str(errors[0]))
+        recreated = cli.interview_prep.load_profile(
+            cli.interview_profile_path("algorithms")
+        )
+        self.assertEqual(recreated["profile"]["weekly_minutes"], 120)
+        self.assertEqual(recreated["profile_revision"], 1)
+        self.assertFalse(cli.interview_edit_journal_path("algorithms").exists())
+
+    def test_non_python_implementation_is_explicitly_uncertain(self) -> None:
+        call_silent(
+            cli.cmd_new,
+            Namespace(
+                topic="Algorithms",
+                goal="Practice algorithms",
+                interview_prep=True,
+                mastery_profile=None,
+                template=None,
+            ),
+        )
+        cli.cmd_interview_edit(
+            Namespace(topic="algorithms", field="coding_language", value="javascript"),
+            output_func=lambda _line: None,
+        )
+        responses = iter(
+            [
+                "I write JavaScript weekly.",
+                "Can width exceed the input length?",
+                "Use a set over each window.",
+                "function firstUniqueWindow(text, width) { return -1; }",
+                "Empty, duplicate, and no-match edge cases.",
+                "O(n * width) time and O(width) space.",
+                "Track last-seen positions for a streaming variant.",
+            ]
+        )
+        output: list[str] = []
+
+        cli.cmd_interview_placement(
+            Namespace(topic="algorithms", action="start"),
+            input_func=lambda _prompt: next(responses),
+            output_func=output.append,
+        )
+
+        profile = cli.interview_prep.load_profile(
+            cli.interview_profile_path("algorithms")
+        )
+        observation = profile["placement"]["observations"]["implementation"]
+        coding_gap = profile["placement"]["result"]["gaps"]["coding_fluency"]
+        activity = cli._current_interview_activity("algorithms")
+        self.assertEqual(observation["status"], "uncertain")
+        self.assertIn("unsupported_language_for_rubric", observation["signals"])
+        self.assertEqual(coding_gap["status"], "uncertain")
+        self.assertEqual(activity["domain_payload"]["coding"]["language"], "python")
+        self.assertTrue(
+            any("validates implementation structure only for Python" in line for line in output)
+        )
+
+    def test_interview_baseline_is_distinct_and_abandons_activity(self) -> None:
+        call_silent(
+            cli.cmd_new,
+            Namespace(
+                topic="Algorithms",
+                goal="Practice algorithms",
+                interview_prep=True,
+                mastery_profile=None,
+                template=None,
+            ),
+        )
+        cli.cmd_interview_placement(
+            Namespace(topic="algorithms", action="start"),
+            input_func=lambda _prompt: "/baseline",
+            output_func=lambda _line: None,
+        )
+
+        profile = cli.interview_prep.load_profile(
+            cli.interview_profile_path("algorithms")
+        )
+        activity = cli._current_interview_activity("algorithms")
+        self.assertEqual(
+            profile["placement"]["result"]["starting_level"],
+            "learner-selected-baseline",
+        )
+        self.assertEqual(activity["status"], "abandoned")
+        self.assertEqual(
+            activity["status_reason"], "learner_selected_less_demanding_baseline"
+        )
+
+    def test_interview_profile_write_cannot_recreate_after_concurrent_delete(self) -> None:
+        call_silent(
+            cli.cmd_new,
+            Namespace(
+                topic="Algorithms",
+                goal="Practice algorithms",
+                interview_prep=True,
+                mastery_profile=None,
+                template=None,
+            ),
+        )
+        entered = threading.Event()
+        release = threading.Event()
+        errors: list[BaseException] = []
+        original_checkpoint = cli.interview_prep._write_checkpoint
+
+        def block_before_replace(stage: str, _path: Path) -> None:
+            if stage == "before_replace":
+                entered.set()
+                release.wait(timeout=5)
+
+        cli.interview_prep._write_checkpoint = block_before_replace
+
+        def run_placement() -> None:
+            try:
+                cli.cmd_interview_placement(
+                    Namespace(topic="algorithms", action="start"),
+                    input_func=lambda _prompt: "/stop",
+                    output_func=lambda _line: None,
+                )
+            except BaseException as exc:
+                errors.append(exc)
+
+        placement_thread = threading.Thread(target=run_placement)
+        deletion_thread = threading.Thread(
+            target=lambda: cli.delete_topic_files("algorithms")
+        )
+        try:
+            placement_thread.start()
+            self.assertTrue(entered.wait(timeout=5))
+            deletion_thread.start()
+            release.set()
+            placement_thread.join(timeout=5)
+            deletion_thread.join(timeout=5)
+        finally:
+            cli.interview_prep._write_checkpoint = original_checkpoint
+            release.set()
+
+        self.assertFalse(placement_thread.is_alive())
+        self.assertFalse(deletion_thread.is_alive())
+        self.assertFalse(cli.topic_path("algorithms").exists())
+        self.assertFalse(cli.interview_profile_path("algorithms").exists())
+        self.assertTrue(
+            not errors
+            or all(isinstance(error, cli.OpenLearnError) for error in errors)
+        )
+
+    def test_malformed_interview_profile_surfaces_clear_cli_error(self) -> None:
+        call_silent(
+            cli.cmd_new,
+            Namespace(
+                topic="Algorithms",
+                goal="Practice algorithms",
+                interview_prep=True,
+                mastery_profile=None,
+                template=None,
+            ),
+        )
+        cli.interview_profile_path("algorithms").write_text(
+            '{"schema_version": 1, "profile": {}, "placement": "broken"}',
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(
+            cli.OpenLearnError, "interview-prep profile has an unsupported format"
+        ):
+            cli.cmd_interview_profile(
+                Namespace(topic="algorithms"), output_func=lambda _line: None
+            )
 
     def test_delayed_retrieval_metric_counts_spaced_review_and_quiz_events(self) -> None:
         path = Path(self.home.name) / "events.jsonl"
@@ -3072,6 +3615,50 @@ class InteractiveTests(unittest.TestCase):
         metadata = dict(metadata)
         metadata.update(updates)
         path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
+
+    def _paused_interview_with_tutor_drill(
+        self,
+    ) -> tuple[cli.Topic, cli.CodingDrillAction]:
+        call_silent(
+            cli.cmd_new,
+            Namespace(
+                topic="Algorithms",
+                goal="Practice algorithms",
+                interview_prep=True,
+                mastery_profile=None,
+                template=None,
+            ),
+        )
+        cli.cmd_interview_placement(
+            Namespace(topic="algorithms", action="start"),
+            input_func=lambda _prompt: "/stop",
+            output_func=lambda _line: None,
+        )
+        action = cli.parse_tutor_coding_drill_action(
+            {
+                "action": "start_coding_drill",
+                "objective": "Implement one bounded scan.",
+                "title": "Bounded Scan",
+                "language": "python",
+                "difficulty": 1,
+                "scaffolding_level": 1,
+                "purpose": "practice",
+                "source": {"kind": "generated", "name": "openLearn original"},
+                "plan_prompt": "State the scan invariant.",
+                "todo_steps": [],
+                "worked_example": None,
+                "hints": ["Track the current window."],
+                "reflection_prompt": "Why is the scan bounded?",
+                "transfer_prompt": "",
+                "drill": {
+                    "title": "Bounded Scan",
+                    "description": "Return the first matching position.",
+                    "function_stub": "def bounded_scan(values):\n    pass",
+                    "test_cases": [{"input": [[1, 2]], "expected": 0}],
+                },
+            }
+        )
+        return cli.read_topic("algorithms"), action
 
     def test_no_args_defaults_to_menu(self) -> None:
         parser = cli.build_parser()
@@ -9326,6 +9913,78 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(state["active_activity"]["status"], "cancelled")
         self.assertFalse((cli.topics_dir() / "drills" / "python").exists())
         self.assertIn("Drill cancelled", "\n".join(output))
+
+    def test_declined_tutor_drill_preserves_paused_interview_placement(self) -> None:
+        topic, action = self._paused_interview_with_tutor_drill()
+        state_before = cli.load_state(topic.slug)
+        profile_before = cli.interview_prep.load_profile(
+            cli.interview_profile_path(topic.slug)
+        )
+        events_before = cli.load_event_log(cli.topic_events_path(topic.slug))
+        output: list[str] = []
+
+        with mock.patch.object(
+            cli, "open_drill_in_editor", side_effect=AssertionError("editor launched")
+        ):
+            result = cli.orchestrate_tutor_coding_drill(
+                topic,
+                action,
+                input_func=lambda _prompt: "no",
+                output_func=output.append,
+            )
+
+        self.assertEqual(result, state_before["active_activity"])
+        self.assertEqual(cli.load_state(topic.slug), state_before)
+        self.assertEqual(
+            cli.interview_prep.load_profile(cli.interview_profile_path(topic.slug)),
+            profile_before,
+        )
+        self.assertEqual(
+            cli.load_event_log(cli.topic_events_path(topic.slug)),
+            events_before,
+        )
+        self.assertIn("active activity is unchanged", "\n".join(output))
+        self.assertFalse((cli.topics_dir() / "drills" / topic.slug).exists())
+
+    def test_accepted_tutor_drill_requires_paused_placement_resolution(self) -> None:
+        topic, action = self._paused_interview_with_tutor_drill()
+        state_before = cli.load_state(topic.slug)
+        profile_before = cli.interview_prep.load_profile(
+            cli.interview_profile_path(topic.slug)
+        )
+        events_before = cli.load_event_log(cli.topic_events_path(topic.slug))
+        output: list[str] = []
+
+        with mock.patch.object(
+            cli, "open_drill_in_editor", side_effect=AssertionError("editor launched")
+        ):
+            result = cli.orchestrate_tutor_coding_drill(
+                topic,
+                action,
+                input_func=lambda _prompt: "yes",
+                output_func=output.append,
+            )
+
+        text = "\n".join(output)
+        self.assertEqual(result, state_before["active_activity"])
+        self.assertEqual(cli.load_state(topic.slug), state_before)
+        self.assertEqual(
+            cli.interview_prep.load_profile(cli.interview_profile_path(topic.slug)),
+            profile_before,
+        )
+        self.assertEqual(
+            cli.load_event_log(cli.topic_events_path(topic.slug)),
+            events_before,
+        )
+        self.assertIn(
+            "openlearn interview placement algorithms resume",
+            text,
+        )
+        self.assertIn(
+            "openlearn interview placement algorithms discard",
+            text,
+        )
+        self.assertFalse((cli.topics_dir() / "drills" / topic.slug).exists())
 
     def test_malformed_tutor_drill_action_preserves_visible_turn_without_side_effects(
         self,

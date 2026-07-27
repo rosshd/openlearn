@@ -259,8 +259,12 @@ def _optional_text(value: object, label: str) -> str:
 
 class CodingActivityAdapter:
     domain = "coding"
-    activity_kinds = {"python_drill"}
-    evidence_kinds = {"artifact_snapshot", "pytest_result"}
+    activity_kinds = {"python_drill", "interview_problem"}
+    evidence_kinds = {
+        "artifact_snapshot",
+        "interview_observation",
+        "pytest_result",
+    }
     tool_actions = {
         "create_drill_workspace",
         "open_configured_editor",
@@ -275,8 +279,34 @@ class CodingActivityAdapter:
         if not isinstance(title, str) or not title.strip() or len(title.strip()) > 200:
             raise ActivityContractError("coding activity title must be non-empty bounded text")
         language = payload.get("language")
-        if language != "python":
+        if not isinstance(language, str) or not language.strip():
+            raise ActivityContractError("coding activity language must be non-empty text")
+        if kind == "python_drill" and language != "python":
             raise ActivityContractError("python_drill requires language=python")
+        if kind == "interview_problem":
+            if language.strip().lower() != "python":
+                raise ActivityContractError(
+                    "interview_problem rubric currently requires language=python"
+                )
+            problem_id = payload.get("problem_id")
+            if (
+                not isinstance(problem_id, str)
+                or not problem_id.strip()
+                or len(problem_id.strip()) > 200
+            ):
+                raise ActivityContractError(
+                    "interview_problem requires a bounded problem_id"
+                )
+            if payload.get("tool_requests", []) != []:
+                raise ActivityContractError(
+                    "interview_problem does not permit tool requests"
+                )
+            return {
+                "title": title.strip(),
+                "language": language.strip(),
+                "problem_id": problem_id.strip(),
+                "tool_requests": [],
+            }
         raw_tools = payload.get("tool_requests", [])
         if not isinstance(raw_tools, list) or len(raw_tools) > 3:
             raise ActivityContractError("coding tool_requests must be a bounded list")
@@ -330,6 +360,29 @@ class CodingActivityAdapter:
     def validate_evidence(self, kind: str, payload: Mapping[str, object]) -> dict[str, object]:
         if kind not in self.evidence_kinds:
             raise ActivityContractError(f"unknown coding evidence kind: {kind}")
+        if kind == "interview_observation":
+            stage = payload.get("stage")
+            allowed_stages = {
+                "calibration",
+                "clarification",
+                "plan",
+                "implementation",
+                "tests",
+                "complexity",
+                "follow_up",
+                "baseline",
+            }
+            if stage not in allowed_stages:
+                raise ActivityContractError("invalid interview observation stage")
+            response = payload.get("response")
+            if not isinstance(response, str) or not response.strip():
+                raise ActivityContractError(
+                    "interview observation response must be non-empty"
+                )
+            normalized = response.strip()
+            if len(normalized) > 40_000:
+                raise ActivityContractError("interview observation response is too long")
+            return {"stage": stage, "response": normalized}
         if kind == "artifact_snapshot":
             if set(payload) != {"artifact_excerpt", "attempt_number"}:
                 raise ActivityContractError("artifact snapshot evidence fields are malformed")

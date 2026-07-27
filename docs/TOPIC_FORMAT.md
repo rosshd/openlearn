@@ -50,6 +50,8 @@ Review it before sharing because the Markdown body and metadata can contain priv
 
 The adjacent files `<slug>.state.json` and `<slug>.events.jsonl` contain machine-managed learner state and learning history.
 They are not required to open the topic and should usually remain private.
+An opt-in `<slug>.interview.json` contains the learner's editable interview-prep profile, placement status, evidence references, and provisional recommendations.
+It is separate from the shareable Markdown topic and is never created for normal topics.
 Imported context under `learning-topics/<slug>/context/` and generated drills under `learning-topics/drills/<slug>/` are also separate from the shareable topic file.
 
 After copying a shared file into `learning-topics/`, run `openlearn repair <slug>` if it came from an older openLearn version or contains only minimal metadata.
