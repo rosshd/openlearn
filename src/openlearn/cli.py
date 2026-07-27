@@ -7895,10 +7895,12 @@ def register_mastery_drill_reflection(
     if activity.get("purpose") != "mastery_check":
         return
     question = extract_pending_question_text(answer)
+    used_fallback = False
     if not question or explicit_check_section_count(answer) != 1:
         fallback = fallback_question.strip()
         question = f"**Check:**\n{fallback}" if fallback else ""
         if question:
+            used_fallback = True
             output_func(question)
             append_session(
                 topic,
@@ -7925,7 +7927,7 @@ def register_mastery_drill_reflection(
     save_pending_question(
         topic,
         answer,
-        _LAST_RESPONSE_ANSWER_KEY,
+        "" if used_fallback else _LAST_RESPONSE_ANSWER_KEY,
         question_text=question,
         focus_override=focus_value,
         concept_id_override=concept_id,

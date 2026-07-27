@@ -10508,10 +10508,11 @@ class InteractiveTests(unittest.TestCase):
         self,
     ) -> None:
         responses = {
-            "missing": "**Feedback:**\nTests passed.",
+            "missing": "**Feedback:**\nTests passed.\n<!-- answer: B -->",
             "multiple": (
                 "**Check:**\nFirst malformed check.\n"
-                "**Check:**\nSecond malformed check."
+                "**Check:**\nSecond malformed check.\n"
+                "<!-- answer: B -->"
             ),
         }
         for suffix, response in responses.items():
@@ -10577,6 +10578,8 @@ class InteractiveTests(unittest.TestCase):
                     visible_check,
                 )
                 self.assertTrue(pending["concept_id"])
+                self.assertEqual(pending["kind"], "free_response")
+                self.assertNotIn("answer_key", pending)
                 self.assertEqual(output.count(visible_check), 1)
                 self.assertEqual(cli.read_topic(slug).body.count(visible_check), 1)
 
@@ -10734,10 +10737,11 @@ class InteractiveTests(unittest.TestCase):
         self,
     ) -> None:
         responses = {
-            "missing": "**Feedback:**\nArtifact saved.",
+            "missing": "**Feedback:**\nArtifact saved.\n<!-- answer: C -->",
             "multiple": (
                 "**Check:**\nFirst malformed check.\n"
-                "**Check:**\nSecond malformed check."
+                "**Check:**\nSecond malformed check.\n"
+                "<!-- answer: C -->"
             ),
         }
         for suffix, response in responses.items():
@@ -10806,6 +10810,8 @@ class InteractiveTests(unittest.TestCase):
                     visible_check,
                 )
                 self.assertTrue(pending["concept_id"])
+                self.assertEqual(pending["kind"], "free_response")
+                self.assertNotIn("answer_key", pending)
                 self.assertEqual(output.count(visible_check), 1)
                 self.assertEqual(cli.read_topic(slug).body.count(visible_check), 1)
 
