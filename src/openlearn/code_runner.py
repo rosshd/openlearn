@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import queue
 import shutil
 import signal
 import subprocess
@@ -10,7 +11,7 @@ import sys
 import tempfile
 import threading
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 from uuid import uuid4
@@ -23,6 +24,10 @@ DEFAULT_RUNNER_IMAGE = (
 SUPPORTED_RUNTIMES = ("docker", "podman")
 OCI_CREATE_TIMEOUT_SECONDS = 15
 PROTOCOL_PREFIX = "OPENLEARN_CALL_RESULT_V1 "
+PROTOCOL_VERSION = 1
+PROTOCOL_MAX_FRAME_BYTES = 64 * 1024
+VALUE_MAX_DEPTH = 64
+VALUE_MAX_ITEMS = 4096
 
 
 @dataclass(frozen=True)
@@ -89,6 +94,11 @@ class _CallResult:
     stderr: str
     exit_code: int | None
     limit_reason: str | None
+
+
+@dataclass(frozen=True)
+class _UnsupportedValue:
+    type_name: str
 
 
 def diagnose_runtime(
@@ -255,150 +265,27 @@ def run_python_tests(
             worker = worker_dir / "call_worker.py"
             worker.write_text(_python_worker(function_name), encoding="utf-8")
             worker.chmod(0o644)
-            return _supervise_test_cases(
-                copied_solution,
-                worker_dir,
-                test_cases,
-                policy,
-                started=started,
-                reduced_isolation=reduced_isolation,
-                diagnostic=diagnostic,
-                image=image,
-            )
-
-
-def _supervise_test_cases(
-    solution: Path,
-    worker_dir: Path,
-    test_cases: list[dict[str, object]],
-    policy: ResourcePolicy,
-    *,
-    started: float,
-    reduced_isolation: bool,
-    diagnostic: RuntimeDiagnostic | None,
-    image: str,
-) -> RunnerResult:
-    stdout_parts: list[str] = []
-    stderr_parts: list[str] = []
-    last_exit_code: int | None = 0
-    failed = False
-    remaining_output = policy.output_bytes
-    deadline = started + policy.wall_seconds
-    isolation = "reduced" if reduced_isolation else "oci"
-    runtime = None if diagnostic is None else diagnostic.runtime
-    for index, case in enumerate(test_cases, 1):
-        remaining_wall = deadline - time.monotonic()
-        if remaining_wall <= 0:
-            return _result(
-                "timeout",
-                "\n".join(stdout_parts),
-                "\n".join(stderr_parts),
-                last_exit_code,
-                started,
-                "wall_time",
-                isolation,
-                runtime,
-            )
-        request_id = uuid4().hex
-        request = (
-            json.dumps(
-                {
-                    "version": 1,
-                    "request_id": request_id,
-                    "input": case["input"],
-                },
-                ensure_ascii=True,
-                allow_nan=False,
-                separators=(",", ":"),
-            )
-            + "\n"
-        ).encode()
-        if remaining_output <= 0:
-            return _result(
-                "output_limit",
-                "\n".join(stdout_parts),
-                "\n".join(stderr_parts),
-                last_exit_code,
-                started,
-                "captured_output",
-                isolation,
-                runtime,
-            )
-        call_policy = replace(
-            policy,
-            wall_seconds=remaining_wall,
-            output_bytes=remaining_output,
-        )
-        if reduced_isolation:
-            call = _run_reduced_call(
-                solution,
-                worker_dir / "call_worker.py",
-                call_policy,
-                request,
-                request_id,
-            )
-        else:
+            if reduced_isolation:
+                return _run_reduced(
+                    copied_solution,
+                    worker,
+                    test_cases,
+                    policy,
+                    started,
+                )
             assert diagnostic is not None
             assert diagnostic.executable is not None
             assert diagnostic.runtime is not None
-            call = _run_oci(
+            return _run_oci(
                 diagnostic.executable,
                 diagnostic.runtime,
                 image,
-                solution.parent,
+                attempt,
                 worker_dir,
-                call_policy,
-                request,
-                request_id,
-            )
-        last_exit_code = call.exit_code
-        remaining_output -= len((call.stdout + call.stderr).encode())
-        if call.stderr.strip():
-            stderr_parts.append(call.stderr.strip())
-        if call.kind != "value":
-            kind = call.kind
-            if kind == "protocol_error":
-                kind = "runtime_error"
-            return _result(
-                kind,
-                "\n".join(stdout_parts),
-                "\n".join(stderr_parts),
-                call.exit_code,
+                test_cases,
+                policy,
                 started,
-                call.limit_reason,
-                isolation,
-                runtime,
             )
-        if call.value == case["expected"]:
-            stdout_parts.append(f"PASSED test_case_{index}")
-        else:
-            failed = True
-            stderr_parts.append(
-                f"FAILED test_case_{index}: expected {case['expected']!r}, "
-                f"got {call.value!r}"
-            )
-    if failed:
-        return _result(
-            "test_failure",
-            "\n".join(stdout_parts),
-            "\n".join(stderr_parts),
-            10,
-            started,
-            None,
-            isolation,
-            runtime,
-        )
-    stdout_parts.append(f"{len(test_cases)} passed")
-    return _result(
-        "success",
-        "\n".join(stdout_parts),
-        "",
-        0,
-        started,
-        None,
-        isolation,
-        runtime,
-    )
 
 
 def build_oci_create_command(
@@ -470,16 +357,17 @@ def _run_oci(
     image: str,
     attempt: Path,
     worker: Path,
+    test_cases: list[dict[str, object]],
     policy: ResourcePolicy,
-    request: bytes,
-    request_id: str,
-) -> _CallResult:
+    started: float,
+) -> RunnerResult:
     name = f"openlearn-{uuid4().hex}"
     command = build_oci_create_command(
         executable, runtime, image, attempt, worker, name, policy
     )
     removed = {"value": False}
     cleanup_detail = {"value": ""}
+    cleanup_failed = {"value": False}
 
     def remove_container() -> bool:
         if removed["value"]:
@@ -494,6 +382,7 @@ def _run_oci(
             )
         except (OSError, subprocess.SubprocessError) as exc:
             cleanup_detail["value"] = str(exc)
+            cleanup_failed["value"] = True
             return False
         detail = (result.stderr or result.stdout or "").strip()
         missing_container = any(
@@ -508,35 +397,55 @@ def _run_oci(
             removed["value"] = True
             return True
         cleanup_detail["value"] = detail[:500] or f"exit {result.returncode}"
+        cleanup_failed["value"] = True
         return False
 
-    call_started = time.monotonic()
+    remaining_before_create = started + policy.wall_seconds - time.monotonic()
+    if remaining_before_create <= 0:
+        return _result(
+            "timeout",
+            "",
+            "",
+            None,
+            started,
+            "wall_time",
+            "oci",
+            runtime,
+        )
     try:
         created = subprocess.run(
             command,
             capture_output=True,
             text=True,
             check=False,
-            timeout=min(OCI_CREATE_TIMEOUT_SECONDS, policy.wall_seconds),
+            timeout=min(OCI_CREATE_TIMEOUT_SECONDS, remaining_before_create),
         )
     except KeyboardInterrupt:
         cleanup_ok = remove_container()
-        return _call_result(
+        return _result(
             "cancelled" if cleanup_ok else "runner_error",
-            stderr=cleanup_detail["value"],
-            exit_code=None,
-            limit_reason="cancelled" if cleanup_ok else "container_cleanup",
+            "",
+            cleanup_detail["value"],
+            None,
+            started,
+            "cancelled" if cleanup_ok else "container_cleanup",
+            "oci",
+            runtime,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         cleanup_ok = remove_container()
         detail = str(exc)
         if not cleanup_ok:
             detail = f"{detail}\nCould not confirm container removal: {cleanup_detail['value']}"
-        return _call_result(
+        return _result(
             "runner_error",
-            stderr=detail,
-            exit_code=None,
-            limit_reason="container_create" if cleanup_ok else "container_cleanup",
+            "",
+            detail,
+            None,
+            started,
+            "container_create" if cleanup_ok else "container_cleanup",
+            "oci",
+            runtime,
         )
     if created.returncode != 0:
         cleanup_ok = remove_container()
@@ -550,24 +459,30 @@ def _run_oci(
                 )
                 if part
             )
-        return _call_result(
+        return _result(
             "runner_error",
-            stdout=created.stdout,
-            stderr=stderr,
-            exit_code=created.returncode,
-            limit_reason="container_create" if cleanup_ok else "container_cleanup",
+            created.stdout,
+            stderr,
+            created.returncode,
+            started,
+            "container_create" if cleanup_ok else "container_cleanup",
+            "oci",
+            runtime,
         )
 
-    remaining_wall = policy.wall_seconds - (time.monotonic() - call_started)
+    remaining_wall = started + policy.wall_seconds - time.monotonic()
     if remaining_wall <= 0:
         cleanup_ok = remove_container()
-        return _call_result(
+        return _result(
             "timeout" if cleanup_ok else "runner_error",
-            stderr=cleanup_detail["value"],
-            exit_code=None,
-            limit_reason="wall_time" if cleanup_ok else "container_cleanup",
+            "",
+            cleanup_detail["value"],
+            None,
+            started,
+            "wall_time" if cleanup_ok else "container_cleanup",
+            "oci",
+            runtime,
         )
-    execution_policy = replace(policy, wall_seconds=remaining_wall)
     try:
         try:
             process = subprocess.Popen(
@@ -576,20 +491,26 @@ def _run_oci(
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
-            outcome, stdout, stderr = _capture_bounded(
+            session_result = _supervise_process(
                 process,
-                execution_policy,
+                test_cases,
+                policy,
+                started=started,
+                isolation="oci",
+                runtime=runtime,
                 terminate=remove_container,
-                stdin_data=request,
             )
-            exit_code = process.returncode
         except KeyboardInterrupt:
             cleanup_ok = remove_container()
-            return _call_result(
+            return _result(
                 "cancelled" if cleanup_ok else "runner_error",
-                stderr=cleanup_detail["value"],
-                exit_code=None,
-                limit_reason="cancelled" if cleanup_ok else "container_cleanup",
+                "",
+                cleanup_detail["value"],
+                None,
+                started,
+                "cancelled" if cleanup_ok else "container_cleanup",
+                "oci",
+                runtime,
             )
         except (OSError, subprocess.SubprocessError) as exc:
             cleanup_ok = remove_container()
@@ -599,47 +520,46 @@ def _run_oci(
                     f"{detail}\nCould not confirm container removal: "
                     f"{cleanup_detail['value']}"
                 )
-            return _call_result(
+            return _result(
                 "runner_error",
-                stderr=detail,
-                exit_code=None,
-                limit_reason="container_start" if cleanup_ok else "container_cleanup",
+                "",
+                detail,
+                None,
+                started,
+                "container_start" if cleanup_ok else "container_cleanup",
+                "oci",
+                runtime,
             )
     finally:
         cleanup_ok = remove_container()
-    if not cleanup_ok:
-        stderr = "\n".join(
-            part
-            for part in (
-                stderr,
-                f"Could not confirm container removal: {cleanup_detail['value']}",
-            )
-            if part
-        )
-        return _call_result(
+    if not cleanup_ok or cleanup_failed["value"]:
+        return _result(
             "runner_error",
-            stdout=stdout,
-            stderr=stderr,
-            exit_code=exit_code,
-            limit_reason="container_cleanup",
+            session_result.stdout,
+            "\n".join(
+                part
+                for part in (
+                    session_result.stderr,
+                    f"Could not confirm container removal: {cleanup_detail['value']}",
+                )
+                if part
+            ),
+            session_result.exit_code,
+            started,
+            "container_cleanup",
+            "oci",
+            runtime,
         )
-    return _interpret_call(
-        outcome,
-        stdout,
-        stderr,
-        exit_code,
-        request_id=request_id,
-        oci=True,
-    )
+    return session_result
 
 
-def _run_reduced_call(
+def _run_reduced(
     solution: Path,
     worker: Path,
+    test_cases: list[dict[str, object]],
     policy: ResourcePolicy,
-    request: bytes,
-    request_id: str,
-) -> _CallResult:
+    started: float,
+) -> RunnerResult:
     popen_kwargs: dict[str, object] = {
         "cwd": str(solution.parent),
         "env": {
@@ -666,7 +586,10 @@ def _run_reduced_call(
         if process.poll() is not None:
             return
         if os.name == "posix":
-            os.killpg(process.pid, signal.SIGKILL)
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except (PermissionError, ProcessLookupError):
+                pass
         elif os.name == "nt":
             subprocess.run(
                 ["taskkill", "/PID", str(process.pid), "/T", "/F"],
@@ -676,236 +599,518 @@ def _run_reduced_call(
         else:
             process.kill()
 
-    outcome, stdout, stderr = _capture_bounded(
+    return _supervise_process(
         process,
+        test_cases,
         policy,
+        started=started,
+        isolation="reduced",
+        runtime=None,
         terminate=terminate,
-        stdin_data=request,
-    )
-    return _interpret_call(
-        outcome,
-        stdout,
-        stderr,
-        process.returncode,
-        request_id=request_id,
-        oci=False,
     )
 
 
-def _capture_bounded(
+def _supervise_process(
     process: subprocess.Popen[bytes],
+    test_cases: list[dict[str, object]],
     policy: ResourcePolicy,
     *,
+    started: float,
+    isolation: Literal["oci", "reduced"],
+    runtime: str | None,
     terminate,
-    stdin_data: bytes | None = None,
-) -> tuple[str | None, str, str]:
-    chunks: dict[str, list[bytes]] = {"stdout": [], "stderr": []}
-    retained = {"value": 0}
-    observed = {"value": 0}
-    lock = threading.Lock()
-    overflow = threading.Event()
+) -> RunnerResult:
+    assert process.stdin is not None
+    assert process.stdout is not None
+    assert process.stderr is not None
+    events: queue.Queue[tuple[str, bytes | None]] = queue.Queue()
+    stdout_buffer = bytearray()
+    stderr_buffer = bytearray()
+    raw_bytes = 0
+    derived_bytes = 0
+    stdout_parts: list[str] = []
+    stderr_parts: list[str] = []
+    failed = False
+    deadline = started + policy.wall_seconds
 
     def drain(label: str, stream) -> None:
+        read = getattr(stream, "read1", stream.read)
         while True:
-            chunk = stream.read(16_384)
+            chunk = read(4096)
             if not chunk:
+                events.put((label, None))
                 return
-            with lock:
-                observed["value"] += len(chunk)
-                remaining = max(0, policy.output_bytes - retained["value"])
-                if remaining:
-                    kept = chunk[:remaining]
-                    chunks[label].append(kept)
-                    retained["value"] += len(kept)
-                if observed["value"] > policy.output_bytes:
-                    overflow.set()
+            events.put((label, chunk))
 
-    threads = [
+    readers = [
         threading.Thread(target=drain, args=("stdout", process.stdout), daemon=True),
         threading.Thread(target=drain, args=("stderr", process.stderr), daemon=True),
     ]
-    for thread in threads:
-        thread.start()
-    if stdin_data is not None and process.stdin is not None:
+    for reader in readers:
+        reader.start()
+
+    def collect(timeout: float) -> bool:
+        nonlocal raw_bytes
         try:
-            process.stdin.write(stdin_data)
-            process.stdin.close()
-        except BrokenPipeError:
-            pass
-    deadline = time.monotonic() + policy.wall_seconds
-    outcome = None
-    try:
-        while process.poll() is None:
-            if overflow.is_set():
-                outcome = "output_limit"
-                terminate()
-                break
-            if time.monotonic() >= deadline:
-                outcome = "timeout"
-                terminate()
-                break
-            time.sleep(0.02)
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            outcome = "termination_failure"
-            process.kill()
-            process.wait(timeout=5)
-    except KeyboardInterrupt:
-        outcome = "cancelled"
+            label, chunk = events.get(timeout=timeout)
+        except queue.Empty:
+            return False
+        if chunk is None:
+            return False
+        available = max(0, policy.output_bytes - raw_bytes - derived_bytes)
+        if label == "stdout":
+            stdout_buffer.extend(chunk)
+        else:
+            stderr_buffer.extend(chunk[:available])
+        raw_bytes += len(chunk)
+        return raw_bytes + derived_bytes > policy.output_bytes
+
+    def stop(
+        kind: str,
+        reason: str | None,
+        *,
+        exit_code: int | None = None,
+    ) -> RunnerResult:
         terminate()
-        process.wait(timeout=5)
-    finally:
-        for thread in threads:
-            thread.join(timeout=2)
-        if process.stdout is not None:
-            process.stdout.close()
-        if process.stderr is not None:
-            process.stderr.close()
-    if overflow.is_set() and outcome is None:
-        outcome = "output_limit"
-    suffix = b"\n[openLearn output truncated at configured limit]\n" if overflow.is_set() else b""
-    stdout = b"".join(chunks["stdout"])
-    stderr = b"".join(chunks["stderr"]) + suffix
-    return (
-        outcome,
-        stdout.decode("utf-8", errors="replace"),
-        stderr.decode("utf-8", errors="replace"),
-    )
+        try:
+            process.wait(timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            try:
+                process.kill()
+            except OSError:
+                pass
+        for reader in readers:
+            reader.join(timeout=1)
+        for stream in (process.stdin, process.stdout, process.stderr):
+            try:
+                stream.close()
+            except OSError:
+                pass
+        raw_stderr = stderr_buffer.decode("utf-8", errors="replace").strip()
+        combined_stderr = "\n".join(
+            part for part in (raw_stderr, *stderr_parts) if part
+        )
+        reported_exit_code = exit_code
+        if reported_exit_code is None:
+            reported_exit_code = {
+                "compile_error": 20,
+                "runtime_error": 21,
+                "test_failure": 10,
+            }.get(kind, process.returncode)
+        return _result(
+            kind,
+            "\n".join(stdout_parts),
+            combined_stderr,
+            reported_exit_code,
+            started,
+            reason,
+            isolation,
+            runtime,
+        )
+
+    def charge(text: str, destination: list[str]) -> bool:
+        nonlocal derived_bytes
+        encoded_size = len(text.encode("utf-8"))
+        if raw_bytes + derived_bytes + encoded_size > policy.output_bytes:
+            return False
+        derived_bytes += encoded_size
+        destination.append(text)
+        return True
+
+    def write_frame(payload: dict[str, object]) -> tuple[str | None, bytes | None]:
+        try:
+            frame = (
+                json.dumps(
+                    payload,
+                    ensure_ascii=True,
+                    allow_nan=False,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            ).encode()
+        except (TypeError, ValueError, RecursionError):
+            return "invalid_worker_protocol", None
+        if len(frame) > PROTOCOL_MAX_FRAME_BYTES:
+            return "invalid_worker_protocol", None
+        outcome: queue.Queue[BaseException | None] = queue.Queue(maxsize=1)
+
+        def write() -> None:
+            try:
+                remaining = memoryview(frame)
+                while remaining:
+                    written = process.stdin.write(remaining)
+                    if not isinstance(written, int) or written <= 0:
+                        raise BrokenPipeError("worker stdin accepted no data")
+                    remaining = remaining[written:]
+                process.stdin.flush()
+            except BaseException as exc:
+                outcome.put(exc)
+            else:
+                outcome.put(None)
+
+        threading.Thread(target=write, daemon=True).start()
+        while outcome.empty():
+            if raw_bytes + derived_bytes > policy.output_bytes:
+                return "output_limit", None
+            if time.monotonic() >= deadline:
+                return "timeout", None
+            if process.poll() is not None:
+                return "abrupt_learner_exit", None
+            if collect(0.02):
+                return "output_limit", None
+        error = outcome.get()
+        if error is not None:
+            return (
+                "abrupt_learner_exit"
+                if isinstance(error, (BrokenPipeError, OSError))
+                else "invalid_worker_protocol",
+                None,
+            )
+        if raw_bytes + derived_bytes > policy.output_bytes:
+            return "output_limit", None
+        while b"\n" not in stdout_buffer:
+            if raw_bytes + derived_bytes > policy.output_bytes:
+                return "output_limit", None
+            if time.monotonic() >= deadline:
+                return "timeout", None
+            if process.poll() is not None and events.empty():
+                return "abrupt_learner_exit", None
+            if collect(0.02):
+                return "output_limit", None
+        line, _, remainder = stdout_buffer.partition(b"\n")
+        stdout_buffer.clear()
+        stdout_buffer.extend(remainder)
+        while not events.empty():
+            collect(0)
+            if raw_bytes + derived_bytes > policy.output_bytes:
+                return "output_limit", None
+        if stdout_buffer:
+            return "invalid_worker_protocol", None
+        if raw_bytes + derived_bytes > policy.output_bytes:
+            return "output_limit", None
+        return None, bytes(line)
+
+    try:
+        for index, case in enumerate(test_cases, 1):
+            request_id = uuid4().hex
+            try:
+                tagged_input = _encode_tagged(case["input"])
+            except (TypeError, ValueError, RecursionError):
+                return stop("runner_error", "invalid_test_input")
+            write_error, line = write_frame(
+                {
+                    "version": PROTOCOL_VERSION,
+                    "request_id": request_id,
+                    "input": tagged_input,
+                }
+            )
+            if write_error is not None:
+                if write_error == "abrupt_learner_exit":
+                    kind, reason = _classify_process_exit(
+                        process.returncode,
+                        isolation,
+                    )
+                    return stop(kind, reason)
+                kind = (
+                    write_error
+                    if write_error in {"timeout", "output_limit"}
+                    else "runtime_error"
+                )
+                reason = {
+                    "timeout": "wall_time",
+                    "output_limit": "captured_output",
+                }.get(write_error, write_error)
+                return stop(kind, reason)
+            assert line is not None
+            call = _decode_response(line, request_id)
+            if call.kind != "value":
+                if call.kind == "unsupported":
+                    failed = True
+                    rendered = f"<unsupported {call.limit_reason or 'value'}>"
+                    expected = _bounded_repr(case["expected"])
+                    feedback = (
+                        f"FAILED test_case_{index}: expected {expected}, got {rendered}"
+                    )
+                    if not charge(feedback, stderr_parts):
+                        return stop("output_limit", "captured_output")
+                    continue
+                kind = "runtime_error" if call.kind == "protocol_error" else call.kind
+                if call.stderr and not charge(call.stderr, stderr_parts):
+                    return stop("output_limit", "captured_output")
+                return stop(kind, call.limit_reason, exit_code=call.exit_code)
+            if call.value == case["expected"]:
+                if not charge(f"PASSED test_case_{index}", stdout_parts):
+                    return stop("output_limit", "captured_output")
+            else:
+                failed = True
+                feedback = (
+                    f"FAILED test_case_{index}: expected "
+                    f"{_bounded_repr(case['expected'])}, got "
+                    f"{_bounded_repr(call.value)}"
+                )
+                if not charge(feedback, stderr_parts):
+                    return stop("output_limit", "captured_output")
+
+        close_id = uuid4().hex
+        write_error, line = write_frame(
+            {
+                "version": PROTOCOL_VERSION,
+                "request_id": close_id,
+                "close": True,
+            }
+        )
+        if write_error is not None:
+            if write_error == "abrupt_learner_exit":
+                kind, reason = _classify_process_exit(process.returncode, isolation)
+                return stop(kind, reason)
+            kind = (
+                write_error
+                if write_error in {"timeout", "output_limit"}
+                else "runtime_error"
+            )
+            reason = {
+                "timeout": "wall_time",
+                "output_limit": "captured_output",
+            }.get(write_error, write_error)
+            return stop(kind, reason)
+        if line is None or not _valid_close_response(line, close_id):
+            return stop("runtime_error", "invalid_worker_protocol")
+        while process.poll() is None:
+            if time.monotonic() >= deadline:
+                return stop("timeout", "wall_time")
+            if collect(0.02):
+                return stop("output_limit", "captured_output")
+        while not events.empty():
+            collect(0)
+            if raw_bytes + derived_bytes > policy.output_bytes:
+                return stop("output_limit", "captured_output")
+        if stdout_buffer:
+            return stop("runtime_error", "invalid_worker_protocol")
+        if process.returncode != 0:
+            return stop("runtime_error", "abrupt_learner_exit")
+    except KeyboardInterrupt:
+        return stop("cancelled", "cancelled")
+
+    if failed:
+        return stop("test_failure", None, exit_code=10)
+    if not charge(f"{len(test_cases)} passed", stdout_parts):
+        return stop("output_limit", "captured_output")
+    return stop("success", None, exit_code=0)
 
 
-def _interpret_call(
-    outcome: str | None,
-    stdout: str,
-    stderr: str,
+def _classify_process_exit(
     exit_code: int | None,
-    *,
-    request_id: str,
-    oci: bool,
-) -> _CallResult:
-    if outcome == "timeout":
-        return _call_result(
-            "timeout",
-            stdout=stdout,
-            stderr=stderr,
-            exit_code=exit_code,
-            limit_reason="wall_time",
-        )
-    if outcome == "output_limit":
-        return _call_result(
-            "output_limit",
-            stdout=stdout,
-            stderr=stderr,
-            exit_code=exit_code,
-            limit_reason="captured_output",
-        )
-    if outcome == "cancelled":
-        return _call_result(
-            "cancelled",
-            stdout=stdout,
-            stderr=stderr,
-            exit_code=exit_code,
-            limit_reason="cancelled",
-        )
-    if outcome == "termination_failure":
-        return _call_result(
-            "runner_error",
-            stdout=stdout,
-            stderr=stderr,
-            exit_code=exit_code,
-            limit_reason="termination_failure",
-        )
+    isolation: Literal["oci", "reduced"],
+) -> tuple[str, str]:
     resource_exit_codes = {
         128 + signal.SIGKILL,
         128 + getattr(signal, "SIGXCPU", signal.SIGKILL),
         128 + getattr(signal, "SIGXFSZ", signal.SIGKILL),
         -signal.SIGKILL,
+        -getattr(signal, "SIGXCPU", signal.SIGKILL),
+        -getattr(signal, "SIGXFSZ", signal.SIGKILL),
     }
     if exit_code in resource_exit_codes:
-        return _call_result(
-            "resource_limit",
-            stdout=stdout,
-            stderr=stderr,
-            exit_code=exit_code,
-            limit_reason="memory_or_process",
-        )
-    if oci and exit_code == 125:
-        return _call_result(
-            "runner_error",
-            stdout=stdout,
-            stderr=stderr,
-            exit_code=exit_code,
-            limit_reason="container_start",
-        )
-    if exit_code != 0:
-        return _call_result(
-            "runtime_error",
-            stdout=stdout,
-            stderr=stderr,
-            exit_code=exit_code,
-            limit_reason="abrupt_learner_exit",
-        )
-    if not stdout:
-        return _call_result(
-            "runtime_error",
-            stderr=stderr,
-            exit_code=exit_code,
-            limit_reason="abrupt_learner_exit",
-        )
-    lines = stdout.splitlines()
-    if len(lines) != 1 or not lines[0].startswith(PROTOCOL_PREFIX):
-        return _call_result(
-            "protocol_error",
-            stdout=stdout,
-            stderr=stderr,
-            exit_code=exit_code,
-            limit_reason="invalid_worker_protocol",
-        )
-    try:
-        payload = json.loads(lines[0][len(PROTOCOL_PREFIX) :])
-    except (json.JSONDecodeError, TypeError):
-        return _call_result(
-            "protocol_error",
-            stdout=stdout,
-            stderr=stderr,
-            exit_code=exit_code,
-            limit_reason="invalid_worker_protocol",
-        )
-    if (
-        not isinstance(payload, dict)
-        or payload.get("version") != 1
-        or payload.get("request_id") != request_id
-        or payload.get("status") not in {"value", "compile_error", "runtime_error"}
+        return "resource_limit", "memory_or_process"
+    if isolation == "oci" and exit_code == 125:
+        return "runner_error", "container_start"
+    return "runtime_error", "abrupt_learner_exit"
+
+
+def _encode_tagged(value: object, *, _depth: int = 0, _items: list[int] | None = None):
+    if _depth > VALUE_MAX_DEPTH:
+        raise ValueError("value nesting is too deep")
+    items = [0] if _items is None else _items
+    items[0] += 1
+    if items[0] > VALUE_MAX_ITEMS:
+        raise ValueError("value contains too many items")
+    if value is None:
+        return {"t": "none"}
+    if isinstance(value, bool):
+        return {"t": "bool", "v": value}
+    if isinstance(value, int):
+        return {"t": "int", "v": str(value)}
+    if isinstance(value, float):
+        return {"t": "float", "v": value.hex()}
+    if isinstance(value, str):
+        return {"t": "str", "v": value}
+    if isinstance(value, bytes):
+        return {"t": "bytes", "v": value.hex()}
+    if isinstance(value, list):
+        return {
+            "t": "list",
+            "v": [
+                _encode_tagged(item, _depth=_depth + 1, _items=items)
+                for item in value
+            ],
+        }
+    if isinstance(value, tuple):
+        return {
+            "t": "tuple",
+            "v": [
+                _encode_tagged(item, _depth=_depth + 1, _items=items)
+                for item in value
+            ],
+        }
+    if isinstance(value, dict):
+        return {
+            "t": "dict",
+            "v": [
+                [
+                    _encode_tagged(key, _depth=_depth + 1, _items=items),
+                    _encode_tagged(item, _depth=_depth + 1, _items=items),
+                ]
+                for key, item in value.items()
+            ],
+        }
+    raise TypeError(type(value).__name__)
+
+
+def _decode_tagged(
+    payload: object,
+    *,
+    _depth: int = 0,
+    _items: list[int] | None = None,
+) -> object:
+    if _depth > VALUE_MAX_DEPTH:
+        raise ValueError("value nesting is too deep")
+    items = [0] if _items is None else _items
+    items[0] += 1
+    if items[0] > VALUE_MAX_ITEMS:
+        raise ValueError("value contains too many items")
+    if not isinstance(payload, dict) or not isinstance(payload.get("t"), str):
+        raise ValueError("invalid tagged value")
+    tag = payload["t"]
+    if tag == "none" and set(payload) == {"t"}:
+        return None
+    if tag == "bool" and set(payload) == {"t", "v"} and isinstance(payload["v"], bool):
+        return payload["v"]
+    if tag == "int" and set(payload) == {"t", "v"} and isinstance(payload["v"], str):
+        text = payload["v"]
+        if not text or len(text) > 4_300 or (
+            text[0] == "-" and (len(text) == 1 or not text[1:].isdigit())
+        ) or (text[0] != "-" and not text.isdigit()):
+            raise ValueError("invalid integer")
+        decoded = int(text)
+        if str(decoded) != text:
+            raise ValueError("noncanonical integer")
+        return decoded
+    if tag == "float" and set(payload) == {"t", "v"} and isinstance(payload["v"], str):
+        decoded = float.fromhex(payload["v"])
+        if decoded.hex() != payload["v"]:
+            raise ValueError("noncanonical float")
+        return decoded
+    if tag == "str" and set(payload) == {"t", "v"} and isinstance(payload["v"], str):
+        return payload["v"]
+    if tag == "bytes" and set(payload) == {"t", "v"} and isinstance(payload["v"], str):
+        decoded = bytes.fromhex(payload["v"])
+        if decoded.hex() != payload["v"]:
+            raise ValueError("noncanonical bytes")
+        return decoded
+    if tag in {"list", "tuple"} and set(payload) == {"t", "v"}:
+        values = payload["v"]
+        if not isinstance(values, list):
+            raise ValueError("invalid sequence")
+        decoded = [
+            _decode_tagged(item, _depth=_depth + 1, _items=items)
+            for item in values
+        ]
+        return decoded if tag == "list" else tuple(decoded)
+    if tag == "dict" and set(payload) == {"t", "v"}:
+        pairs = payload["v"]
+        if not isinstance(pairs, list):
+            raise ValueError("invalid mapping")
+        result = {}
+        for pair in pairs:
+            if not isinstance(pair, list) or len(pair) != 2:
+                raise ValueError("invalid mapping pair")
+            key = _decode_tagged(pair[0], _depth=_depth + 1, _items=items)
+            item = _decode_tagged(pair[1], _depth=_depth + 1, _items=items)
+            try:
+                if key in result:
+                    raise ValueError("duplicate mapping key")
+                result[key] = item
+            except (TypeError, ValueError) as exc:
+                raise ValueError("invalid mapping key") from exc
+        return result
+    raise ValueError("unknown tagged value")
+
+
+def _decode_response(line: bytes, request_id: str) -> _CallResult:
+    if len(line) > PROTOCOL_MAX_FRAME_BYTES or not line.startswith(
+        PROTOCOL_PREFIX.encode()
     ):
-        return _call_result(
-            "protocol_error",
-            stdout=stdout,
-            stderr=stderr,
-            exit_code=exit_code,
-            limit_reason="invalid_worker_protocol",
-        )
-    status = payload["status"]
-    if status == "value" and "value" not in payload:
-        return _call_result(
-            "protocol_error",
-            stdout=stdout,
-            stderr=stderr,
-            exit_code=exit_code,
-            limit_reason="invalid_worker_protocol",
-        )
-    detail = payload.get("detail")
-    if isinstance(detail, str) and detail:
-        stderr = "\n".join(part for part in (stderr, detail[:4_000]) if part)
-    trusted_exit_code = {
-        "compile_error": 20,
-        "runtime_error": 21,
-    }.get(status, exit_code)
-    return _call_result(
-        status,
-        value=payload.get("value"),
-        stderr=stderr,
-        exit_code=trusted_exit_code,
-    )
+        return _call_result("protocol_error", limit_reason="invalid_worker_protocol")
+    try:
+        payload = json.loads(line[len(PROTOCOL_PREFIX) :])
+        if not isinstance(payload, dict):
+            raise ValueError("response must be an object")
+        if (
+            type(payload.get("version")) is not int
+            or payload["version"] != PROTOCOL_VERSION
+        ):
+            raise ValueError("wrong protocol version")
+        if payload.get("request_id") != request_id:
+            raise ValueError("wrong request id")
+        status = payload.get("status")
+        if status == "value":
+            if set(payload) != {"version", "request_id", "status", "value"}:
+                raise ValueError("invalid value response schema")
+            return _call_result("value", value=_decode_tagged(payload["value"]))
+        if status in {"compile_error", "runtime_error", "unsupported"}:
+            if set(payload) != {"version", "request_id", "status", "detail"}:
+                raise ValueError("invalid error response schema")
+            detail = payload["detail"]
+            if not isinstance(detail, str) or len(detail.encode()) > 4_000:
+                raise ValueError("invalid error detail")
+            return _call_result(
+                status,
+                stderr=detail if status != "unsupported" else "",
+                exit_code={"compile_error": 20, "runtime_error": 21}.get(status, 10),
+                limit_reason=detail if status == "unsupported" else None,
+            )
+        raise ValueError("invalid response status")
+    except (
+        json.JSONDecodeError,
+        TypeError,
+        ValueError,
+        RecursionError,
+        OverflowError,
+    ):
+        return _call_result("protocol_error", limit_reason="invalid_worker_protocol")
+
+
+def _valid_close_response(line: bytes, request_id: str) -> bool:
+    if len(line) > PROTOCOL_MAX_FRAME_BYTES or not line.startswith(
+        PROTOCOL_PREFIX.encode()
+    ):
+        return False
+    try:
+        payload = json.loads(line[len(PROTOCOL_PREFIX) :])
+    except (
+        json.JSONDecodeError,
+        TypeError,
+        ValueError,
+        RecursionError,
+        OverflowError,
+    ):
+        return False
+    return type(payload.get("version")) is int and payload == {
+        "version": PROTOCOL_VERSION,
+        "request_id": request_id,
+        "status": "closed",
+    }
+
+
+def _bounded_repr(value: object) -> str:
+    try:
+        rendered = repr(value)
+    except (ValueError, RecursionError):
+        return "<unrenderable value>"
+    encoded = rendered.encode("utf-8", errors="replace")
+    if len(encoded) <= PROTOCOL_MAX_FRAME_BYTES:
+        return rendered
+    return encoded[:PROTOCOL_MAX_FRAME_BYTES].decode("utf-8", errors="ignore")
 
 
 def _call_result(
@@ -983,8 +1188,21 @@ def _validate_request(
         raise ValueError("function name must be a Python identifier")
     if not test_cases or len(test_cases) > 64:
         raise ValueError("test bundle must contain 1-64 cases")
-    encoded = json.dumps(test_cases, ensure_ascii=True, allow_nan=False)
-    if len(encoded) > 64_000:
+    if any(
+        not isinstance(case, dict) or set(case) != {"input", "expected"}
+        for case in test_cases
+    ):
+        raise ValueError("each test case must contain exactly input and expected")
+    try:
+        encoded = json.dumps(
+            _encode_tagged(test_cases),
+            ensure_ascii=True,
+            allow_nan=False,
+            separators=(",", ":"),
+        ).encode()
+    except (TypeError, ValueError, RecursionError, OverflowError) as exc:
+        raise ValueError("test bundle contains an unsupported value") from exc
+    if len(encoded) > PROTOCOL_MAX_FRAME_BYTES:
         raise ValueError("test bundle is too large")
     if (
         isinstance(policy.wall_seconds, bool)
@@ -1022,67 +1240,199 @@ import traceback
 os.environ.clear()
 os.environ.update({{"HOME": "/tmp", "TMPDIR": "/tmp", "PYTHONDONTWRITEBYTECODE": "1"}})
 prefix = {PROTOCOL_PREFIX!r}
+version = {PROTOCOL_VERSION}
+max_frame = {PROTOCOL_MAX_FRAME_BYTES}
+max_depth = {VALUE_MAX_DEPTH}
+max_items = {VALUE_MAX_ITEMS}
 solution_path = sys.argv[1]
 
-def emit(status, *, value=None, detail=None):
+def emit(request_id, status, *, value=None, detail=None):
     payload = {{
-        "version": 1,
+        "version": version,
         "request_id": request_id,
         "status": status,
     }}
     if status == "value":
         payload["value"] = value
     if detail:
-        payload["detail"] = detail
+        payload["detail"] = detail.encode("utf-8")[:4000].decode(
+            "utf-8", errors="ignore"
+        )
     encoded = json.dumps(payload, ensure_ascii=True, allow_nan=False, separators=(",", ":"))
+    if len((prefix + encoded + "\\n").encode()) > max_frame:
+        if status != "value":
+            raise ValueError("response frame is too large")
+        payload = {{
+            "version": version,
+            "request_id": request_id,
+            "status": "unsupported",
+            "detail": "encoded value is too large",
+        }}
+        encoded = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
     sys.stdout.write(prefix + encoded + "\\n")
     sys.stdout.flush()
 
-try:
-    raw = sys.stdin.buffer.read(65537)
-    if len(raw) > 65536:
-        raise ValueError("request frame is too large")
-    request = json.loads(raw)
-    if (
-        not isinstance(request, dict)
-        or request.get("version") != 1
-        or not isinstance(request.get("request_id"), str)
-        or "input" not in request
-    ):
-        raise ValueError("invalid request frame")
-    request_id = request["request_id"]
-except BaseException:
-    traceback.print_exc(file=sys.stderr)
-    raise SystemExit(22)
+def decode_tagged(payload, depth=0, items=None):
+    if depth > max_depth:
+        raise ValueError("value nesting is too deep")
+    items = [0] if items is None else items
+    items[0] += 1
+    if items[0] > max_items:
+        raise ValueError("value contains too many items")
+    if not isinstance(payload, dict) or not isinstance(payload.get("t"), str):
+        raise ValueError("invalid tagged value")
+    tag = payload["t"]
+    if tag == "none" and set(payload) == {{"t"}}:
+        return None
+    if tag == "bool" and set(payload) == {{"t", "v"}} and isinstance(payload["v"], bool):
+        return payload["v"]
+    if tag == "int" and set(payload) == {{"t", "v"}} and isinstance(payload["v"], str):
+        text = payload["v"]
+        if not text or len(text) > 4300 or (
+            text[0] == "-" and (len(text) == 1 or not text[1:].isdigit())
+        ) or (text[0] != "-" and not text.isdigit()):
+            raise ValueError("invalid integer")
+        decoded = int(text)
+        if str(decoded) != text:
+            raise ValueError("noncanonical integer")
+        return decoded
+    if tag == "float" and set(payload) == {{"t", "v"}} and isinstance(payload["v"], str):
+        decoded = float.fromhex(payload["v"])
+        if decoded.hex() != payload["v"]:
+            raise ValueError("noncanonical float")
+        return decoded
+    if tag == "str" and set(payload) == {{"t", "v"}} and isinstance(payload["v"], str):
+        return payload["v"]
+    if tag == "bytes" and set(payload) == {{"t", "v"}} and isinstance(payload["v"], str):
+        decoded = bytes.fromhex(payload["v"])
+        if decoded.hex() != payload["v"]:
+            raise ValueError("noncanonical bytes")
+        return decoded
+    if tag in {{"list", "tuple"}} and set(payload) == {{"t", "v"}}:
+        values = payload["v"]
+        if not isinstance(values, list):
+            raise ValueError("invalid sequence")
+        decoded = [decode_tagged(item, depth + 1, items) for item in values]
+        return decoded if tag == "list" else tuple(decoded)
+    if tag == "dict" and set(payload) == {{"t", "v"}}:
+        pairs = payload["v"]
+        if not isinstance(pairs, list):
+            raise ValueError("invalid mapping")
+        result = {{}}
+        for pair in pairs:
+            if not isinstance(pair, list) or len(pair) != 2:
+                raise ValueError("invalid mapping pair")
+            key = decode_tagged(pair[0], depth + 1, items)
+            item = decode_tagged(pair[1], depth + 1, items)
+            if key in result:
+                raise ValueError("duplicate mapping key")
+            result[key] = item
+        return result
+    raise ValueError("unknown tagged value")
+
+def encode_tagged(value, depth=0, items=None):
+    if depth > max_depth:
+        raise ValueError("value nesting is too deep")
+    items = [0] if items is None else items
+    items[0] += 1
+    if items[0] > max_items:
+        raise ValueError("value contains too many items")
+    if value is None:
+        return {{"t": "none"}}
+    if isinstance(value, bool):
+        return {{"t": "bool", "v": value}}
+    if isinstance(value, int):
+        return {{"t": "int", "v": str(value)}}
+    if isinstance(value, float):
+        return {{"t": "float", "v": value.hex()}}
+    if isinstance(value, str):
+        return {{"t": "str", "v": value}}
+    if isinstance(value, bytes):
+        return {{"t": "bytes", "v": value.hex()}}
+    if isinstance(value, list):
+        return {{"t": "list", "v": [encode_tagged(item, depth + 1, items) for item in value]}}
+    if isinstance(value, tuple):
+        return {{"t": "tuple", "v": [encode_tagged(item, depth + 1, items) for item in value]}}
+    if isinstance(value, dict):
+        return {{
+            "t": "dict",
+            "v": [
+                [encode_tagged(key, depth + 1, items), encode_tagged(item, depth + 1, items)]
+                for key, item in value.items()
+            ],
+        }}
+    raise TypeError(type(value).__name__)
 
 try:
     spec = importlib.util.spec_from_file_location("learner_solution", solution_path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
 except SyntaxError:
-    emit("compile_error", detail=traceback.format_exc())
-    raise SystemExit(0)
+    load_status = "compile_error"
+    load_detail = traceback.format_exc()
+    function = None
 except BaseException:
-    emit("runtime_error", detail=traceback.format_exc())
-    raise SystemExit(0)
-
-try:
-    function = getattr(module, {function_name!r})
-except (AttributeError, TypeError):
-    emit("runtime_error", detail=traceback.format_exc())
-    raise SystemExit(0)
-
-try:
-    value = request["input"]
-    if isinstance(value, list):
-        actual = function(*value)
-    elif isinstance(value, dict):
-        actual = function(**value)
+    load_status = "runtime_error"
+    load_detail = traceback.format_exc()
+    function = None
+else:
+    try:
+        function = getattr(module, {function_name!r})
+        if not callable(function):
+            raise TypeError("target is not callable")
+    except (AttributeError, TypeError):
+        load_status = "runtime_error"
+        load_detail = traceback.format_exc()
+        function = None
     else:
-        actual = function(value)
-    emit("value", value=actual)
-except BaseException:
-    emit("runtime_error", detail=traceback.format_exc())
+        load_status = None
+        load_detail = None
+
+while True:
+    try:
+        raw = sys.stdin.buffer.readline(max_frame + 1)
+        if not raw or len(raw) > max_frame or not raw.endswith(b"\\n"):
+            raise ValueError("invalid request frame")
+        request = json.loads(raw)
+        if not isinstance(request, dict):
+            raise ValueError("request must be an object")
+        request_id = request.get("request_id")
+        if (
+            not isinstance(request_id, str)
+            or type(request.get("version")) is not int
+            or request["version"] != version
+        ):
+            raise ValueError("invalid request envelope")
+        if set(request) == {{"version", "request_id", "close"}}:
+            if request["close"] is not True:
+                raise ValueError("invalid close request")
+            emit(request_id, "closed")
+            raise SystemExit(0)
+        if set(request) != {{"version", "request_id", "input"}}:
+            raise ValueError("invalid call request")
+        value = decode_tagged(request["input"])
+    except (json.JSONDecodeError, TypeError, ValueError, RecursionError, OverflowError):
+        traceback.print_exc(file=sys.stderr)
+        raise SystemExit(22)
+
+    if load_status is not None:
+        emit(request_id, load_status, detail=load_detail[:4000])
+        continue
+    try:
+        if isinstance(value, list):
+            actual = function(*value)
+        elif isinstance(value, dict):
+            actual = function(**value)
+        else:
+            actual = function(value)
+    except BaseException:
+        emit(request_id, "runtime_error", detail=traceback.format_exc()[:4000])
+        continue
+    try:
+        encoded = encode_tagged(actual)
+        emit(request_id, "value", value=encoded)
+    except (TypeError, ValueError, RecursionError, OverflowError):
+        emit(request_id, "unsupported", detail=type(actual).__name__)
 """
 
 

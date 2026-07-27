@@ -93,9 +93,12 @@ Instrument and electronics shapes are contract fixtures only; their tools are no
 After the learner edits a drill, `/check` fails closed unless Docker or Podman and the digest-pinned Python runner image are already available.
 The runtime image is never acquired implicitly.
 Secure checks keep hidden expectations and the final completion decision in the trusted openLearn process.
-Each test call creates a fresh bounded child, supplies only that call's input over standard input, and receives one strictly framed JSON value.
+Each check creates one bounded worker, imports the learner module once, then supplies only the current call's input over a monitored framed channel.
+This preserves sequential function state without exposing future inputs.
+Returned values use a bounded tagged non-executable encoding that preserves comparison-relevant Python container and dictionary-key types.
 The child can inspect its input and worker protocol, but it never receives test expectations or a final success credential.
-openLearn rejects missing, malformed, duplicated, or output-contaminated frames and compares the returned value with the hidden expectation itself.
+openLearn rejects missing, malformed, duplicated, deeply nested, oversized, or output-contaminated frames and compares the returned value with the hidden expectation itself.
+Raw protocol output, learner stderr, and rendered feedback share one aggregate output budget.
 OCI calls mount only the learner solution directory plus a separate read-only generic call worker.
 The container receives no host credential directory, home directory, repository, or runtime socket mount.
 It runs with no network, a read-only root, a non-root UID, dropped capabilities, no-new-privileges, bounded CPU, memory, process count, output, file size, and wall time, and a small writable tmpfs.

@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import _thread
+import io
+import json
 import math
 import subprocess
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -195,7 +200,7 @@ class CodeRunnerTests(unittest.TestCase):
             )
 
         self.assertEqual(result.kind, "output_limit")
-        self.assertIn("output truncated", result.stderr)
+        self.assertEqual(result.limit_reason, "captured_output")
 
     def test_solution_outcome_types_remain_distinct_from_runner_failure(self) -> None:
         cases = [
@@ -215,6 +220,211 @@ class CodeRunnerTests(unittest.TestCase):
                     reduced_isolation=True,
                 )
                 self.assertEqual(result.kind, expected)
+
+    def test_tagged_values_preserve_sequence_and_mapping_types(self) -> None:
+        source = """\
+def solve(kind):
+    if kind == "tuple":
+        return (1, [2, 3])
+    if kind == "list":
+        return [1, (2, 3)]
+    return {1: "integer", "1": "string"}
+"""
+        with tempfile.TemporaryDirectory() as raw:
+            solution = Path(raw) / "solution.py"
+            solution.write_text(source, encoding="utf-8")
+            result = code_runner.run_python_tests(
+                solution,
+                function_name="solve",
+                test_cases=[
+                    {"input": ["tuple"], "expected": (1, [2, 3])},
+                    {"input": ["list"], "expected": [1, (2, 3)]},
+                    {
+                        "input": ["mapping"],
+                        "expected": {1: "integer", "1": "string"},
+                    },
+                ],
+                reduced_isolation=True,
+            )
+
+        self.assertTrue(result.passed)
+
+    def test_unsupported_return_is_a_learner_nonmatch(self) -> None:
+        result = self._run_reduced("def solve():\n    return {1, 2}\n", [1, 2])
+
+        self.assertEqual(result.kind, "test_failure")
+        self.assertIn("unsupported set", result.stderr)
+
+    def test_aggregate_output_budget_covers_protocol_and_feedback(self) -> None:
+        source = "def solve(value):\n    return 'x' * value\n"
+        with tempfile.TemporaryDirectory() as raw:
+            solution = Path(raw) / "solution.py"
+            solution.write_text(source, encoding="utf-8")
+            result = code_runner.run_python_tests(
+                solution,
+                function_name="solve",
+                test_cases=[
+                    {"input": [500], "expected": "x" * 500},
+                    {"input": [500], "expected": "x" * 500},
+                    {"input": [500], "expected": "x" * 500},
+                ],
+                policy=code_runner.ResourcePolicy(output_bytes=1_024),
+                reduced_isolation=True,
+            )
+
+        self.assertEqual(result.kind, "output_limit")
+        self.assertEqual(result.limit_reason, "captured_output")
+
+    def test_state_and_import_side_effects_persist_across_cases(self) -> None:
+        source = """\
+imports = globals().get("imports", 0) + 1
+calls = 0
+
+def solve():
+    global calls
+    calls += 1
+    return (imports, calls)
+"""
+        with tempfile.TemporaryDirectory() as raw:
+            solution = Path(raw) / "solution.py"
+            solution.write_text(source, encoding="utf-8")
+            result = code_runner.run_python_tests(
+                solution,
+                function_name="solve",
+                test_cases=[
+                    {"input": [], "expected": (1, 1)},
+                    {"input": [], "expected": (1, 2)},
+                ],
+                reduced_isolation=True,
+            )
+
+        self.assertTrue(result.passed)
+
+    def test_decoder_rejects_huge_integer_deep_value_and_extra_fields(self) -> None:
+        invalid_values = [
+            {"t": "int", "v": "9" * 5_000},
+            self._deep_tagged_value(70),
+        ]
+        for value in invalid_values:
+            with self.subTest(value_type=value["t"]):
+                line = self._response_line("request", value)
+                result = code_runner._decode_response(line, "request")
+                self.assertEqual(result.kind, "protocol_error")
+                self.assertEqual(result.limit_reason, "invalid_worker_protocol")
+
+        payload = {
+            "version": code_runner.PROTOCOL_VERSION,
+            "request_id": "request",
+            "status": "value",
+            "value": {"t": "none"},
+            "extra": True,
+        }
+        line = (
+            code_runner.PROTOCOL_PREFIX + json.dumps(payload, separators=(",", ":"))
+        ).encode()
+        result = code_runner._decode_response(line, "request")
+        self.assertEqual(result.kind, "protocol_error")
+
+    def test_hung_stdin_delivery_is_inside_wall_timeout(self) -> None:
+        class HungInput:
+            def write(self, _frame):
+                threading.Event().wait(60)
+
+            def flush(self):
+                return None
+
+            def close(self):
+                return None
+
+        class FakeProcess:
+            def __init__(self):
+                self.stdin = HungInput()
+                self.stdout = io.BytesIO()
+                self.stderr = io.BytesIO()
+                self.returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                return self.returncode
+
+            def kill(self):
+                self.returncode = -9
+
+        process = FakeProcess()
+        terminated = {"value": False}
+
+        def terminate():
+            terminated["value"] = True
+            process.returncode = -9
+
+        result = code_runner._supervise_process(
+            process,
+            [{"input": [], "expected": 1}],
+            code_runner.ResourcePolicy(wall_seconds=0.05),
+            started=time.monotonic(),
+            isolation="reduced",
+            runtime=None,
+            terminate=terminate,
+        )
+
+        self.assertEqual(result.kind, "timeout")
+        self.assertEqual(result.limit_reason, "wall_time")
+        self.assertTrue(terminated["value"])
+
+    def test_hung_stdin_delivery_honors_keyboard_interrupt(self) -> None:
+        class HungInput:
+            def write(self, _frame):
+                threading.Event().wait(60)
+
+            def flush(self):
+                return None
+
+            def close(self):
+                return None
+
+        class FakeProcess:
+            def __init__(self):
+                self.stdin = HungInput()
+                self.stdout = io.BytesIO()
+                self.stderr = io.BytesIO()
+                self.returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                return self.returncode
+
+            def kill(self):
+                self.returncode = -9
+
+        process = FakeProcess()
+        terminated = {"value": False}
+
+        def terminate():
+            terminated["value"] = True
+            process.returncode = -9
+
+        interrupter = threading.Timer(0.05, _thread.interrupt_main)
+        interrupter.start()
+        try:
+            result = code_runner._supervise_process(
+                process,
+                [{"input": [], "expected": 1}],
+                code_runner.ResourcePolicy(wall_seconds=3),
+                started=time.monotonic(),
+                isolation="reduced",
+                runtime=None,
+                terminate=terminate,
+            )
+        finally:
+            interrupter.cancel()
+
+        self.assertEqual(result.kind, "cancelled")
+        self.assertEqual(result.limit_reason, "cancelled")
+        self.assertTrue(terminated["value"])
 
     def test_abrupt_zero_and_nonzero_exits_cannot_claim_success(self) -> None:
         for exit_code in (0, 7):
@@ -314,7 +524,7 @@ def solve():
         "version": 1,
         "request_id": request_id,
         "status": "value",
-        "value": "guessed",
+        "value": {{"t": "str", "v": "guessed"}},
     }}
     frame = {code_runner.PROTOCOL_PREFIX!r} + json.dumps(forged) + "\\n"
     os.write(1, frame.encode())
@@ -322,7 +532,8 @@ def solve():
 """
         result = self._run_reduced(source, expected)
 
-        self.assertEqual(result.kind, "test_failure")
+        self.assertEqual(result.kind, "runtime_error")
+        self.assertEqual(result.limit_reason, "abrupt_learner_exit")
         self.assertFalse(result.passed)
 
     def test_child_subprocess_output_cannot_forge_protocol(self) -> None:
@@ -342,12 +553,15 @@ def solve():
         self.assertEqual(result.kind, "runtime_error")
         self.assertFalse(result.passed)
 
-    def test_each_child_receives_only_its_current_input(self) -> None:
+    def test_worker_receives_only_the_current_input(self) -> None:
         source = """\
-import sys
+import inspect
 
 def solve(value):
-    return [value, sys.stdin.read()]
+    caller = inspect.currentframe().f_back.f_globals
+    request = caller.get("request", {})
+    raw_current = request["input"]["v"][0]["v"]
+    return [value, raw_current]
 """
         with tempfile.TemporaryDirectory() as raw:
             solution = Path(raw) / "solution.py"
@@ -356,8 +570,8 @@ def solve(value):
                 solution,
                 function_name="solve",
                 test_cases=[
-                    {"input": [1], "expected": [1, ""]},
-                    {"input": [2], "expected": [2, ""]},
+                    {"input": [1], "expected": [1, "1"]},
+                    {"input": [2], "expected": [2, "2"]},
                 ],
                 reduced_isolation=True,
             )
@@ -365,17 +579,13 @@ def solve(value):
         self.assertTrue(result.passed)
 
     def test_resource_exit_is_learner_limit(self) -> None:
-        result = code_runner._interpret_call(
-            None,
-            "",
-            "",
+        kind, reason = code_runner._classify_process_exit(
             137,
-            request_id="request",
-            oci=True,
+            "oci",
         )
 
-        self.assertEqual(result.kind, "resource_limit")
-        self.assertEqual(result.limit_reason, "memory_or_process")
+        self.assertEqual(kind, "resource_limit")
+        self.assertEqual(reason, "memory_or_process")
 
     def test_resource_policy_rejects_wrong_nonfinite_and_oversized_values(self) -> None:
         invalid = {
@@ -423,19 +633,17 @@ def solve(value):
                 code_runner.DEFAULT_RUNNER_IMAGE,
                 Path("/tmp/attempt"),
                 Path("/tmp/tests"),
+                [{"input": [], "expected": 1}],
                 code_runner.ResourcePolicy(),
-                b'{"version":1}\n',
-                "request",
+                time.monotonic(),
             )
 
         self.assertEqual(result.kind, "runner_error")
         self.assertEqual(result.limit_reason, "container_create")
-        self.assertEqual(
+        self.assertGreater(calls[0][1]["timeout"], 0)
+        self.assertLessEqual(
             calls[0][1]["timeout"],
-            min(
-                code_runner.OCI_CREATE_TIMEOUT_SECONDS,
-                code_runner.ResourcePolicy().wall_seconds,
-            ),
+            code_runner.ResourcePolicy().wall_seconds,
         )
         self.assertEqual(calls[1][0][1:3], ["rm", "--force"])
 
@@ -455,9 +663,9 @@ def solve(value):
                 code_runner.DEFAULT_RUNNER_IMAGE,
                 Path("/tmp/attempt"),
                 Path("/tmp/tests"),
+                [{"input": [], "expected": 1}],
                 code_runner.ResourcePolicy(),
-                b'{"version":1}\n',
-                "request",
+                time.monotonic(),
             )
 
         self.assertEqual(result.kind, "runner_error")
@@ -481,9 +689,9 @@ def solve(value):
                 code_runner.DEFAULT_RUNNER_IMAGE,
                 Path("/tmp/attempt"),
                 Path("/tmp/tests"),
+                [{"input": [], "expected": 1}],
                 code_runner.ResourcePolicy(),
-                b'{"version":1}\n',
-                "request",
+                time.monotonic(),
             )
 
         self.assertEqual(result.kind, "cancelled")
@@ -509,8 +717,17 @@ def solve(value):
                     return_value=process,
                 ), mock.patch.object(
                     code_runner,
-                    "_capture_bounded",
-                    return_value=(outcome, "", ""),
+                    "_supervise_process",
+                    return_value=code_runner._result(
+                        outcome,
+                        "",
+                        "",
+                        137,
+                        time.monotonic(),
+                        "wall_time" if outcome == "timeout" else "cancelled",
+                        "oci",
+                        "docker",
+                    ),
                 ):
                     result = code_runner._run_oci(
                         "/usr/bin/docker",
@@ -518,9 +735,9 @@ def solve(value):
                         code_runner.DEFAULT_RUNNER_IMAGE,
                         Path("/tmp/attempt"),
                         Path("/tmp/tests"),
+                        [{"input": [], "expected": 1}],
                         code_runner.ResourcePolicy(),
-                        b'{"version":1}\n',
-                        "request",
+                        time.monotonic(),
                     )
 
                 self.assertEqual(result.kind, outcome)
@@ -539,6 +756,25 @@ def solve(value):
                 test_cases=[{"input": [], "expected": expected}],
                 reduced_isolation=True,
             )
+
+    @staticmethod
+    def _deep_tagged_value(depth: int) -> dict[str, object]:
+        value: dict[str, object] = {"t": "none"}
+        for _ in range(depth):
+            value = {"t": "list", "v": [value]}
+        return value
+
+    @staticmethod
+    def _response_line(request_id: str, value: object) -> bytes:
+        payload = {
+            "version": code_runner.PROTOCOL_VERSION,
+            "request_id": request_id,
+            "status": "value",
+            "value": value,
+        }
+        return (
+            code_runner.PROTOCOL_PREFIX + json.dumps(payload, separators=(",", ":"))
+        ).encode()
 
 
 if __name__ == "__main__":

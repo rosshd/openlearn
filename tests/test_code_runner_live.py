@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import json
 import subprocess
 import tempfile
 import threading
@@ -197,12 +196,12 @@ class LiveCodeRunnerTests(unittest.TestCase):
                         code_runner.DEFAULT_RUNNER_IMAGE,
                         attempt,
                         harness,
+                        [{"input": [], "expected": True}],
                         code_runner.ResourcePolicy(
                             wall_seconds=0.5,
                             cpu_seconds=4,
                         ),
-                        self._request(),
-                        "live-request",
+                        time.monotonic(),
                     )
                     self.assertEqual(result.kind, "timeout")
                     time.sleep(2.2)
@@ -230,9 +229,9 @@ class LiveCodeRunnerTests(unittest.TestCase):
                                 code_runner.DEFAULT_RUNNER_IMAGE,
                                 attempt,
                                 harness,
+                                [{"input": [], "expected": True}],
                                 code_runner.ResourcePolicy(),
-                                self._request(),
-                                "live-request",
+                                time.monotonic(),
                             )
                         finally:
                             interrupter.cancel()
@@ -296,9 +295,9 @@ class LiveCodeRunnerTests(unittest.TestCase):
                             code_runner.DEFAULT_RUNNER_IMAGE,
                             attempt,
                             harness,
+                            [{"input": [], "expected": True}],
                             code_runner.ResourcePolicy(),
-                            self._request(),
-                            "live-request",
+                            time.monotonic(),
                         )
                     self.assertEqual(result.kind, "runner_error")
                     self.assertEqual(result.limit_reason, "container_cleanup")
@@ -347,20 +346,6 @@ class LiveCodeRunnerTests(unittest.TestCase):
                 self.attempt_temp.cleanup()
 
         return Fixture()
-
-    @staticmethod
-    def _request() -> bytes:
-        return (
-            json.dumps(
-                {
-                    "version": 1,
-                    "request_id": "live-request",
-                    "input": [],
-                }
-            )
-            + "\n"
-        ).encode()
-
 
 if __name__ == "__main__":
     unittest.main()
