@@ -1,0 +1,22 @@
+{
+  "name": "advanced_learner",
+  "family": "advanced_learner",
+  "persona": "An advanced learner who can handle terse feedback and difficult transfer.",
+  "description": "Exercises reduced guidance and escalating transfer for strong performance.",
+  "topic": "transaction isolation",
+  "goal": "Reason about database transaction isolation",
+  "mastery_profile": "deep",
+  "state": {"difficulty_tier": "mastering", "consecutive_correct": 3, "rolling_pass_rate": 0.9},
+  "turns": [
+    {"role": "assistant", "content": "Why can snapshot isolation still permit write skew?"},
+    {"role": "user", "content": "Each transaction can update a different row after reading the same valid snapshot, so neither detects a direct write-write conflict while the joint invariant breaks."},
+    {"role": "assistant", "content": null},
+    {"role": "user", "content": "For two on-call rows, both doctors can observe two active doctors and independently set their own row off call."},
+    {"role": "assistant", "content": null}
+  ],
+  "rubric": [
+    "the tutor avoids reteaching demonstrated fundamentals",
+    "the tutor gives concise feedback and a harder novel transfer task",
+    "the difficulty remains appropriate for a mastering learner"
+  ]
+}

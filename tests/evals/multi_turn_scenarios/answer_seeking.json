@@ -1,0 +1,19 @@
+{
+  "name": "answer_seeking",
+  "family": "answer_seeking",
+  "persona": "A learner who asks for the answer before making an attempt.",
+  "description": "Exercises elicitation first and bounded help after an attempt.",
+  "topic": "binary tree height",
+  "goal": "Derive a recursive tree-height algorithm",
+  "turns": [
+    {"role": "user", "content": "Just give me the complete recursive solution."},
+    {"role": "assistant", "content": null},
+    {"role": "user", "content": "My attempt is one plus the larger height of the left and right subtrees, with an empty tree as the base case."},
+    {"role": "assistant", "content": null}
+  ],
+  "rubric": [
+    "the tutor withholds a complete solution before an attempt",
+    "the tutor asks for one small genuine attempt",
+    "after the attempt, help remains bounded and specific"
+  ]
+}

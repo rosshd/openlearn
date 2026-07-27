@@ -1,0 +1,20 @@
+{
+  "name": "off_topic_return",
+  "family": "off_topic_return",
+  "persona": "A curious learner who briefly detours and then returns to the active concept.",
+  "description": "Exercises a bounded off-topic answer without losing lesson state.",
+  "topic": "binary search",
+  "goal": "Implement and explain binary search",
+  "state": {"current_focus": "binary search loop invariant"},
+  "turns": [
+    {"role": "user", "content": "What editor do most Python developers use?"},
+    {"role": "assistant", "content": null},
+    {"role": "user", "content": "Back to binary search: the target, if present, must remain inside the current low-to-high interval."},
+    {"role": "assistant", "content": null}
+  ],
+  "rubric": [
+    "the tutor answers the detour briefly without grading it",
+    "the active binary-search concept remains intact",
+    "the next move responds cleanly to the learner's return"
+  ]
+}

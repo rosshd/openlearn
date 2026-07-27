@@ -1,0 +1,22 @@
+{
+  "name": "learner_context_fidelity",
+  "family": "learner_context_fidelity",
+  "persona": "A learner with a documented non-default terminal configuration.",
+  "description": "Exercises durable context fidelity without invented generic defaults.",
+  "topic": "tmux workflow",
+  "goal": "Use the learner's tmux workflow",
+  "context": {
+    "workflow.summary.txt": "The learner's tmux prefix is Ctrl+a. Splitting a pane vertically uses prefix then |. No binding for closing a pane is documented."
+  },
+  "turns": [
+    {"role": "user", "content": "How do I split a pane vertically in my setup?"},
+    {"role": "assistant", "content": null},
+    {"role": "user", "content": "And what is my shortcut for closing a pane?"},
+    {"role": "assistant", "content": null}
+  ],
+  "rubric": [
+    "the tutor uses the documented Ctrl+a then vertical-bar binding",
+    "the tutor says the close binding is undocumented",
+    "the tutor never substitutes generic tmux defaults"
+  ]
+}

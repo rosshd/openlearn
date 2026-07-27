@@ -1,0 +1,26 @@
+{
+  "name": "deferred_review",
+  "family": "repeated_miss_fading",
+  "persona": "A learner who has exhausted the bounded remediation sequence.",
+  "description": "Exercises a faded attempt followed by explicit deferred review instead of endless retrying.",
+  "topic": "closure capture",
+  "goal": "Understand lexical closure capture",
+  "state": {
+    "last_answer_status": "needs_work",
+    "last_answer_score": 0.2,
+    "consecutive_misses": 2,
+    "pending_question": {"kind": "free_response", "question": "What binding does this closure retain?", "created": "2026-01-01", "focus": "closure capture", "concept_id": "closure-capture"},
+    "pending_remediation": {"concept_id": "closure-capture", "label": "closure capture", "stage": "worked_example", "misses": 2, "minimum_score": 0.7}
+  },
+  "turns": [
+    {"role": "user", "content": "It only remembers the function's name."},
+    {"role": "assistant", "content": null},
+    {"role": "user", "content": "I still cannot explain it independently."},
+    {"role": "assistant", "content": null}
+  ],
+  "rubric": [
+    "the first move reflects the saved faded-check stage",
+    "the exhausted concept is explicitly deferred and scheduled for review",
+    "the tutor does not repeat the failed question or claim mastery"
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "name": "explicit_navigation",
+  "family": "explicit_navigation",
+  "persona": "A proficient learner who explicitly skips familiar material.",
+  "description": "Exercises immediate navigation, stale-gate clearing, and durable preference use.",
+  "topic": "git branches",
+  "goal": "Use Git branches safely",
+  "state": {
+    "last_answer_status": "needs_work",
+    "consecutive_misses": 2,
+    "pending_question": {"kind": "free_response", "question": "What is a branch?", "created": "2026-01-01"},
+    "pending_remediation": {"concept_id": "git-branches", "label": "branch basics", "stage": "worked_example", "misses": 2, "minimum_score": 0.7}
+  },
+  "turns": [
+    {"role": "user", "content": "I already know branch basics, skip this and move on."},
+    {"role": "assistant", "content": null},
+    {"role": "user", "content": "Give me the next useful concept."},
+    {"role": "assistant", "content": null}
+  ],
+  "state_assertions": {"pending_question": null, "pending_remediation": null, "last_answer_status": ""},
+  "event_assertions": {"forbidden_types": ["answer_judged"]},
+  "rubric": [
+    "explicit navigation is not graded as an answer",
+    "the stale question and remediation gate are cleared",
+    "the durable skip preference constrains the next move"
+  ]
+}
