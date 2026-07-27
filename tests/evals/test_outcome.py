@@ -231,7 +231,11 @@ def test_metrics_surface_efficiency_dependency_and_false_mastery() -> None:
 
     assert metrics["delayed_retrieval"]["attempts"] == 2
     assert metrics["delayed_retrieval"]["passed"] == 1
-    assert metrics["novel_transfer"]["pass_rate"] == 1.0
+    assert metrics["novel_transfer"] == {
+        "attempts": 0,
+        "passed": 0,
+        "pass_rate": None,
+    }
     assert metrics["turns_to_criterion"] == 1
     assert metrics["probes"] == {"total": 4, "redundant": 1}
     assert metrics["hint_worked_example_dependency"]["unresolved_concepts"] == 1
@@ -243,8 +247,8 @@ def test_metrics_surface_efficiency_dependency_and_false_mastery() -> None:
     }
     assert metrics["deferred_recovery"] == {
         "deferred": 1,
-        "recovered": 1,
-        "rate": 1.0,
+        "recovered": 0,
+        "rate": 0.0,
     }
     assert metrics["diagnostics"]["false_mastery"] == ["beta"]
     assert metrics["diagnostics"]["excessive_probing"]["excess"] == 2
@@ -254,6 +258,176 @@ def test_metrics_surface_efficiency_dependency_and_false_mastery() -> None:
     aggregate = aggregate_metrics([{"metrics": metrics, "turns": turns}])
     for key, value in baseline["results"].items():
         assert aggregate[key] == value
+
+
+def test_only_independent_production_counts_as_qualifying_outcome() -> None:
+    turns = [
+        _turn(
+            1,
+            events=[
+                _event(
+                    "answer_judged",
+                    day=1,
+                    concept="recognition",
+                    status="correct",
+                    score=0.9,
+                    answer_kind="recognition",
+                    is_transfer=True,
+                    source="review",
+                )
+            ],
+            move="advance",
+            tutor_output="Continue.",
+        ),
+        _turn(
+            2,
+            events=[
+                _event(
+                    "answer_judged",
+                    day=2,
+                    concept="gamed",
+                    status="correct",
+                    score=0.9,
+                    answer_kind="production",
+                    is_transfer=True,
+                    gaming_suspected=True,
+                    source="review",
+                ),
+                _event("concept_deferred", day=2, concept="supported"),
+            ],
+            move="remediation_hint",
+            tutor_output="**Hint:** Isolate the invariant.",
+        ),
+        _turn(
+            3,
+            events=[
+                _event(
+                    "answer_judged",
+                    day=3,
+                    concept="supported",
+                    status="correct",
+                    score=0.9,
+                    answer_kind="production",
+                    is_transfer=True,
+                    source="review",
+                ),
+                _event("concept_deferred", day=3, concept="independent"),
+            ],
+            move="advance",
+            tutor_output="Try a new case.",
+            probe="retrieval",
+        ),
+        _turn(
+            4,
+            events=[
+                _event(
+                    "answer_judged",
+                    day=5,
+                    concept="independent",
+                    status="correct",
+                    score=0.9,
+                    answer_kind="production",
+                    is_transfer=True,
+                    source="review",
+                )
+            ],
+            move="advance",
+            tutor_output="Continue.",
+            probe="retrieval",
+        ),
+    ]
+
+    metrics = scenario_metrics(turns, maximum_probes=4)
+
+    assert metrics["turns_to_criterion"] == 4
+    assert metrics["novel_transfer"] == {
+        "attempts": 1,
+        "passed": 1,
+        "pass_rate": 1.0,
+    }
+    assert metrics["deferred_recovery"] == {
+        "deferred": 2,
+        "recovered": 1,
+        "rate": 0.5,
+    }
+    assert metrics["diagnostics"]["unrecovered_deferred_concepts"] == [
+        "supported"
+    ]
+    assert metrics["hint_worked_example_dependency"][
+        "unresolved_concepts"
+    ] == 1
+
+
+def test_premature_mastery_remains_false_after_independent_recovery() -> None:
+    turns = [
+        _turn(
+            1,
+            events=[
+                _event(
+                    "answer_judged",
+                    day=1,
+                    concept="omega",
+                    status="needs_work",
+                    score=0.2,
+                    answer_kind="production",
+                    source="review",
+                )
+            ],
+            move="remediation_hint",
+            tutor_output="**Hint:** Focus on the invariant.",
+        ),
+        _turn(
+            2,
+            events=[
+                _event(
+                    "answer_judged",
+                    day=2,
+                    concept="omega",
+                    status="correct",
+                    score=0.9,
+                    answer_kind="production",
+                    source="review",
+                ),
+                _event(
+                    "mastery_changed",
+                    day=2,
+                    concept="omega",
+                    mastered=True,
+                ),
+            ],
+            move="advance",
+            tutor_output="Try it independently next.",
+        ),
+        _turn(
+            3,
+            events=[
+                _event(
+                    "answer_judged",
+                    day=3,
+                    concept="omega",
+                    status="correct",
+                    score=0.9,
+                    answer_kind="production",
+                    source="review",
+                )
+            ],
+            move="advance",
+            tutor_output="Continue.",
+        ),
+    ]
+
+    metrics = scenario_metrics(turns, maximum_probes=3)
+
+    assert metrics["turns_to_criterion"] == 3
+    assert metrics["diagnostics"]["false_mastery"] == ["omega"]
+    assert metrics["diagnostics"]["false_mastery_later_recovered"] == ["omega"]
+    assert metrics["concepts"]["false_mastery"] == 1
+    assert metrics["concepts"]["covered_without_false_mastery"] == 0
+    assert metrics["hint_worked_example_dependency"] == {
+        "supported_correct_concepts": 1,
+        "resolved_concepts": 1,
+        "unresolved_concepts": 0,
+    }
 
 
 def test_partial_record_and_aggregate_metrics_remain_valid() -> None:

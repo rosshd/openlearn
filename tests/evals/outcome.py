@@ -279,44 +279,64 @@ def scenario_metrics(
     transfer_passed = 0
     supported_correct: set[str] = set()
     independent_correct: set[str] = set()
+    mastery_events: set[str] = set()
+    false_mastery: set[str] = set()
+    deferred_at: dict[str, int] = {}
     for index, turn in enumerate(turns):
         prior_move = _move_name(turns[index - 1]) if index else ""
         support = prior_move if prior_move in SUPPORT_MOVES else "none"
-        for event in _events_of_type(turn, "answer_judged"):
+        raw_events = turn.get("events")
+        for event in raw_events if isinstance(raw_events, list) else []:
+            if not isinstance(event, dict):
+                continue
             data = event.get("data")
             if not isinstance(data, dict):
                 continue
+            event_type = event.get("event_type")
             concept = _concept(data)
-            passed = _passed(data)
-            production = data.get("answer_kind") == "production"
-            transfer = data.get("is_transfer") is True
-            valid = passed and production and data.get("gaming_suspected") is not True
-            answers.append(
-                {
-                    "turn": index + 1,
-                    "concept": concept,
-                    "passed": passed,
-                    "valid_criterion": valid,
-                    "support": support,
-                    "transfer": transfer,
-                }
-            )
-            if valid and criterion_turn is None:
-                criterion_turn = index + 1
-            if transfer:
-                transfer_attempts += 1
-                if passed:
-                    transfer_passed += 1
-            if valid and concept:
-                if support == "none":
+            if event_type == "concept_deferred" and concept:
+                deferred_at.setdefault(concept, index + 1)
+                continue
+            if event_type == "mastery_changed" and data.get("mastered") is True:
+                if concept:
+                    mastery_events.add(concept)
+                    if concept not in independent_correct:
+                        false_mastery.add(concept)
+                continue
+            if event_type != "answer_judged":
+                continue
+            answer = {
+                "turn": index + 1,
+                "concept": concept,
+                "passed": _passed(data),
+                "production": data.get("answer_kind") == "production",
+                "gaming_suspected": data.get("gaming_suspected") is True,
+                "support": support,
+                "transfer": data.get("is_transfer") is True,
+                "retrieval": (
+                    _answer_is_retrieval(turns, index + 1)
+                    and bool(cli.event_retrieval_source(event))
+                ),
+            }
+            answers.append(answer)
+            if qualifying_outcome_evidence(answer, "criterion"):
+                if concept:
                     independent_correct.add(concept)
-                else:
-                    supported_correct.add(concept)
+            elif _valid_production_evidence(answer) and concept:
+                supported_correct.add(concept)
+            if (
+                qualifying_outcome_evidence(answer, "criterion")
+                and criterion_turn is None
+            ):
+                criterion_turn = index + 1
+            if _eligible_outcome_attempt(answer, "novel_transfer"):
+                transfer_attempts += 1
+                if qualifying_outcome_evidence(answer, "novel_transfer"):
+                    transfer_passed += 1
 
-    mastery_events = _mastery_concepts(events)
-    false_mastery = sorted(mastery_events - independent_correct)
+    recovered_false_mastery = sorted(false_mastery & independent_correct)
+    false_mastery_list = sorted(false_mastery)
     unresolved_dependency = sorted(supported_correct - independent_correct)
-    deferred_at = _deferred_turns(turns)
     deferred = set(deferred_at)
     recovered = {
         str(answer["concept"])
@@ -324,8 +344,7 @@ def scenario_metrics(
         if answer["concept"]
         and answer["concept"] in deferred
         and int(answer["turn"]) > deferred_at[str(answer["concept"])]
-        and answer["passed"] is True
-        and _answer_is_retrieval(turns, int(answer["turn"]))
+        and qualifying_outcome_evidence(answer, "deferred_recovery")
     }
     tutor_words = sum(
         _word_count(str(turn.get("tutor_output") or "")) for turn in turns
@@ -340,7 +359,8 @@ def scenario_metrics(
     delayed = cli.delayed_retrieval_metric(events)
     covered = {str(answer["concept"]) for answer in answers if answer["concept"]}
     diagnostics = {
-        "false_mastery": false_mastery,
+        "false_mastery": false_mastery_list,
+        "false_mastery_later_recovered": recovered_false_mastery,
         "excessive_probing": {
             "actual": len(probes),
             "maximum": maximum_probes,
@@ -381,7 +401,7 @@ def scenario_metrics(
         "concepts": {
             "covered": len(covered),
             "mastered": len(mastery_events),
-            "covered_without_false_mastery": len(covered - set(false_mastery)),
+            "covered_without_false_mastery": len(covered - false_mastery),
             "false_mastery": len(false_mastery),
         },
         "deferred_recovery": {
@@ -391,6 +411,52 @@ def scenario_metrics(
         },
         "diagnostics": diagnostics,
     }
+
+
+def qualifying_outcome_evidence(
+    answer: dict[str, object],
+    semantic: str,
+) -> bool:
+    if not (
+        answer.get("passed") is True
+        and _eligible_outcome_attempt(answer, semantic)
+    ):
+        return False
+    if semantic == "criterion":
+        return True
+    if semantic == "novel_transfer":
+        return answer.get("transfer") is True
+    if semantic == "deferred_recovery":
+        return answer.get("retrieval") is True
+    raise ValueError(f"unknown outcome semantic: {semantic}")
+
+
+def _eligible_outcome_attempt(
+    answer: dict[str, object],
+    semantic: str,
+) -> bool:
+    if not (
+        answer.get("production") is True
+        and answer.get("gaming_suspected") is not True
+        and answer.get("support") == "none"
+    ):
+        return False
+    if semantic == "criterion":
+        return True
+    if semantic == "novel_transfer":
+        return answer.get("transfer") is True
+    if semantic == "deferred_recovery":
+        return answer.get("retrieval") is True
+    raise ValueError(f"unknown outcome semantic: {semantic}")
+
+
+def _valid_production_evidence(answer: dict[str, object]) -> bool:
+    return (
+        answer.get("passed") is True
+        and answer.get("production") is True
+        and answer.get("gaming_suspected") is not True
+        and answer.get("support") in SUPPORT_MOVES
+    )
 
 
 def aggregate_metrics(records: list[dict[str, object]]) -> dict[str, object]:
@@ -615,30 +681,6 @@ def _passed(data: dict[str, object]) -> bool:
         and not isinstance(score, bool)
         and float(score) >= 0.8
     )
-
-
-def _mastery_concepts(events: list[dict[str, object]]) -> set[str]:
-    return {
-        _concept(data)
-        for event in events
-        if event.get("event_type") == "mastery_changed"
-        and isinstance((data := event.get("data")), dict)
-        and data.get("mastered") is True
-        and _concept(data)
-    }
-
-
-def _deferred_turns(turns: list[dict[str, object]]) -> dict[str, int]:
-    deferred: dict[str, int] = {}
-    for turn_number, turn in enumerate(turns, start=1):
-        for event in _events_of_type(turn, "concept_deferred"):
-            data = event.get("data")
-            if not isinstance(data, dict):
-                continue
-            concept = _concept(data)
-            if concept:
-                deferred.setdefault(concept, turn_number)
-    return deferred
 
 
 def _answer_is_retrieval(turns: list[dict[str, object]], turn_number: int) -> bool:

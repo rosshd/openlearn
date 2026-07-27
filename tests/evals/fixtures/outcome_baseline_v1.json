@@ -11,9 +11,9 @@
       "pass_rate": 0.5
     },
     "novel_transfer": {
-      "attempts": 1,
-      "passed": 1,
-      "pass_rate": 1.0
+      "attempts": 0,
+      "passed": 0,
+      "pass_rate": null
     },
     "turns_to_criterion": {
       "observations": 1,
@@ -34,8 +34,8 @@
     "false_mastery": 1,
     "deferred_recovery": {
       "deferred": 1,
-      "recovered": 1,
-      "rate": 1.0
+      "recovered": 0,
+      "rate": 0.0
     }
   },
   "notes": [

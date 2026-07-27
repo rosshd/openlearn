@@ -62,7 +62,11 @@ The lane reports:
 
 Judge prose is not a metric input.
 The metric inputs are persisted answer events, mastery and deferral events, selected tutor moves, state-linked turns, and persisted tutor output.
+Criterion, novel-transfer success, and deferred recovery all use the same qualifying evidence rule.
+The answer must pass as production-grade evidence, must not be flagged as gaming, and must be independent of a disqualifying hint or worked example.
+Transfer and recovery additionally require their matching novel-transfer or scheduled-retrieval semantics.
 False mastery, excessive probing, redundant probing, unresolved support dependency, delayed failure, and unrecovered deferral remain visible in each scenario's diagnostics even when other metrics are strong.
+A premature mastery event remains false mastery if the learner later recovers independently; the later recovery is recorded separately instead of rewriting history.
 
 ## Baseline and calibration
 
