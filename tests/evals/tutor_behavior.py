@@ -19,6 +19,7 @@ from tests.dogfood.evidence import EvidenceRecorder
 
 SCHEMA_VERSION = 2
 RUBRIC_VERSION = "tutor-behavior-v2"
+MULTI_TURN_CONTRACT_VERSION = "adaptive-sequence-v1"
 JUDGE_THRESHOLD = 0.7
 DIMENSION_FLOOR = 0.5
 SCENARIOS_DIR = Path(__file__).parent / "scenarios"
@@ -561,6 +562,9 @@ def _run_multi_turn_scenario(
                     "selected_move": selected_move,
                     "judgment": judgment,
                     "judge": judge,
+                    "rubric": _effective_rubric(
+                        _turn_scoped_scenario(scenario, index - 1)
+                    ),
                     "state_delta": _mapping_delta(state_before, state_after),
                     "state_before_sha256": state_before_hash,
                     "state_after_sha256": state_after_hash,
@@ -583,7 +587,7 @@ def _run_multi_turn_scenario(
                         else ""
                     ),
                     "actual_system_prompt_replay_sha256": (
-                        _stable_replay_hash(actual_system_prompt, home)
+                        _stable_prompt_replay_hash(actual_system_prompt, home)
                         if actual_system_prompt
                         else ""
                     ),
@@ -647,6 +651,8 @@ def _run_multi_turn_scenario(
         )
         record: dict[str, object] = {
             "schema_version": SCHEMA_VERSION,
+            "suite": "multi-turn",
+            "contract_version": MULTI_TURN_CONTRACT_VERSION,
             "scenario": scenario["name"],
             "family": scenario["family"],
             "persona": scenario["persona"],
@@ -952,42 +958,55 @@ def _stable_hash(value: object) -> str:
 
 
 def _stable_replay_hash(value: object, home: Path) -> str:
-    return _stable_hash(_normalize_replay_value(value, home=home))
+    return _stable_hash(
+        _normalize_replay_value(value, home=home, path=("state",))
+    )
 
 
-def _normalize_replay_value(value: object, *, home: Path | None = None) -> object:
+def _stable_prompt_replay_hash(prompt: str, home: Path) -> str:
+    normalized = prompt.replace(str(home), "<SCENARIO_HOME>")
+    normalized = re.sub(r"\bturn_[0-9a-f]{32}\b", "turn_<ID>", normalized)
+    normalized = re.sub(r"\btopic_[0-9a-f]{32}\b", "topic_<ID>", normalized)
+    return _stable_hash(normalized)
+
+
+def _normalize_replay_value(
+    value: object,
+    *,
+    home: Path | None = None,
+    path: tuple[str, ...] = (),
+) -> object:
     if isinstance(value, dict):
-        return {
-            key: _normalize_replay_value(item, home=home)
-            for key, item in sorted(value.items())
-            if key not in {"mutation_id", "_turn_receipts"}
-        }
+        normalized: dict[str, object] = {}
+        for key, item in sorted(value.items()):
+            if key == "_turn_receipts":
+                continue
+            child_path = (*path, key)
+            if key == "mutation_id":
+                normalized[key] = "<MUTATION_ID>"
+            elif key == "topic_generation":
+                normalized[key] = "<TOPIC_ID>"
+            elif key == "event_id" and "events" in path:
+                normalized[key] = "<EVENT_ID>"
+            elif key == "ts" and "events" in path:
+                normalized[key] = "<EVENT_TIMESTAMP>"
+            else:
+                normalized[key] = _normalize_replay_value(
+                    item,
+                    home=home,
+                    path=child_path,
+                )
+        return normalized
     if isinstance(value, list):
-        return [_normalize_replay_value(item, home=home) for item in value]
+        return [
+            _normalize_replay_value(item, home=home, path=(*path, "[]"))
+            for item in value
+        ]
     if not isinstance(value, str):
         return value
     normalized = value
     if home is not None:
         normalized = normalized.replace(str(home), "<SCENARIO_HOME>")
-    normalized = re.sub(
-        r"\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})\b",
-        "<TIMESTAMP>",
-        normalized,
-    )
-    normalized = re.sub(r"\b\d{4}-\d{2}-\d{2}\b", "<DATE>", normalized)
-    normalized = re.sub(
-        r"(?<![A-Za-z0-9])(?:/private)?/tmp/[^\s\"']+",
-        "<TEMP_PATH>",
-        normalized,
-    )
-    normalized = re.sub(
-        r"\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b",
-        "<UUID>",
-        normalized,
-        flags=re.IGNORECASE,
-    )
-    normalized = re.sub(r"\bturn_[0-9a-f]{32}\b", "turn_<ID>", normalized)
-    normalized = re.sub(r"\btopic_[0-9a-f]{32}\b", "topic_<ID>", normalized)
     return normalized
 
 
@@ -1008,6 +1027,7 @@ def _multi_turn_replay_fingerprint(record: dict[str, object]) -> str:
                         "selected_move",
                         "judgment",
                         "judge",
+                        "rubric",
                         "state_delta",
                         "events",
                         "actual_system_prompt_replay_sha256",
@@ -1020,9 +1040,20 @@ def _multi_turn_replay_fingerprint(record: dict[str, object]) -> str:
                 }
             )
     semantic_evidence = {
+        "schema_version": record.get("schema_version"),
+        "suite": record.get("suite"),
+        "contract_version": record.get("contract_version"),
         "scenario": record.get("scenario"),
         "family": record.get("family"),
         "rubric_version": record.get("rubric_version"),
+        "rubric": record.get("rubric"),
+        "assessment_mode": record.get("assessment_mode"),
+        "assessment_item_count": record.get("assessment_item_count"),
+        "fixture_sha256": (
+            record.get("provenance", {}).get("fixture_sha256")
+            if isinstance(record.get("provenance"), dict)
+            else None
+        ),
         "turns": stable_turns,
         "sequence_judge": record.get("sequence_judge"),
         "sequence_error": record.get("sequence_error"),
@@ -1030,7 +1061,15 @@ def _multi_turn_replay_fingerprint(record: dict[str, object]) -> str:
         "event_assertions": record.get("event_assertions"),
         "partial_evidence": record.get("partial_evidence"),
     }
-    return _stable_hash(_normalize_replay_value(semantic_evidence))
+    home: Path | None = None
+    provenance = record.get("provenance")
+    if isinstance(provenance, dict):
+        openlearn_home = provenance.get("openlearn_home")
+        if isinstance(openlearn_home, str) and openlearn_home:
+            home = Path(openlearn_home)
+    return _stable_hash(
+        _normalize_replay_value(semantic_evidence, home=home, path=("record",))
+    )
 
 
 def _seed_scenario(

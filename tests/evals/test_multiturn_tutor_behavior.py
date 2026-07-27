@@ -438,37 +438,76 @@ def test_mocked_replay_has_stable_fingerprint(
 
 def test_replay_fingerprint_changes_for_semantic_evidence() -> None:
     record = {
+        "schema_version": 2,
+        "suite": "multi-turn",
+        "contract_version": "adaptive-sequence-v1",
         "scenario": "adaptive",
         "family": "prerequisite_repair",
         "rubric_version": "test",
+        "rubric": ["repair before resuming"],
+        "assessment_mode": False,
+        "assessment_item_count": {"min": 1, "max": 1},
         "turns": [
             {
                 "turn": 1,
                 "learner_input": "attempt",
-                "tutor_output": "feedback",
+                "tutor_output": "Review this on 2026-01-04.",
                 "selected_move": {"name": "feedback"},
                 "judgment": {"graded": True, "score": 0.2},
-                "judge": {"pass": True, "score": 0.9},
-                "events": [{"event_type": "answer_judged", "data": {"score": 0.2}}],
+                "judge": {
+                    "pass": True,
+                    "score": 0.9,
+                    "evidence": "Review is scheduled for 2026-01-04.",
+                },
+                "rubric": ["give bounded feedback"],
+                "events": [
+                    {
+                        "event_type": "answer_judged",
+                        "data": {"score": 0.2, "review_due": "2026-01-04"},
+                    }
+                ],
                 "actual_system_prompt_replay_sha256": "prompt-a",
                 "state_before_replay_sha256": "state-a",
                 "state_after_replay_sha256": "state-b",
-                "policy_state": {"pending_remediation": {"stage": "hint"}},
+                "policy_state": {
+                    "pending_remediation": {"stage": "hint"},
+                    "review_due": [{"due": "2026-01-04"}],
+                },
             }
         ],
         "sequence_judge": {"pass": True, "score": 0.9},
         "state_assertions": {"pass": True},
         "event_assertions": {"pass": True},
+        "provenance": {
+            "fixture_sha256": "fixture-a",
+            "openlearn_home": "/tmp/run-a/home",
+        },
     }
     mutations = []
     changed_event = deepcopy(record)
     changed_event["turns"][0]["events"][0]["event_type"] = "mastery_changed"
     mutations.append(changed_event)
+    changed_event_date = deepcopy(record)
+    changed_event_date["turns"][0]["events"][0]["data"][
+        "review_due"
+    ] = "2026-01-05"
+    mutations.append(changed_event_date)
     changed_output = deepcopy(record)
-    changed_output["turns"][0]["tutor_output"] = "different feedback"
+    changed_output["turns"][0]["tutor_output"] = "Review this on 2026-01-05."
     mutations.append(changed_output)
+    changed_due = deepcopy(record)
+    changed_due["turns"][0]["policy_state"]["review_due"][0]["due"] = "2026-01-05"
+    mutations.append(changed_due)
+    changed_rubric = deepcopy(record)
+    changed_rubric["rubric"][0] = "defer before resuming"
+    mutations.append(changed_rubric)
+    changed_fixture = deepcopy(record)
+    changed_fixture["provenance"]["fixture_sha256"] = "fixture-b"
+    mutations.append(changed_fixture)
     changed_judge = deepcopy(record)
-    changed_judge["turns"][0]["judge"]["score"] = 0.4
+    changed_judge["turns"][0]["judge"][
+        "evidence"
+    ] = "Review is scheduled for 2026-01-05."
     mutations.append(changed_judge)
     changed_prompt = deepcopy(record)
     changed_prompt["turns"][0]["actual_system_prompt_replay_sha256"] = "prompt-b"
@@ -486,11 +525,15 @@ def test_replay_fingerprint_changes_for_semantic_evidence() -> None:
     )
 
 
-def test_replay_fingerprint_ignores_volatile_dates_timestamps_and_paths() -> None:
+def test_replay_fingerprint_ignores_volatile_timestamps_paths_and_ids() -> None:
     record = {
+        "schema_version": 2,
+        "suite": "multi-turn",
+        "contract_version": "adaptive-sequence-v1",
         "scenario": "adaptive",
         "family": "prerequisite_repair",
         "rubric_version": "test",
+        "rubric": ["repair before resuming"],
         "turns": [
             {
                 "turn": 1,
@@ -504,28 +547,37 @@ def test_replay_fingerprint_ignores_volatile_dates_timestamps_and_paths() -> Non
                         "event_type": "answer_judged",
                         "event_id": "turn_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:0",
                         "ts": "2026-01-01T10:00:00+00:00",
-                        "data": {"created": "2026-01-01", "path": "/tmp/run-a/topic.md"},
+                        "data": {
+                            "created": "2026-01-01",
+                            "path": "/tmp/run-a/home/topic.md",
+                        },
                     }
                 ],
                 "actual_system_prompt_replay_sha256": "prompt-a",
                 "state_before_replay_sha256": "state-a",
                 "state_after_replay_sha256": "state-b",
-                "policy_state": {"review_due": [{"due": "2026-01-02"}]},
+                "policy_state": {
+                    "created": "2026-01-01",
+                    "review_due": [{"due": "2026-01-02"}],
+                },
             }
         ],
         "sequence_judge": {"pass": True, "score": 0.9},
         "state_assertions": {"pass": True},
         "event_assertions": {"pass": True},
-        "provenance": {"openlearn_home": "/tmp/run-a/home"},
+        "provenance": {
+            "fixture_sha256": "fixture-a",
+            "openlearn_home": "/tmp/run-a/home",
+        },
     }
     replay = deepcopy(record)
     replay["turns"][0]["events"][0]["ts"] = "2027-04-05T11:30:00+00:00"
     replay["turns"][0]["events"][0][
         "event_id"
     ] = "turn_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:0"
-    replay["turns"][0]["events"][0]["data"]["created"] = "2027-04-05"
-    replay["turns"][0]["events"][0]["data"]["path"] = "/private/tmp/run-b/topic.md"
-    replay["turns"][0]["policy_state"]["review_due"][0]["due"] = "2027-04-06"
+    replay["turns"][0]["events"][0]["data"][
+        "path"
+    ] = "/private/tmp/run-b/home/topic.md"
     replay["provenance"]["openlearn_home"] = "/private/tmp/run-b/home"
 
     assert _multi_turn_replay_fingerprint(record) == _multi_turn_replay_fingerprint(
