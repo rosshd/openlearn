@@ -6,16 +6,209 @@ and activity lifecycle only retain the namespaced payload and opaque evidence ID
 
 from __future__ import annotations
 
+import json
+import re
 from collections.abc import Mapping
+from dataclasses import dataclass
+from urllib.parse import urlparse
 
 from openlearn.activities import ActivityContractError
+
+ACTION_MARKER_PATTERN = re.compile(
+    r"(?is)<!--\s*openlearn-action\s*:\s*(.*?)\s*-->"
+)
+DRILL_ACTION_FIELDS = {
+    "action",
+    "objective",
+    "title",
+    "language",
+    "difficulty",
+    "scaffolding_level",
+    "purpose",
+    "source",
+    "plan_prompt",
+    "hints",
+    "reflection_prompt",
+    "transfer_prompt",
+    "drill",
+}
+DRILL_SPEC_FIELDS = {"title", "description", "function_stub", "test_cases"}
+SOURCE_FIELDS = {
+    "generated": {"kind", "name"},
+    "curated": {"kind", "name", "license"},
+    "licensed": {"kind", "name", "license"},
+    "official_link": {"kind", "name", "uri"},
+}
+MAX_ACTION_TEXT = 1_000
+MAX_HINTS = 3
+
+
+@dataclass(frozen=True)
+class CodingDrillAction:
+    """One fully validated semantic tutor action with no executable/path fields."""
+
+    objective: str
+    title: str
+    language: str
+    difficulty: int
+    scaffolding_level: int
+    purpose: str
+    source: dict[str, str]
+    plan_prompt: str
+    hints: tuple[str, ...]
+    reflection_prompt: str
+    transfer_prompt: str
+    drill: dict[str, object]
+
+
+def extract_coding_drill_action(text: str) -> tuple[str, CodingDrillAction | None]:
+    """Remove and decode at most one hidden tutor action marker."""
+    matches = list(ACTION_MARKER_PATTERN.finditer(text))
+    if not matches:
+        return text, None
+    if len(matches) != 1:
+        raise ActivityContractError("tutor response must contain at most one activity action")
+    marker = matches[0]
+    try:
+        payload = json.loads(marker.group(1))
+    except json.JSONDecodeError as exc:
+        raise ActivityContractError("tutor coding drill action is malformed JSON") from exc
+    if not isinstance(payload, Mapping):
+        raise ActivityContractError("tutor coding drill action must be an object")
+    action = parse_coding_drill_action(payload)
+    visible = (text[: marker.start()] + text[marker.end() :]).strip()
+    return visible, action
+
+
+def parse_coding_drill_action(payload: Mapping[str, object]) -> CodingDrillAction:
+    """Validate the allow-listed `start_coding_drill` action schema."""
+    if set(payload) != DRILL_ACTION_FIELDS:
+        raise ActivityContractError("tutor coding drill action fields are malformed")
+    if payload.get("action") != "start_coding_drill":
+        raise ActivityContractError("unknown tutor coding drill action")
+    objective = _text(payload.get("objective"), "coding drill objective")
+    title = _text(payload.get("title"), "coding drill title", limit=200)
+    if payload.get("language") != "python":
+        raise ActivityContractError("tutor coding drills currently require language=python")
+    difficulty = payload.get("difficulty")
+    if not isinstance(difficulty, int) or isinstance(difficulty, bool) or not 1 <= difficulty <= 3:
+        raise ActivityContractError("coding drill difficulty must be an integer from 1 to 3")
+    scaffolding = payload.get("scaffolding_level")
+    if not isinstance(scaffolding, int) or isinstance(scaffolding, bool) or not 0 <= scaffolding <= 3:
+        raise ActivityContractError("scaffolding_level must be an integer from 0 to 3")
+    purpose = payload.get("purpose")
+    if purpose not in {"practice", "mastery_check"}:
+        raise ActivityContractError("coding drill purpose must be practice or mastery_check")
+    source = _source(payload.get("source"))
+    plan_prompt = _optional_text(payload.get("plan_prompt"), "coding drill plan prompt")
+    hints_value = payload.get("hints")
+    if not isinstance(hints_value, list) or len(hints_value) > MAX_HINTS:
+        raise ActivityContractError(f"coding drill hints must contain at most {MAX_HINTS} items")
+    hints = tuple(_text(item, "coding drill hint") for item in hints_value)
+    reflection = _text(payload.get("reflection_prompt"), "coding drill reflection prompt")
+    transfer = _optional_text(payload.get("transfer_prompt"), "coding drill transfer prompt")
+    drill_value = payload.get("drill")
+    if not isinstance(drill_value, Mapping) or set(drill_value) != DRILL_SPEC_FIELDS:
+        raise ActivityContractError("coding drill specification fields are malformed")
+    drill = dict(drill_value)
+    try:
+        encoded_drill = json.dumps(drill, sort_keys=True)
+    except (TypeError, ValueError) as exc:
+        raise ActivityContractError("coding drill specification must contain JSON values") from exc
+    if len(encoded_drill.encode("utf-8")) > 16_384:
+        raise ActivityContractError("coding drill specification is too large")
+    if drill.get("title") != title:
+        raise ActivityContractError("coding drill action and specification titles must match")
+    for key in ("description", "function_stub"):
+        _text(drill.get(key), f"coding drill {key}", limit=4_000)
+    cases = drill.get("test_cases")
+    if not isinstance(cases, list) or len(cases) > 8:
+        raise ActivityContractError("coding drill test_cases must be a bounded list")
+    if source["kind"] == "official_link":
+        if cases:
+            raise ActivityContractError(
+                "official-link drills must not reproduce remote problem tests"
+            )
+    elif not cases:
+        raise ActivityContractError("local coding drills require test cases")
+    return CodingDrillAction(
+        objective=objective,
+        title=title,
+        language="python",
+        difficulty=difficulty,
+        scaffolding_level=scaffolding,
+        purpose=str(purpose),
+        source=source,
+        plan_prompt=plan_prompt,
+        hints=hints,
+        reflection_prompt=reflection,
+        transfer_prompt=transfer,
+        drill=drill,
+    )
+
+
+def _source(value: object) -> dict[str, str]:
+    if not isinstance(value, Mapping):
+        raise ActivityContractError("coding drill source must be an object")
+    kind = value.get("kind")
+    if (
+        not isinstance(kind, str)
+        or kind not in SOURCE_FIELDS
+        or set(value) != SOURCE_FIELDS[kind]
+    ):
+        raise ActivityContractError("coding drill source fields are malformed")
+    source = {"kind": str(kind), "name": _text(value.get("name"), "coding drill source name")}
+    if kind in {"curated", "licensed"}:
+        source["license"] = _text(value.get("license"), "coding drill source license")
+    if kind == "official_link":
+        uri = _text(value.get("uri"), "coding drill official URI")
+        parsed = urlparse(uri)
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname not in {"leetcode.com", "www.leetcode.com"}
+            or not parsed.path.startswith("/problems/")
+            or parsed.username is not None
+            or parsed.password is not None
+        ):
+            raise ActivityContractError(
+                "official-link drills require an official HTTPS LeetCode problem URL"
+            )
+        source["uri"] = uri
+    return source
+
+
+def _text(value: object, label: str, *, limit: int = MAX_ACTION_TEXT) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ActivityContractError(f"{label} must be non-empty text")
+    normalized = value.strip()
+    if len(normalized) > limit:
+        raise ActivityContractError(f"{label} is too long")
+    if '"""' in normalized:
+        raise ActivityContractError(f"{label} contains an unsafe docstring delimiter")
+    return normalized
+
+
+def _optional_text(value: object, label: str) -> str:
+    if not isinstance(value, str):
+        raise ActivityContractError(f"{label} must be text")
+    normalized = value.strip()
+    if len(normalized) > MAX_ACTION_TEXT:
+        raise ActivityContractError(f"{label} is too long")
+    if '"""' in normalized:
+        raise ActivityContractError(f"{label} contains an unsafe docstring delimiter")
+    return normalized
 
 
 class CodingActivityAdapter:
     domain = "coding"
     activity_kinds = {"python_drill"}
-    evidence_kinds = {"pytest_result"}
-    tool_actions = {"create_drill_workspace", "open_configured_editor", "run_drill_tests"}
+    evidence_kinds = {"artifact_snapshot", "pytest_result"}
+    tool_actions = {
+        "create_drill_workspace",
+        "open_configured_editor",
+        "open_official_problem_link",
+        "run_drill_tests",
+    }
 
     def validate_request(self, kind: str, payload: Mapping[str, object]) -> dict[str, object]:
         if kind not in self.activity_kinds:
@@ -42,15 +235,44 @@ class CodingActivityAdapter:
                     "built-in coding tool actions do not accept arbitrary payloads"
                 )
             tools.append({"action": action, "payload": {}})
-        return {
+        normalized: dict[str, object] = {
             "title": title.strip(),
             "language": "python",
             "tool_requests": tools,
         }
+        optional_text = ("plan_prompt", "reflection_prompt", "transfer_prompt")
+        for field in optional_text:
+            if field in payload:
+                normalized[field] = _optional_text(payload.get(field), f"coding {field}")
+        if "difficulty" in payload:
+            difficulty = payload.get("difficulty")
+            if (
+                not isinstance(difficulty, int)
+                or isinstance(difficulty, bool)
+                or not 1 <= difficulty <= 3
+            ):
+                raise ActivityContractError("coding difficulty must be an integer from 1 to 3")
+            normalized["difficulty"] = difficulty
+        if "hints" in payload:
+            hints = payload.get("hints")
+            if not isinstance(hints, list) or len(hints) > MAX_HINTS:
+                raise ActivityContractError("coding hints must be a bounded list")
+            normalized["hints"] = [_text(item, "coding hint") for item in hints]
+        return normalized
 
     def validate_evidence(self, kind: str, payload: Mapping[str, object]) -> dict[str, object]:
         if kind not in self.evidence_kinds:
             raise ActivityContractError(f"unknown coding evidence kind: {kind}")
+        if kind == "artifact_snapshot":
+            if set(payload) != {"artifact_excerpt", "attempt_number"}:
+                raise ActivityContractError("artifact snapshot evidence fields are malformed")
+            artifact = payload.get("artifact_excerpt")
+            attempt = payload.get("attempt_number")
+            if not isinstance(artifact, str) or len(artifact) > 8_000:
+                raise ActivityContractError("artifact snapshot is too long")
+            if not isinstance(attempt, int) or isinstance(attempt, bool) or not 1 <= attempt <= 64:
+                raise ActivityContractError("artifact snapshot attempt_number is invalid")
+            return {"artifact_excerpt": artifact, "attempt_number": attempt}
         return_code = payload.get("return_code")
         if not isinstance(return_code, int) or isinstance(return_code, bool):
             raise ActivityContractError("pytest evidence return_code must be an integer")
@@ -60,4 +282,37 @@ class CodingActivityAdapter:
         normalized = summary.strip()
         if len(normalized) > 4_000:
             raise ActivityContractError("pytest evidence summary is too long")
-        return {"return_code": return_code, "summary": normalized}
+        evidence: dict[str, object] = {"return_code": return_code, "summary": normalized}
+        optional_fields = {
+            "artifact_excerpt",
+            "attempt_number",
+            "hint_stage",
+            "tests_passed",
+        }
+        unexpected = set(payload) - {"return_code", "summary"} - optional_fields
+        if unexpected:
+            raise ActivityContractError("pytest evidence fields are malformed")
+        if "artifact_excerpt" in payload:
+            artifact = payload.get("artifact_excerpt")
+            if not isinstance(artifact, str) or len(artifact) > 8_000:
+                raise ActivityContractError("pytest evidence artifact_excerpt is too long")
+            evidence["artifact_excerpt"] = artifact
+        if "attempt_number" in payload:
+            attempt = payload.get("attempt_number")
+            if not isinstance(attempt, int) or isinstance(attempt, bool) or not 1 <= attempt <= 64:
+                raise ActivityContractError("pytest evidence attempt_number is invalid")
+            evidence["attempt_number"] = attempt
+        if "hint_stage" in payload:
+            hint_stage = payload.get("hint_stage")
+            if (
+                not isinstance(hint_stage, int)
+                or isinstance(hint_stage, bool)
+                or not 0 <= hint_stage <= MAX_HINTS
+            ):
+                raise ActivityContractError("pytest evidence hint_stage is invalid")
+            evidence["hint_stage"] = hint_stage
+        if "tests_passed" in payload:
+            if not isinstance(payload.get("tests_passed"), bool):
+                raise ActivityContractError("pytest evidence tests_passed must be boolean")
+            evidence["tests_passed"] = payload["tests_passed"]
+        return evidence

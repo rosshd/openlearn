@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 from collections.abc import Mapping
 from datetime import datetime, timezone
@@ -13,7 +14,11 @@ from openlearn.activities import (
     propose_activity,
     transition_activity,
 )
-from openlearn.coding_activities import CodingActivityAdapter
+from openlearn.coding_activities import (
+    CodingActivityAdapter,
+    CodingDrillAction,
+    extract_coding_drill_action,
+)
 
 
 FIXED_TIME = datetime(2026, 7, 24, 12, 0, tzinfo=timezone.utc)
@@ -213,6 +218,108 @@ class ActivityContractTests(unittest.TestCase):
 
         self.assertNotIn("mastery", completed)
         self.assertEqual(completed["evidence_refs"], [])
+
+    def test_tutor_drill_action_is_narrow_typed_and_stripped_from_visible_text(self) -> None:
+        raw = (
+            "**Example:**\nA small hash-map drill would make the tradeoff observable.\n"
+            '<!-- openlearn-action: {"action":"start_coding_drill",'
+            '"objective":"Implement one-pass lookup without nested loops.",'
+            '"title":"Pair Lookup","language":"python","difficulty":2,'
+            '"scaffolding_level":1,"purpose":"practice",'
+            '"source":{"kind":"generated","name":"openLearn original"},'
+            '"plan_prompt":"Name the lookup invariant before coding.",'
+            '"hints":["What should the map remember?","Check before inserting."],'
+            '"reflection_prompt":"Why does lookup order avoid reusing an item?",'
+            '"transfer_prompt":"Solve a related complement lookup with a different output.",'
+            '"drill":{"title":"Pair Lookup","description":"Return two matching indexes.",'
+            '"function_stub":"def pair_lookup(values, target):\\n    pass",'
+            '"test_cases":[{"input":[[2,7,11],9],"expected":[0,1]}]}} -->'
+        )
+
+        visible, action = extract_coding_drill_action(raw)
+
+        self.assertNotIn("openlearn-action", visible)
+        self.assertIsInstance(action, CodingDrillAction)
+        assert action is not None
+        self.assertEqual(action.purpose, "practice")
+        self.assertEqual(action.difficulty, 2)
+        self.assertEqual(action.hints[0], "What should the map remember?")
+
+    def test_tutor_drill_action_rejects_malformed_or_unsafe_fields(self) -> None:
+        base = {
+            "action": "start_coding_drill",
+            "objective": "Practice lookup.",
+            "title": "Lookup",
+            "language": "python",
+            "difficulty": 2,
+            "scaffolding_level": 0,
+            "purpose": "practice",
+            "source": {"kind": "generated", "name": "openLearn original"},
+            "plan_prompt": "",
+            "hints": [],
+            "reflection_prompt": "Explain the invariant.",
+            "transfer_prompt": "",
+            "drill": {
+                "title": "Lookup",
+                "description": "Return the matching index.",
+                "function_stub": "def lookup(values, target):\n    pass",
+                "test_cases": [{"input": [[1], 1], "expected": 0}],
+            },
+        }
+        unsafe_variants = [
+            {**base, "command": "rm -rf /"},
+            {**base, "path": "/tmp/owned"},
+            {**base, "language": "bash"},
+            {**base, "difficulty": 9},
+            {**base, "purpose": "automatic_mastery"},
+            {
+                **base,
+                "drill": {
+                    **base["drill"],
+                    "description": 'Safe text."""\nprint("unexpected")\n"""',
+                },
+            },
+            {
+                **base,
+                "source": {
+                    "kind": "official_link",
+                    "name": "copied problem",
+                    "uri": "https://example.com/problem",
+                },
+            },
+        ]
+
+        for payload in unsafe_variants:
+            with self.subTest(payload=payload):
+                marker = f"<!-- openlearn-action: {json.dumps(payload)} -->"
+                with self.assertRaises(ActivityContractError):
+                    extract_coding_drill_action(f"**Lesson:**\nOffer.\n{marker}")
+
+    def test_coding_evidence_keeps_attempt_feedback_fields_bounded(self) -> None:
+        adapter = CodingActivityAdapter()
+
+        evidence = adapter.validate_evidence(
+            "pytest_result",
+            {
+                "return_code": 1,
+                "summary": "FAILED test_case_1",
+                "artifact_excerpt": "def solve():\n    return None",
+                "attempt_number": 2,
+                "hint_stage": 1,
+                "tests_passed": False,
+            },
+        )
+
+        self.assertEqual(evidence["attempt_number"], 2)
+        self.assertEqual(evidence["hint_stage"], 1)
+        with self.assertRaises(ActivityContractError):
+            adapter.validate_evidence(
+                "pytest_result",
+                {
+                    **evidence,
+                    "artifact_excerpt": "x" * 8_001,
+                },
+            )
 
 
 if __name__ == "__main__":
