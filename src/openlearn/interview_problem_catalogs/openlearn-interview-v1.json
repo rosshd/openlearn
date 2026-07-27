@@ -17,6 +17,7 @@
       "statement": "A sensor produced integer readings in nondecreasing order. Return the zero-based positions of two distinct readings whose sum equals the target. Return [-1, -1] when no pair exists.",
       "source": {
         "type": "packaged",
+        "provider": "openlearn",
         "rights_basis": "openlearn_original",
         "url": "https://github.com/rosshd/openlearn",
         "license": "AGPL-3.0-or-later",
@@ -30,7 +31,7 @@
             "function": "pair_sum_sorted",
             "parameters": ["values", "target"]
           },
-          "starter_code": "def pair_sum_sorted(values: list[int], target: int) -> list[int]:\n    pass\n",
+          "starter_code": "def pair_sum_sorted(values, target):\n    pass\n",
           "reference": "openlearn.interview_problem_references:pair_sum_sorted",
           "tests": {
             "public": [
@@ -85,7 +86,7 @@
           "problem_id": "problem.longest-repeating-replacement"
         }
       ],
-      "checksum": "sha256:da5f466351f5d9d31eeeec86137f33778c02b4d2219b92f3ddfac38af67ec8fe"
+      "checksum": "sha256:5db858f43dd3614288f4c6fbfdc3bef1696bfb20364e2ee0fa6488b7958f13f2"
     },
     {
       "id": "problem.pair-sum-sorted",
@@ -98,6 +99,7 @@
       "statement": "A sensor produced integer readings in nondecreasing order. At most one pair of distinct positions has readings that sum to the target. Return that zero-based position pair, or [-1, -1] when no pair exists.",
       "source": {
         "type": "packaged",
+        "provider": "openlearn",
         "rights_basis": "openlearn_original",
         "url": "https://github.com/rosshd/openlearn",
         "license": "AGPL-3.0-or-later",
@@ -111,7 +113,7 @@
             "function": "pair_sum_sorted",
             "parameters": ["values", "target"]
           },
-          "starter_code": "def pair_sum_sorted(values: list[int], target: int) -> list[int]:\n    pass\n",
+          "starter_code": "def pair_sum_sorted(values, target):\n    pass\n",
           "reference": "openlearn.interview_problem_references:pair_sum_sorted",
           "tests": {
             "public": [
@@ -166,7 +168,7 @@
           "problem_id": "problem.longest-repeating-replacement"
         }
       ],
-      "checksum": "sha256:94517beb75a9347865006c4538c05a2d22ad09d9d2699cd9e36c23242e715ab5"
+      "checksum": "sha256:e163e8a85fa926219f0ab1623ab4805bade04dae9bdc81785c106056d7bc6023"
     },
     {
       "id": "problem.longest-repeating-replacement",
@@ -179,6 +181,7 @@
       "statement": "Given a text and a nonnegative edit budget, find the greatest length of a contiguous segment that can be made entirely one character by replacing at most that many characters.",
       "source": {
         "type": "packaged",
+        "provider": "openlearn",
         "rights_basis": "openlearn_original",
         "url": "https://github.com/rosshd/openlearn",
         "license": "AGPL-3.0-or-later",
@@ -192,7 +195,7 @@
             "function": "longest_uniform_span_after_replacements",
             "parameters": ["text", "budget"]
           },
-          "starter_code": "def longest_uniform_span_after_replacements(text: str, budget: int) -> int:\n    pass\n",
+          "starter_code": "def longest_uniform_span_after_replacements(text, budget):\n    pass\n",
           "reference": "openlearn.interview_problem_references:longest_uniform_span_after_replacements",
           "tests": {
             "public": [
@@ -247,7 +250,7 @@
           "problem_id": "problem.longest-repeating-replacement"
         }
       ],
-      "checksum": "sha256:a4073af47d9fdc7073e38547ed5cca0ae0538852ba7c9b53d357be0ae39bd958"
+      "checksum": "sha256:130790940a82e0e2f1fc2b8162d8f80cf8a86a9a4f7c0257c042687b9c3a875a"
     },
     {
       "id": "problem.merge-intervals",
@@ -260,6 +263,7 @@
       "statement": "A calendar exports busy periods as inclusive [start, end] integer pairs in arbitrary order. Return an ordered list that combines every pair of periods that overlaps or touches.",
       "source": {
         "type": "packaged",
+        "provider": "openlearn",
         "rights_basis": "openlearn_original",
         "url": "https://github.com/rosshd/openlearn",
         "license": "AGPL-3.0-or-later",
@@ -273,7 +277,7 @@
             "function": "merge_busy_periods",
             "parameters": ["intervals"]
           },
-          "starter_code": "def merge_busy_periods(intervals: list[list[int]]) -> list[list[int]]:\n    pass\n",
+          "starter_code": "def merge_busy_periods(intervals):\n    pass\n",
           "reference": "openlearn.interview_problem_references:merge_busy_periods",
           "tests": {
             "public": [
@@ -328,7 +332,7 @@
           "problem_id": "problem.merge-intervals"
         }
       ],
-      "checksum": "sha256:434b10b5f7de7e52235426deb6c528b7074d2ff8b0b7d159f09111cb5d4ec2e5"
+      "checksum": "sha256:eb43a1d5360f6630f371a9798b41c4f5e159568614d24cb1a8b687e2b1ed3185"
     },
     {
       "id": "problem.connected-components",
@@ -341,6 +345,7 @@
       "statement": "Devices are numbered from 0 through node_count - 1. Undirected links connect pairs of devices. Return the number of connected device groups, counting an isolated device as its own group.",
       "source": {
         "type": "packaged",
+        "provider": "openlearn",
         "rights_basis": "openlearn_original",
         "url": "https://github.com/rosshd/openlearn",
         "license": "AGPL-3.0-or-later",
@@ -354,7 +359,7 @@
             "function": "connected_component_count",
             "parameters": ["node_count", "edges"]
           },
-          "starter_code": "def connected_component_count(node_count: int, edges: list[list[int]]) -> int:\n    pass\n",
+          "starter_code": "def connected_component_count(node_count, edges):\n    pass\n",
           "reference": "openlearn.interview_problem_references:connected_component_count",
           "tests": {
             "public": [
@@ -409,7 +414,7 @@
           "problem_id": "problem.connected-components"
         }
       ],
-      "checksum": "sha256:cdfd4ed54e3d3cc06c4daf7a37a288d30798032f264fc1d6e36b09b1c6aa2804"
+      "checksum": "sha256:7fa1d92407b84c5c15589fc73f90956da79f432b74aca54bc1834657e6f4746e"
     },
     {
       "id": "external.leetcode.two-sum",
@@ -422,6 +427,7 @@
       "statement": null,
       "source": {
         "type": "official_link",
+        "provider": "leetcode",
         "rights_basis": "official_link_only",
         "url": "https://leetcode.com/problems/two-sum/",
         "license": "External content is not redistributed.",
@@ -456,8 +462,8 @@
       "misconceptions": [],
       "hints": [],
       "follow_ups": [],
-      "checksum": "sha256:cc6e0763761794d192a2e47be2a827757db5a4aa9eb4f4cc902441786f2a496e"
+      "checksum": "sha256:e831867f4896d552105db4635a910fc7e0bcc4524de96acf5d86530408924b46"
     }
   ],
-  "catalog_checksum": "sha256:3e7c4db2cb8a2ad542cf91ad7a9e44c37a1a469a526e26436163e5e671152dae"
+  "catalog_checksum": "sha256:1c9937f5b8237dad047ceab70f74c8497fa4fc7eb3c38891744544dba756eff3"
 }

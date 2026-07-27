@@ -16,6 +16,7 @@ import os
 import re
 import stat
 import sys
+import urllib.parse
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from difflib import SequenceMatcher
@@ -55,6 +56,14 @@ OPEN_LICENSES = frozenset(
 SKILL_ROLES = ("primary", "supporting")
 TEST_VISIBILITIES = ("public", "hidden")
 MAX_PRIVATE_ENTRY_BYTES = 256_000
+OFFICIAL_SOURCE_HOSTS = MappingProxyType({"leetcode": "leetcode.com"})
+OFFICIAL_PROBLEM_URLS = MappingProxyType(
+    {
+        ("leetcode", "external.leetcode.two-sum"): (
+            "https://leetcode.com/problems/two-sum/"
+        )
+    }
+)
 
 
 class CatalogValidationError(ValueError):
@@ -64,6 +73,7 @@ class CatalogValidationError(ValueError):
 @dataclass(frozen=True)
 class ProblemSource:
     source_type: Literal["packaged", "official_link"]
+    provider: str
     rights_basis: str
     url: str
     license: str
@@ -271,11 +281,20 @@ def _text_tuple(value: object, label: str, *, nonempty: bool = False) -> tuple[s
     return result
 
 
-def _validate_source(raw: object, delivery: str) -> ProblemSource:
-    fields = {"type", "rights_basis", "url", "license", "attribution", "permission"}
+def _validate_source(raw: object, delivery: str, problem_id: str) -> ProblemSource:
+    fields = {
+        "type",
+        "provider",
+        "rights_basis",
+        "url",
+        "license",
+        "attribution",
+        "permission",
+    }
     if not isinstance(raw, dict) or set(raw) != fields:
         raise CatalogValidationError("problem source fields are invalid")
     source_type = raw.get("type")
+    provider = _text(raw.get("provider"), "source provider")
     rights_basis = raw.get("rights_basis")
     if source_type not in SOURCE_TYPES or source_type != delivery:
         raise CatalogValidationError("problem source type does not match delivery")
@@ -285,9 +304,18 @@ def _validate_source(raw: object, delivery: str) -> ProblemSource:
         raise CatalogValidationError("official links require official_link_only rights")
     if source_type == "packaged" and rights_basis == "official_link_only":
         raise CatalogValidationError("packaged content requires redistribution rights")
-    url = _text(raw.get("url"), "source url")
-    if not url.startswith("https://"):
-        raise CatalogValidationError("source url must use https")
+    url = _canonical_https_url(raw.get("url"), "source url")
+    if source_type == "official_link":
+        expected_host = OFFICIAL_SOURCE_HOSTS.get(provider)
+        parsed = urllib.parse.urlsplit(url)
+        if expected_host is None or parsed.hostname != expected_host:
+            raise CatalogValidationError(
+                "source url host does not match official provider"
+            )
+        if OFFICIAL_PROBLEM_URLS.get((provider, problem_id)) != url:
+            raise CatalogValidationError(
+                "source url does not match official problem identity"
+            )
     license_name = _text(raw.get("license"), "source license")
     if rights_basis == "openlearn_original" and license_name != "AGPL-3.0-or-later":
         raise CatalogValidationError("openlearn-original source license is invalid")
@@ -295,12 +323,47 @@ def _validate_source(raw: object, delivery: str) -> ProblemSource:
         raise CatalogValidationError("open-license source requires a supported SPDX license")
     return ProblemSource(
         source_type=source_type,
+        provider=provider,
         rights_basis=rights_basis,
         url=url,
         license=license_name,
         attribution=_text(raw.get("attribution"), "source attribution"),
         permission=_text(raw.get("permission"), "source permission"),
     )
+
+
+def _canonical_https_url(value: object, label: str) -> str:
+    url = _text(value, label)
+    if not url.isascii() or any(
+        character.isspace() or ord(character) < 32 or ord(character) == 127
+        for character in url
+    ):
+        raise CatalogValidationError(f"{label} must be single-line and control-free")
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        port = parsed.port
+    except ValueError as exc:
+        raise CatalogValidationError(f"{label} is malformed") from exc
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.fragment
+        or parsed.query
+        or port is not None
+    ):
+        raise CatalogValidationError(
+            f"{label} requires HTTPS host without credentials, query, port, or fragment"
+        )
+    path = parsed.path or "/"
+    lowered_path = path.lower()
+    if any(encoded in lowered_path for encoded in ("%00", "%0a", "%0d")):
+        raise CatalogValidationError(f"{label} contains encoded control data")
+    canonical = urllib.parse.urlunsplit(("https", parsed.hostname, path, "", ""))
+    if url != canonical:
+        raise CatalogValidationError(f"{label} is not canonical")
+    return canonical
 
 
 def _validate_test(raw: object, label: str) -> ProblemTest:
@@ -352,9 +415,13 @@ def _validate_language(raw: object, label: str, delivery: str) -> LanguageDefini
         or tuple(argument.arg for argument in functions[0].args.args) != parameters
         or functions[0].args.vararg is not None
         or functions[0].args.kwarg is not None
+        or functions[0].args.posonlyargs
+        or functions[0].args.kwonlyargs
         or functions[0].args.defaults
         or functions[0].args.kw_defaults
         or functions[0].decorator_list
+        or functions[0].returns is not None
+        or any(argument.annotation is not None for argument in functions[0].args.args)
         or len(functions[0].body) != 1
         or not isinstance(functions[0].body[0], ast.Pass)
     ):
@@ -568,7 +635,7 @@ def validate_catalog(
             raise CatalogValidationError(
                 "official link transfer_family must be null and evidence-ineligible"
             )
-        source = _validate_source(value.get("source"), delivery)
+        source = _validate_source(value.get("source"), delivery, problem_id)
         statement = value.get("statement")
         if delivery == "packaged":
             statement = _text(statement, f"{problem_id} statement")
@@ -759,6 +826,21 @@ def validate_catalog(
                 checksum=checksum,
             )
         )
+    revisions_by_id: dict[str, list[CatalogProblem]] = {}
+    for problem in problems:
+        revisions_by_id.setdefault(problem.problem_id, []).append(problem)
+    for problem_id, history in revisions_by_id.items():
+        ordered = sorted(history, key=lambda problem: problem.revision)
+        if [problem.revision for problem in ordered] != list(
+            range(1, len(ordered) + 1)
+        ) or any(
+            current.introduced_catalog_revision
+            >= following.introduced_catalog_revision
+            for current, following in zip(ordered, ordered[1:])
+        ):
+            raise CatalogValidationError(
+                f"{problem_id} revision chronology is invalid"
+            )
     for problem in problems:
         _validate_pair_sum_contract(problem)
         for target in (*problem.prerequisites, *problem.near_duplicate_exclusions):
@@ -1006,35 +1088,51 @@ def create_official_link_workspace(
     return destination
 
 
-def read_private_entry(
-    path: Path,
+def _decode_private_entry(descriptor: int, name: str) -> dict[str, object]:
+    metadata = os.fstat(descriptor)
+    if not stat.S_ISREG(metadata.st_mode):
+        raise CatalogValidationError("private entry must be a regular file")
+    if metadata.st_size > MAX_PRIVATE_ENTRY_BYTES:
+        raise CatalogValidationError("private catalog entry is too large")
+    chunks: list[bytes] = []
+    remaining = MAX_PRIVATE_ENTRY_BYTES + 1
+    while remaining:
+        chunk = os.read(descriptor, min(64 * 1024, remaining))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    payload = b"".join(chunks)
+    if len(payload) > MAX_PRIVATE_ENTRY_BYTES:
+        raise CatalogValidationError("private catalog entry is too large")
+    try:
+        value = json.loads(payload.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise CatalogValidationError(f"private entry is unreadable: {name}") from exc
+    if not isinstance(value, dict):
+        raise CatalogValidationError(f"private entry must be an object: {name}")
+    return value
+
+
+def _verified_private_open(
+    name: str | Path,
     *,
-    opener: Callable[[Path, int], int] | None = None,
+    opener: Callable[[str | Path, int], int],
+    lstat_entry: Callable[[str | Path], os.stat_result],
+    nofollow_flag: int,
 ) -> dict[str, object]:
-    path = Path(path)
-    open_file = opener or (lambda candidate, flags: os.open(candidate, flags))
-    flags = os.O_RDONLY
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
+    before = lstat_entry(name)
+    if stat.S_ISLNK(before.st_mode):
+        raise CatalogValidationError("private catalog entry must not be a symlink")
+    if not stat.S_ISREG(before.st_mode):
+        raise CatalogValidationError("private entry must be a regular file")
     descriptor = -1
     try:
-        descriptor = open_file(path, flags)
-        metadata = os.fstat(descriptor)
-        if not stat.S_ISREG(metadata.st_mode):
-            raise CatalogValidationError("private entry must be a regular file")
-        if metadata.st_size > MAX_PRIVATE_ENTRY_BYTES:
-            raise CatalogValidationError("private catalog entry is too large")
-        chunks: list[bytes] = []
-        remaining = MAX_PRIVATE_ENTRY_BYTES + 1
-        while remaining:
-            chunk = os.read(descriptor, min(64 * 1024, remaining))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        payload = b"".join(chunks)
-        if len(payload) > MAX_PRIVATE_ENTRY_BYTES:
-            raise CatalogValidationError("private catalog entry is too large")
+        descriptor = opener(name, os.O_RDONLY | nofollow_flag)
+        opened = os.fstat(descriptor)
+        if (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino):
+            raise CatalogValidationError("private catalog entry changed during open")
+        return _decode_private_entry(descriptor, Path(name).name)
     except CatalogValidationError:
         raise
     except OSError as exc:
@@ -1042,25 +1140,142 @@ def read_private_entry(
     finally:
         if descriptor >= 0:
             os.close(descriptor)
+
+
+def _read_private_entry_path(
+    path: Path,
+    *,
+    opener: Callable[[Path, int], int] | None = None,
+    nofollow_flag: int | None = None,
+) -> dict[str, object]:
+    path = Path(path)
+    flag = getattr(os, "O_NOFOLLOW", 0) if nofollow_flag is None else nofollow_flag
+    if opener is not None:
+        return _verified_private_open(
+            path,
+            opener=lambda candidate, flags: opener(Path(candidate), flags),
+            lstat_entry=lambda candidate: os.lstat(candidate),
+            nofollow_flag=flag,
+        )
+    if (
+        not hasattr(os, "O_DIRECTORY")
+        or os.open not in os.supports_dir_fd
+        or os.stat not in os.supports_dir_fd
+    ):
+        raise CatalogValidationError(
+            "stable private no-follow reads are unsupported on this platform"
+        )
+    parent_descriptor = -1
     try:
-        value = json.loads(payload.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError) as exc:
-        raise CatalogValidationError(f"private entry is unreadable: {path.name}") from exc
-    if not isinstance(value, dict):
-        raise CatalogValidationError(f"private entry must be an object: {path.name}")
-    return value
+        parent_before = os.lstat(path.parent)
+        if stat.S_ISLNK(parent_before.st_mode) or not stat.S_ISDIR(
+            parent_before.st_mode
+        ):
+            raise CatalogValidationError("private catalog parent is unsafe")
+        parent_descriptor = os.open(
+            path.parent,
+            os.O_RDONLY
+            | os.O_DIRECTORY
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+        parent_opened = os.fstat(parent_descriptor)
+        if (parent_before.st_dev, parent_before.st_ino) != (
+            parent_opened.st_dev,
+            parent_opened.st_ino,
+        ):
+            raise CatalogValidationError("private catalog parent changed during open")
+        return _verified_private_open(
+            path.name,
+            opener=lambda name, flags: os.open(
+                name, flags, dir_fd=parent_descriptor
+            ),
+            lstat_entry=lambda name: os.stat(
+                name, dir_fd=parent_descriptor, follow_symlinks=False
+            ),
+            nofollow_flag=flag,
+        )
+    except CatalogValidationError:
+        raise
+    except OSError as exc:
+        raise CatalogValidationError("private catalog entry is unsafe") from exc
+    finally:
+        if parent_descriptor >= 0:
+            os.close(parent_descriptor)
 
 
-def load_private_entries(directory: Path) -> tuple[dict[str, object], ...]:
+def read_private_entry(path: Path) -> dict[str, object]:
+    return _read_private_entry_path(path)
+
+
+def load_private_entries(
+    directory: Path,
+    *,
+    _list_directory: Callable[[int], list[str]] | None = None,
+) -> tuple[dict[str, object], ...]:
     directory = Path(directory)
     if not directory.exists():
         return ()
     if not directory.is_dir() or directory.is_symlink():
         raise CatalogValidationError("private catalog path must be a real directory")
-    entries: list[dict[str, object]] = []
-    for path in sorted(directory.glob("*.json")):
-        entries.append(read_private_entry(path))
-    return tuple(entries)
+    if (
+        not hasattr(os, "O_DIRECTORY")
+        or os.open not in os.supports_dir_fd
+        or os.stat not in os.supports_dir_fd
+        or os.listdir not in os.supports_fd
+    ):
+        raise CatalogValidationError(
+            "stable private directory reads are unsupported on this platform"
+        )
+    directory_descriptor = -1
+    try:
+        directory_before = os.lstat(directory)
+        if stat.S_ISLNK(directory_before.st_mode) or not stat.S_ISDIR(
+            directory_before.st_mode
+        ):
+            raise CatalogValidationError("private catalog path must be a real directory")
+        directory_descriptor = os.open(
+            directory,
+            os.O_RDONLY
+            | os.O_DIRECTORY
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+        opened_directory = os.fstat(directory_descriptor)
+        if (
+            not stat.S_ISDIR(opened_directory.st_mode)
+            or (directory_before.st_dev, directory_before.st_ino)
+            != (opened_directory.st_dev, opened_directory.st_ino)
+        ):
+            raise CatalogValidationError("private catalog directory changed during open")
+        names = (_list_directory or os.listdir)(directory_descriptor)
+        entries = [
+            _verified_private_open(
+                name,
+                opener=lambda candidate, flags: os.open(
+                    candidate, flags, dir_fd=directory_descriptor
+                ),
+                lstat_entry=lambda candidate: os.stat(
+                    candidate,
+                    dir_fd=directory_descriptor,
+                    follow_symlinks=False,
+                ),
+                nofollow_flag=getattr(os, "O_NOFOLLOW", 0),
+            )
+            for name in sorted(
+                name
+                for name in names
+                if isinstance(name, str)
+                and name.endswith(".json")
+                and Path(name).name == name
+            )
+        ]
+        return tuple(entries)
+    except CatalogValidationError:
+        raise
+    except OSError as exc:
+        raise CatalogValidationError("private catalog directory is unsafe") from exc
+    finally:
+        if directory_descriptor >= 0:
+            os.close(directory_descriptor)
 
 
 def _main(arguments: list[str]) -> int:

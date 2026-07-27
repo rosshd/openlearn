@@ -99,9 +99,11 @@ Attempt references include the catalog revision, problem revision, and problem c
 The catalog retains immutable problem revisions keyed by `(problem_id, revision)` and resolves an attempt only when its exact checksum remains available.
 Packaged problems contain only redistributable material, while official-link entries store no external statement, examples, tests, editorial, or reference implementation.
 Official-link teaching and feedback fields are empty, and their local scaffold is an inert function that cannot execute on import.
+Official URLs are canonical HTTPS values bound to an allowed provider host and exclude credentials, query data, fragments, and control characters.
 Trusted package reference implementations run directly during catalog validation and remain separate from the untrusted learner-code runner.
 Validated tests and examples are recursively immutable after parsing.
 Private entries use bounded descriptor-based reads from an explicit learner-owned directory and never enter package data.
+Directory descriptors and descriptor-relative entry opens prevent a replaced directory path from redirecting private reads; unsupported platforms fail closed.
 See [Interview Problem Catalog](INTERVIEW_PROBLEM_CATALOG.md) for the full rights policy and contributor workflow.
 
 ## Practice Activities

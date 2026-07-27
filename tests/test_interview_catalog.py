@@ -237,6 +237,53 @@ def test_starter_scaffold_rejects_top_level_execution() -> None:
         interview_catalog.validate_catalog(raw)
 
 
+def test_starter_scaffold_rejects_executable_annotations() -> None:
+    raw = _catalog()
+    external = _problem(raw, "external.leetcode.two-sum")
+    external["languages"]["python"]["starter_code"] = (
+        "def solve(value: danger()) -> danger():\n    pass\n"
+    )
+    external["languages"]["python"]["interface"]["parameters"] = ["value"]
+    external["checksum"] = interview_catalog.problem_checksum(external)
+    raw["catalog_checksum"] = interview_catalog.catalog_checksum(raw)
+
+    with pytest.raises(interview_catalog.CatalogValidationError, match="inert"):
+        interview_catalog.validate_catalog(raw)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://leetcode.com/problems/two-sum/\nCopied payload",
+        "https://leetcode.com/problems/two-sum/\x00payload",
+        "https://user:secret@leetcode.com/problems/two-sum/",
+        "https://example.com/problems/two-sum/",
+        "https://leetcode.com/problems/three-sum/",
+        "https://leetcode.com/problems/two-sum/#copied",
+    ],
+)
+def test_official_source_url_is_canonical_and_provider_bound(url: str) -> None:
+    raw = _catalog()
+    external = _problem(raw, "external.leetcode.two-sum")
+    external["source"]["url"] = url
+    external["checksum"] = interview_catalog.problem_checksum(external)
+    raw["catalog_checksum"] = interview_catalog.catalog_checksum(raw)
+
+    with pytest.raises(interview_catalog.CatalogValidationError, match="source url"):
+        interview_catalog.validate_catalog(raw)
+
+
+def test_official_source_provider_identity_is_pinned() -> None:
+    raw = _catalog()
+    external = _problem(raw, "external.leetcode.two-sum")
+    external["source"]["provider"] = "untrusted"
+    external["checksum"] = interview_catalog.problem_checksum(external)
+    raw["catalog_checksum"] = interview_catalog.catalog_checksum(raw)
+
+    with pytest.raises(interview_catalog.CatalogValidationError, match="provider"):
+        interview_catalog.validate_catalog(raw)
+
+
 def test_similarity_flags_are_advisory_and_honor_declared_exclusions() -> None:
     raw = _catalog()
     original = _problem(raw)
@@ -300,6 +347,37 @@ def test_catalog_retains_and_resolves_multiple_immutable_problem_revisions() -> 
     impossible_reference["catalog_revision"] = 1
     with pytest.raises(interview_catalog.CatalogValidationError, match="predates"):
         interview_catalog.resolve_attempt_problem(catalog, impossible_reference)
+
+
+@pytest.mark.parametrize(
+    ("revision", "introduced_revision", "first_introduced_revision"),
+    [
+        (3, 2, 1),
+        (2, 1, 1),
+        (2, 1, 2),
+    ],
+)
+def test_problem_revision_chronology_rejects_gaps_backdating_and_reversal(
+    revision: int,
+    introduced_revision: int,
+    first_introduced_revision: int,
+) -> None:
+    raw = _catalog()
+    first = _problem(raw)
+    second = next(
+        problem
+        for problem in raw["problems"]
+        if problem["id"] == "problem.pair-sum-sorted" and problem["revision"] == 2
+    )
+    second["revision"] = revision
+    second["introduced_catalog_revision"] = introduced_revision
+    first["introduced_catalog_revision"] = first_introduced_revision
+    first["checksum"] = interview_catalog.problem_checksum(first)
+    second["checksum"] = interview_catalog.problem_checksum(second)
+    raw["catalog_checksum"] = interview_catalog.catalog_checksum(raw)
+
+    with pytest.raises(interview_catalog.CatalogValidationError, match="chronology"):
+        interview_catalog.validate_catalog(raw)
 
 
 def test_validated_nested_values_are_deeply_immutable_and_detached() -> None:
@@ -400,7 +478,7 @@ def test_private_loader_rejects_symlinks_directories_and_oversize(
     target = private / "target"
     target.write_text("{}", encoding="utf-8")
     (private / "linked.json").symlink_to(target)
-    with pytest.raises(interview_catalog.CatalogValidationError, match="unsafe"):
+    with pytest.raises(interview_catalog.CatalogValidationError, match="symlink"):
         interview_catalog.load_private_entries(private)
 
     (private / "linked.json").unlink()
@@ -412,7 +490,7 @@ def test_private_loader_rejects_symlinks_directories_and_oversize(
         )
     except OSError:
         pytest.skip("directory symlinks are unavailable")
-    with pytest.raises(interview_catalog.CatalogValidationError, match="unsafe"):
+    with pytest.raises(interview_catalog.CatalogValidationError, match="symlink"):
         interview_catalog.load_private_entries(private)
 
     (private / "linked-directory.json").unlink()
@@ -442,6 +520,39 @@ def test_private_entry_read_uses_opened_descriptor_when_path_is_replaced(
         replacement.rename(candidate)
         return descriptor
 
-    assert interview_catalog.read_private_entry(path, opener=replacing_opener) == {
+    assert interview_catalog._read_private_entry_path(
+        path, opener=replacing_opener
+    ) == {
         "id": "original"
     }
+
+
+def test_private_entry_forced_no_nofollow_rejects_symlink(tmp_path: Path) -> None:
+    target = tmp_path / "target.json"
+    target.write_text("{}", encoding="utf-8")
+    linked = tmp_path / "linked.json"
+    linked.symlink_to(target)
+
+    with pytest.raises(interview_catalog.CatalogValidationError, match="symlink"):
+        interview_catalog._read_private_entry_path(linked, nofollow_flag=0)
+
+
+def test_private_directory_replacement_cannot_redirect_opened_directory(
+    tmp_path: Path,
+) -> None:
+    private = tmp_path / "private"
+    replacement = tmp_path / "replacement"
+    private.mkdir()
+    replacement.mkdir()
+    (private / "entry.json").write_text('{"id": "original"}', encoding="utf-8")
+    (replacement / "entry.json").write_text('{"id": "replacement"}', encoding="utf-8")
+
+    def replacing_listdir(directory_fd: int) -> list[str]:
+        names = os.listdir(directory_fd)
+        private.rename(tmp_path / "original-directory")
+        replacement.rename(private)
+        return names
+
+    assert interview_catalog.load_private_entries(
+        private, _list_directory=replacing_listdir
+    ) == ({"id": "original"},)

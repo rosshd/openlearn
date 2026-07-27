@@ -12,6 +12,8 @@ The first catalog revision supports two delivery types.
 - `official_link` entries store only neutral metadata and an official HTTPS URL.
 
 Every entry records its delivery type, rights basis, source URL, license, attribution, and permission note.
+Source URLs are canonical single-line HTTPS URLs without credentials, queries, fragments, ports, or control data.
+Official-link providers are bound to an explicit allowed host.
 Packaged entries currently use only the `openlearn_original` rights basis and the repository's `AGPL-3.0-or-later` license.
 The schema also represents `owned_or_licensed` and `open_license` rights bases for future content with documented permission.
 Do not use either rights basis without retaining the applicable permission or license evidence and required attribution.
@@ -28,6 +30,8 @@ Private learner entries belong under the user's openlearn home, not in the Pytho
 When a repository-local development copy is necessary, use `interview-problems/private/`, which Git ignores.
 The private loader reads that directory separately and never merges its contents into the bundled catalog.
 It opens each entry once without following its final symlink where the platform supports that flag, validates the opened descriptor, and performs a bounded read.
+Directory loading holds an opened directory descriptor and resolves entry names relative to it so a path replacement cannot redirect later reads.
+Platforms without the required stable descriptor-relative operations fail closed.
 
 ## Version And Checksum Contract
 
@@ -35,6 +39,7 @@ The catalog has a stable `catalog_id` and monotonically increasing `catalog_revi
 Each problem has a stable ID, an integer revision, and a SHA-256 checksum of its canonical JSON content.
 The catalog retains multiple immutable revisions under the `(problem_id, revision)` key.
 Each record declares the catalog revision that first introduced it.
+Problem revisions are contiguous, and their introduction revisions must increase strictly without backdating.
 The catalog also has a SHA-256 checksum covering the complete catalog.
 
 Any durable attempt reference must record:
@@ -66,7 +71,8 @@ A packaged problem declares:
 
 Official-link entries retain selection metadata and a local interface scaffold but package no protected execution or feedback content.
 They are explicitly ineligible for mastery evidence.
-Starter scaffolds contain exactly one inert function with a single `pass` body and cannot execute code on import.
+Starter scaffolds contain exactly one unannotated and undecorated function with simple arguments, no defaults, and a single `pass` body.
+They cannot execute code while imported.
 
 ## Contributor Workflow
 
