@@ -27,15 +27,18 @@ def code_result(
     returncode: int,
     stdout: str,
     stderr: str = "",
+    *,
+    kind: str | None = None,
+    limit_reason: str | None = None,
 ) -> cli.code_runner.RunnerResult:
     return cli.code_runner.RunnerResult(
-        kind="success" if returncode == 0 else "test_failure",
+        kind=kind or ("success" if returncode == 0 else "test_failure"),
         stdout=stdout,
         stderr=stderr,
         exit_code=returncode,
         signal=None,
         duration_seconds=0.1,
-        limit_reason=None,
+        limit_reason=limit_reason,
         isolation="oci",
         runtime="docker",
         protections=("oci-container",),
@@ -11155,6 +11158,124 @@ class InteractiveTests(unittest.TestCase):
 
         self.assertTrue(runner.call_args.kwargs["reduced_isolation"])
         self.assertTrue(any("not a sandbox" in line for line in output))
+
+    def test_runner_limits_are_failed_attempt_evidence_not_tool_failures(self) -> None:
+        for index, (kind, reason, expected_code) in enumerate(
+            (
+                ("timeout", "wall_time", 124),
+                ("output_limit", "captured_output", 125),
+                ("resource_limit", "memory_or_process", 137),
+            ),
+            start=1,
+        ):
+            with self.subTest(kind=kind):
+                slug = f"runner-limit-{index}"
+                call_silent(
+                    cli.cmd_new,
+                    Namespace(topic=slug, goal="practice loops"),
+                )
+                drill = {
+                    "title": f"Limit Drill {index}",
+                    "description": "Return one.",
+                    "function_stub": "def solve():\n    pass",
+                    "test_cases": [{"input": [], "expected": 1}],
+                }
+                with mock.patch.object(
+                    cli,
+                    "call_openai",
+                    new=lambda *_args, _drill=drill, **_kwargs: json.dumps(_drill),
+                ), mock.patch.object(
+                    cli,
+                    "open_drill_in_editor",
+                    return_value="nvim",
+                ):
+                    cli.cmd_drill(
+                        Namespace(topic=slug, model=None, leetcode=False),
+                        output_func=lambda _text: None,
+                    )
+                prompts = []
+                exit_code = 137 if kind == "resource_limit" else None
+                result = code_result(
+                    exit_code or 1,
+                    "",
+                    kind=kind,
+                    limit_reason=reason,
+                )
+                result = cli.code_runner.RunnerResult(
+                    **{
+                        **result.__dict__,
+                        "exit_code": exit_code,
+                    }
+                )
+                with mock.patch.object(
+                    cli.code_runner,
+                    "run_python_tests",
+                    return_value=result,
+                ), mock.patch.object(
+                    cli,
+                    "call_openai",
+                    new=lambda _model, _system, user: (
+                        prompts.append(user)
+                        or "**Feedback:**\nReduce the work and retry /check."
+                    ),
+                ):
+                    return_code = cli.cmd_check(
+                        Namespace(topic=slug, model=None),
+                        output_func=lambda _text: None,
+                    )
+
+                self.assertEqual(return_code, 1)
+                self.assertIn(f"Runner outcome: {kind}", prompts[0])
+                self.assertIn("one retry with /check", prompts[0])
+                events = cli.load_event_log(cli.topic_events_path(slug))
+                self.assertNotIn(
+                    "activity_tool_failed",
+                    [event["event_type"] for event in events],
+                )
+                evidence = [
+                    event
+                    for event in events
+                    if event["event_type"] == "activity_evidence_recorded"
+                ]
+                coding = evidence[-1]["data"]["domain_evidence"]["coding"]
+                self.assertEqual(coding["return_code"], expected_code)
+                self.assertFalse(coding["tests_passed"])
+                self.assertEqual(cli.load_state(slug)["active_activity"]["status"], "active")
+
+    def test_cancelled_runner_preserves_attempt_without_failure_event(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Cancel Run", goal="practice arrays"))
+        with mock.patch.object(cli, "open_drill_in_editor", return_value="nvim"):
+            cli.cmd_drill(
+                Namespace(topic="cancel-run", model=None, leetcode=True),
+                output_func=lambda _text: None,
+            )
+        cancelled = code_result(
+            1,
+            "",
+            kind="cancelled",
+            limit_reason="cancelled",
+        )
+        cancelled = cli.code_runner.RunnerResult(
+            **{**cancelled.__dict__, "exit_code": None}
+        )
+
+        with mock.patch.object(
+            cli.code_runner,
+            "run_python_tests",
+            return_value=cancelled,
+        ):
+            with self.assertRaises(cli.OpenLearnError):
+                cli.cmd_check(
+                    Namespace(topic="cancel-run", model=None),
+                    output_func=lambda _text: None,
+                )
+
+        events = cli.load_event_log(cli.topic_events_path("cancel-run"))
+        self.assertNotIn("activity_tool_failed", [event["event_type"] for event in events])
+        self.assertNotIn(
+            "activity_evidence_recorded",
+            [event["event_type"] for event in events],
+        )
 
     def test_doctor_reports_runtime_and_explicit_image_acquisition(self) -> None:
         diagnostic = cli.code_runner.RuntimeDiagnostic(

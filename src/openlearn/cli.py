@@ -8677,7 +8677,7 @@ def cmd_check(args: argparse.Namespace, output_func=print) -> int:
     except (OSError, ValueError, code_runner.RunnerUnavailableError) as exc:
         log_activity_tool_failure(topic.slug, activity, "run_drill_tests", exc)
         raise OpenLearnError(f"could not run drill tests: {exc}") from exc
-    if run_result.kind in {"runner_error", "timeout", "output_limit", "resource_limit", "cancelled"}:
+    if run_result.kind == "runner_error":
         detail = "\n".join(
             part
             for part in [run_result.stdout.strip(), run_result.stderr.strip()]
@@ -8690,11 +8690,19 @@ def cmd_check(args: argparse.Namespace, output_func=print) -> int:
         )
         log_activity_tool_failure(topic.slug, activity, "run_drill_tests", error)
         raise error
+    if run_result.kind == "cancelled":
+        raise OpenLearnError("drill check cancelled; the active attempt was preserved")
     output = "\n".join(
         part
         for part in [run_result.stdout.strip(), run_result.stderr.strip()]
         if part
     )
+    if not run_result.passed:
+        outcome_summary = (
+            f"Execution outcome: {run_result.kind}"
+            f"{' (' + run_result.limit_reason + ')' if run_result.limit_reason else ''}"
+        )
+        output = "\n".join(part for part in (outcome_summary, output) if part)
     refs = activity.get("evidence_refs")
     attempt_number = len(refs) + 1 if isinstance(refs, list) else 1
     hints = coding_payload.get("hints")
@@ -8716,7 +8724,7 @@ def cmd_check(args: argparse.Namespace, output_func=print) -> int:
         activity,
         "pytest_result",
         {
-            "return_code": run_result.exit_code or 0,
+            "return_code": runner_evidence_return_code(run_result),
             "summary": output[:4_000],
             "artifact_excerpt": artifact_excerpt,
             "attempt_number": attempt_number,
@@ -8781,6 +8789,23 @@ def cmd_check(args: argparse.Namespace, output_func=print) -> int:
             output_func=output_func,
         )
     return 0 if run_result.passed else 1
+
+
+def runner_evidence_return_code(result: code_runner.RunnerResult) -> int:
+    synthetic = {
+        "timeout": 124,
+        "output_limit": 125,
+    }
+    if result.kind in synthetic:
+        return synthetic[result.kind]
+    if isinstance(result.exit_code, int):
+        return result.exit_code
+    return {
+        "resource_limit": 126,
+        "compile_error": 20,
+        "runtime_error": 21,
+        "test_failure": 10,
+    }.get(result.kind, 1)
 
 
 def check_linked_coding_drill(

@@ -108,6 +108,8 @@ It uses a scrubbed subprocess environment plus best-effort resource and process-
 It does not prevent filesystem or network access.
 Docker and Podman may enforce the Linux container contract through their normal VM on macOS and Windows.
 `openlearn doctor` reports missing runtimes, unavailable services, unpinned image configuration, and an absent local image without installing or pulling anything.
+`make oci-live` is the opt-in pre-provisioned security-fixture lane.
+It never acquires an image and exercises every ready Docker and Podman runtime against environment, mount, network, process, resource, timeout, cancellation, and cleanup boundaries.
 
 ## Model Calls
 

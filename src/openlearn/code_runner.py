@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 import signal
@@ -20,6 +21,9 @@ DEFAULT_RUNNER_IMAGE = (
     "sha256:4c2cf9917bd1cbacc5e9b07320025bdb7cdf2df7b0ceaccb55e9dd7e30987419"
 )
 SUPPORTED_RUNTIMES = ("docker", "podman")
+OCI_CREATE_TIMEOUT_SECONDS = 15
+HARNESS_START_PREFIX = "OPENLEARN_HARNESS_STARTED_"
+HARNESS_SUCCESS_PREFIX = "OPENLEARN_HARNESS_SUCCESS_"
 
 
 @dataclass(frozen=True)
@@ -94,6 +98,7 @@ def diagnose_runtime(
             "runner image is not pinned by digest",
         )
     candidates = (preferred,) if preferred else SUPPORTED_RUNTIMES
+    diagnostics: list[RuntimeDiagnostic] = []
     for runtime in candidates:
         if runtime not in SUPPORTED_RUNTIMES:
             return RuntimeDiagnostic(
@@ -116,10 +121,22 @@ def diagnose_runtime(
                 check=False,
             )
         except (OSError, subprocess.SubprocessError) as exc:
-            return RuntimeDiagnostic(runtime, executable, False, False, image, str(exc))
+            diagnostic = RuntimeDiagnostic(
+                runtime, executable, False, False, image, str(exc)
+            )
+            diagnostics.append(diagnostic)
+            if preferred:
+                return diagnostic
+            continue
         if info.returncode != 0:
             detail = (info.stderr or info.stdout or "runtime service is unavailable").strip()
-            return RuntimeDiagnostic(runtime, executable, False, False, image, detail[:500])
+            diagnostic = RuntimeDiagnostic(
+                runtime, executable, False, False, image, detail[:500]
+            )
+            diagnostics.append(diagnostic)
+            if preferred:
+                return diagnostic
+            continue
         try:
             inspect = run(
                 [executable, "image", "inspect", image],
@@ -129,9 +146,15 @@ def diagnose_runtime(
                 check=False,
             )
         except (OSError, subprocess.SubprocessError) as exc:
-            return RuntimeDiagnostic(runtime, executable, True, False, image, str(exc))
+            diagnostic = RuntimeDiagnostic(
+                runtime, executable, True, False, image, str(exc)
+            )
+            diagnostics.append(diagnostic)
+            if preferred:
+                return diagnostic
+            continue
         if inspect.returncode != 0:
-            return RuntimeDiagnostic(
+            diagnostic = RuntimeDiagnostic(
                 runtime,
                 executable,
                 True,
@@ -139,6 +162,10 @@ def diagnose_runtime(
                 image,
                 "pinned runner image is not present locally",
             )
+            diagnostics.append(diagnostic)
+            if preferred:
+                return diagnostic
+            continue
         return RuntimeDiagnostic(
             runtime,
             executable,
@@ -147,14 +174,24 @@ def diagnose_runtime(
             image,
             "OCI runtime and pinned runner image are ready",
         )
-    return RuntimeDiagnostic(
-        None,
-        None,
-        False,
-        False,
-        image,
-        "Docker or Podman was not found",
-    )
+    if diagnostics:
+        selected = next(
+            (diagnostic for diagnostic in diagnostics if diagnostic.runtime_ready),
+            diagnostics[0],
+        )
+        detail = "; ".join(
+            f"{diagnostic.runtime}: {diagnostic.detail}"
+            for diagnostic in diagnostics
+        )
+        return RuntimeDiagnostic(
+            selected.runtime,
+            selected.executable,
+            selected.runtime_ready,
+            selected.image_ready,
+            image,
+            detail[:1_000],
+        )
+    return RuntimeDiagnostic(None, None, False, False, image, "Docker or Podman was not found")
 
 
 def runtime_setup_guidance(diagnostic: RuntimeDiagnostic) -> str:
@@ -199,13 +236,27 @@ def run_python_tests(
             shutil.copyfile(solution, copied_solution)
             copied_solution.chmod(0o666)
             harness = harness_dir / "run_tests.py"
+            nonce = uuid4().hex
+            start_sentinel = f"{HARNESS_START_PREFIX}{nonce}"
+            success_sentinel = f"{HARNESS_SUCCESS_PREFIX}{nonce}"
             harness.write_text(
-                _python_harness(function_name, test_cases),
+                _python_harness(
+                    function_name,
+                    test_cases,
+                    start_sentinel=start_sentinel,
+                    success_sentinel=success_sentinel,
+                ),
                 encoding="utf-8",
             )
             harness.chmod(0o644)
             if reduced_isolation:
-                return _run_reduced(copied_solution, harness, policy)
+                return _run_reduced(
+                    copied_solution,
+                    harness,
+                    policy,
+                    start_sentinel,
+                    success_sentinel,
+                )
             diagnostic = diagnose_runtime(preferred=preferred_runtime, image=image)
             if not diagnostic.ready:
                 raise RunnerUnavailableError(runtime_setup_guidance(diagnostic))
@@ -218,6 +269,8 @@ def run_python_tests(
                 attempt,
                 harness_dir,
                 policy,
+                start_sentinel,
+                success_sentinel,
             )
 
 
@@ -290,25 +343,13 @@ def _run_oci(
     attempt: Path,
     harness: Path,
     policy: ResourcePolicy,
+    start_sentinel: str,
+    success_sentinel: str,
 ) -> RunnerResult:
     name = f"openlearn-{uuid4().hex}"
     command = build_oci_create_command(
         executable, runtime, image, attempt, harness, name, policy
     )
-    started = time.monotonic()
-    created = subprocess.run(command, capture_output=True, text=True, check=False)
-    if created.returncode != 0:
-        return _result(
-            "runner_error",
-            created.stdout,
-            created.stderr,
-            created.returncode,
-            started,
-            "container_create",
-            "oci",
-            runtime,
-        )
-
     removed = {"value": False}
     cleanup_detail = {"value": ""}
 
@@ -327,11 +368,78 @@ def _run_oci(
             cleanup_detail["value"] = str(exc)
             return False
         detail = (result.stderr or result.stdout or "").strip()
-        if result.returncode == 0 or "no such container" in detail.casefold():
+        missing_container = any(
+            marker in detail.casefold()
+            for marker in (
+                "no such container",
+                "no container with name or id",
+                "does not exist",
+            )
+        )
+        if result.returncode == 0 or missing_container:
             removed["value"] = True
             return True
         cleanup_detail["value"] = detail[:500] or f"exit {result.returncode}"
         return False
+
+    started = time.monotonic()
+    try:
+        created = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=OCI_CREATE_TIMEOUT_SECONDS,
+        )
+    except KeyboardInterrupt:
+        cleanup_ok = remove_container()
+        return _result(
+            "cancelled" if cleanup_ok else "runner_error",
+            "",
+            cleanup_detail["value"],
+            None,
+            started,
+            "cancelled" if cleanup_ok else "container_cleanup",
+            "oci",
+            runtime,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        cleanup_ok = remove_container()
+        detail = str(exc)
+        if not cleanup_ok:
+            detail = f"{detail}\nCould not confirm container removal: {cleanup_detail['value']}"
+        return _result(
+            "runner_error",
+            "",
+            detail,
+            None,
+            started,
+            "container_create" if cleanup_ok else "container_cleanup",
+            "oci",
+            runtime,
+        )
+    if created.returncode != 0:
+        cleanup_ok = remove_container()
+        stderr = created.stderr
+        if not cleanup_ok:
+            stderr = "\n".join(
+                part
+                for part in (
+                    stderr,
+                    f"Could not confirm container removal: {cleanup_detail['value']}",
+                )
+                if part
+            )
+        return _result(
+            "runner_error",
+            created.stdout,
+            stderr,
+            created.returncode,
+            started,
+            "container_create" if cleanup_ok else "container_cleanup",
+            "oci",
+            runtime,
+        )
 
     try:
         process = subprocess.Popen(
@@ -358,7 +466,13 @@ def _run_oci(
             kind = "runner_error"
             reason = "termination_failure"
         else:
-            kind, reason = _classify_exit(exit_code, stdout, stderr)
+            kind, reason = _classify_exit(
+                exit_code,
+                stdout,
+                stderr,
+                start_sentinel=start_sentinel,
+                success_sentinel=success_sentinel,
+            )
     finally:
         cleanup_ok = remove_container()
     if not cleanup_ok:
@@ -372,6 +486,7 @@ def _run_oci(
             )
             if part
         )
+    stdout = _strip_sentinels(stdout, start_sentinel, success_sentinel)
     return _result(
         kind,
         stdout,
@@ -388,6 +503,8 @@ def _run_reduced(
     solution: Path,
     harness: Path,
     policy: ResourcePolicy,
+    start_sentinel: str,
+    success_sentinel: str,
 ) -> RunnerResult:
     started = time.monotonic()
     popen_kwargs: dict[str, object] = {
@@ -435,7 +552,14 @@ def _run_reduced(
     elif outcome == "termination_failure":
         kind, reason = "runner_error", "termination_failure"
     else:
-        kind, reason = _classify_exit(process.returncode, stdout, stderr)
+        kind, reason = _classify_exit(
+            process.returncode,
+            stdout,
+            stderr,
+            start_sentinel=start_sentinel,
+            success_sentinel=success_sentinel,
+        )
+    stdout = _strip_sentinels(stdout, start_sentinel, success_sentinel)
     return _result(
         kind,
         stdout,
@@ -524,10 +648,17 @@ def _capture_bounded(
 
 
 def _classify_exit(
-    exit_code: int | None, stdout: str, stderr: str
+    exit_code: int | None,
+    stdout: str,
+    stderr: str,
+    *,
+    start_sentinel: str,
+    success_sentinel: str,
 ) -> tuple[str, str | None]:
     combined = f"{stdout}\n{stderr}"
-    if exit_code == 0:
+    harness_started = start_sentinel in stdout
+    harness_succeeded = success_sentinel in stdout
+    if exit_code == 0 and harness_started and harness_succeeded:
         return "success", None
     if "OPENLEARN_COMPILE_ERROR" in combined:
         return "compile_error", None
@@ -541,9 +672,18 @@ def _classify_exit(
         128 + getattr(signal, "SIGXFSZ", signal.SIGKILL),
         -signal.SIGKILL,
     }
-    if exit_code in resource_exit_codes:
+    if harness_started and exit_code in resource_exit_codes:
         return "resource_limit", "memory_or_process"
+    if harness_started and not harness_succeeded:
+        return "runtime_error", "abrupt_learner_exit"
     return "runner_error", "unexpected_exit"
+
+
+def _strip_sentinels(stdout: str, *sentinels: str) -> str:
+    lines = stdout.splitlines(keepends=True)
+    return "".join(
+        line for line in lines if line.strip() not in sentinels
+    )
 
 
 def _result(
@@ -606,19 +746,38 @@ def _validate_request(
     encoded = json.dumps(test_cases, ensure_ascii=True, allow_nan=False)
     if len(encoded) > 64_000:
         raise ValueError("test bundle is too large")
-    values = (
-        policy.wall_seconds,
-        policy.cpu_seconds,
-        policy.memory_bytes,
-        policy.process_limit,
-        policy.output_bytes,
-        policy.file_bytes,
-    )
-    if any(value <= 0 for value in values):
-        raise ValueError("resource limits must be positive")
+    if (
+        isinstance(policy.wall_seconds, bool)
+        or not isinstance(policy.wall_seconds, (int, float))
+        or not math.isfinite(policy.wall_seconds)
+        or not 0.05 <= policy.wall_seconds <= 300
+    ):
+        raise ValueError("wall_seconds must be a finite number from 0.05 to 300")
+    integer_limits = {
+        "cpu_seconds": (policy.cpu_seconds, 1, 300),
+        "memory_bytes": (policy.memory_bytes, 16 * 1024 * 1024, 2 * 1024**3),
+        "process_limit": (policy.process_limit, 1, 512),
+        "output_bytes": (policy.output_bytes, 1_024, 4 * 1024**2),
+        "file_bytes": (policy.file_bytes, 1_024, 256 * 1024**2),
+    }
+    for label, (value, minimum, maximum) in integer_limits.items():
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or not minimum <= value <= maximum
+        ):
+            raise ValueError(
+                f"{label} must be an integer from {minimum} to {maximum}"
+            )
 
 
-def _python_harness(function_name: str, test_cases: list[dict[str, object]]) -> str:
+def _python_harness(
+    function_name: str,
+    test_cases: list[dict[str, object]],
+    *,
+    start_sentinel: str,
+    success_sentinel: str,
+) -> str:
     cases = json.dumps(test_cases, ensure_ascii=True, allow_nan=False)
     return f"""\
 import importlib.util
@@ -629,6 +788,7 @@ import traceback
 
 os.environ.clear()
 os.environ.update({{"HOME": "/tmp", "TMPDIR": "/tmp", "PYTHONDONTWRITEBYTECODE": "1"}})
+print({start_sentinel!r}, flush=True)
 solution_path = sys.argv[1]
 try:
     spec = importlib.util.spec_from_file_location("learner_solution", solution_path)
@@ -678,6 +838,7 @@ if failed:
     print("OPENLEARN_TEST_FAILURE", file=sys.stderr)
     raise SystemExit(10)
 print(f"{{len(cases)}} passed")
+print({success_sentinel!r}, flush=True)
 """
 
 

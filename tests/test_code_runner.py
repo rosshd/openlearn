@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import subprocess
 import tempfile
 import unittest
@@ -47,7 +48,13 @@ class CodeRunnerTests(unittest.TestCase):
                 return subprocess.CompletedProcess(args, 0, "", "")
             return subprocess.CompletedProcess(args, 1, "", "not found")
 
-        with mock.patch.object(code_runner.shutil, "which", return_value="/usr/bin/docker"):
+        with mock.patch.object(
+            code_runner.shutil,
+            "which",
+            side_effect=lambda runtime: (
+                "/usr/bin/docker" if runtime == "docker" else None
+            ),
+        ):
             diagnostic = code_runner.diagnose_runtime(run=fake_run)
 
         self.assertFalse(diagnostic.ready)
@@ -55,6 +62,50 @@ class CodeRunnerTests(unittest.TestCase):
         self.assertFalse(diagnostic.image_ready)
         self.assertEqual([call[1:3] for call in calls], [["info"], ["image", "inspect"]])
         self.assertIn("explicitly acquire", code_runner.runtime_setup_guidance(diagnostic))
+
+    def test_runtime_discovery_continues_from_broken_docker_to_ready_podman(self) -> None:
+        calls = []
+
+        def fake_run(args, **_kwargs):
+            calls.append(args)
+            if args[0].endswith("docker"):
+                return subprocess.CompletedProcess(args, 1, "", "daemon unavailable")
+            return subprocess.CompletedProcess(args, 0, "ready", "")
+
+        with mock.patch.object(
+            code_runner.shutil,
+            "which",
+            side_effect=lambda runtime: f"/usr/bin/{runtime}",
+        ):
+            diagnostic = code_runner.diagnose_runtime(run=fake_run)
+
+        self.assertTrue(diagnostic.ready)
+        self.assertEqual(diagnostic.runtime, "podman")
+        self.assertEqual(
+            [call[0] for call in calls],
+            ["/usr/bin/docker", "/usr/bin/podman", "/usr/bin/podman"],
+        )
+
+    def test_preferred_broken_runtime_does_not_fall_back(self) -> None:
+        calls = []
+
+        def fake_run(args, **_kwargs):
+            calls.append(args)
+            return subprocess.CompletedProcess(args, 1, "", "daemon unavailable")
+
+        with mock.patch.object(
+            code_runner.shutil,
+            "which",
+            side_effect=lambda runtime: f"/usr/bin/{runtime}",
+        ):
+            diagnostic = code_runner.diagnose_runtime(
+                preferred="docker",
+                run=fake_run,
+            )
+
+        self.assertFalse(diagnostic.ready)
+        self.assertEqual(diagnostic.runtime, "docker")
+        self.assertEqual(len(calls), 1)
 
     def test_unpinned_image_is_rejected_without_runtime_calls(self) -> None:
         run = mock.Mock()
@@ -163,6 +214,196 @@ class CodeRunnerTests(unittest.TestCase):
                     reduced_isolation=True,
                 )
                 self.assertEqual(result.kind, expected)
+
+    def test_abrupt_zero_and_nonzero_exits_cannot_claim_success(self) -> None:
+        for exit_code in (0, 7):
+            with self.subTest(exit_code=exit_code), tempfile.TemporaryDirectory() as raw:
+                solution = Path(raw) / "solution.py"
+                solution.write_text(
+                    "import os\n"
+                    "def solve():\n"
+                    f"    os._exit({exit_code})\n",
+                    encoding="utf-8",
+                )
+                result = code_runner.run_python_tests(
+                    solution,
+                    function_name="solve",
+                    test_cases=[{"input": [], "expected": 1}],
+                    reduced_isolation=True,
+                )
+
+                self.assertEqual(result.kind, "runtime_error")
+                self.assertEqual(result.limit_reason, "abrupt_learner_exit")
+                self.assertFalse(result.passed)
+
+    def test_resource_exit_without_harness_start_is_runner_failure(self) -> None:
+        kind, reason = code_runner._classify_exit(
+            137,
+            "",
+            "",
+            start_sentinel="start",
+            success_sentinel="success",
+        )
+
+        self.assertEqual(kind, "runner_error")
+        self.assertEqual(reason, "unexpected_exit")
+
+    def test_resource_exit_after_harness_start_is_learner_limit(self) -> None:
+        kind, reason = code_runner._classify_exit(
+            137,
+            "start\n",
+            "",
+            start_sentinel="start",
+            success_sentinel="success",
+        )
+
+        self.assertEqual(kind, "resource_limit")
+        self.assertEqual(reason, "memory_or_process")
+
+    def test_resource_policy_rejects_wrong_nonfinite_and_oversized_values(self) -> None:
+        invalid = {
+            "wall_seconds": [True, "1", math.nan, math.inf, 0.01, 301],
+            "cpu_seconds": [True, 1.5, "1", 0, 301],
+            "memory_bytes": [True, 1.5, 1024, 2 * 1024**3 + 1],
+            "process_limit": [True, 1.5, 0, 513],
+            "output_bytes": [True, 1.5, 1, 4 * 1024**2 + 1],
+            "file_bytes": [True, 1.5, 1, 256 * 1024**2 + 1],
+        }
+        with tempfile.TemporaryDirectory() as raw:
+            solution = Path(raw) / "solution.py"
+            solution.write_text("def solve():\n    return 1\n", encoding="utf-8")
+            defaults = code_runner.ResourcePolicy()
+            for field, values in invalid.items():
+                for value in values:
+                    with self.subTest(field=field, value=value):
+                        policy_values = {
+                            name: getattr(defaults, name)
+                            for name in defaults.__dataclass_fields__
+                        }
+                        policy_values[field] = value
+                        with self.assertRaises(ValueError):
+                            code_runner.run_python_tests(
+                                solution,
+                                function_name="solve",
+                                test_cases=[{"input": [], "expected": 1}],
+                                policy=code_runner.ResourcePolicy(**policy_values),
+                                reduced_isolation=True,
+                            )
+
+    def test_hung_create_is_bounded_and_forces_name_cleanup(self) -> None:
+        calls = []
+
+        def fake_run(args, **kwargs):
+            calls.append((args, kwargs))
+            if args[1] == "create":
+                raise subprocess.TimeoutExpired(args, kwargs["timeout"])
+            return subprocess.CompletedProcess(args, 1, "", "No such container")
+
+        with mock.patch.object(code_runner.subprocess, "run", side_effect=fake_run):
+            result = code_runner._run_oci(
+                "/usr/bin/docker",
+                "docker",
+                code_runner.DEFAULT_RUNNER_IMAGE,
+                Path("/tmp/attempt"),
+                Path("/tmp/tests"),
+                code_runner.ResourcePolicy(),
+                "start",
+                "success",
+            )
+
+        self.assertEqual(result.kind, "runner_error")
+        self.assertEqual(result.limit_reason, "container_create")
+        self.assertEqual(calls[0][1]["timeout"], code_runner.OCI_CREATE_TIMEOUT_SECONDS)
+        self.assertEqual(calls[1][0][1:3], ["rm", "--force"])
+
+    def test_ambiguous_create_failure_reports_cleanup_failure(self) -> None:
+        calls = []
+
+        def fake_run(args, **_kwargs):
+            calls.append(args)
+            if args[1] == "create":
+                return subprocess.CompletedProcess(args, 125, "", "ambiguous create failure")
+            return subprocess.CompletedProcess(args, 1, "", "daemon unavailable")
+
+        with mock.patch.object(code_runner.subprocess, "run", side_effect=fake_run):
+            result = code_runner._run_oci(
+                "/usr/bin/docker",
+                "docker",
+                code_runner.DEFAULT_RUNNER_IMAGE,
+                Path("/tmp/attempt"),
+                Path("/tmp/tests"),
+                code_runner.ResourcePolicy(),
+                "start",
+                "success",
+            )
+
+        self.assertEqual(result.kind, "runner_error")
+        self.assertEqual(result.limit_reason, "container_cleanup")
+        self.assertIn("Could not confirm container removal", result.stderr)
+        self.assertEqual(calls[-1][1:3], ["rm", "--force"])
+
+    def test_create_keyboard_interrupt_forces_cleanup_and_reports_cancelled(self) -> None:
+        calls = []
+
+        def fake_run(args, **_kwargs):
+            calls.append(args)
+            if args[1] == "create":
+                raise KeyboardInterrupt
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        with mock.patch.object(code_runner.subprocess, "run", side_effect=fake_run):
+            result = code_runner._run_oci(
+                "/usr/bin/podman",
+                "podman",
+                code_runner.DEFAULT_RUNNER_IMAGE,
+                Path("/tmp/attempt"),
+                Path("/tmp/tests"),
+                code_runner.ResourcePolicy(),
+                "start",
+                "success",
+            )
+
+        self.assertEqual(result.kind, "cancelled")
+        self.assertEqual(calls[-1][1:3], ["rm", "--force"])
+
+    def test_started_timeout_and_cancellation_force_remove_container(self) -> None:
+        for outcome in ("timeout", "cancelled"):
+            with self.subTest(outcome=outcome):
+                calls = []
+                process = mock.Mock(returncode=137)
+
+                def fake_run(args, **_kwargs):
+                    calls.append(args)
+                    return subprocess.CompletedProcess(args, 0, "", "")
+
+                with mock.patch.object(
+                    code_runner.subprocess,
+                    "run",
+                    side_effect=fake_run,
+                ), mock.patch.object(
+                    code_runner.subprocess,
+                    "Popen",
+                    return_value=process,
+                ), mock.patch.object(
+                    code_runner,
+                    "_capture_bounded",
+                    return_value=(outcome, "", ""),
+                ):
+                    result = code_runner._run_oci(
+                        "/usr/bin/docker",
+                        "docker",
+                        code_runner.DEFAULT_RUNNER_IMAGE,
+                        Path("/tmp/attempt"),
+                        Path("/tmp/tests"),
+                        code_runner.ResourcePolicy(),
+                        "start",
+                        "success",
+                    )
+
+                self.assertEqual(result.kind, outcome)
+                self.assertTrue(
+                    any(call[1:3] == ["rm", "--force"] for call in calls)
+                )
 
 
 if __name__ == "__main__":
