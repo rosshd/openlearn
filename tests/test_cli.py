@@ -10457,6 +10457,12 @@ class InteractiveTests(unittest.TestCase):
             pending["question"],
             "**Check:**\nWhy is this implementation linear?",
         )
+        self.assertEqual(
+            cli.read_topic("loops").body.count(
+                "**Check:**\nWhy is this implementation linear?"
+            ),
+            1,
+        )
         self.assertEqual(pending["concept_id"], "linear-scan")
         self.assertNotIn(
             "mastery_changed",
@@ -10547,6 +10553,7 @@ class InteractiveTests(unittest.TestCase):
                         output_func=lambda _text: None,
                     )
                 passed = types.SimpleNamespace(returncode=0, stdout="1 passed", stderr="")
+                output = []
                 with mock.patch.object(
                     cli.subprocess,
                     "run",
@@ -10558,15 +10565,20 @@ class InteractiveTests(unittest.TestCase):
                 ):
                     cli.cmd_check(
                         Namespace(topic=slug, model=None),
-                        output_func=lambda _text: None,
+                        output_func=output.append,
                     )
 
                 pending = cli.load_state(slug)["pending_question"]
+                visible_check = (
+                    "**Check:**\nWhy does this visit each value once?"
+                )
                 self.assertEqual(
                     pending["question"],
-                    "Why does this visit each value once?",
+                    visible_check,
                 )
                 self.assertTrue(pending["concept_id"])
+                self.assertEqual(output.count(visible_check), 1)
+                self.assertEqual(cli.read_topic(slug).body.count(visible_check), 1)
 
     def test_tutor_drill_check_returns_artifact_feedback_and_progressive_hints(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Loops", goal="practice loops"))
@@ -10711,6 +10723,12 @@ class InteractiveTests(unittest.TestCase):
             "**Check:**\nExplain the linked solution's complexity.",
         )
         self.assertTrue(pending["concept_id"])
+        self.assertEqual(
+            cli.read_topic("arrays").body.count(
+                "**Check:**\nExplain the linked solution's complexity."
+            ),
+            1,
+        )
 
     def test_official_link_mastery_drill_falls_back_to_owned_reflection_prompt(
         self,
@@ -10773,17 +10791,23 @@ class InteractiveTests(unittest.TestCase):
                     "call_openai",
                     new=lambda *_args, _response=response, **_kwargs: _response,
                 ):
+                    output = []
                     cli.cmd_check(
                         Namespace(topic=slug, model=None),
-                        output_func=lambda _text: None,
+                        output_func=output.append,
                     )
 
                 pending = cli.load_state(slug)["pending_question"]
+                visible_check = (
+                    "**Check:**\nExplain the approach and complexity."
+                )
                 self.assertEqual(
                     pending["question"],
-                    "Explain the approach and complexity.",
+                    visible_check,
                 )
                 self.assertTrue(pending["concept_id"])
+                self.assertEqual(output.count(visible_check), 1)
+                self.assertEqual(cli.read_topic(slug).body.count(visible_check), 1)
 
     def test_official_link_drill_renders_each_scaffolding_level_without_remote_content(
         self,

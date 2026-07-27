@@ -7812,6 +7812,7 @@ def cmd_check(args: argparse.Namespace, output_func=print) -> int:
             activity,
             answer,
             fallback_question=reflection,
+            output_func=output_func,
         )
     return result.returncode
 
@@ -7876,6 +7877,7 @@ def check_linked_coding_drill(
         activity,
         answer,
         fallback_question=reflection,
+        output_func=output_func,
     )
     return 0
 
@@ -7886,6 +7888,7 @@ def register_mastery_drill_reflection(
     answer: str,
     *,
     fallback_question: str,
+    output_func=print,
 ) -> None:
     """Register a mastery reflection as the next normally judged learner answer."""
     global _LAST_RESPONSE_ANSWER_KEY
@@ -7893,7 +7896,16 @@ def register_mastery_drill_reflection(
         return
     question = extract_pending_question_text(answer)
     if not question or explicit_check_section_count(answer) != 1:
-        question = fallback_question.strip()
+        fallback = fallback_question.strip()
+        question = f"**Check:**\n{fallback}" if fallback else ""
+        if question:
+            output_func(question)
+            append_session(
+                topic,
+                "check",
+                "Validated coding-drill reflection prompt.",
+                question,
+            )
     if not question:
         return
     concept_ids = activity.get("concept_ids")
