@@ -39,6 +39,7 @@ from urllib.request import Request, urlopen
 from platformdirs import user_data_dir
 
 from openlearn import __version__
+from openlearn import code_runner
 from openlearn import interview_prep
 from openlearn import stats as stats_metrics
 from openlearn.activities import (
@@ -282,7 +283,8 @@ REPL_HELP_LINES = [
 REPL_HELP_ALL = (
     "Commands: /resume (/r), /next (/n), /done, /review, /status, /summary, "
     "/options, /plan, /progress [unit slide], /chapter [N], /scope <change>, /repair, "
-    "/drill [--leetcode], /check, /videos [--n N] [query], /active [topic], /recent, "
+    "/drill [--leetcode], /check [--reduced-isolation], "
+    "/videos [--n N] [query], /active [topic], /recent, "
     "/new <topic> [goal], /delete <topic>, /ask <question>, /quit (/q)"
 )
 LESSON_ENTER_ADVANCE_PROMPT = (
@@ -444,6 +446,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     templates_parser = sub.add_parser("templates", help="List starter course templates")
     templates_parser.set_defaults(func=cmd_templates)
+
+    doctor_parser = sub.add_parser(
+        "doctor",
+        help="Check secure code-runner readiness",
+    )
+    doctor_parser.set_defaults(func=cmd_doctor)
 
     test_parser = sub.add_parser("test", help="Seed and open the built-in manual test course")
     test_parser.add_argument(
@@ -840,6 +848,21 @@ def cmd_templates(_args: argparse.Namespace, output_func=print) -> int:
     output_func("")
     output_func("Use: openlearn new <topic> --template <slug>")
     return 0
+
+
+def cmd_doctor(
+    _args: argparse.Namespace,
+    output_func=print,
+    *,
+    diagnose=code_runner.diagnose_runtime,
+) -> int:
+    diagnostic = diagnose()
+    output_func("Code runner: secure OCI mode")
+    output_func(f"Pinned image: {diagnostic.image}")
+    if diagnostic.runtime:
+        output_func(f"Runtime: {diagnostic.runtime}")
+    output_func(code_runner.runtime_setup_guidance(diagnostic))
+    return 0 if diagnostic.ready else 1
 
 
 def cmd_menu(_args: argparse.Namespace) -> int:
@@ -2171,8 +2194,14 @@ def handle_repl_command(
             output_func=output_func,
         )
     elif name == "check":
+        reduced_isolation = "--reduced-isolation" in args
+        topic_args = [arg for arg in args if arg != "--reduced-isolation"]
         cmd_check(
-            argparse.Namespace(topic=args[0] if args else resolve_topic_slug(None), model=model),
+            argparse.Namespace(
+                topic=topic_args[0] if topic_args else resolve_topic_slug(None),
+                model=model,
+                reduced_isolation=reduced_isolation,
+            ),
             output_func=output_func,
         )
     elif name == "videos":
@@ -8250,6 +8279,23 @@ def tutor_drill_activity_request(
     else:
         tool_requests.append({"action": "run_drill_tests", "payload": {}})
         requested_evidence = ["pytest_result"]
+    coding_payload: dict[str, object] = {
+        "title": action.title,
+        "language": action.language,
+        "difficulty": action.difficulty,
+        "plan_prompt": action.plan_prompt,
+        "todo_steps": list(action.todo_steps),
+        "worked_example": action.worked_example,
+        "hints": list(action.hints),
+        "reflection_prompt": action.reflection_prompt,
+        "transfer_prompt": action.transfer_prompt,
+        "tool_requests": tool_requests,
+    }
+    if action.source["kind"] != "official_link":
+        coding_payload["function_name"] = function_name_from_stub(
+            str(action.drill["function_stub"])
+        )
+        coding_payload["test_cases"] = list(action.drill["test_cases"])
     return {
         "domain": "coding",
         "kind": "python_drill",
@@ -8258,18 +8304,7 @@ def tutor_drill_activity_request(
         "requested_evidence": requested_evidence,
         "scaffolding_level": action.scaffolding_level,
         "purpose": action.purpose,
-        "domain_payload": {
-            "title": action.title,
-            "language": action.language,
-            "difficulty": action.difficulty,
-            "plan_prompt": action.plan_prompt,
-            "todo_steps": list(action.todo_steps),
-            "worked_example": action.worked_example,
-            "hints": list(action.hints),
-            "reflection_prompt": action.reflection_prompt,
-            "transfer_prompt": action.transfer_prompt,
-            "tool_requests": tool_requests,
-        },
+        "domain_payload": coding_payload,
         "resources": tutor_drill_resources(action),
     }
 
@@ -8390,6 +8425,19 @@ def ensure_coding_drill_activity(topic: Topic, drill_path: Path) -> dict[str, ob
     existing = active_topic_activity(topic.slug, domain="coding", kind="python_drill")
     if existing is not None:
         return existing
+    legacy_bundle = extract_legacy_drill_bundle(drill_path)
+    if legacy_bundle is None:
+        raise OpenLearnError(
+            "this legacy drill has no extractable test bundle; start a new drill with /drill"
+        )
+    function_name, test_cases, _cleaned_source = legacy_bundle
+    coding_payload: dict[str, object] = {
+        "title": drill_path.stem,
+        "language": "python",
+        "function_name": function_name,
+        "test_cases": test_cases,
+        "tool_requests": [{"action": "run_drill_tests", "payload": {}}],
+    }
     activity = propose_topic_activity(
         topic.slug,
         {
@@ -8400,15 +8448,106 @@ def ensure_coding_drill_activity(topic: Topic, drill_path: Path) -> dict[str, ob
             "requested_evidence": ["pytest_result"],
             "scaffolding_level": 1,
             "purpose": "practice",
-            "domain_payload": {
-                "title": drill_path.stem,
-                "language": "python",
-                "tool_requests": [{"action": "run_drill_tests", "payload": {}}],
-            },
+            "domain_payload": coding_payload,
         },
     )
     activity = accept_topic_activity(topic.slug, activity, learner_confirmed=True)
-    return transition_topic_activity(topic.slug, activity, "active")
+    activity = transition_topic_activity(topic.slug, activity, "active")
+    try:
+        write_text_atomic(drill_path, legacy_bundle[2])
+    except OSError as exc:
+        log_activity_tool_failure(topic.slug, activity, "migrate_legacy_drill", exc)
+        raise OpenLearnError(
+            f"could not separate legacy drill tests from the learner workspace: {exc}"
+        ) from exc
+    return activity
+
+
+def extract_legacy_drill_bundle(
+    path: Path,
+) -> tuple[str, list[dict[str, object]], str] | None:
+    """Extract only the exact inert test shape emitted by older openLearn versions."""
+    try:
+        source = path.read_text(encoding="utf-8")
+        module = ast.parse(source, mode="exec")
+    except (OSError, SyntaxError):
+        return None
+    test_blocks = [
+        node
+        for node in module.body
+        if isinstance(node, ast.If)
+        and isinstance(node.test, ast.Constant)
+        and isinstance(node.test.value, bool)
+    ]
+    if len(test_blocks) != 1:
+        return None
+    block = test_blocks[0]
+    if not block.body or block.orelse or any(
+        not isinstance(node, ast.FunctionDef) for node in block.body
+    ):
+        return None
+    function_name = ""
+    test_cases: list[dict[str, object]] = []
+    for index, test_function in enumerate(block.body, start=1):
+        assert isinstance(test_function, ast.FunctionDef)
+        if (
+            test_function.name != f"test_case_{index}"
+            or test_function.decorator_list
+            or test_function.args.args
+            or test_function.args.posonlyargs
+            or test_function.args.kwonlyargs
+            or test_function.args.vararg is not None
+            or test_function.args.kwarg is not None
+            or len(test_function.body) != 1
+            or not isinstance(test_function.body[0], ast.Assert)
+        ):
+            return None
+        assertion = test_function.body[0].test
+        if (
+            not isinstance(assertion, ast.Compare)
+            or len(assertion.ops) != 1
+            or not isinstance(assertion.ops[0], ast.Eq)
+            or len(assertion.comparators) != 1
+            or not isinstance(assertion.left, ast.Call)
+            or not isinstance(assertion.left.func, ast.Name)
+        ):
+            return None
+        call = assertion.left
+        if function_name and call.func.id != function_name:
+            return None
+        function_name = call.func.id
+        try:
+            expected = ast.literal_eval(assertion.comparators[0])
+            if (
+                len(call.args) == 1
+                and isinstance(call.args[0], ast.Starred)
+                and not call.keywords
+            ):
+                input_value = ast.literal_eval(call.args[0].value)
+            elif (
+                not call.args
+                and len(call.keywords) == 1
+                and call.keywords[0].arg is None
+            ):
+                input_value = ast.literal_eval(call.keywords[0].value)
+            elif len(call.args) == 1 and not call.keywords:
+                input_value = ast.literal_eval(call.args[0])
+            else:
+                return None
+            json.dumps(
+                {"input": input_value, "expected": expected},
+                allow_nan=False,
+            )
+        except (TypeError, ValueError):
+            return None
+        test_cases.append({"input": input_value, "expected": expected})
+    if not function_name or block.end_lineno is None:
+        return None
+    lines = source.splitlines(keepends=True)
+    cleaned = "".join(
+        [*lines[: block.lineno - 1], *lines[block.end_lineno :]]
+    ).rstrip() + "\n"
+    return function_name, test_cases, cleaned
 
 
 def cmd_drill(args: argparse.Namespace, output_func=print) -> int:
@@ -8442,6 +8581,10 @@ def cmd_drill(args: argparse.Namespace, output_func=print) -> int:
             "domain_payload": {
                 "title": str(drill["title"]),
                 "language": "python",
+                "function_name": function_name_from_stub(
+                    str(drill["function_stub"])
+                ),
+                "test_cases": list(drill["test_cases"]),
                 "tool_requests": [
                     {"action": "create_drill_workspace", "payload": {}},
                     {"action": "open_configured_editor", "payload": {}},
@@ -8506,17 +8649,52 @@ def cmd_check(args: argparse.Namespace, output_func=print) -> int:
             args.model,
             output_func,
         )
-    enable_drill_tests(drill_path)
-    try:
-        result = subprocess.run(
-            [sys.executable, "-m", "pytest", str(drill_path), "-v", "--tb=short"],
-            capture_output=True,
-            text=True,
+    function_name = coding_payload.get("function_name")
+    test_cases = coding_payload.get("test_cases")
+    if (
+        not isinstance(function_name, str)
+        or not function_name.isidentifier()
+        or not isinstance(test_cases, list)
+        or not test_cases
+        or any(not isinstance(case, dict) for case in test_cases)
+    ):
+        raise OpenLearnError(
+            "this legacy drill has no separate test bundle; start a new drill with /drill"
         )
-    except OSError as exc:
-        transition_topic_activity(topic.slug, activity, "failed", reason=str(exc))
+    reduced_isolation = bool(getattr(args, "reduced_isolation", False))
+    if reduced_isolation:
+        output_func(
+            "WARNING: reduced-isolation execution is not a sandbox. Learner code can "
+            "access your account's files and network and may escape resource limits."
+        )
+    try:
+        run_result = code_runner.run_python_tests(
+            drill_path,
+            function_name=function_name,
+            test_cases=test_cases,
+            reduced_isolation=reduced_isolation,
+        )
+    except (OSError, ValueError, code_runner.RunnerUnavailableError) as exc:
+        log_activity_tool_failure(topic.slug, activity, "run_drill_tests", exc)
         raise OpenLearnError(f"could not run drill tests: {exc}") from exc
-    output = "\n".join(part for part in [result.stdout.strip(), result.stderr.strip()] if part)
+    if run_result.kind in {"runner_error", "timeout", "output_limit", "resource_limit", "cancelled"}:
+        detail = "\n".join(
+            part
+            for part in [run_result.stdout.strip(), run_result.stderr.strip()]
+            if part
+        )
+        error = OpenLearnError(
+            "drill runner did not produce a learner result "
+            f"({run_result.kind}{': ' + run_result.limit_reason if run_result.limit_reason else ''})"
+            f"{': ' + detail[:500] if detail else ''}"
+        )
+        log_activity_tool_failure(topic.slug, activity, "run_drill_tests", error)
+        raise error
+    output = "\n".join(
+        part
+        for part in [run_result.stdout.strip(), run_result.stderr.strip()]
+        if part
+    )
     refs = activity.get("evidence_refs")
     attempt_number = len(refs) + 1 if isinstance(refs, list) else 1
     hints = coding_payload.get("hints")
@@ -8526,7 +8704,7 @@ def cmd_check(args: argparse.Namespace, output_func=print) -> int:
         else []
     )
     hint_stage = (
-        min(attempt_number, len(hint_values)) if result.returncode != 0 else 0
+        min(attempt_number, len(hint_values)) if not run_result.passed else 0
     )
     try:
         artifact_excerpt = drill_path.read_text(encoding="utf-8")[:8_000]
@@ -8538,15 +8716,15 @@ def cmd_check(args: argparse.Namespace, output_func=print) -> int:
         activity,
         "pytest_result",
         {
-            "return_code": result.returncode,
+            "return_code": run_result.exit_code or 0,
             "summary": output[:4_000],
             "artifact_excerpt": artifact_excerpt,
             "attempt_number": attempt_number,
             "hint_stage": hint_stage,
-            "tests_passed": result.returncode == 0,
+            "tests_passed": run_result.passed,
         },
     )
-    if result.returncode == 0:
+    if run_result.passed:
         activity = transition_topic_activity(topic.slug, activity, "completed")
     purpose = str(activity.get("purpose"))
     reflection = str(
@@ -8559,10 +8737,10 @@ def cmd_check(args: argparse.Namespace, output_func=print) -> int:
         "Tests passed, but this is a mastery check and tests alone are not mastery "
         "evidence. Use one **Check:** with the reflection prompt below so explanation "
         "quality is judged separately. Mention the later transfer task when supplied."
-        if result.returncode == 0 and purpose == "mastery_check"
+        if run_result.passed and purpose == "mastery_check"
         else "Tests passed on a practice attempt. Use one **Feedback:** move, reinforce "
         "the key idea briefly, and invite the reflection without grading it or claiming mastery."
-        if result.returncode == 0
+        if run_result.passed
         else "Tests failed. Use one **Feedback:** move with targeted feedback tied to the "
         "artifact and test output, reveal only the selected progressive hint, and ask for "
         "one retry with /check. Do not reveal a complete solution."
@@ -8575,7 +8753,9 @@ def cmd_check(args: argparse.Namespace, output_func=print) -> int:
         or advance solely because tests passed.
         {feedback_contract}
 
-        Pytest return code: {result.returncode}
+        Runner outcome: {run_result.kind}
+        Runner exit code: {run_result.exit_code}
+        Execution isolation: {run_result.isolation}
         Test output:
         {output or "(no output)"}
 
@@ -8592,7 +8772,7 @@ def cmd_check(args: argparse.Namespace, output_func=print) -> int:
         model=model, system=system_prompt(topic), user=user, output_func=output_func
     )
     print_and_append_model_answer(topic, "check", user, answer, output_func=output_func)
-    if result.returncode == 0:
+    if run_result.passed:
         register_mastery_drill_reflection(
             topic,
             activity,
@@ -8600,7 +8780,7 @@ def cmd_check(args: argparse.Namespace, output_func=print) -> int:
             fallback_question=reflection,
             output_func=output_func,
         )
-    return result.returncode
+    return 0 if run_result.passed else 1
 
 
 def check_linked_coding_drill(
@@ -8993,8 +9173,6 @@ def unique_drill_path(slug: str, title: str) -> Path:
 
 def render_drill_file(drill: dict[str, object]) -> str:
     function_stub = str(drill["function_stub"]).rstrip()
-    function_name = function_name_from_stub(function_stub)
-    cases = drill["test_cases"]
     lines = [
         '"""',
         str(drill["title"]),
@@ -9005,32 +9183,8 @@ def render_drill_file(drill: dict[str, object]) -> str:
         '"""',
         "",
         function_stub,
-        "",
-        "",
-        "if False:",
     ]
-    case_items = cases if isinstance(cases, list) else []
-    for index, case in enumerate(case_items, start=1):
-        if not isinstance(case, dict):
-            continue
-        call = drill_call_expression(function_name, case["input"])
-        expected = repr(case["expected"])
-        lines.extend(
-            [
-                f"    def test_case_{index}():",
-                f"        assert {call} == {expected}",
-                "",
-            ]
-        )
     return "\n".join(lines).rstrip() + "\n"
-
-
-def drill_call_expression(function_name: str, input_value: object) -> str:
-    if isinstance(input_value, list):
-        return f"{function_name}(*{repr(input_value)})"
-    if isinstance(input_value, dict):
-        return f"{function_name}(**{repr(input_value)})"
-    return f"{function_name}({repr(input_value)})"
 
 
 def save_active_drill(slug: str, path: Path) -> None:
@@ -9053,14 +9207,6 @@ def active_drill_path(topic: Topic) -> Path:
     if not path.is_relative_to(owned_root):
         raise OpenLearnError(f"active drill is outside its owned workspace: {path}")
     return path
-
-
-def enable_drill_tests(path: Path) -> None:
-    text = path.read_text(encoding="utf-8")
-    updated = re.sub(r"(?m)^if False:\s*$", "if True:", text, count=1)
-    if updated == text:
-        return
-    write_text_atomic(path, updated)
 
 
 def open_drill_in_editor(path: Path) -> str:

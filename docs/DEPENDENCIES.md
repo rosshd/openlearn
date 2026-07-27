@@ -60,7 +60,10 @@ FMHY is useful as a human-discoverable resource index.
 Do not redistribute or programmatically ingest its repository until licensing permission is explicit.
 User-directed imports of public pages remain acceptable through the normal URL import path.
 
-## Drill Sandbox
+## Drill Code Runner
 
-Coding drills use no new dependency.
-The tutor writes a small Python file with tests, `/check` runs pytest on that file, and the tutor explains failures or confirms success.
+Coding drills add no Python package dependency.
+Secure `/check` execution requires an existing Docker or Podman installation and an explicitly acquired digest-pinned official Python image.
+openLearn neither installs the runtime nor pulls the image automatically.
+The generated test harness uses only the Python standard library inside the image.
+Run `openlearn doctor` to inspect local readiness and print the explicit acquisition command.

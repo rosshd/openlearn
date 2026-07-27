@@ -90,8 +90,24 @@ Model-generated function stubs are parsed as untrusted Python before writing and
 The existing `/drill` command is explicit learner consent and remains the reliable manual fallback.
 Future tutor-selected proposals must show the proposal and obtain an explicit learner acceptance before dispatch.
 Instrument and electronics shapes are contract fixtures only; their tools are not implemented.
-After the learner edits a drill, `/check` still executes learner-authored Python through pytest.
-That execution remains a trusted local workflow until the separate safe coding runner boundary is implemented, so learners should not run drills containing code they did not author or inspect.
+After the learner edits a drill, `/check` fails closed unless Docker or Podman and the digest-pinned Python runner image are already available.
+The runtime image is never acquired implicitly.
+Secure checks create a fresh attempt directory, copy only the learner solution into it, and mount that directory plus a separate read-only generated harness into the container.
+The container receives no host credential directory, home directory, repository, or runtime socket mount.
+It runs with no network, a read-only root, a non-root UID, dropped capabilities, no-new-privileges, bounded CPU, memory, process count, output, file size, and wall time, and a small writable tmpfs.
+Timeout and cancellation force-remove the complete container.
+The shared result distinguishes successful tests, test failures, compile errors, runtime errors, resource limits, cancellation, and runner infrastructure failures.
+Infrastructure failures record no incorrect-answer evidence and leave the activity available for retry.
+
+Test cases remain in validated activity state outside the learner-editable drill workspace.
+The ephemeral harness is mounted separately and read-only, but learner code running in the same container can introspect that harness.
+This design prevents ordinary workspace edits from changing hidden tests, but it is not an anti-cheating boundary against intentionally adversarial learner code.
+
+`/check --reduced-isolation` is a per-command explicit fallback.
+It uses a scrubbed subprocess environment plus best-effort resource and process-tree controls, prints a residual-risk warning, and is never described as a sandbox.
+It does not prevent filesystem or network access.
+Docker and Podman may enforce the Linux container contract through their normal VM on macOS and Windows.
+`openlearn doctor` reports missing runtimes, unavailable services, unpinned image configuration, and an absent local image without installing or pulling anything.
 
 ## Model Calls
 

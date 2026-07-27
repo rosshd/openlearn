@@ -355,6 +355,37 @@ class CodingActivityAdapter:
             ]
         if "worked_example" in payload:
             normalized["worked_example"] = _worked_example(payload.get("worked_example"))
+        if "function_name" in payload:
+            function_name = payload.get("function_name")
+            if not isinstance(function_name, str) or not function_name.isidentifier():
+                raise ActivityContractError(
+                    "coding function_name must be a Python identifier"
+                )
+            normalized["function_name"] = function_name
+        if "test_cases" in payload:
+            test_cases = payload.get("test_cases")
+            if not isinstance(test_cases, list) or not 1 <= len(test_cases) <= 64:
+                raise ActivityContractError(
+                    "coding test_cases must contain 1-64 cases"
+                )
+            try:
+                encoded_cases = json.dumps(
+                    test_cases,
+                    ensure_ascii=True,
+                    allow_nan=False,
+                )
+            except (TypeError, ValueError) as exc:
+                raise ActivityContractError(
+                    "coding test_cases must contain JSON values"
+                ) from exc
+            if len(encoded_cases) > 64_000:
+                raise ActivityContractError("coding test_cases are too large")
+            for case in test_cases:
+                if not isinstance(case, Mapping) or set(case) != {"input", "expected"}:
+                    raise ActivityContractError(
+                        "each coding test case requires input and expected"
+                    )
+            normalized["test_cases"] = [dict(case) for case in test_cases]
         return normalized
 
     def validate_evidence(self, kind: str, payload: Mapping[str, object]) -> dict[str, object]:

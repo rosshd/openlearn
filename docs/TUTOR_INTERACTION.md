@@ -56,6 +56,8 @@ Practice and mastery-check purposes remain distinct throughout this flow.
 
 Cancellation and adapter failures preserve the surrounding tutor session.
 The learner can continue chatting and use manual `/drill` and `/check` fallbacks without a generic shell, arbitrary executable, or arbitrary path permission.
+`/check` uses secure OCI execution by default and fails closed when its pinned local runner image or Docker/Podman runtime is unavailable.
+The explicitly requested `/check --reduced-isolation` fallback prints its residual-risk warning and is not treated as sandboxed execution.
 Activity state and its teaching evidence recover together after an interrupted write through the durable activity-update journal.
 
 Coding drills use one allow-listed `start_coding_drill` action with validated objective, language, difficulty, scaffolding level, source metadata, and practice-or-mastery purpose.
