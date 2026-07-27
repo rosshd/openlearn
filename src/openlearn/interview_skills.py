@@ -679,6 +679,65 @@ def _validated_context(
         return None
 
 
+def _source_delay_satisfied(
+    delayed: tuple[Mapping[str, object], ValidatedEvidenceRecord],
+    prior: Iterable[tuple[Mapping[str, object], ValidatedEvidenceRecord]],
+) -> bool:
+    delayed_record, delayed_context = delayed
+    delayed_at = _parse_timestamp(delayed_record.get("observed_at"))
+    if delayed_at is None:
+        return False
+    source_key = (
+        delayed_context.graph.graph_version,
+        delayed_context.graph.mastery_policy_version,
+    )
+    prior_times = [
+        observed_at
+        for record, context in prior
+        if (
+            context.graph.graph_version,
+            context.graph.mastery_policy_version,
+        )
+        == source_key
+        and context.skill.skill_id == delayed_context.skill.skill_id
+        and (observed_at := _parse_timestamp(record.get("observed_at"))) is not None
+        and observed_at <= delayed_at
+    ]
+    if not prior_times:
+        return False
+    required_delay = timedelta(
+        days=delayed_context.skill.evidence_policy.transfer.minimum_delay_days
+    )
+    return delayed_at - min(prior_times) >= required_delay
+
+
+def _distinct_problem_context_count(
+    evidence: Iterable[tuple[Mapping[str, object], ValidatedEvidenceRecord]],
+) -> int:
+    parents: dict[tuple[str, str], tuple[str, str]] = {}
+
+    def find(node: tuple[str, str]) -> tuple[str, str]:
+        parents.setdefault(node, node)
+        while parents[node] != node:
+            parents[node] = parents[parents[node]]
+            node = parents[node]
+        return node
+
+    def union(left: tuple[str, str], right: tuple[str, str]) -> None:
+        left_root = find(left)
+        right_root = find(right)
+        if left_root != right_root:
+            parents[right_root] = left_root
+
+    problem_nodes: set[tuple[str, str]] = set()
+    for _record, context in evidence:
+        problem = ("problem", context.problem.problem_id)
+        family = ("family", context.problem.transfer_family)
+        union(problem, family)
+        problem_nodes.add(problem)
+    return len({find(problem) for problem in problem_nodes})
+
+
 def assess_skills(
     graph: InterviewSkillGraph,
     evidence: Iterable[Mapping[str, object]],
@@ -729,43 +788,24 @@ def assess_skills(
             elif reason and reason not in rejection_reasons:
                 rejection_reasons.append(reason)
         prior_qualifying = [
-            record
+            (record, context)
             for kind in ("explanation", "production", "transfer")
-            for record, _context in qualifying[kind]
+            for record, context in qualifying[kind]
         ]
         if qualifying["delayed_retrieval"]:
-            if prior_qualifying:
-                first_prior = min(
-                    timestamp
-                    for record in prior_qualifying
-                    if (timestamp := _parse_timestamp(record.get("observed_at")))
-                    is not None
-                )
-                delay = timedelta(
-                    days=skill.evidence_policy.transfer.minimum_delay_days
-                )
-                qualifying["delayed_retrieval"] = [
-                    (record, context)
-                    for record, context in qualifying["delayed_retrieval"]
-                    if (
-                        timestamp := _parse_timestamp(record.get("observed_at"))
-                    )
-                    is not None
-                    and timestamp - first_prior >= delay
-                ]
-            else:
-                qualifying["delayed_retrieval"] = []
+            qualifying["delayed_retrieval"] = [
+                delayed
+                for delayed in qualifying["delayed_retrieval"]
+                if _source_delay_satisfied(delayed, prior_qualifying)
+            ]
             if not qualifying["delayed_retrieval"]:
                 rejection_reasons.append(
-                    "delayed retrieval occurred before the policy delay or without prior evidence"
+                    "delayed retrieval occurred before the policy delay from its source bundle "
+                    "or without source-qualified prior evidence"
                 )
         counts = {kind: len(items) for kind, items in qualifying.items()}
         for kind in ("transfer", "delayed_retrieval"):
-            families = {
-                context.problem.transfer_family
-                for _record, context in qualifying[kind]
-            }
-            counts[kind] = len(families)
+            counts[kind] = _distinct_problem_context_count(qualifying[kind])
         required = dict(skill.evidence_policy.minimum)
         required["transfer"] = max(
             required["transfer"],

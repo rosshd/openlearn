@@ -81,7 +81,9 @@ The deterministic assessment surface separates readiness from selection.
 Readiness is `ready`, `provisional`, `weak`, or `unassessed`.
 Selection is `ready`, `blocked`, `weak`, `due`, or `unassessed`, with learner-visible reasons for missing evidence, prerequisite blocks, hint-dependent work, and delayed-retrieval failures.
 Evidence provenance uses closed assistance and completion values, and independent mastery rejects copied structure, partial code, worked examples, editorials, incomplete attempts, and prompted production.
-Transfer breadth is derived from the canonical problem family in the source graph, so repeated attempts or caller-supplied labels cannot manufacture novelty.
+Delayed retrieval uses the source bundle's skill policy and a qualifying prior observation from that same bundle before current aggregate mastery minimums are applied.
+Transfer breadth is derived from stable problem IDs and canonical source-graph families, so repeated attempts, family renames, or caller-supplied labels cannot manufacture novelty.
+Distinct problems in one canonical family still count as one transfer context.
 Blocking prerequisites propagate through the graph and require each prerequisite to be selection-ready.
 Blocking is a selection constraint rather than an instruction to drill indefinitely.
 

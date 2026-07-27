@@ -316,6 +316,62 @@ def test_early_delayed_retrieval_does_not_satisfy_the_delay_contract() -> None:
     assert any("before the policy delay" in reason for reason in skill.reasons)
 
 
+@pytest.mark.parametrize(
+    ("historical_delay", "current_delay", "delayed_at", "expected_count"),
+    [
+        (3, 14, "2026-06-05T12:00:00+00:00", 1),
+        (14, 3, "2026-06-08T12:00:00+00:00", 0),
+    ],
+)
+def test_historical_delayed_retrieval_uses_its_source_policy_delay(
+    historical_delay: int,
+    current_delay: int,
+    delayed_at: str,
+    expected_count: int,
+) -> None:
+    historical_raw = _versioned_graph("0.9.0", "interview-mastery-v0")
+    historical_pattern = next(
+        item
+        for item in historical_raw["evidence_policies"]
+        if item["id"] == "pattern-v1"
+    )
+    historical_pattern["transfer"]["minimum_delay_days"] = historical_delay
+    historical = interview_skills.validate_graph(historical_raw)
+    current_raw = _versioned_graph("2.0.0", "interview-mastery-v2")
+    current_pattern = next(
+        item
+        for item in current_raw["evidence_policies"]
+        if item["id"] == "pattern-v1"
+    )
+    current_pattern["transfer"]["minimum_delay_days"] = current_delay
+    current = interview_skills.validate_graph(current_raw)
+    registry = interview_skills.SkillGraphRegistry.from_graphs(
+        (historical, current)
+    )
+    evidence = _with_versions(
+        _evidence("advanced_learner"),
+        historical.graph_version,
+        historical.mastery_policy_version,
+    )
+    delayed = next(
+        record
+        for record in evidence
+        if record["skill_id"] == "pattern.sliding-window"
+        and record["kind"] == "delayed_retrieval"
+    )
+    delayed["observed_at"] = delayed_at
+
+    skill = interview_skills.assess_skills(
+        current,
+        evidence,
+        registry=registry,
+        now=datetime(2026, 6, 20, 12, 0, tzinfo=timezone.utc),
+    )["pattern.sliding-window"]
+
+    assert skill.qualifying_counts["delayed_retrieval"] == expected_count
+    assert skill.readiness == ("ready" if expected_count else "provisional")
+
+
 def test_nonqualifying_recent_attempt_does_not_hide_due_retrieval() -> None:
     graph = interview_skills.load_default_graph()
     evidence = _evidence("advanced_learner")
@@ -472,6 +528,101 @@ def test_repeated_same_problem_cannot_manufacture_transfer_breadth() -> None:
     duplicate["evidence_id"] = "ev-duplicate-transfer"
     duplicate["observed_at"] = "2026-06-04T12:00:00+00:00"
     evidence.append(duplicate)
+
+    skill = interview_skills.assess_skills(graph, evidence, now=NOW)[
+        "pattern.sliding-window"
+    ]
+
+    assert skill.qualifying_counts["transfer"] == 1
+    assert skill.readiness == "provisional"
+
+
+def test_same_problem_family_rename_across_versions_is_one_transfer_context() -> None:
+    historical = interview_skills.load_default_graph()
+    current_raw = _versioned_graph("2.0.0", "interview-mastery-v2")
+    pattern_policy = next(
+        item
+        for item in current_raw["evidence_policies"]
+        if item["id"] == "pattern-v1"
+    )
+    pattern_policy["transfer"]["minimum_novel_contexts"] = 2
+    renamed_problem = next(
+        problem
+        for problem in current_raw["problems"]
+        if problem["id"] == "problem.longest-repeating-replacement"
+    )
+    renamed_problem["transfer_family"] = "renamed-window-invariant"
+    current = interview_skills.validate_graph(current_raw)
+    registry = interview_skills.SkillGraphRegistry.from_graphs(
+        (historical, current)
+    )
+    evidence = _evidence("advanced_learner")
+    historical_transfer = next(
+        record
+        for record in evidence
+        if record["skill_id"] == "pattern.sliding-window"
+        and record["kind"] == "transfer"
+    )
+    renamed_transfer = deepcopy(historical_transfer)
+    renamed_transfer.update(
+        {
+            "evidence_id": "ev-renamed-family-transfer",
+            "graph_version": current.graph_version,
+            "mastery_policy_version": current.mastery_policy_version,
+            "observed_at": "2026-06-04T12:00:00+00:00",
+            "transfer_family": "renamed-window-invariant",
+        }
+    )
+    evidence.append(renamed_transfer)
+
+    skill = interview_skills.assess_skills(
+        current,
+        evidence,
+        registry=registry,
+        now=NOW,
+    )["pattern.sliding-window"]
+
+    assert skill.qualifying_counts["transfer"] == 1
+    assert skill.readiness == "provisional"
+
+
+def test_distinct_problems_in_same_family_are_one_transfer_context() -> None:
+    raw = _versioned_graph("2.0.0", "interview-mastery-v2")
+    pattern_policy = next(
+        item for item in raw["evidence_policies"] if item["id"] == "pattern-v1"
+    )
+    pattern_policy["transfer"]["minimum_novel_contexts"] = 2
+    for problem in raw["problems"]:
+        if problem["id"] in {
+            "problem.minimum-window-substring",
+            "problem.longest-repeating-replacement",
+        }:
+            problem["transfer_family"] = "shared-window-family"
+    graph = interview_skills.validate_graph(raw)
+    evidence = _with_versions(
+        _evidence("advanced_learner"),
+        graph.graph_version,
+        graph.mastery_policy_version,
+    )
+    transfer = next(
+        record
+        for record in evidence
+        if record["skill_id"] == "pattern.sliding-window"
+        and record["kind"] == "transfer"
+    )
+    transfer["transfer_family"] = "shared-window-family"
+    second_problem = deepcopy(transfer)
+    second_problem.update(
+        {
+            "evidence_id": "ev-distinct-problem-same-family",
+            "problem_id": "problem.minimum-window-substring",
+            "observed_at": "2026-06-04T12:00:00+00:00",
+        }
+    )
+    evidence.append(second_problem)
+    for record in evidence:
+        if record["problem_id"] == "problem.minimum-window-substring":
+            record["transfer_family"] = "shared-window-family"
 
     skill = interview_skills.assess_skills(graph, evidence, now=NOW)[
         "pattern.sliding-window"
