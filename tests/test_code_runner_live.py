@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import subprocess
 import tempfile
 import threading
@@ -200,8 +201,8 @@ class LiveCodeRunnerTests(unittest.TestCase):
                             wall_seconds=0.5,
                             cpu_seconds=4,
                         ),
-                        "start",
-                        "success",
+                        self._request(),
+                        "live-request",
                     )
                     self.assertEqual(result.kind, "timeout")
                     time.sleep(2.2)
@@ -230,8 +231,8 @@ class LiveCodeRunnerTests(unittest.TestCase):
                                 attempt,
                                 harness,
                                 code_runner.ResourcePolicy(),
-                                "start",
-                                "success",
+                                self._request(),
+                                "live-request",
                             )
                         finally:
                             interrupter.cancel()
@@ -255,9 +256,9 @@ class LiveCodeRunnerTests(unittest.TestCase):
                 attempt,
                 harness,
             ):
-                (harness / "run_tests.py").write_text(
-                    "print('start', flush=True)\n"
-                    "print('success', flush=True)\n",
+                (attempt / "solution.py").write_text(
+                    "def probe():\n"
+                    "    return True\n",
                     encoding="utf-8",
                 )
                 injected = {"value": False}
@@ -296,8 +297,8 @@ class LiveCodeRunnerTests(unittest.TestCase):
                             attempt,
                             harness,
                             code_runner.ResourcePolicy(),
-                            "start",
-                            "success",
+                            self._request(),
+                            "live-request",
                         )
                     self.assertEqual(result.kind, "runner_error")
                     self.assertEqual(result.limit_reason, "container_cleanup")
@@ -333,11 +334,9 @@ class LiveCodeRunnerTests(unittest.TestCase):
                     encoding="utf-8",
                 )
                 solution.chmod(0o666)
-                runner = harness / "run_tests.py"
+                runner = harness / "call_worker.py"
                 runner.write_text(
-                    "import time\n"
-                    "while True:\n"
-                    "    time.sleep(1)\n",
+                    code_runner._python_worker("probe"),
                     encoding="utf-8",
                 )
                 runner.chmod(0o644)
@@ -348,6 +347,19 @@ class LiveCodeRunnerTests(unittest.TestCase):
                 self.attempt_temp.cleanup()
 
         return Fixture()
+
+    @staticmethod
+    def _request() -> bytes:
+        return (
+            json.dumps(
+                {
+                    "version": 1,
+                    "request_id": "live-request",
+                    "input": [],
+                }
+            )
+            + "\n"
+        ).encode()
 
 
 if __name__ == "__main__":

@@ -10,7 +10,7 @@ import sys
 import tempfile
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
 from uuid import uuid4
@@ -22,8 +22,7 @@ DEFAULT_RUNNER_IMAGE = (
 )
 SUPPORTED_RUNTIMES = ("docker", "podman")
 OCI_CREATE_TIMEOUT_SECONDS = 15
-HARNESS_START_PREFIX = "OPENLEARN_HARNESS_STARTED_"
-HARNESS_SUCCESS_PREFIX = "OPENLEARN_HARNESS_SUCCESS_"
+PROTOCOL_PREFIX = "OPENLEARN_CALL_RESULT_V1 "
 
 
 @dataclass(frozen=True)
@@ -80,6 +79,16 @@ class RunnerResult:
 
 class RunnerUnavailableError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class _CallResult:
+    kind: str
+    value: object | None
+    stdout: str
+    stderr: str
+    exit_code: int | None
+    limit_reason: str | None
 
 
 def diagnose_runtime(
@@ -226,52 +235,170 @@ def run_python_tests(
 ) -> RunnerResult:
     policy = policy or ResourcePolicy()
     _validate_request(solution, function_name, test_cases, policy)
+    started = time.monotonic()
+    diagnostic = None
+    if not reduced_isolation:
+        diagnostic = diagnose_runtime(preferred=preferred_runtime, image=image)
+        if not diagnostic.ready:
+            raise RunnerUnavailableError(runtime_setup_guidance(diagnostic))
+        assert diagnostic.executable is not None
+        assert diagnostic.runtime is not None
     with tempfile.TemporaryDirectory(prefix="openlearn-attempt-") as attempt_raw:
-        with tempfile.TemporaryDirectory(prefix="openlearn-tests-") as harness_raw:
+        with tempfile.TemporaryDirectory(prefix="openlearn-worker-") as worker_raw:
             attempt = Path(attempt_raw)
-            harness_dir = Path(harness_raw)
+            worker_dir = Path(worker_raw)
             attempt.chmod(0o777)
-            harness_dir.chmod(0o755)
+            worker_dir.chmod(0o755)
             copied_solution = attempt / "solution.py"
             shutil.copyfile(solution, copied_solution)
             copied_solution.chmod(0o666)
-            harness = harness_dir / "run_tests.py"
-            nonce = uuid4().hex
-            start_sentinel = f"{HARNESS_START_PREFIX}{nonce}"
-            success_sentinel = f"{HARNESS_SUCCESS_PREFIX}{nonce}"
-            harness.write_text(
-                _python_harness(
-                    function_name,
-                    test_cases,
-                    start_sentinel=start_sentinel,
-                    success_sentinel=success_sentinel,
-                ),
-                encoding="utf-8",
+            worker = worker_dir / "call_worker.py"
+            worker.write_text(_python_worker(function_name), encoding="utf-8")
+            worker.chmod(0o644)
+            return _supervise_test_cases(
+                copied_solution,
+                worker_dir,
+                test_cases,
+                policy,
+                started=started,
+                reduced_isolation=reduced_isolation,
+                diagnostic=diagnostic,
+                image=image,
             )
-            harness.chmod(0o644)
-            if reduced_isolation:
-                return _run_reduced(
-                    copied_solution,
-                    harness,
-                    policy,
-                    start_sentinel,
-                    success_sentinel,
-                )
-            diagnostic = diagnose_runtime(preferred=preferred_runtime, image=image)
-            if not diagnostic.ready:
-                raise RunnerUnavailableError(runtime_setup_guidance(diagnostic))
+
+
+def _supervise_test_cases(
+    solution: Path,
+    worker_dir: Path,
+    test_cases: list[dict[str, object]],
+    policy: ResourcePolicy,
+    *,
+    started: float,
+    reduced_isolation: bool,
+    diagnostic: RuntimeDiagnostic | None,
+    image: str,
+) -> RunnerResult:
+    stdout_parts: list[str] = []
+    stderr_parts: list[str] = []
+    last_exit_code: int | None = 0
+    failed = False
+    remaining_output = policy.output_bytes
+    deadline = started + policy.wall_seconds
+    isolation = "reduced" if reduced_isolation else "oci"
+    runtime = None if diagnostic is None else diagnostic.runtime
+    for index, case in enumerate(test_cases, 1):
+        remaining_wall = deadline - time.monotonic()
+        if remaining_wall <= 0:
+            return _result(
+                "timeout",
+                "\n".join(stdout_parts),
+                "\n".join(stderr_parts),
+                last_exit_code,
+                started,
+                "wall_time",
+                isolation,
+                runtime,
+            )
+        request_id = uuid4().hex
+        request = (
+            json.dumps(
+                {
+                    "version": 1,
+                    "request_id": request_id,
+                    "input": case["input"],
+                },
+                ensure_ascii=True,
+                allow_nan=False,
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode()
+        if remaining_output <= 0:
+            return _result(
+                "output_limit",
+                "\n".join(stdout_parts),
+                "\n".join(stderr_parts),
+                last_exit_code,
+                started,
+                "captured_output",
+                isolation,
+                runtime,
+            )
+        call_policy = replace(
+            policy,
+            wall_seconds=remaining_wall,
+            output_bytes=remaining_output,
+        )
+        if reduced_isolation:
+            call = _run_reduced_call(
+                solution,
+                worker_dir / "call_worker.py",
+                call_policy,
+                request,
+                request_id,
+            )
+        else:
+            assert diagnostic is not None
             assert diagnostic.executable is not None
             assert diagnostic.runtime is not None
-            return _run_oci(
+            call = _run_oci(
                 diagnostic.executable,
                 diagnostic.runtime,
                 image,
-                attempt,
-                harness_dir,
-                policy,
-                start_sentinel,
-                success_sentinel,
+                solution.parent,
+                worker_dir,
+                call_policy,
+                request,
+                request_id,
             )
+        last_exit_code = call.exit_code
+        remaining_output -= len((call.stdout + call.stderr).encode())
+        if call.stderr.strip():
+            stderr_parts.append(call.stderr.strip())
+        if call.kind != "value":
+            kind = call.kind
+            if kind == "protocol_error":
+                kind = "runtime_error"
+            return _result(
+                kind,
+                "\n".join(stdout_parts),
+                "\n".join(stderr_parts),
+                call.exit_code,
+                started,
+                call.limit_reason,
+                isolation,
+                runtime,
+            )
+        if call.value == case["expected"]:
+            stdout_parts.append(f"PASSED test_case_{index}")
+        else:
+            failed = True
+            stderr_parts.append(
+                f"FAILED test_case_{index}: expected {case['expected']!r}, "
+                f"got {call.value!r}"
+            )
+    if failed:
+        return _result(
+            "test_failure",
+            "\n".join(stdout_parts),
+            "\n".join(stderr_parts),
+            10,
+            started,
+            None,
+            isolation,
+            runtime,
+        )
+    stdout_parts.append(f"{len(test_cases)} passed")
+    return _result(
+        "success",
+        "\n".join(stdout_parts),
+        "",
+        0,
+        started,
+        None,
+        isolation,
+        runtime,
+    )
 
 
 def build_oci_create_command(
@@ -279,7 +406,7 @@ def build_oci_create_command(
     runtime: str,
     image: str,
     attempt: Path,
-    harness: Path,
+    worker: Path,
     name: str,
     policy: ResourcePolicy,
 ) -> list[str]:
@@ -290,6 +417,7 @@ def build_oci_create_command(
     return [
         executable,
         "create",
+        "--interactive",
         "--name",
         name,
         "--pull",
@@ -322,7 +450,7 @@ def build_oci_create_command(
         "--mount",
         f"type=bind,src={attempt},dst=/workspace,rw",
         "--mount",
-        f"type=bind,src={harness},dst=/opt/openlearn-tests,readonly",
+        f"type=bind,src={worker},dst=/opt/openlearn-worker,readonly",
         image,
         "/usr/bin/env",
         "-i",
@@ -331,7 +459,7 @@ def build_oci_create_command(
         "PYTHONDONTWRITEBYTECODE=1",
         "/usr/local/bin/python",
         "-I",
-        "/opt/openlearn-tests/run_tests.py",
+        "/opt/openlearn-worker/call_worker.py",
         "/workspace/solution.py",
     ]
 
@@ -341,14 +469,14 @@ def _run_oci(
     runtime: str,
     image: str,
     attempt: Path,
-    harness: Path,
+    worker: Path,
     policy: ResourcePolicy,
-    start_sentinel: str,
-    success_sentinel: str,
-) -> RunnerResult:
+    request: bytes,
+    request_id: str,
+) -> _CallResult:
     name = f"openlearn-{uuid4().hex}"
     command = build_oci_create_command(
-        executable, runtime, image, attempt, harness, name, policy
+        executable, runtime, image, attempt, worker, name, policy
     )
     removed = {"value": False}
     cleanup_detail = {"value": ""}
@@ -382,41 +510,33 @@ def _run_oci(
         cleanup_detail["value"] = detail[:500] or f"exit {result.returncode}"
         return False
 
-    started = time.monotonic()
+    call_started = time.monotonic()
     try:
         created = subprocess.run(
             command,
             capture_output=True,
             text=True,
             check=False,
-            timeout=OCI_CREATE_TIMEOUT_SECONDS,
+            timeout=min(OCI_CREATE_TIMEOUT_SECONDS, policy.wall_seconds),
         )
     except KeyboardInterrupt:
         cleanup_ok = remove_container()
-        return _result(
+        return _call_result(
             "cancelled" if cleanup_ok else "runner_error",
-            "",
-            cleanup_detail["value"],
-            None,
-            started,
-            "cancelled" if cleanup_ok else "container_cleanup",
-            "oci",
-            runtime,
+            stderr=cleanup_detail["value"],
+            exit_code=None,
+            limit_reason="cancelled" if cleanup_ok else "container_cleanup",
         )
     except (OSError, subprocess.SubprocessError) as exc:
         cleanup_ok = remove_container()
         detail = str(exc)
         if not cleanup_ok:
             detail = f"{detail}\nCould not confirm container removal: {cleanup_detail['value']}"
-        return _result(
+        return _call_result(
             "runner_error",
-            "",
-            detail,
-            None,
-            started,
-            "container_create" if cleanup_ok else "container_cleanup",
-            "oci",
-            runtime,
+            stderr=detail,
+            exit_code=None,
+            limit_reason="container_create" if cleanup_ok else "container_cleanup",
         )
     if created.returncode != 0:
         cleanup_ok = remove_container()
@@ -430,54 +550,64 @@ def _run_oci(
                 )
                 if part
             )
-        return _result(
+        return _call_result(
             "runner_error",
-            created.stdout,
-            stderr,
-            created.returncode,
-            started,
-            "container_create" if cleanup_ok else "container_cleanup",
-            "oci",
-            runtime,
+            stdout=created.stdout,
+            stderr=stderr,
+            exit_code=created.returncode,
+            limit_reason="container_create" if cleanup_ok else "container_cleanup",
         )
 
+    remaining_wall = policy.wall_seconds - (time.monotonic() - call_started)
+    if remaining_wall <= 0:
+        cleanup_ok = remove_container()
+        return _call_result(
+            "timeout" if cleanup_ok else "runner_error",
+            stderr=cleanup_detail["value"],
+            exit_code=None,
+            limit_reason="wall_time" if cleanup_ok else "container_cleanup",
+        )
+    execution_policy = replace(policy, wall_seconds=remaining_wall)
     try:
-        process = subprocess.Popen(
-            [executable, "start", "--attach", name],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        outcome, stdout, stderr = _capture_bounded(
-            process,
-            policy,
-            terminate=remove_container,
-        )
-        exit_code = process.returncode
-        if outcome == "timeout":
-            kind = "timeout"
-            reason = "wall_time"
-        elif outcome == "output_limit":
-            kind = "output_limit"
-            reason = "captured_output"
-        elif outcome == "cancelled":
-            kind = "cancelled"
-            reason = "cancelled"
-        elif outcome == "termination_failure":
-            kind = "runner_error"
-            reason = "termination_failure"
-        else:
-            kind, reason = _classify_exit(
-                exit_code,
-                stdout,
-                stderr,
-                start_sentinel=start_sentinel,
-                success_sentinel=success_sentinel,
+        try:
+            process = subprocess.Popen(
+                [executable, "start", "--attach", "--interactive", name],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            outcome, stdout, stderr = _capture_bounded(
+                process,
+                execution_policy,
+                terminate=remove_container,
+                stdin_data=request,
+            )
+            exit_code = process.returncode
+        except KeyboardInterrupt:
+            cleanup_ok = remove_container()
+            return _call_result(
+                "cancelled" if cleanup_ok else "runner_error",
+                stderr=cleanup_detail["value"],
+                exit_code=None,
+                limit_reason="cancelled" if cleanup_ok else "container_cleanup",
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            cleanup_ok = remove_container()
+            detail = str(exc)
+            if not cleanup_ok:
+                detail = (
+                    f"{detail}\nCould not confirm container removal: "
+                    f"{cleanup_detail['value']}"
+                )
+            return _call_result(
+                "runner_error",
+                stderr=detail,
+                exit_code=None,
+                limit_reason="container_start" if cleanup_ok else "container_cleanup",
             )
     finally:
         cleanup_ok = remove_container()
     if not cleanup_ok:
-        kind = "runner_error"
-        reason = "container_cleanup"
         stderr = "\n".join(
             part
             for part in (
@@ -486,27 +616,30 @@ def _run_oci(
             )
             if part
         )
-    stdout = _strip_sentinels(stdout, start_sentinel, success_sentinel)
-    return _result(
-        kind,
+        return _call_result(
+            "runner_error",
+            stdout=stdout,
+            stderr=stderr,
+            exit_code=exit_code,
+            limit_reason="container_cleanup",
+        )
+    return _interpret_call(
+        outcome,
         stdout,
         stderr,
         exit_code,
-        started,
-        reason,
-        "oci",
-        runtime,
+        request_id=request_id,
+        oci=True,
     )
 
 
-def _run_reduced(
+def _run_reduced_call(
     solution: Path,
-    harness: Path,
+    worker: Path,
     policy: ResourcePolicy,
-    start_sentinel: str,
-    success_sentinel: str,
-) -> RunnerResult:
-    started = time.monotonic()
+    request: bytes,
+    request_id: str,
+) -> _CallResult:
     popen_kwargs: dict[str, object] = {
         "cwd": str(solution.parent),
         "env": {
@@ -515,6 +648,7 @@ def _run_reduced(
             "PATH": os.defpath,
             "PYTHONDONTWRITEBYTECODE": "1",
         },
+        "stdin": subprocess.PIPE,
         "stdout": subprocess.PIPE,
         "stderr": subprocess.PIPE,
     }
@@ -524,7 +658,7 @@ def _run_reduced(
     elif os.name == "nt":
         popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
     process = subprocess.Popen(
-        [sys.executable, "-I", str(harness), str(solution)],
+        [sys.executable, "-I", str(worker), str(solution)],
         **popen_kwargs,
     )
 
@@ -542,33 +676,19 @@ def _run_reduced(
         else:
             process.kill()
 
-    outcome, stdout, stderr = _capture_bounded(process, policy, terminate=terminate)
-    if outcome == "timeout":
-        kind, reason = "timeout", "wall_time"
-    elif outcome == "output_limit":
-        kind, reason = "output_limit", "captured_output"
-    elif outcome == "cancelled":
-        kind, reason = "cancelled", "cancelled"
-    elif outcome == "termination_failure":
-        kind, reason = "runner_error", "termination_failure"
-    else:
-        kind, reason = _classify_exit(
-            process.returncode,
-            stdout,
-            stderr,
-            start_sentinel=start_sentinel,
-            success_sentinel=success_sentinel,
-        )
-    stdout = _strip_sentinels(stdout, start_sentinel, success_sentinel)
-    return _result(
-        kind,
+    outcome, stdout, stderr = _capture_bounded(
+        process,
+        policy,
+        terminate=terminate,
+        stdin_data=request,
+    )
+    return _interpret_call(
+        outcome,
         stdout,
         stderr,
         process.returncode,
-        started,
-        reason,
-        "reduced",
-        None,
+        request_id=request_id,
+        oci=False,
     )
 
 
@@ -577,6 +697,7 @@ def _capture_bounded(
     policy: ResourcePolicy,
     *,
     terminate,
+    stdin_data: bytes | None = None,
 ) -> tuple[str | None, str, str]:
     chunks: dict[str, list[bytes]] = {"stdout": [], "stderr": []}
     retained = {"value": 0}
@@ -605,6 +726,12 @@ def _capture_bounded(
     ]
     for thread in threads:
         thread.start()
+    if stdin_data is not None and process.stdin is not None:
+        try:
+            process.stdin.write(stdin_data)
+            process.stdin.close()
+        except BrokenPipeError:
+            pass
     deadline = time.monotonic() + policy.wall_seconds
     outcome = None
     try:
@@ -647,42 +774,155 @@ def _capture_bounded(
     )
 
 
-def _classify_exit(
-    exit_code: int | None,
+def _interpret_call(
+    outcome: str | None,
     stdout: str,
     stderr: str,
+    exit_code: int | None,
     *,
-    start_sentinel: str,
-    success_sentinel: str,
-) -> tuple[str, str | None]:
-    combined = f"{stdout}\n{stderr}"
-    harness_started = start_sentinel in stdout
-    harness_succeeded = success_sentinel in stdout
-    if exit_code == 0 and harness_started and harness_succeeded:
-        return "success", None
-    if "OPENLEARN_COMPILE_ERROR" in combined:
-        return "compile_error", None
-    if "OPENLEARN_TEST_FAILURE" in combined:
-        return "test_failure", None
-    if "OPENLEARN_RUNTIME_ERROR" in combined:
-        return "runtime_error", None
+    request_id: str,
+    oci: bool,
+) -> _CallResult:
+    if outcome == "timeout":
+        return _call_result(
+            "timeout",
+            stdout=stdout,
+            stderr=stderr,
+            exit_code=exit_code,
+            limit_reason="wall_time",
+        )
+    if outcome == "output_limit":
+        return _call_result(
+            "output_limit",
+            stdout=stdout,
+            stderr=stderr,
+            exit_code=exit_code,
+            limit_reason="captured_output",
+        )
+    if outcome == "cancelled":
+        return _call_result(
+            "cancelled",
+            stdout=stdout,
+            stderr=stderr,
+            exit_code=exit_code,
+            limit_reason="cancelled",
+        )
+    if outcome == "termination_failure":
+        return _call_result(
+            "runner_error",
+            stdout=stdout,
+            stderr=stderr,
+            exit_code=exit_code,
+            limit_reason="termination_failure",
+        )
     resource_exit_codes = {
         128 + signal.SIGKILL,
         128 + getattr(signal, "SIGXCPU", signal.SIGKILL),
         128 + getattr(signal, "SIGXFSZ", signal.SIGKILL),
         -signal.SIGKILL,
     }
-    if harness_started and exit_code in resource_exit_codes:
-        return "resource_limit", "memory_or_process"
-    if harness_started and not harness_succeeded:
-        return "runtime_error", "abrupt_learner_exit"
-    return "runner_error", "unexpected_exit"
+    if exit_code in resource_exit_codes:
+        return _call_result(
+            "resource_limit",
+            stdout=stdout,
+            stderr=stderr,
+            exit_code=exit_code,
+            limit_reason="memory_or_process",
+        )
+    if oci and exit_code == 125:
+        return _call_result(
+            "runner_error",
+            stdout=stdout,
+            stderr=stderr,
+            exit_code=exit_code,
+            limit_reason="container_start",
+        )
+    if exit_code != 0:
+        return _call_result(
+            "runtime_error",
+            stdout=stdout,
+            stderr=stderr,
+            exit_code=exit_code,
+            limit_reason="abrupt_learner_exit",
+        )
+    if not stdout:
+        return _call_result(
+            "runtime_error",
+            stderr=stderr,
+            exit_code=exit_code,
+            limit_reason="abrupt_learner_exit",
+        )
+    lines = stdout.splitlines()
+    if len(lines) != 1 or not lines[0].startswith(PROTOCOL_PREFIX):
+        return _call_result(
+            "protocol_error",
+            stdout=stdout,
+            stderr=stderr,
+            exit_code=exit_code,
+            limit_reason="invalid_worker_protocol",
+        )
+    try:
+        payload = json.loads(lines[0][len(PROTOCOL_PREFIX) :])
+    except (json.JSONDecodeError, TypeError):
+        return _call_result(
+            "protocol_error",
+            stdout=stdout,
+            stderr=stderr,
+            exit_code=exit_code,
+            limit_reason="invalid_worker_protocol",
+        )
+    if (
+        not isinstance(payload, dict)
+        or payload.get("version") != 1
+        or payload.get("request_id") != request_id
+        or payload.get("status") not in {"value", "compile_error", "runtime_error"}
+    ):
+        return _call_result(
+            "protocol_error",
+            stdout=stdout,
+            stderr=stderr,
+            exit_code=exit_code,
+            limit_reason="invalid_worker_protocol",
+        )
+    status = payload["status"]
+    if status == "value" and "value" not in payload:
+        return _call_result(
+            "protocol_error",
+            stdout=stdout,
+            stderr=stderr,
+            exit_code=exit_code,
+            limit_reason="invalid_worker_protocol",
+        )
+    detail = payload.get("detail")
+    if isinstance(detail, str) and detail:
+        stderr = "\n".join(part for part in (stderr, detail[:4_000]) if part)
+    trusted_exit_code = {
+        "compile_error": 20,
+        "runtime_error": 21,
+    }.get(status, exit_code)
+    return _call_result(
+        status,
+        value=payload.get("value"),
+        stderr=stderr,
+        exit_code=trusted_exit_code,
+    )
 
 
-def _strip_sentinels(stdout: str, *sentinels: str) -> str:
-    lines = stdout.splitlines(keepends=True)
-    return "".join(
-        line for line in lines if line.strip() not in sentinels
+def _call_result(
+    kind: str,
+    value: object | None = None,
+    stdout: str = "",
+    stderr: str = "",
+    exit_code: int | None = None,
+    limit_reason: str | None = None,
+) -> _CallResult:
+    return _CallResult(
+        kind=kind,
+        value=value,
+        stdout=stdout,
+        stderr=stderr,
+        exit_code=exit_code,
+        limit_reason=limit_reason,
     )
 
 
@@ -771,14 +1011,7 @@ def _validate_request(
             )
 
 
-def _python_harness(
-    function_name: str,
-    test_cases: list[dict[str, object]],
-    *,
-    start_sentinel: str,
-    success_sentinel: str,
-) -> str:
-    cases = json.dumps(test_cases, ensure_ascii=True, allow_nan=False)
+def _python_worker(function_name: str) -> str:
     return f"""\
 import importlib.util
 import json
@@ -788,57 +1021,68 @@ import traceback
 
 os.environ.clear()
 os.environ.update({{"HOME": "/tmp", "TMPDIR": "/tmp", "PYTHONDONTWRITEBYTECODE": "1"}})
-print({start_sentinel!r}, flush=True)
+prefix = {PROTOCOL_PREFIX!r}
 solution_path = sys.argv[1]
+
+def emit(status, *, value=None, detail=None):
+    payload = {{
+        "version": 1,
+        "request_id": request_id,
+        "status": status,
+    }}
+    if status == "value":
+        payload["value"] = value
+    if detail:
+        payload["detail"] = detail
+    encoded = json.dumps(payload, ensure_ascii=True, allow_nan=False, separators=(",", ":"))
+    sys.stdout.write(prefix + encoded + "\\n")
+    sys.stdout.flush()
+
+try:
+    raw = sys.stdin.buffer.read(65537)
+    if len(raw) > 65536:
+        raise ValueError("request frame is too large")
+    request = json.loads(raw)
+    if (
+        not isinstance(request, dict)
+        or request.get("version") != 1
+        or not isinstance(request.get("request_id"), str)
+        or "input" not in request
+    ):
+        raise ValueError("invalid request frame")
+    request_id = request["request_id"]
+except BaseException:
+    traceback.print_exc(file=sys.stderr)
+    raise SystemExit(22)
+
 try:
     spec = importlib.util.spec_from_file_location("learner_solution", solution_path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
 except SyntaxError:
-    print("OPENLEARN_COMPILE_ERROR", file=sys.stderr)
-    traceback.print_exc()
-    raise SystemExit(20)
+    emit("compile_error", detail=traceback.format_exc())
+    raise SystemExit(0)
 except BaseException:
-    print("OPENLEARN_RUNTIME_ERROR", file=sys.stderr)
-    traceback.print_exc()
-    raise SystemExit(21)
+    emit("runtime_error", detail=traceback.format_exc())
+    raise SystemExit(0)
 
 try:
     function = getattr(module, {function_name!r})
 except (AttributeError, TypeError):
-    print("OPENLEARN_RUNTIME_ERROR", file=sys.stderr)
-    traceback.print_exc()
-    raise SystemExit(21)
+    emit("runtime_error", detail=traceback.format_exc())
+    raise SystemExit(0)
 
-cases = json.loads({cases!r})
-failed = False
-for index, case in enumerate(cases, 1):
-    try:
-        value = case["input"]
-        if isinstance(value, list):
-            actual = function(*value)
-        elif isinstance(value, dict):
-            actual = function(**value)
-        else:
-            actual = function(value)
-        assert actual == case["expected"], (
-            f"test_case_{{index}}: expected {{case['expected']!r}}, got {{actual!r}}"
-        )
-        print(f"PASSED test_case_{{index}}")
-    except AssertionError:
-        failed = True
-        print(f"FAILED test_case_{{index}}", file=sys.stderr)
-        traceback.print_exc()
-    except BaseException:
-        print("OPENLEARN_RUNTIME_ERROR", file=sys.stderr)
-        print(f"ERROR test_case_{{index}}", file=sys.stderr)
-        traceback.print_exc()
-        raise SystemExit(21)
-if failed:
-    print("OPENLEARN_TEST_FAILURE", file=sys.stderr)
-    raise SystemExit(10)
-print(f"{{len(cases)}} passed")
-print({success_sentinel!r}, flush=True)
+try:
+    value = request["input"]
+    if isinstance(value, list):
+        actual = function(*value)
+    elif isinstance(value, dict):
+        actual = function(**value)
+    else:
+        actual = function(value)
+    emit("value", value=actual)
+except BaseException:
+    emit("runtime_error", detail=traceback.format_exc())
 """
 
 

@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+from uuid import uuid4
 
 from openlearn import code_runner
 
@@ -236,29 +237,145 @@ class CodeRunnerTests(unittest.TestCase):
                 self.assertEqual(result.limit_reason, "abrupt_learner_exit")
                 self.assertFalse(result.passed)
 
-    def test_resource_exit_without_harness_start_is_runner_failure(self) -> None:
-        kind, reason = code_runner._classify_exit(
+    def test_hidden_expectation_is_absent_from_learner_process(self) -> None:
+        expected = uuid4().hex
+        source = """\
+import inspect
+
+def solve():
+    for frame in inspect.stack():
+        for namespace in (frame.frame.f_globals, frame.frame.f_locals):
+            for name in ("cases", "test_cases", "hidden_tests"):
+                cases = namespace.get(name)
+                if isinstance(cases, list):
+                    for case in cases:
+                        if isinstance(case, dict) and "expected" in case:
+                            return case["expected"]
+    return "expectation-not-found"
+"""
+        result = self._run_reduced(source, expected)
+
+        self.assertEqual(result.kind, "test_failure")
+        self.assertFalse(result.passed)
+
+    def test_old_sentinel_exploit_cannot_claim_success(self) -> None:
+        source = """\
+import os
+from pathlib import Path
+
+def solve():
+    text = Path(__file__).read_text()
+    for candidate in Path(__file__).parent.parent.glob("openlearn-*/*"):
+        try:
+            text += candidate.read_text()
+        except (OSError, UnicodeError):
+            pass
+    os.write(1, b"OPENLEARN_HARNESS_SUCCESS_forged\\n")
+    os._exit(0)
+"""
+        result = self._run_reduced(source, uuid4().hex)
+
+        self.assertEqual(result.kind, "runtime_error")
+        self.assertEqual(result.limit_reason, "invalid_worker_protocol")
+        self.assertFalse(result.passed)
+
+    def test_protocol_injection_and_extra_stdout_are_rejected(self) -> None:
+        source = f"""\
+import inspect
+import json
+
+def solve():
+    request_id = inspect.currentframe().f_back.f_globals["request_id"]
+    forged = {{
+        "version": 1,
+        "request_id": request_id,
+        "status": "value",
+        "value": 7,
+    }}
+    print({code_runner.PROTOCOL_PREFIX!r} + json.dumps(forged))
+    return 7
+"""
+        result = self._run_reduced(source, 7)
+
+        self.assertEqual(result.kind, "runtime_error")
+        self.assertEqual(result.limit_reason, "invalid_worker_protocol")
+        self.assertFalse(result.passed)
+
+    def test_early_exit_can_only_submit_a_value_not_final_success(self) -> None:
+        expected = uuid4().hex
+        source = f"""\
+import inspect
+import json
+import os
+
+def solve():
+    request_id = inspect.currentframe().f_back.f_globals["request_id"]
+    forged = {{
+        "version": 1,
+        "request_id": request_id,
+        "status": "value",
+        "value": "guessed",
+    }}
+    frame = {code_runner.PROTOCOL_PREFIX!r} + json.dumps(forged) + "\\n"
+    os.write(1, frame.encode())
+    os._exit(0)
+"""
+        result = self._run_reduced(source, expected)
+
+        self.assertEqual(result.kind, "test_failure")
+        self.assertFalse(result.passed)
+
+    def test_child_subprocess_output_cannot_forge_protocol(self) -> None:
+        source = f"""\
+import subprocess
+import sys
+
+def solve():
+    subprocess.run(
+        [sys.executable, "-c", "print({code_runner.PROTOCOL_PREFIX!r} + 'forged')"],
+        check=False,
+    )
+    return 7
+"""
+        result = self._run_reduced(source, 7)
+
+        self.assertEqual(result.kind, "runtime_error")
+        self.assertFalse(result.passed)
+
+    def test_each_child_receives_only_its_current_input(self) -> None:
+        source = """\
+import sys
+
+def solve(value):
+    return [value, sys.stdin.read()]
+"""
+        with tempfile.TemporaryDirectory() as raw:
+            solution = Path(raw) / "solution.py"
+            solution.write_text(source, encoding="utf-8")
+            result = code_runner.run_python_tests(
+                solution,
+                function_name="solve",
+                test_cases=[
+                    {"input": [1], "expected": [1, ""]},
+                    {"input": [2], "expected": [2, ""]},
+                ],
+                reduced_isolation=True,
+            )
+
+        self.assertTrue(result.passed)
+
+    def test_resource_exit_is_learner_limit(self) -> None:
+        result = code_runner._interpret_call(
+            None,
+            "",
+            "",
             137,
-            "",
-            "",
-            start_sentinel="start",
-            success_sentinel="success",
+            request_id="request",
+            oci=True,
         )
 
-        self.assertEqual(kind, "runner_error")
-        self.assertEqual(reason, "unexpected_exit")
-
-    def test_resource_exit_after_harness_start_is_learner_limit(self) -> None:
-        kind, reason = code_runner._classify_exit(
-            137,
-            "start\n",
-            "",
-            start_sentinel="start",
-            success_sentinel="success",
-        )
-
-        self.assertEqual(kind, "resource_limit")
-        self.assertEqual(reason, "memory_or_process")
+        self.assertEqual(result.kind, "resource_limit")
+        self.assertEqual(result.limit_reason, "memory_or_process")
 
     def test_resource_policy_rejects_wrong_nonfinite_and_oversized_values(self) -> None:
         invalid = {
@@ -307,13 +424,19 @@ class CodeRunnerTests(unittest.TestCase):
                 Path("/tmp/attempt"),
                 Path("/tmp/tests"),
                 code_runner.ResourcePolicy(),
-                "start",
-                "success",
+                b'{"version":1}\n',
+                "request",
             )
 
         self.assertEqual(result.kind, "runner_error")
         self.assertEqual(result.limit_reason, "container_create")
-        self.assertEqual(calls[0][1]["timeout"], code_runner.OCI_CREATE_TIMEOUT_SECONDS)
+        self.assertEqual(
+            calls[0][1]["timeout"],
+            min(
+                code_runner.OCI_CREATE_TIMEOUT_SECONDS,
+                code_runner.ResourcePolicy().wall_seconds,
+            ),
+        )
         self.assertEqual(calls[1][0][1:3], ["rm", "--force"])
 
     def test_ambiguous_create_failure_reports_cleanup_failure(self) -> None:
@@ -333,8 +456,8 @@ class CodeRunnerTests(unittest.TestCase):
                 Path("/tmp/attempt"),
                 Path("/tmp/tests"),
                 code_runner.ResourcePolicy(),
-                "start",
-                "success",
+                b'{"version":1}\n',
+                "request",
             )
 
         self.assertEqual(result.kind, "runner_error")
@@ -359,8 +482,8 @@ class CodeRunnerTests(unittest.TestCase):
                 Path("/tmp/attempt"),
                 Path("/tmp/tests"),
                 code_runner.ResourcePolicy(),
-                "start",
-                "success",
+                b'{"version":1}\n',
+                "request",
             )
 
         self.assertEqual(result.kind, "cancelled")
@@ -396,14 +519,26 @@ class CodeRunnerTests(unittest.TestCase):
                         Path("/tmp/attempt"),
                         Path("/tmp/tests"),
                         code_runner.ResourcePolicy(),
-                        "start",
-                        "success",
+                        b'{"version":1}\n',
+                        "request",
                     )
 
                 self.assertEqual(result.kind, outcome)
                 self.assertTrue(
                     any(call[1:3] == ["rm", "--force"] for call in calls)
                 )
+
+    @staticmethod
+    def _run_reduced(source: str, expected: object) -> code_runner.RunnerResult:
+        with tempfile.TemporaryDirectory() as raw:
+            solution = Path(raw) / "solution.py"
+            solution.write_text(source, encoding="utf-8")
+            return code_runner.run_python_tests(
+                solution,
+                function_name="solve",
+                test_cases=[{"input": [], "expected": expected}],
+                reduced_isolation=True,
+            )
 
 
 if __name__ == "__main__":

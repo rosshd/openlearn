@@ -65,5 +65,5 @@ User-directed imports of public pages remain acceptable through the normal URL i
 Coding drills add no Python package dependency.
 Secure `/check` execution requires an existing Docker or Podman installation and an explicitly acquired digest-pinned official Python image.
 openLearn neither installs the runtime nor pulls the image automatically.
-The generated test harness uses only the Python standard library inside the image.
+The generic per-call worker uses only the Python standard library inside the image.
 Run `openlearn doctor` to inspect local readiness and print the explicit acquisition command.
