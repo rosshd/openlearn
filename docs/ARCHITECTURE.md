@@ -61,6 +61,25 @@ Recovery verifies that same generation again under the topic lock immediately be
 Profile edits invalidate affected recommendations and mark completed placement stale without deleting attempt events.
 Topics without the adjacent file behave exactly as ordinary topics and receive no interview prompts.
 
+## Interview Skill Graph
+
+`openlearn.interview_skills` owns the versioned static interview-readiness model.
+The bundled `coding-interview-v1.json` graph is canonical, while the algorithms course template is only a presentation seed.
+The graph uses stable category-prefixed IDs for concepts, patterns, process skills, and communication skills.
+It declares blocking and supporting prerequisite edges, versioned evidence policies, transfer expectations, and primary or supporting problem references.
+Validation rejects unknown references, duplicate identities, invalid problem roles, and cycles before the graph can be used.
+
+Learner-specific evidence remains outside the graph in caller-owned append-only event history.
+Each evidence record carries the graph and mastery-policy versions under which it was observed.
+Current assessment may apply the current policy to older evidence without rewriting the original record.
+Evidence for a retired stable ID remains inspectable as orphaned history instead of being deleted or silently mapped to another skill.
+Ordinary topics do not load the graph, receive graph metadata, or acquire interview-only learner state.
+
+The deterministic assessment surface separates readiness from selection.
+Readiness is `ready`, `provisional`, `weak`, or `unassessed`.
+Selection is `ready`, `blocked`, `weak`, `due`, or `unassessed`, with learner-visible reasons for missing evidence, prerequisite blocks, hint-dependent work, and delayed-retrieval failures.
+Blocking is a selection constraint rather than an instruction to drill indefinitely.
+
 ## Practice Activities
 
 `openlearn.activities` defines the versioned, domain-neutral contract for hands-on practice.
