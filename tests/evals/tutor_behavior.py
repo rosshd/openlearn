@@ -967,7 +967,47 @@ def _stable_prompt_replay_hash(prompt: str, home: Path) -> str:
     normalized = prompt.replace(str(home), "<SCENARIO_HOME>")
     normalized = re.sub(r"\bturn_[0-9a-f]{32}\b", "turn_<ID>", normalized)
     normalized = re.sub(r"\btopic_[0-9a-f]{32}\b", "topic_<ID>", normalized)
+    normalized = _normalize_prompt_topic_metadata(normalized)
     return _stable_hash(normalized)
+
+
+def _normalize_prompt_topic_metadata(prompt: str) -> str:
+    marker = "Topic metadata:\n"
+    marker_start = prompt.find(marker)
+    if marker_start < 0:
+        return prompt
+    value_start = marker_start + len(marker)
+    while value_start < len(prompt) and prompt[value_start].isspace():
+        value_start += 1
+    try:
+        metadata, consumed = json.JSONDecoder().raw_decode(prompt[value_start:])
+    except json.JSONDecodeError:
+        return prompt
+    if not isinstance(metadata, dict):
+        return prompt
+    normalized = _normalize_replay_value(metadata, path=("state",))
+    return (
+        prompt[:value_start]
+        + json.dumps(normalized, indent=2, ensure_ascii=False, sort_keys=True)
+        + prompt[value_start + consumed :]
+    )
+
+
+def _is_generated_creation_field(path: tuple[str, ...], key: str) -> bool:
+    if key != "created":
+        return False
+    generated_containers = {
+        "pending_question",
+        "previous_pending_question",
+        "pending_remediation",
+        "previous_pending_remediation",
+    }
+    return (
+        path == ("state",)
+        or (path and path[-1] == "policy_state")
+        or any(part in generated_containers for part in path)
+        or (path and path[-1] == "state_delta")
+    )
 
 
 def _normalize_replay_value(
@@ -990,6 +1030,8 @@ def _normalize_replay_value(
                 normalized[key] = "<EVENT_ID>"
             elif key == "ts" and "events" in path:
                 normalized[key] = "<EVENT_TIMESTAMP>"
+            elif _is_generated_creation_field(path, key):
+                normalized[key] = "<CREATED_AT>"
             else:
                 normalized[key] = _normalize_replay_value(
                     item,
@@ -1011,6 +1053,10 @@ def _normalize_replay_value(
 
 
 def _multi_turn_replay_fingerprint(record: dict[str, object]) -> str:
+    return _stable_hash(_multi_turn_replay_evidence(record))
+
+
+def _multi_turn_replay_evidence(record: dict[str, object]) -> object:
     turns = record.get("turns")
     stable_turns: list[dict[str, object]] = []
     if isinstance(turns, list):
@@ -1067,8 +1113,10 @@ def _multi_turn_replay_fingerprint(record: dict[str, object]) -> str:
         openlearn_home = provenance.get("openlearn_home")
         if isinstance(openlearn_home, str) and openlearn_home:
             home = Path(openlearn_home)
-    return _stable_hash(
-        _normalize_replay_value(semantic_evidence, home=home, path=("record",))
+    return _normalize_replay_value(
+        semantic_evidence,
+        home=home,
+        path=("record",),
     )
 
 

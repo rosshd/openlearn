@@ -418,7 +418,9 @@ def test_mocked_replay_has_stable_fingerprint(
         )
 
     fingerprints = []
-    for index in range(2):
+    pending_created_dates = []
+    for index, mocked_today in enumerate(("2025-02-03", "2031-11-19")):
+        monkeypatch.setattr(cli, "today", lambda value=mocked_today: value)
         install_mocks()
         outcome = run_evaluation(
             tmp_path / f"run-{index}",
@@ -427,12 +429,13 @@ def test_mocked_replay_has_stable_fingerprint(
             scenario_ids=["two_turn_adaptation"],
             scenarios_dir=scenarios_dir,
         )
-        fingerprints.append(
-            _read_jsonl(outcome.evidence_dir / "turns.jsonl")[0][
-                "replay_fingerprint"
-            ]
+        record = _read_jsonl(outcome.evidence_dir / "turns.jsonl")[0]
+        fingerprints.append(record["replay_fingerprint"])
+        pending_created_dates.append(
+            record["turns"][0]["policy_state"]["pending_question"]["created"]
         )
 
+    assert pending_created_dates == ["2025-02-03", "2031-11-19"]
     assert fingerprints[0] == fingerprints[1]
 
 
@@ -558,6 +561,14 @@ def test_replay_fingerprint_ignores_volatile_timestamps_paths_and_ids() -> None:
                 "state_after_replay_sha256": "state-b",
                 "policy_state": {
                     "created": "2026-01-01",
+                    "pending_question": {
+                        "question": "Try once.",
+                        "created": "2026-01-01",
+                    },
+                    "pending_remediation": {
+                        "stage": "hint",
+                        "created": "2026-01-01",
+                    },
                     "review_due": [{"due": "2026-01-02"}],
                 },
             }
@@ -578,6 +589,11 @@ def test_replay_fingerprint_ignores_volatile_timestamps_paths_and_ids() -> None:
     replay["turns"][0]["events"][0]["data"][
         "path"
     ] = "/private/tmp/run-b/home/topic.md"
+    replay["turns"][0]["policy_state"]["created"] = "2027-04-05"
+    replay["turns"][0]["policy_state"]["pending_question"]["created"] = "2027-04-05"
+    replay["turns"][0]["policy_state"]["pending_remediation"][
+        "created"
+    ] = "2027-04-05"
     replay["provenance"]["openlearn_home"] = "/private/tmp/run-b/home"
 
     assert _multi_turn_replay_fingerprint(record) == _multi_turn_replay_fingerprint(
