@@ -589,6 +589,78 @@ class CliStorageTests(unittest.TestCase):
         self.assertEqual(recovered["profile"]["weekly_minutes"], 60)
         self.assertEqual(recovered["placement"]["status"], "not_started")
 
+    def test_stale_edit_journal_cannot_mutate_recreated_topic_generation(self) -> None:
+        call_silent(
+            cli.cmd_new,
+            Namespace(
+                topic="Algorithms",
+                goal="Generation A",
+                interview_prep=True,
+                mastery_profile=None,
+                template=None,
+            ),
+        )
+        generation_a = cli.current_topic_generation("algorithms")
+        cli.cmd_interview_placement(
+            Namespace(topic="algorithms", action="start"),
+            input_func=lambda _prompt: "/stop",
+            output_func=lambda _line: None,
+        )
+        abandoned = threading.Event()
+        release = threading.Event()
+        errors: list[BaseException] = []
+        original_checkpoint = cli._interview_edit_checkpoint
+
+        def pause_after_abandonment(stage: str) -> None:
+            if stage == "after_activity_abandoned":
+                abandoned.set()
+                release.wait(timeout=5)
+
+        cli._interview_edit_checkpoint = pause_after_abandonment
+
+        def edit_generation_a() -> None:
+            try:
+                cli.cmd_interview_edit(
+                    Namespace(topic="algorithms", field="weekly_minutes", value="60"),
+                    output_func=lambda _line: None,
+                )
+            except BaseException as exc:
+                errors.append(exc)
+
+        edit_thread = threading.Thread(target=edit_generation_a)
+        try:
+            edit_thread.start()
+            self.assertTrue(abandoned.wait(timeout=5))
+            cli.delete_topic_files("algorithms")
+            call_silent(
+                cli.cmd_new,
+                Namespace(
+                    topic="Algorithms",
+                    goal="Generation B",
+                    interview_prep=True,
+                    mastery_profile=None,
+                    template=None,
+                ),
+            )
+            generation_b = cli.current_topic_generation("algorithms")
+            self.assertNotEqual(generation_b, generation_a)
+            release.set()
+            edit_thread.join(timeout=5)
+        finally:
+            cli._interview_edit_checkpoint = original_checkpoint
+            release.set()
+
+        self.assertFalse(edit_thread.is_alive())
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], cli.OpenLearnError)
+        self.assertIn("generation changed", str(errors[0]))
+        recreated = cli.interview_prep.load_profile(
+            cli.interview_profile_path("algorithms")
+        )
+        self.assertEqual(recreated["profile"]["weekly_minutes"], 120)
+        self.assertEqual(recreated["profile_revision"], 1)
+        self.assertFalse(cli.interview_edit_journal_path("algorithms").exists())
+
     def test_non_python_implementation_is_explicitly_uncertain(self) -> None:
         call_silent(
             cli.cmd_new,

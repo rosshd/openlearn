@@ -2397,7 +2397,9 @@ def interview_profile_values(args: argparse.Namespace) -> dict[str, object]:
 
 
 @contextlib.contextmanager
-def interview_profile_write_lock(slug: str):
+def interview_profile_write_lock(
+    slug: str, *, expected_generation: str | None = None
+):
     """Serialize profile writes after the topic identity lock.
 
     Topic deletion takes the same first lock, so it cannot race a profile write
@@ -2409,6 +2411,13 @@ def interview_profile_write_lock(slug: str):
             or topic_deletion_tombstone_path(slug).exists()
         ):
             raise OpenLearnError("topic was deleted during the interview-prep update")
+        if (
+            expected_generation is not None
+            and current_topic_generation(slug) != expected_generation
+        ):
+            raise OpenLearnError(
+                "topic generation changed during the interview-prep update"
+            )
         yield
 
 
@@ -2444,25 +2453,43 @@ def _write_interview_edit_journal(
     field: str,
     value: object,
 ) -> None:
-    generation = current_topic_generation(slug)
-    if generation is None:
-        raise OpenLearnError("topic was deleted before the interview profile edit")
-    journal = {
-        "schema_version": 1,
-        "slug": slug,
-        "topic_generation": generation,
-        "profile_revision": profile_revision,
-        "field": field,
-        "value": value,
-    }
-    _validated_interview_edit_journal(slug, journal)
     path = interview_edit_journal_path(slug)
-    with file_lock(path):
+    with file_lock(topic_path(slug)), file_lock(path):
+        generation = current_topic_generation(slug)
+        if (
+            generation is None
+            or topic_deletion_tombstone_path(slug).exists()
+        ):
+            raise OpenLearnError("topic was deleted before the interview profile edit")
+        journal = {
+            "schema_version": 1,
+            "slug": slug,
+            "topic_generation": generation,
+            "profile_revision": profile_revision,
+            "field": field,
+            "value": value,
+        }
+        _validated_interview_edit_journal(slug, journal)
         if path.exists():
             raise OpenLearnError(
                 "another interview profile edit is pending recovery; retry the command"
             )
         write_text_atomic(path, json.dumps(journal, indent=2, sort_keys=True) + "\n")
+
+
+def _discard_interview_edit_journal_if_generation(
+    slug: str, generation: object
+) -> None:
+    path = interview_edit_journal_path(slug)
+    with file_lock(path):
+        if not path.exists():
+            return
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        if isinstance(raw, dict) and raw.get("topic_generation") == generation:
+            durable_unlink(path)
 
 
 def recover_interview_profile_edit(slug: str) -> bool:
@@ -2480,7 +2507,9 @@ def recover_interview_profile_edit(slug: str) -> bool:
         or topic_deletion_tombstone_path(slug).exists()
         or current_topic_generation(slug) != journal["topic_generation"]
     ):
-        durable_unlink(journal_path)
+        _discard_interview_edit_journal_if_generation(
+            slug, journal["topic_generation"]
+        )
         raise OpenLearnError("topic changed or was deleted during interview profile edit")
     try:
         current = interview_prep.load_profile(interview_profile_path(slug))
@@ -2492,7 +2521,9 @@ def recover_interview_profile_edit(slug: str) -> bool:
                 profile, {str(journal["field"]): journal["value"]}
             )
             if normalized == profile:
-                durable_unlink(journal_path)
+                _discard_interview_edit_journal_if_generation(
+                    slug, journal["topic_generation"]
+                )
                 return True
             raise OpenLearnError(
                 "interview profile changed while a saved edit was pending"
@@ -2503,7 +2534,9 @@ def recover_interview_profile_edit(slug: str) -> bool:
     except ValueError as exc:
         raise OpenLearnError(str(exc)) from exc
     if normalized == profile:
-        durable_unlink(journal_path)
+        _discard_interview_edit_journal_if_generation(
+            slug, journal["topic_generation"]
+        )
         return True
     if placement.get("status") == "in_progress":
         activity = _current_interview_activity(slug)
@@ -2524,15 +2557,25 @@ def recover_interview_profile_edit(slug: str) -> bool:
             )
         _interview_edit_checkpoint("after_activity_abandoned")
     queued_events: list[tuple[str, dict[str, object]]] = []
-    with interview_profile_write_lock(slug):
-        interview_prep.edit_profile(
-            interview_profile_path(slug),
-            {str(journal["field"]): journal["value"]},
-            lambda event_type, data: queued_events.append((event_type, data)),
+    try:
+        with interview_profile_write_lock(
+            slug, expected_generation=str(journal["topic_generation"])
+        ):
+            interview_prep.edit_profile(
+                interview_profile_path(slug),
+                {str(journal["field"]): journal["value"]},
+                lambda event_type, data: queued_events.append((event_type, data)),
+            )
+    except OpenLearnError:
+        _discard_interview_edit_journal_if_generation(
+            slug, journal["topic_generation"]
         )
+        raise
     for event_type, data in queued_events:
         log_event(slug, event_type, data)
-    durable_unlink(journal_path)
+    _discard_interview_edit_journal_if_generation(
+        slug, journal["topic_generation"]
+    )
     return True
 
 

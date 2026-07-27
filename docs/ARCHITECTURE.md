@@ -56,7 +56,8 @@ Raw calibration, code, tests, and reasoning pass through the validated coding ac
 Coding placement rubric v1 declares Python as its only structurally validated implementation language; other preferred-language implementations remain uncertain rather than being treated as failed evidence.
 Interrupted activity transactions recover through the activity journal, and placement resume idempotently projects any recovered evidence into the profile before asking for the next stage.
 Profile publication takes the topic identity lock before the profile lock, so concurrent topic deletion cannot recreate an orphan profile.
-Effective profile edits are validated before mutation and use a topic-generation-aware edit journal, allowing an interrupted activity abandonment and profile reset to finish on the next profile read.
+Effective profile edits are validated before mutation and publish a topic-generation-aware edit journal while holding the topic identity lock, allowing an interrupted activity abandonment and profile reset to finish on the next profile read.
+Recovery verifies that same generation again under the topic lock immediately before profile publication, so a stale edit cannot mutate a deleted and recreated topic with the same slug.
 Profile edits invalidate affected recommendations and mark completed placement stale without deleting attempt events.
 Topics without the adjacent file behave exactly as ordinary topics and receive no interview prompts.
 
