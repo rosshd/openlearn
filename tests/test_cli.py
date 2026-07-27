@@ -4006,6 +4006,33 @@ class InteractiveTests(unittest.TestCase):
         self.assertIn("Check: What is AI?", pending["question"])
         self.assertNotIn("answer_key", pending)
 
+    def test_first_lesson_without_check_shows_enter_affordance(self) -> None:
+        call_silent(
+            cli.cmd_new,
+            Namespace(topic="Intro AI", goal="college course basics"),
+        )
+        output: list[str] = []
+
+        def fake_call_openai(_model: str, _system: str, user: str) -> str:
+            if "Create a concise course plan" in user:
+                return "Scope: AI basics\nUnits:\n1. Definitions (2 slides) - Explain AI."
+            return "**Lesson:**\nAI systems perform tasks that normally require intelligence."
+
+        with mock.patch.object(cli, "call_openai", new=fake_call_openai):
+            call_silent(
+                cli.start_course,
+                input_func=iter_input(["n", "y"]),
+                output_func=output.append,
+            )
+
+        topic = cli.read_topic("intro-ai")
+        self.assertIn(cli.LESSON_ENTER_ADVANCE_PROMPT, output)
+        self.assertNotIn("pending_question", topic.metadata)
+        self.assertEqual(
+            topic.metadata["enter_advance_cue"]["source"],
+            "lesson_complete",
+        )
+
     def test_start_course_blank_revision_keeps_course_unstarted(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Intro AI", goal="basics"))
         original_call_openai = cli.call_openai
@@ -8120,6 +8147,83 @@ class InteractiveTests(unittest.TestCase):
             if event["event_type"] == "unit_advanced"
         ]
         self.assertEqual(unit_events[-1]["data"], {"from_unit": 1, "to_unit": 2})
+
+    def test_lesson_only_slide_registers_visible_enter_affordance(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
+        self._set_meta(
+            "vim",
+            {
+                "current_unit": 1,
+                "current_slide": 1,
+                "course_units": [
+                    {"unit": 1, "chapter": "1", "title": "Modes", "slide_count": 2}
+                ],
+            },
+        )
+        output: list[str] = []
+
+        with mock.patch.object(
+            cli,
+            "call_openai_streaming",
+            return_value="**Lesson:**\nNormal mode runs editing commands.",
+        ):
+            cli.cmd_next(
+                Namespace(topic="vim", model=None),
+                output_func=output.append,
+            )
+
+        topic = cli.read_topic("vim")
+        self.assertIn(cli.LESSON_ENTER_ADVANCE_PROMPT, output)
+        self.assertNotIn("pending_question", topic.metadata)
+        self.assertEqual(
+            topic.metadata["enter_advance_cue"]["source"],
+            "lesson_complete",
+        )
+
+        calls: list[str] = []
+        with mock.patch.object(
+            cli,
+            "cmd_next",
+            side_effect=lambda *_args, **_kwargs: calls.append("next"),
+        ):
+            call_silent(
+                cli.run_repl,
+                input_func=iter_input(["", "/q"]),
+                output_func=lambda _text: None,
+                show_intro=False,
+            )
+
+        self.assertEqual(cli.read_topic("vim").metadata["current_slide"], 2)
+        self.assertEqual(calls, ["next"])
+
+    def test_lesson_enter_affordance_does_not_bypass_a_check(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
+        self._set_meta(
+            "vim",
+            {
+                "current_unit": 1,
+                "current_slide": 1,
+                "course_units": [
+                    {"unit": 1, "chapter": "1", "title": "Modes", "slide_count": 2}
+                ],
+            },
+        )
+        output: list[str] = []
+
+        with mock.patch.object(
+            cli,
+            "call_openai_streaming",
+            return_value="**Check:**\nWhat does normal mode let you do?",
+        ):
+            cli.cmd_next(
+                Namespace(topic="vim", model=None),
+                output_func=output.append,
+            )
+
+        topic = cli.read_topic("vim")
+        self.assertNotIn(cli.LESSON_ENTER_ADVANCE_PROMPT, output)
+        self.assertIn("pending_question", topic.metadata)
+        self.assertNotIn("enter_advance_cue", topic.metadata)
 
     def test_failed_next_lesson_does_not_make_enter_cue_reusable(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
