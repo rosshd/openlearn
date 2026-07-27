@@ -9290,6 +9290,8 @@ class InteractiveTests(unittest.TestCase):
                 "purpose": "practice",
                 "source": {"kind": "generated", "name": "openLearn original"},
                 "plan_prompt": "Predict the loop invariant before coding.",
+                "todo_steps": ["Initialize the accumulator.", "Visit each value once."],
+                "worked_example": None,
                 "hints": ["What value should the accumulator start with?"],
                 "reflection_prompt": "Which empty-input edge case matters?",
                 "transfer_prompt": "",
@@ -9325,6 +9327,41 @@ class InteractiveTests(unittest.TestCase):
         self.assertFalse((cli.topics_dir() / "drills" / "python").exists())
         self.assertIn("Drill cancelled", "\n".join(output))
 
+    def test_malformed_tutor_drill_action_preserves_visible_turn_without_side_effects(
+        self,
+    ) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Python", goal="practice functions"))
+        output = []
+
+        with mock.patch.object(
+            cli,
+            "call_openai",
+            new=lambda *_args, **_kwargs: (
+                "**Lesson:**\nA loop invariant describes what remains true after each step.\n"
+                '<!-- openlearn-action: {"action":"run_shell","command":"echo unsafe"} -->'
+            ),
+        ), mock.patch.object(
+            cli,
+            "open_drill_in_editor",
+            side_effect=AssertionError("editor launched"),
+        ):
+            answer = cli.ask_topic(
+                "python",
+                "Explain loop invariants.",
+                input_func=lambda _prompt: (_ for _ in ()).throw(
+                    AssertionError("consent requested")
+                ),
+                output_func=output.append,
+            )
+
+        topic = cli.read_topic("python")
+        state = cli.load_state("python")
+        self.assertIn("loop invariant", answer)
+        self.assertIn("loop invariant", topic.body)
+        self.assertNotIn("openlearn-action", topic.body)
+        self.assertNotIn("active_activity", state)
+        self.assertFalse((cli.topics_dir() / "drills" / "python").exists())
+
     def test_accepted_tutor_drill_materializes_selected_scaffold_and_launches(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Python", goal="practice functions"))
         marker = json.dumps(
@@ -9342,6 +9379,12 @@ class InteractiveTests(unittest.TestCase):
                     "license": "AGPL-3.0-or-later",
                 },
                 "plan_prompt": "State what the map keys and values represent.",
+                "todo_steps": ["Create the count map.", "Update one count per value."],
+                "worked_example": {
+                    "input": "['x', 'x', 'y']",
+                    "trace": ["x -> 1", "x -> 2", "y -> 1"],
+                    "result": "{'x': 2, 'y': 1}",
+                },
                 "hints": ["Start from an empty dictionary.", "Update one count per item."],
                 "reflection_prompt": "Why is the result linear in input length?",
                 "transfer_prompt": "Find the first unique item in a new list.",
@@ -9385,8 +9428,78 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(activity["scaffolding_level"], 3)
         self.assertIn("State what the map keys and values represent.", text)
         self.assertIn("Start from an empty dictionary.", text)
-        self.assertIn("Worked-example scaffold", text)
+        self.assertIn("Worked example trace", text)
         self.assertIn("Opened in nvim", "\n".join(output))
+
+    def test_tutor_drill_scaffolding_levels_render_distinct_validated_support(
+        self,
+    ) -> None:
+        base = {
+            "action": "start_coding_drill",
+            "objective": "Accumulate values.",
+            "title": "Accumulate",
+            "language": "python",
+            "difficulty": 1,
+            "purpose": "practice",
+            "source": {"kind": "generated", "name": "openLearn original"},
+            "hints": [],
+            "reflection_prompt": "Explain the empty-input case.",
+            "transfer_prompt": "",
+            "drill": {
+                "title": "Accumulate",
+                "description": "Return the sum.",
+                "function_stub": "def accumulate(values):\n    pass",
+                "test_cases": [{"input": [[1, 2]], "expected": 3}],
+            },
+        }
+        variants = [
+            {
+                "scaffolding_level": 0,
+                "plan_prompt": "",
+                "todo_steps": [],
+                "worked_example": None,
+            },
+            {
+                "scaffolding_level": 1,
+                "plan_prompt": "Name the accumulator invariant.",
+                "todo_steps": [],
+                "worked_example": None,
+            },
+            {
+                "scaffolding_level": 2,
+                "plan_prompt": "Name the accumulator invariant.",
+                "todo_steps": ["Initialize the total.", "Update it once per value."],
+                "worked_example": None,
+            },
+            {
+                "scaffolding_level": 3,
+                "plan_prompt": "Name the accumulator invariant.",
+                "todo_steps": ["Initialize the total.", "Update it once per value."],
+                "worked_example": {
+                    "input": "[2, 3]",
+                    "trace": ["start total = 0", "after 2 total = 2", "after 3 total = 5"],
+                    "result": "5",
+                },
+            },
+        ]
+
+        rendered = [
+            cli.render_scaffolded_drill_file(
+                cli.parse_tutor_coding_drill_action({**base, **variant})
+            )
+            for variant in variants
+        ]
+
+        self.assertNotIn("Plan before coding", rendered[0])
+        self.assertNotIn("# TODO", rendered[0])
+        self.assertIn("Plan before coding", rendered[1])
+        self.assertNotIn("# TODO", rendered[1])
+        self.assertIn("# TODO 1: Initialize the total.", rendered[2])
+        self.assertNotIn("Worked example trace", rendered[2])
+        self.assertIn("# TODO 2: Update it once per value.", rendered[3])
+        self.assertIn("Worked example trace", rendered[3])
+        self.assertIn("after 3 total = 5", rendered[3])
+        self.assertEqual(len(set(rendered)), 4)
 
     def test_tutor_drill_launch_failure_keeps_workspace_and_visible_recovery(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Python", goal="practice functions"))
@@ -9401,6 +9514,8 @@ class InteractiveTests(unittest.TestCase):
                 "purpose": "practice",
                 "source": {"kind": "generated", "name": "openLearn original"},
                 "plan_prompt": "",
+                "todo_steps": [],
+                "worked_example": None,
                 "hints": [],
                 "reflection_prompt": "Explain the return value.",
                 "transfer_prompt": "",
@@ -10284,6 +10399,105 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(set(evidence[-1]["data"]["domain_evidence"]), {"coding"})
         self.assertNotIn("mastery_changed", [event["event_type"] for event in events])
 
+    def test_passing_mastery_drill_registers_reflection_for_normal_judging(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Loops", goal="practice loops"))
+        path = cli.topic_path("loops")
+        metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+        metadata = dict(metadata)
+        metadata["current_focus"] = "linear scan"
+        cli.write_topic(path, metadata, body)
+        action = cli.parse_tutor_coding_drill_action(
+            {
+                "action": "start_coding_drill",
+                "objective": "Implement one linear scan.",
+                "title": "Linear Total",
+                "language": "python",
+                "difficulty": 2,
+                "scaffolding_level": 0,
+                "purpose": "mastery_check",
+                "source": {"kind": "generated", "name": "openLearn original"},
+                "plan_prompt": "",
+                "todo_steps": [],
+                "worked_example": None,
+                "hints": [],
+                "reflection_prompt": "Why is this implementation linear?",
+                "transfer_prompt": "Find the maximum with one scan.",
+                "drill": {
+                    "title": "Linear Total",
+                    "description": "Return the sum in one scan.",
+                    "function_stub": "def linear_total(values):\n    pass",
+                    "test_cases": [{"input": [[1, 2]], "expected": 3}],
+                },
+            }
+        )
+        with mock.patch.object(cli, "open_drill_in_editor", return_value="nvim"):
+            cli.orchestrate_tutor_coding_drill(
+                cli.read_topic("loops"),
+                action,
+                input_func=lambda _prompt: "yes",
+                output_func=lambda _text: None,
+            )
+        passed = types.SimpleNamespace(returncode=0, stdout="1 passed", stderr="")
+        with mock.patch.object(cli.subprocess, "run", return_value=passed), mock.patch.object(
+            cli,
+            "call_openai",
+            new=lambda *_args, **_kwargs: (
+                "**Check:**\nWhy is this implementation linear?"
+            ),
+        ):
+            cli.cmd_check(
+                Namespace(topic="loops", model=None),
+                output_func=lambda _text: None,
+            )
+
+        state_after_tests = cli.load_state("loops")
+        pending = state_after_tests["pending_question"]
+        events_after_tests = cli.load_event_log(cli.topic_events_path("loops"))
+        self.assertEqual(
+            pending["question"],
+            "**Check:**\nWhy is this implementation linear?",
+        )
+        self.assertEqual(pending["concept_id"], "linear-scan")
+        self.assertNotIn(
+            "mastery_changed",
+            [event["event_type"] for event in events_after_tests],
+        )
+        self.assertNotIn(
+            "answer_judged",
+            [event["event_type"] for event in events_after_tests],
+        )
+
+        judgment = {
+            "message_kind": "answer",
+            "last_answer_status": "correct",
+            "answer_score": 0.9,
+            "answer_kind": "production",
+            "is_transfer": False,
+            "gameable": False,
+        }
+        with mock.patch.object(
+            cli,
+            "parse_metadata_update",
+            return_value=judgment,
+        ), mock.patch.object(
+            cli,
+            "call_openai",
+            new=lambda *_args, **_kwargs: (
+                "**Next:**\nPress Enter to continue, or type what you want more help with."
+            ),
+        ):
+            cli.ask_topic(
+                "loops",
+                "It visits each item exactly once.",
+                output_func=lambda _text: None,
+            )
+
+        events = cli.load_event_log(cli.topic_events_path("loops"))
+        judged = [event for event in events if event["event_type"] == "answer_judged"]
+        self.assertEqual(len(judged), 1)
+        self.assertEqual(judged[0]["data"]["concept_id"], "linear-scan")
+        self.assertEqual(judged[0]["data"]["learner_prompt"], "It visits each item exactly once.")
+
     def test_tutor_drill_check_returns_artifact_feedback_and_progressive_hints(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Loops", goal="practice loops"))
         action = cli.parse_tutor_coding_drill_action(
@@ -10297,6 +10511,8 @@ class InteractiveTests(unittest.TestCase):
                 "purpose": "practice",
                 "source": {"kind": "generated", "name": "openLearn original"},
                 "plan_prompt": "Predict the accumulator after each iteration.",
+                "todo_steps": [],
+                "worked_example": None,
                 "hints": ["Initialize the accumulator.", "Update it once per value."],
                 "reflection_prompt": "What should happen for an empty list?",
                 "transfer_prompt": "",
@@ -10365,13 +10581,15 @@ class InteractiveTests(unittest.TestCase):
                 "language": "python",
                 "difficulty": 2,
                 "scaffolding_level": 0,
-                "purpose": "practice",
+                "purpose": "mastery_check",
                 "source": {
                     "kind": "official_link",
                     "name": "LeetCode official problem",
                     "uri": "https://leetcode.com/problems/two-sum/",
                 },
                 "plan_prompt": "",
+                "todo_steps": [],
+                "worked_example": None,
                 "hints": [],
                 "reflection_prompt": "Explain the complexity.",
                 "transfer_prompt": "",
@@ -10406,6 +10624,23 @@ class InteractiveTests(unittest.TestCase):
         self.assertIn("official URL", text)
         self.assertNotIn("Return the indices", text)
         self.assertNotIn("test_case_", text)
+        with mock.patch.object(
+            cli,
+            "call_openai",
+            new=lambda *_args, **_kwargs: (
+                "**Check:**\nExplain the linked solution's complexity."
+            ),
+        ):
+            cli.cmd_check(
+                Namespace(topic="arrays", model=None),
+                output_func=lambda _text: None,
+            )
+        pending = cli.load_state("arrays")["pending_question"]
+        self.assertEqual(
+            pending["question"],
+            "**Check:**\nExplain the linked solution's complexity.",
+        )
+        self.assertTrue(pending["concept_id"])
 
     def test_enable_drill_tests_replaces_only_standalone_guard_line(self) -> None:
         path = Path(self.home.name) / "drill.py"

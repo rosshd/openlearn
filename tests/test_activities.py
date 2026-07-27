@@ -228,6 +228,8 @@ class ActivityContractTests(unittest.TestCase):
             '"scaffolding_level":1,"purpose":"practice",'
             '"source":{"kind":"generated","name":"openLearn original"},'
             '"plan_prompt":"Name the lookup invariant before coding.",'
+            '"todo_steps":[],'
+            '"worked_example":null,'
             '"hints":["What should the map remember?","Check before inserting."],'
             '"reflection_prompt":"Why does lookup order avoid reusing an item?",'
             '"transfer_prompt":"Solve a related complement lookup with a different output.",'
@@ -256,6 +258,8 @@ class ActivityContractTests(unittest.TestCase):
             "purpose": "practice",
             "source": {"kind": "generated", "name": "openLearn original"},
             "plan_prompt": "",
+            "todo_steps": [],
+            "worked_example": None,
             "hints": [],
             "reflection_prompt": "Explain the invariant.",
             "transfer_prompt": "",

@@ -27,6 +27,8 @@ DRILL_ACTION_FIELDS = {
     "purpose",
     "source",
     "plan_prompt",
+    "todo_steps",
+    "worked_example",
     "hints",
     "reflection_prompt",
     "transfer_prompt",
@@ -41,6 +43,8 @@ SOURCE_FIELDS = {
 }
 MAX_ACTION_TEXT = 1_000
 MAX_HINTS = 3
+MAX_TODO_STEPS = 4
+MAX_TRACE_STEPS = 6
 
 
 @dataclass(frozen=True)
@@ -55,6 +59,8 @@ class CodingDrillAction:
     purpose: str
     source: dict[str, str]
     plan_prompt: str
+    todo_steps: tuple[str, ...]
+    worked_example: dict[str, object] | None
     hints: tuple[str, ...]
     reflection_prompt: str
     transfer_prompt: str
@@ -80,6 +86,11 @@ def extract_coding_drill_action(text: str) -> tuple[str, CodingDrillAction | Non
     return visible, action
 
 
+def suppress_coding_drill_action(text: str) -> str:
+    """Remove rejected hidden action metadata while retaining learner-facing text."""
+    return ACTION_MARKER_PATTERN.sub("", text).strip()
+
+
 def parse_coding_drill_action(payload: Mapping[str, object]) -> CodingDrillAction:
     """Validate the allow-listed `start_coding_drill` action schema."""
     if set(payload) != DRILL_ACTION_FIELDS:
@@ -101,6 +112,27 @@ def parse_coding_drill_action(payload: Mapping[str, object]) -> CodingDrillActio
         raise ActivityContractError("coding drill purpose must be practice or mastery_check")
     source = _source(payload.get("source"))
     plan_prompt = _optional_text(payload.get("plan_prompt"), "coding drill plan prompt")
+    todo_value = payload.get("todo_steps")
+    if not isinstance(todo_value, list) or len(todo_value) > MAX_TODO_STEPS:
+        raise ActivityContractError(
+            f"coding drill todo_steps must contain at most {MAX_TODO_STEPS} items"
+        )
+    todo_steps = tuple(_line_text(item, "coding drill TODO step") for item in todo_value)
+    worked_example = _worked_example(payload.get("worked_example"))
+    if scaffolding == 0 and (plan_prompt or todo_steps or worked_example is not None):
+        raise ActivityContractError("level 0 scaffolding must be unaided")
+    if scaffolding == 1 and (not plan_prompt or todo_steps or worked_example is not None):
+        raise ActivityContractError("level 1 scaffolding requires only a plan prompt")
+    if scaffolding == 2 and (not plan_prompt or not todo_steps or worked_example is not None):
+        raise ActivityContractError(
+            "level 2 scaffolding requires a plan prompt and partial TODO steps"
+        )
+    if scaffolding == 3 and (
+        not plan_prompt or not todo_steps or worked_example is None
+    ):
+        raise ActivityContractError(
+            "level 3 scaffolding requires plan, TODO, and worked trace support"
+        )
     hints_value = payload.get("hints")
     if not isinstance(hints_value, list) or len(hints_value) > MAX_HINTS:
         raise ActivityContractError(f"coding drill hints must contain at most {MAX_HINTS} items")
@@ -140,6 +172,8 @@ def parse_coding_drill_action(payload: Mapping[str, object]) -> CodingDrillActio
         purpose=str(purpose),
         source=source,
         plan_prompt=plan_prompt,
+        todo_steps=todo_steps,
+        worked_example=worked_example,
         hints=hints,
         reflection_prompt=reflection,
         transfer_prompt=transfer,
@@ -175,6 +209,30 @@ def _source(value: object) -> dict[str, str]:
             )
         source["uri"] = uri
     return source
+
+
+def _worked_example(value: object) -> dict[str, object] | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping) or set(value) != {"input", "trace", "result"}:
+        raise ActivityContractError("coding drill worked_example fields are malformed")
+    trace = value.get("trace")
+    if not isinstance(trace, list) or not 1 <= len(trace) <= MAX_TRACE_STEPS:
+        raise ActivityContractError(
+            f"coding drill worked trace must contain 1-{MAX_TRACE_STEPS} steps"
+        )
+    return {
+        "input": _line_text(value.get("input"), "coding drill worked input"),
+        "trace": [_line_text(item, "coding drill worked trace step") for item in trace],
+        "result": _line_text(value.get("result"), "coding drill worked result"),
+    }
+
+
+def _line_text(value: object, label: str) -> str:
+    normalized = _text(value, label, limit=200)
+    if "\n" in normalized or "\r" in normalized:
+        raise ActivityContractError(f"{label} must be one line")
+    return normalized
 
 
 def _text(value: object, label: str, *, limit: int = MAX_ACTION_TEXT) -> str:
@@ -258,6 +316,15 @@ class CodingActivityAdapter:
             if not isinstance(hints, list) or len(hints) > MAX_HINTS:
                 raise ActivityContractError("coding hints must be a bounded list")
             normalized["hints"] = [_text(item, "coding hint") for item in hints]
+        if "todo_steps" in payload:
+            todo_steps = payload.get("todo_steps")
+            if not isinstance(todo_steps, list) or len(todo_steps) > MAX_TODO_STEPS:
+                raise ActivityContractError("coding TODO steps must be a bounded list")
+            normalized["todo_steps"] = [
+                _line_text(item, "coding TODO step") for item in todo_steps
+            ]
+        if "worked_example" in payload:
+            normalized["worked_example"] = _worked_example(payload.get("worked_example"))
         return normalized
 
     def validate_evidence(self, kind: str, payload: Mapping[str, object]) -> dict[str, object]:

@@ -55,6 +55,7 @@ from openlearn.coding_activities import (
     CodingDrillAction,
     extract_coding_drill_action,
     parse_coding_drill_action,
+    suppress_coding_drill_action,
 )
 from openlearn.course_templates import (
     CourseTemplateError,
@@ -7503,6 +7504,8 @@ def tutor_drill_activity_request(
             "language": action.language,
             "difficulty": action.difficulty,
             "plan_prompt": action.plan_prompt,
+            "todo_steps": list(action.todo_steps),
+            "worked_example": action.worked_example,
             "hints": list(action.hints),
             "reflection_prompt": action.reflection_prompt,
             "transfer_prompt": action.transfer_prompt,
@@ -7803,6 +7806,8 @@ def cmd_check(args: argparse.Namespace, output_func=print) -> int:
         model=model, system=system_prompt(topic), user=user, output_func=output_func
     )
     print_and_append_model_answer(topic, "check", user, answer, output_func=output_func)
+    if result.returncode == 0:
+        register_mastery_drill_reflection(topic, activity, answer)
     return result.returncode
 
 
@@ -7861,7 +7866,45 @@ def check_linked_coding_drill(
         output_func=output_func,
     )
     print_and_append_model_answer(topic, "check", user, answer, output_func=output_func)
+    register_mastery_drill_reflection(topic, activity, answer)
     return 0
+
+
+def register_mastery_drill_reflection(
+    topic: Topic,
+    activity: dict[str, object],
+    answer: str,
+) -> None:
+    """Register a mastery reflection as the next normally judged learner answer."""
+    global _LAST_RESPONSE_ANSWER_KEY
+    if activity.get("purpose") != "mastery_check":
+        return
+    question = extract_pending_question_text(answer)
+    if not question or explicit_check_section_count(answer) != 1:
+        return
+    concept_ids = activity.get("concept_ids")
+    concept_id = (
+        str(concept_ids[0])
+        if isinstance(concept_ids, list)
+        and concept_ids
+        and isinstance(concept_ids[0], str)
+        else ""
+    )
+    focus = topic.metadata.get("current_focus")
+    focus_value = (
+        focus.strip()
+        if isinstance(focus, str) and focus.strip()
+        else str(activity.get("objective") or "").strip()
+    )
+    save_pending_question(
+        topic,
+        answer,
+        _LAST_RESPONSE_ANSWER_KEY,
+        question_text=question,
+        focus_override=focus_value,
+        concept_id_override=concept_id,
+    )
+    _LAST_RESPONSE_ANSWER_KEY = ""
 
 
 def drill_generation_prompt(topic: Topic) -> str:
@@ -8038,25 +8081,26 @@ def write_tutor_drill_file(slug: str, action: CodingDrillAction) -> Path:
 
 def render_scaffolded_drill_file(action: CodingDrillAction) -> str:
     validated = validate_drill_data(action.drill)
+    if action.todo_steps:
+        validated["function_stub"] = function_stub_with_todos(
+            str(validated["function_stub"]),
+            action.todo_steps,
+        )
     rendered = render_drill_file(validated)
     guidance: list[str] = []
     if action.plan_prompt and action.scaffolding_level >= 1:
         guidance.extend(["Plan before coding:", action.plan_prompt])
-    if action.scaffolding_level >= 2:
+    if action.worked_example is not None:
+        trace = action.worked_example["trace"]
+        assert isinstance(trace, list)
         guidance.extend(
             [
                 "",
-                "Partial scaffold:",
-                "- Identify the state that changes on each step.",
-                "- Handle the smallest edge case before the general case.",
-            ]
-        )
-    if action.scaffolding_level >= 3:
-        guidance.extend(
-            [
-                "",
-                "Worked-example scaffold (different instance):",
-                "- Trace one tiny input by hand, then fade the trace and implement.",
+                "Worked example trace (different instance):",
+                f"Input: {action.worked_example['input']}",
+                *[f"- {step}" for step in trace],
+                f"Result: {action.worked_example['result']}",
+                "Now fade this trace and implement the target function yourself.",
             ]
         )
     if action.hints and action.scaffolding_level >= 2:
@@ -8069,6 +8113,22 @@ def render_scaffolded_drill_file(action: CodingDrillAction) -> str:
         insertion + "Run openlearn /check when you are ready to test your solution.\n",
         1,
     )
+
+
+def function_stub_with_todos(function_stub: str, todo_steps: tuple[str, ...]) -> str:
+    """Insert validated comment-only TODO structure before the inert body statement."""
+    module = ast.parse(function_stub, mode="exec")
+    function = module.body[0]
+    assert isinstance(function, ast.FunctionDef)
+    statement = function.body[-1]
+    lines = function_stub.splitlines()
+    index = statement.lineno - 1
+    indentation = lines[index][: len(lines[index]) - len(lines[index].lstrip())]
+    comments = [
+        f"{indentation}# TODO {number}: {step}"
+        for number, step in enumerate(todo_steps, start=1)
+    ]
+    return "\n".join([*lines[:index], *comments, *lines[index:]])
 
 
 def render_official_link_drill_file(action: CodingDrillAction) -> str:
@@ -8634,6 +8694,8 @@ def save_pending_question(
     answer_key: str,
     question_text: str | None = None,
     event_sink: Callable[[str, str, dict[str, object]], None] | None = None,
+    focus_override: str = "",
+    concept_id_override: str = "",
 ) -> None:
     has_answer_key = answer_key in {"A", "B", "C", "D"}
     question = (
@@ -8653,10 +8715,14 @@ def save_pending_question(
     }
     if has_answer_key:
         pending_question["answer_key"] = answer_key
-    focus = topic.metadata.get("current_focus")
+    focus = focus_override or topic.metadata.get("current_focus")
     if isinstance(focus, str) and focus.strip():
         pending_question["focus"] = focus.strip()
-        pending_question["concept_id"] = concept_id_for_focus(topic.metadata, focus)
+        pending_question["concept_id"] = (
+            concept_id_override.strip()
+            if concept_id_override.strip()
+            else concept_id_for_focus(topic.metadata, focus)
+        )
     previous_pending_question: dict[str, object] | None = None
     with file_lock(topic.path):
         raw_metadata, body = parse_topic(topic.path.read_text(encoding="utf-8"))
@@ -12377,6 +12443,8 @@ def coding_drill_action_prompt(metadata: dict[str, object]) -> str:
           "purpose": "practice",
           "source": {"kind": "generated", "name": "openLearn original"},
           "plan_prompt": "optional short prediction before coding",
+          "todo_steps": [],
+          "worked_example": null,
           "hints": ["up to three progressive hints"],
           "reflection_prompt": "one edge-case, complexity, or debugging reflection",
           "transfer_prompt": "optional related novel transfer task",
@@ -12387,9 +12455,14 @@ def coding_drill_action_prompt(metadata: dict[str, object]) -> str:
             "test_cases": [{"input": [], "expected": null}]
           }
         } -->
-        Use difficulty 1-3 and scaffolding_level 0-3: 0 unaided, 1 decomposition
-        prompt, 2 partial TODO scaffold, 3 worked-example cues that still require an
-        attempt. Distinguish purpose=practice from purpose=mastery_check. Use a mastery
+        Use difficulty 1-3 and these exact scaffolding contracts:
+        - Level 0 is unaided: empty plan_prompt and todo_steps, worked_example=null.
+        - Level 1 requires one plan_prompt, empty todo_steps, worked_example=null.
+        - Level 2 requires a plan_prompt plus 1-4 one-line todo_steps and no worked example.
+        - Level 3 adds worked_example={"input":"...","trace":["..."],"result":"..."}
+          with 1-6 bounded one-line trace steps from a different instance.
+        TODO and worked fields are learner-facing text only, never executable code.
+        Distinguish purpose=practice from purpose=mastery_check. Use a mastery
         check only when the learner explicitly requested assessment; accepting a drill
         never makes passing tests sufficient for mastery. Require learner-authored work before
         a complete solution, and never place a complete solution in the action.
@@ -13182,8 +13255,9 @@ def call_openai_streaming(
             visible_text, _LAST_RESPONSE_CODING_DRILL_ACTION = extract_coding_drill_action(
                 raw_text
             )
-        except ActivityContractError as exc:
-            raise OpenLearnError(f"invalid tutor coding drill action: {exc}") from exc
+        except ActivityContractError:
+            visible_text = suppress_coding_drill_action(raw_text)
+            _LAST_RESPONSE_CODING_DRILL_ACTION = None
         text = sanitize_model_output(visible_text)
         if not text:
             raise OpenLearnError(
@@ -13200,8 +13274,9 @@ def call_openai_streaming(
             _LAST_RESPONSE_ANSWER_KEY = extract_answer_key(raw)
         try:
             visible_text, _LAST_RESPONSE_CODING_DRILL_ACTION = extract_coding_drill_action(raw)
-        except ActivityContractError as exc:
-            raise OpenLearnError(f"invalid tutor coding drill action: {exc}") from exc
+        except ActivityContractError:
+            visible_text = suppress_coding_drill_action(raw)
+            _LAST_RESPONSE_CODING_DRILL_ACTION = None
         text = sanitize_model_output(visible_text)
         if not text:
             raise OpenLearnError(
@@ -13312,8 +13387,9 @@ def call_openai_streaming(
         _LAST_RESPONSE_ANSWER_KEY = extract_answer_key(raw_text)
     try:
         visible_text, _LAST_RESPONSE_CODING_DRILL_ACTION = extract_coding_drill_action(raw_text)
-    except ActivityContractError as exc:
-        raise OpenLearnError(f"invalid tutor coding drill action: {exc}") from exc
+    except ActivityContractError:
+        visible_text = suppress_coding_drill_action(raw_text)
+        _LAST_RESPONSE_CODING_DRILL_ACTION = None
     text = sanitize_model_output(visible_text)
     if not text:
         raise OpenLearnError(
