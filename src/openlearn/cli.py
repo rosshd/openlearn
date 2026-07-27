@@ -276,6 +276,9 @@ REPL_HELP_ALL = (
     "/drill [--leetcode], /check, /videos [--n N] [query], /active [topic], /recent, "
     "/new <topic> [goal], /delete <topic>, /ask <question>, /quit (/q)"
 )
+LESSON_ENTER_ADVANCE_PROMPT = (
+    "Press Enter to continue to the next slide, or type what you want more help with."
+)
 METADATA_EXTRACTOR_SYSTEM = (
     "You are a calibrated JSON judge and metadata extractor for a tutoring app. "
     "Return only one valid JSON object. When evaluating an answer, score the "
@@ -2498,7 +2501,15 @@ def teach_first_lesson(topic: Topic, outline: str, model: str, output_func=print
     pending_question_text = extract_pending_question_text(raw_lesson_for_question)
     lesson = trim_words(raw_lesson_for_question, FIRST_LESSON_WORD_LIMIT)
     emit_tutor_output(lesson, output_func)
-    append_session(read_topic(topic.slug), "lesson", lesson_prompt, lesson)
+    append_session(
+        read_topic(topic.slug),
+        "lesson",
+        lesson_prompt,
+        lesson,
+        enter_advance_source=(
+            "lesson_complete" if tutor_response_is_lesson_complete(lesson) else None
+        ),
+    )
     save_current_slide_coverage(topic.slug, lesson, covered_concepts)
     save_pending_question(
         read_topic(topic.slug),
@@ -2506,6 +2517,7 @@ def teach_first_lesson(topic: Topic, outline: str, model: str, output_func=print
         _LAST_RESPONSE_ANSWER_KEY,
         question_text=pending_question_text,
     )
+    emit_lesson_enter_advance_affordance(topic.slug, output_func)
     _LAST_RESPONSE_ANSWER_KEY = ""
 
 
@@ -3392,20 +3404,45 @@ def last_tutor_lesson_entry(topic: Topic) -> tuple[int, dict[str, str]] | None:
     return None
 
 
-def enter_advance_cue_token(topic: Topic) -> str:
+def tutor_response_is_lesson_complete(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    first_line = next((line.strip() for line in value.splitlines() if line.strip()), "")
+    if not re.match(r"(?i)^(?:\*\*)?Lesson:(?:\*\*)?", first_line):
+        return False
+    return (
+        explicit_check_section_count(value) == 0
+        and not tutor_response_has_enter_advance_cue(value)
+        and not question_outside_check_section(value)
+        and not response_requests_learner_evidence(value)
+    )
+
+
+def enter_advance_cue_token(topic: Topic, *, source: str = "explicit_next") -> str:
     occurrence = last_tutor_lesson_entry(topic)
     if occurrence is None:
         return ""
     index, entry = occurrence
-    if not tutor_response_has_enter_advance_cue(entry["response"]):
+    if source == "lesson_complete":
+        if entry["kind"] not in {"lesson", "next"} or not tutor_response_is_lesson_complete(
+            entry["response"]
+        ):
+            return ""
+    elif source == "explicit_next":
+        if not tutor_response_has_enter_advance_cue(entry["response"]):
+            return ""
+    else:
         return ""
+    token_data = {
+        "index": index,
+        "kind": entry["kind"],
+        "prompt": entry["prompt"],
+        "response": entry["response"],
+    }
+    if source != "explicit_next":
+        token_data["source"] = source
     payload = json.dumps(
-        {
-            "index": index,
-            "kind": entry["kind"],
-            "prompt": entry["prompt"],
-            "response": entry["response"],
-        },
+        token_data,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
@@ -3418,20 +3455,31 @@ def register_enter_advance_cue(
     body: str,
     slug: str,
     path: Path,
+    *,
+    source: str = "explicit_next",
 ) -> bool:
     token = enter_advance_cue_token(
-        Topic(slug=slug, path=path, metadata=metadata, body=body)
+        Topic(slug=slug, path=path, metadata=metadata, body=body),
+        source=source,
     )
     unit = metadata.get("current_unit")
     slide = metadata.get("current_slide")
-    if not token or not isinstance(unit, int) or not isinstance(slide, int):
+    if (
+        not token
+        or isinstance(metadata.get("pending_question"), dict)
+        or not isinstance(unit, int)
+        or not isinstance(slide, int)
+    ):
         return False
-    metadata["enter_advance_cue"] = {
+    registration: dict[str, object] = {
         "token": token,
         "current_unit": unit,
         "current_slide": slide,
         "consumed": False,
     }
+    if source != "explicit_next":
+        registration["source"] = source
+    metadata["enter_advance_cue"] = registration
     return True
 
 
@@ -3982,8 +4030,12 @@ def claim_blank_input_advance() -> bool:
         registration = metadata.get("enter_advance_cue")
         if not isinstance(registration, dict) or registration.get("consumed") is not False:
             return False
+        source = registration.get("source")
+        if not isinstance(source, str):
+            source = "explicit_next"
         token = enter_advance_cue_token(
-            Topic(slug=slug, path=path, metadata=metadata, body=body)
+            Topic(slug=slug, path=path, metadata=metadata, body=body),
+            source=source,
         )
         if not token or registration.get("token") != token:
             return False
@@ -8098,7 +8150,15 @@ def cmd_next(args: argparse.Namespace, output_func=print) -> int:
     answer = call_openai_streaming(
         model=model, system=system_prompt(topic), user=user, output_func=output_func
     )
-    print_and_append_model_answer(topic, "next", user, answer, output_func=output_func)
+    print_and_append_model_answer(
+        topic,
+        "next",
+        user,
+        answer,
+        output_func=output_func,
+        register_lesson_advance=True,
+    )
+    emit_lesson_enter_advance_affordance(topic.slug, output_func)
     return 0
 
 
@@ -8147,10 +8207,22 @@ def print_and_append_model_answer(
     mark_reviewed: bool = False,
     output_func=print,
     event_sink: Callable[[str, str, dict[str, object]], None] | None = None,
+    register_lesson_advance: bool = False,
 ) -> str:
     global _LAST_RESPONSE_ANSWER_KEY, _LAST_RESPONSE_COVERED_CONCEPTS
     answer = sanitize_model_output(answer)
-    append_session(topic, kind, prompt, answer, mark_reviewed=mark_reviewed)
+    append_session(
+        topic,
+        kind,
+        prompt,
+        answer,
+        mark_reviewed=mark_reviewed,
+        enter_advance_source=(
+            "lesson_complete"
+            if register_lesson_advance and tutor_response_is_lesson_complete(answer)
+            else None
+        ),
+    )
     if kind in {"next", "lesson"}:
         save_current_slide_coverage(topic.slug, answer, _LAST_RESPONSE_COVERED_CONCEPTS)
         _LAST_RESPONSE_COVERED_CONCEPTS = []
@@ -8167,6 +8239,18 @@ def print_and_append_model_answer(
             )
         _LAST_RESPONSE_ANSWER_KEY = ""
     return answer
+
+
+def emit_lesson_enter_advance_affordance(slug: str, output_func=print) -> bool:
+    registration = read_topic(slug).metadata.get("enter_advance_cue")
+    if (
+        not isinstance(registration, dict)
+        or registration.get("source") != "lesson_complete"
+        or registration.get("consumed") is not False
+    ):
+        return False
+    output_func(LESSON_ENTER_ADVANCE_PROMPT)
+    return True
 
 
 def save_pending_question(
@@ -11694,7 +11778,13 @@ def parse_topic(text: str) -> tuple[dict[str, object], str]:
 
 
 def append_session(
-    topic: Topic, kind: str, prompt: str, answer: str, mark_reviewed: bool = False
+    topic: Topic,
+    kind: str,
+    prompt: str,
+    answer: str,
+    mark_reviewed: bool = False,
+    *,
+    enter_advance_source: str | None = None,
 ) -> None:
     entry = textwrap.dedent(
         f"""
@@ -11721,8 +11811,13 @@ def append_session(
         else:
             with topic.path.open("a", encoding="utf-8") as file:
                 file.write("\n\n" + entry + "\n")
+        advance_source = (
+            "explicit_next"
+            if tutor_response_has_enter_advance_cue(answer)
+            else enter_advance_source
+        )
         if kind in {"lesson", "next", "resume", "review", "chat", "quiz"} and (
-            tutor_response_has_enter_advance_cue(answer)
+            advance_source in {"explicit_next", "lesson_complete"}
         ):
             current_text = topic.path.read_text(encoding="utf-8")
             raw_metadata, body = parse_topic(current_text)
@@ -11735,6 +11830,7 @@ def append_session(
                 body,
                 topic.slug,
                 topic.path,
+                source=advance_source,
             ):
                 save_state(topic.slug, state_from_metadata(metadata))
 
