@@ -10498,6 +10498,76 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(judged[0]["data"]["concept_id"], "linear-scan")
         self.assertEqual(judged[0]["data"]["learner_prompt"], "It visits each item exactly once.")
 
+    def test_passing_local_mastery_drill_falls_back_to_owned_reflection_prompt(
+        self,
+    ) -> None:
+        responses = {
+            "missing": "**Feedback:**\nTests passed.",
+            "multiple": (
+                "**Check:**\nFirst malformed check.\n"
+                "**Check:**\nSecond malformed check."
+            ),
+        }
+        for suffix, response in responses.items():
+            with self.subTest(response=suffix):
+                slug = f"local-fallback-{suffix}"
+                call_silent(
+                    cli.cmd_new,
+                    Namespace(topic=slug, goal="practice linear scans"),
+                )
+                action = cli.parse_tutor_coding_drill_action(
+                    {
+                        "action": "start_coding_drill",
+                        "objective": "Implement one linear scan.",
+                        "title": f"Linear Total {suffix}",
+                        "language": "python",
+                        "difficulty": 2,
+                        "scaffolding_level": 0,
+                        "purpose": "mastery_check",
+                        "source": {"kind": "generated", "name": "openLearn original"},
+                        "plan_prompt": "",
+                        "todo_steps": [],
+                        "worked_example": None,
+                        "hints": [],
+                        "reflection_prompt": "Why does this visit each value once?",
+                        "transfer_prompt": "",
+                        "drill": {
+                            "title": f"Linear Total {suffix}",
+                            "description": "Return the total in one scan.",
+                            "function_stub": "def linear_total(values):\n    pass",
+                            "test_cases": [{"input": [[1, 2]], "expected": 3}],
+                        },
+                    }
+                )
+                with mock.patch.object(cli, "open_drill_in_editor", return_value="nvim"):
+                    cli.orchestrate_tutor_coding_drill(
+                        cli.read_topic(slug),
+                        action,
+                        input_func=lambda _prompt: "yes",
+                        output_func=lambda _text: None,
+                    )
+                passed = types.SimpleNamespace(returncode=0, stdout="1 passed", stderr="")
+                with mock.patch.object(
+                    cli.subprocess,
+                    "run",
+                    return_value=passed,
+                ), mock.patch.object(
+                    cli,
+                    "call_openai",
+                    new=lambda *_args, _response=response, **_kwargs: _response,
+                ):
+                    cli.cmd_check(
+                        Namespace(topic=slug, model=None),
+                        output_func=lambda _text: None,
+                    )
+
+                pending = cli.load_state(slug)["pending_question"]
+                self.assertEqual(
+                    pending["question"],
+                    "Why does this visit each value once?",
+                )
+                self.assertTrue(pending["concept_id"])
+
     def test_tutor_drill_check_returns_artifact_feedback_and_progressive_hints(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Loops", goal="practice loops"))
         action = cli.parse_tutor_coding_drill_action(
@@ -10641,6 +10711,155 @@ class InteractiveTests(unittest.TestCase):
             "**Check:**\nExplain the linked solution's complexity.",
         )
         self.assertTrue(pending["concept_id"])
+
+    def test_official_link_mastery_drill_falls_back_to_owned_reflection_prompt(
+        self,
+    ) -> None:
+        responses = {
+            "missing": "**Feedback:**\nArtifact saved.",
+            "multiple": (
+                "**Check:**\nFirst malformed check.\n"
+                "**Check:**\nSecond malformed check."
+            ),
+        }
+        for suffix, response in responses.items():
+            with self.subTest(response=suffix):
+                slug = f"official-fallback-{suffix}"
+                call_silent(
+                    cli.cmd_new,
+                    Namespace(topic=slug, goal="practice linked problems"),
+                )
+                action = cli.parse_tutor_coding_drill_action(
+                    {
+                        "action": "start_coding_drill",
+                        "objective": "Practice an official linked problem.",
+                        "title": f"Official Fallback {suffix}",
+                        "language": "python",
+                        "difficulty": 2,
+                        "scaffolding_level": 0,
+                        "purpose": "mastery_check",
+                        "source": {
+                            "kind": "official_link",
+                            "name": "LeetCode official problem",
+                            "uri": "https://leetcode.com/problems/two-sum/",
+                        },
+                        "plan_prompt": "",
+                        "todo_steps": [],
+                        "worked_example": None,
+                        "hints": [],
+                        "reflection_prompt": "Explain the approach and complexity.",
+                        "transfer_prompt": "",
+                        "drill": {
+                            "title": f"Official Fallback {suffix}",
+                            "description": "Use the official problem page.",
+                            "function_stub": "def solve(*args):\n    pass",
+                            "test_cases": [],
+                        },
+                    }
+                )
+                with mock.patch.object(
+                    cli,
+                    "open_drill_in_editor",
+                    return_value="nvim",
+                ), mock.patch.object(cli.webbrowser, "open", return_value=True):
+                    cli.orchestrate_tutor_coding_drill(
+                        cli.read_topic(slug),
+                        action,
+                        input_func=lambda _prompt: "yes",
+                        output_func=lambda _text: None,
+                    )
+                with mock.patch.object(
+                    cli,
+                    "call_openai",
+                    new=lambda *_args, _response=response, **_kwargs: _response,
+                ):
+                    cli.cmd_check(
+                        Namespace(topic=slug, model=None),
+                        output_func=lambda _text: None,
+                    )
+
+                pending = cli.load_state(slug)["pending_question"]
+                self.assertEqual(
+                    pending["question"],
+                    "Explain the approach and complexity.",
+                )
+                self.assertTrue(pending["concept_id"])
+
+    def test_official_link_drill_renders_each_scaffolding_level_without_remote_content(
+        self,
+    ) -> None:
+        base = {
+            "action": "start_coding_drill",
+            "objective": "Practice an official linked problem.",
+            "title": "Official Scaffold",
+            "language": "python",
+            "difficulty": 2,
+            "purpose": "practice",
+            "source": {
+                "kind": "official_link",
+                "name": "LeetCode official problem",
+                "uri": "https://leetcode.com/problems/two-sum/",
+            },
+            "hints": [],
+            "reflection_prompt": "Explain the complexity.",
+            "transfer_prompt": "",
+            "drill": {
+                "title": "Official Scaffold",
+                "description": "PROTECTED REMOTE PROBLEM CONTENT",
+                "function_stub": "def solve(*args):\n    pass",
+                "test_cases": [],
+            },
+        }
+        variants = [
+            {
+                "scaffolding_level": 0,
+                "plan_prompt": "",
+                "todo_steps": [],
+                "worked_example": None,
+            },
+            {
+                "scaffolding_level": 1,
+                "plan_prompt": "Name the state needed by the approach.",
+                "todo_steps": [],
+                "worked_example": None,
+            },
+            {
+                "scaffolding_level": 2,
+                "plan_prompt": "Name the state needed by the approach.",
+                "todo_steps": ["Initialize the state.", "Process one item at a time."],
+                "worked_example": None,
+            },
+            {
+                "scaffolding_level": 3,
+                "plan_prompt": "Name the state needed by the approach.",
+                "todo_steps": ["Initialize the state.", "Process one item at a time."],
+                "worked_example": {
+                    "input": "a tiny tutor-created input",
+                    "trace": ["Initialize empty state.", "Update it for one item."],
+                    "result": "the tutor-created result",
+                },
+            },
+        ]
+
+        rendered = [
+            cli.render_official_link_drill_file(
+                cli.parse_tutor_coding_drill_action({**base, **variant})
+            )
+            for variant in variants
+        ]
+
+        self.assertEqual(len(set(rendered)), 4)
+        self.assertNotIn("Plan before coding", rendered[0])
+        self.assertIn("Plan before coding", rendered[1])
+        self.assertNotIn("# TODO", rendered[1])
+        self.assertIn("# TODO 1: Initialize the state.", rendered[2])
+        self.assertNotIn("Worked example trace", rendered[2])
+        self.assertIn("# TODO 2: Process one item at a time.", rendered[3])
+        self.assertIn("Worked example trace", rendered[3])
+        self.assertIn("a tiny tutor-created input", rendered[3])
+        for text in rendered:
+            self.assertNotIn("PROTECTED REMOTE PROBLEM CONTENT", text)
+            self.assertNotIn("test_case_", text)
 
     def test_enable_drill_tests_replaces_only_standalone_guard_line(self) -> None:
         path = Path(self.home.name) / "drill.py"

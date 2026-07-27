@@ -7807,7 +7807,12 @@ def cmd_check(args: argparse.Namespace, output_func=print) -> int:
     )
     print_and_append_model_answer(topic, "check", user, answer, output_func=output_func)
     if result.returncode == 0:
-        register_mastery_drill_reflection(topic, activity, answer)
+        register_mastery_drill_reflection(
+            topic,
+            activity,
+            answer,
+            fallback_question=reflection,
+        )
     return result.returncode
 
 
@@ -7866,7 +7871,12 @@ def check_linked_coding_drill(
         output_func=output_func,
     )
     print_and_append_model_answer(topic, "check", user, answer, output_func=output_func)
-    register_mastery_drill_reflection(topic, activity, answer)
+    register_mastery_drill_reflection(
+        topic,
+        activity,
+        answer,
+        fallback_question=reflection,
+    )
     return 0
 
 
@@ -7874,6 +7884,8 @@ def register_mastery_drill_reflection(
     topic: Topic,
     activity: dict[str, object],
     answer: str,
+    *,
+    fallback_question: str,
 ) -> None:
     """Register a mastery reflection as the next normally judged learner answer."""
     global _LAST_RESPONSE_ANSWER_KEY
@@ -7881,6 +7893,8 @@ def register_mastery_drill_reflection(
         return
     question = extract_pending_question_text(answer)
     if not question or explicit_check_section_count(answer) != 1:
+        question = fallback_question.strip()
+    if not question:
         return
     concept_ids = activity.get("concept_ids")
     concept_id = (
@@ -8134,16 +8148,32 @@ def function_stub_with_todos(function_stub: str, todo_steps: tuple[str, ...]) ->
 def render_official_link_drill_file(action: CodingDrillAction) -> str:
     function_stub = str(action.drill["function_stub"]).rstrip()
     validate_inert_function_stub(function_stub)
+    if action.todo_steps:
+        function_stub = function_stub_with_todos(function_stub, action.todo_steps)
     plan = (
         f"\nPlan before coding:\n{action.plan_prompt}\n" if action.plan_prompt else ""
     )
+    worked = ""
+    if action.worked_example is not None:
+        trace = action.worked_example["trace"]
+        assert isinstance(trace, list)
+        worked_lines = [
+            "",
+            "Worked example trace (tutor-created different instance):",
+            f"Input: {action.worked_example['input']}",
+            *[f"- {step}" for step in trace],
+            f"Result: {action.worked_example['result']}",
+            "Now fade this trace and implement the official problem yourself.",
+        ]
+        worked = "\n".join(worked_lines) + "\n"
     return (
         '"""\n'
         f"{action.title}\n\n"
         f"Read the problem only at its official URL:\n{action.source['uri']}\n"
         f"{plan}\n"
-        "This local file contains only your solution scaffold, not the remote problem "
-        "statement, examples, or tests.\n"
+        f"{worked}"
+        "This local file contains only your solution scaffold and bounded tutor-created "
+        "guidance, not the remote problem statement, examples, or tests.\n"
         '"""\n\n'
         f"{function_stub}\n"
     )
