@@ -8282,7 +8282,20 @@ def orchestrate_tutor_coding_drill(
     output_func=print,
 ) -> dict[str, object]:
     """Offer, consent, materialize, and launch one model-selected coding drill."""
-    previous = active_topic_activity(topic.slug, domain="coding", kind="python_drill")
+    current = active_topic_activity(topic.slug)
+    active = (
+        current
+        if current is not None and current.get("status") == "active"
+        else None
+    )
+    previous = (
+        active
+        if active is not None
+        and active.get("domain") == "coding"
+        and active.get("kind") == "python_drill"
+        else None
+    )
+    blocked_by_other = active is not None and previous is None
     if action.source["kind"] != "official_link":
         validate_drill_data(action.drill)
     else:
@@ -8295,16 +8308,30 @@ def orchestrate_tutor_coding_drill(
         "configured editor? [y/N] "
     )
     if accepted.strip().casefold() not in {"y", "yes"}:
-        if replacement:
-            output_func("Drill cancelled. Your active drill is unchanged.")
-            assert previous is not None
-            return previous
+        if active is not None:
+            output_func("Drill cancelled. Your active activity is unchanged.")
+            return active
         activity = propose_topic_activity(
             topic.slug, tutor_drill_activity_request(topic, action)
         )
         activity = transition_topic_activity(topic.slug, activity, "cancelled", reason="learner declined")
         output_func("Drill cancelled. Continue chatting or use /drill when you are ready.")
         return activity
+    if blocked_by_other:
+        assert active is not None
+        if active.get("domain") == "coding" and active.get("kind") == "interview_problem":
+            output_func(
+                "Drill not started. Your interview placement remains active. "
+                f"Resume it with 'openlearn interview placement {topic.slug} resume' "
+                f"or discard it with 'openlearn interview placement {topic.slug} discard' "
+                "before starting another activity."
+            )
+        else:
+            output_func(
+                "Drill not started. Another activity remains active; finish or discard "
+                "it before starting a tutor-selected drill."
+            )
+        return active
     if replacement:
         assert previous is not None
         transition_topic_activity(

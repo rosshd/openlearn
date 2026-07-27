@@ -3616,6 +3616,50 @@ class InteractiveTests(unittest.TestCase):
         metadata.update(updates)
         path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
 
+    def _paused_interview_with_tutor_drill(
+        self,
+    ) -> tuple[cli.Topic, cli.CodingDrillAction]:
+        call_silent(
+            cli.cmd_new,
+            Namespace(
+                topic="Algorithms",
+                goal="Practice algorithms",
+                interview_prep=True,
+                mastery_profile=None,
+                template=None,
+            ),
+        )
+        cli.cmd_interview_placement(
+            Namespace(topic="algorithms", action="start"),
+            input_func=lambda _prompt: "/stop",
+            output_func=lambda _line: None,
+        )
+        action = cli.parse_tutor_coding_drill_action(
+            {
+                "action": "start_coding_drill",
+                "objective": "Implement one bounded scan.",
+                "title": "Bounded Scan",
+                "language": "python",
+                "difficulty": 1,
+                "scaffolding_level": 1,
+                "purpose": "practice",
+                "source": {"kind": "generated", "name": "openLearn original"},
+                "plan_prompt": "State the scan invariant.",
+                "todo_steps": [],
+                "worked_example": None,
+                "hints": ["Track the current window."],
+                "reflection_prompt": "Why is the scan bounded?",
+                "transfer_prompt": "",
+                "drill": {
+                    "title": "Bounded Scan",
+                    "description": "Return the first matching position.",
+                    "function_stub": "def bounded_scan(values):\n    pass",
+                    "test_cases": [{"input": [[1, 2]], "expected": 0}],
+                },
+            }
+        )
+        return cli.read_topic("algorithms"), action
+
     def test_no_args_defaults_to_menu(self) -> None:
         parser = cli.build_parser()
         args = parser.parse_args([])
@@ -9869,6 +9913,78 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(state["active_activity"]["status"], "cancelled")
         self.assertFalse((cli.topics_dir() / "drills" / "python").exists())
         self.assertIn("Drill cancelled", "\n".join(output))
+
+    def test_declined_tutor_drill_preserves_paused_interview_placement(self) -> None:
+        topic, action = self._paused_interview_with_tutor_drill()
+        state_before = cli.load_state(topic.slug)
+        profile_before = cli.interview_prep.load_profile(
+            cli.interview_profile_path(topic.slug)
+        )
+        events_before = cli.load_event_log(cli.topic_events_path(topic.slug))
+        output: list[str] = []
+
+        with mock.patch.object(
+            cli, "open_drill_in_editor", side_effect=AssertionError("editor launched")
+        ):
+            result = cli.orchestrate_tutor_coding_drill(
+                topic,
+                action,
+                input_func=lambda _prompt: "no",
+                output_func=output.append,
+            )
+
+        self.assertEqual(result, state_before["active_activity"])
+        self.assertEqual(cli.load_state(topic.slug), state_before)
+        self.assertEqual(
+            cli.interview_prep.load_profile(cli.interview_profile_path(topic.slug)),
+            profile_before,
+        )
+        self.assertEqual(
+            cli.load_event_log(cli.topic_events_path(topic.slug)),
+            events_before,
+        )
+        self.assertIn("active activity is unchanged", "\n".join(output))
+        self.assertFalse((cli.topics_dir() / "drills" / topic.slug).exists())
+
+    def test_accepted_tutor_drill_requires_paused_placement_resolution(self) -> None:
+        topic, action = self._paused_interview_with_tutor_drill()
+        state_before = cli.load_state(topic.slug)
+        profile_before = cli.interview_prep.load_profile(
+            cli.interview_profile_path(topic.slug)
+        )
+        events_before = cli.load_event_log(cli.topic_events_path(topic.slug))
+        output: list[str] = []
+
+        with mock.patch.object(
+            cli, "open_drill_in_editor", side_effect=AssertionError("editor launched")
+        ):
+            result = cli.orchestrate_tutor_coding_drill(
+                topic,
+                action,
+                input_func=lambda _prompt: "yes",
+                output_func=output.append,
+            )
+
+        text = "\n".join(output)
+        self.assertEqual(result, state_before["active_activity"])
+        self.assertEqual(cli.load_state(topic.slug), state_before)
+        self.assertEqual(
+            cli.interview_prep.load_profile(cli.interview_profile_path(topic.slug)),
+            profile_before,
+        )
+        self.assertEqual(
+            cli.load_event_log(cli.topic_events_path(topic.slug)),
+            events_before,
+        )
+        self.assertIn(
+            "openlearn interview placement algorithms resume",
+            text,
+        )
+        self.assertIn(
+            "openlearn interview placement algorithms discard",
+            text,
+        )
+        self.assertFalse((cli.topics_dir() / "drills" / topic.slug).exists())
 
     def test_malformed_tutor_drill_action_preserves_visible_turn_without_side_effects(
         self,
