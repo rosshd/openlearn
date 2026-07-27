@@ -40,6 +40,7 @@ from platformdirs import user_data_dir
 
 from openlearn import __version__
 from openlearn import code_runner
+from openlearn import interview_attempts
 from openlearn import interview_prep
 from openlearn import stats as stats_metrics
 from openlearn.activities import (
@@ -283,7 +284,7 @@ REPL_HELP_LINES = [
 REPL_HELP_ALL = (
     "Commands: /resume (/r), /next (/n), /done, /review, /status, /summary, "
     "/options, /plan, /progress [unit slide], /chapter [N], /scope <change>, /repair, "
-    "/drill [--leetcode], /check [--reduced-isolation], "
+    "/drill [--leetcode], /check [--reduced-isolation], /attempt <action>, "
     "/videos [--n N] [query], /active [topic], /recent, "
     "/new <topic> [goal], /delete <topic>, /ask <question>, /quit (/q)"
 )
@@ -603,6 +604,24 @@ def build_parser() -> argparse.ArgumentParser:
         default="status",
     )
     interview_placement.set_defaults(func=cmd_interview_placement)
+
+    attempt_parser = sub.add_parser(
+        "attempt", help="List, inspect, resume, abandon, or retry coding attempts"
+    )
+    attempt_sub = attempt_parser.add_subparsers(required=True)
+    attempt_list = attempt_sub.add_parser("list", help="List durable attempts")
+    attempt_list.add_argument("topic", nargs="?", help="Topic slug")
+    attempt_list.set_defaults(func=cmd_attempt_list)
+    for action, handler in (
+        ("inspect", cmd_attempt_inspect),
+        ("resume", cmd_attempt_resume),
+        ("abandon", cmd_attempt_abandon),
+        ("retry", cmd_attempt_retry),
+    ):
+        command = attempt_sub.add_parser(action, help=f"{action.title()} a durable attempt")
+        command.add_argument("attempt_id")
+        command.add_argument("--topic", default=None, help="Topic slug")
+        command.set_defaults(func=handler)
 
     delete_parser = sub.add_parser("delete", help="Delete a local learning topic")
     delete_parser.add_argument("topic", nargs="?", help="Topic slug")
@@ -2204,6 +2223,28 @@ def handle_repl_command(
             ),
             output_func=output_func,
         )
+    elif name == "attempt":
+        if not args or args[0] not in {"list", "inspect", "resume", "abandon", "retry"}:
+            raise OpenLearnError(
+                "usage: /attempt list | /attempt inspect|resume|abandon|retry <attempt_id>"
+            )
+        action = args[0]
+        slug = resolve_topic_slug(None)
+        if action == "list":
+            cmd_attempt_list(argparse.Namespace(topic=slug), output_func=output_func)
+        else:
+            if len(args) != 2:
+                raise OpenLearnError(f"usage: /attempt {action} <attempt_id>")
+            handler = {
+                "inspect": cmd_attempt_inspect,
+                "resume": cmd_attempt_resume,
+                "abandon": cmd_attempt_abandon,
+                "retry": cmd_attempt_retry,
+            }[action]
+            handler(
+                argparse.Namespace(topic=slug, attempt_id=args[1]),
+                output_func=output_func,
+            )
     elif name == "videos":
         count, rest = parse_videos_count(args)
         cmd_videos(
@@ -8374,6 +8415,9 @@ def orchestrate_tutor_coding_drill(
         return active
     if replacement:
         assert previous is not None
+        abandon_active_drill_attempt(
+            topic, "replaced by an accepted tutor-selected drill"
+        )
         transition_topic_activity(
             topic.slug,
             previous,
@@ -8387,6 +8431,7 @@ def orchestrate_tutor_coding_drill(
     try:
         path = write_tutor_drill_file(topic.slug, action)
         save_active_drill(topic.slug, path)
+        ensure_attempt_for_drill(topic, activity, path, snapshot=True)
     except (OSError, OpenLearnError) as exc:
         transition_topic_activity(topic.slug, activity, "failed", reason=str(exc))
         raise OpenLearnError(f"could not create drill workspace: {exc}") from exc
@@ -8567,6 +8612,9 @@ def cmd_drill(args: argparse.Namespace, output_func=print) -> int:
         drill = parse_drill_json(raw)
     previous_activity = active_topic_activity(topic.slug, domain="coding", kind="python_drill")
     if previous_activity is not None and previous_activity.get("status") == "active":
+        abandon_active_drill_attempt(
+            topic, "replaced by a new learner-requested drill"
+        )
         transition_topic_activity(
             topic.slug,
             previous_activity,
@@ -8604,6 +8652,7 @@ def cmd_drill(args: argparse.Namespace, output_func=print) -> int:
     try:
         path = write_drill_file(topic.slug, drill)
         save_active_drill(topic.slug, path)
+        ensure_attempt_for_drill(topic, activity, path, snapshot=True)
     except (OSError, OpenLearnError) as exc:
         transition_topic_activity(topic.slug, activity, "failed", reason=str(exc))
         raise OpenLearnError(f"could not create drill workspace: {exc}") from exc
@@ -8631,6 +8680,9 @@ def cmd_check(args: argparse.Namespace, output_func=print) -> int:
     topic = read_topic(resolve_topic_slug(args.topic))
     drill_path = active_drill_path(topic)
     activity = ensure_coding_drill_activity(topic, drill_path)
+    attempt = ensure_attempt_for_drill(topic, activity, drill_path, snapshot=True)
+    store = attempt_store()
+    attempt_id = str(attempt["attempt_id"])
     payload_namespace = activity.get("domain_payload")
     coding_payload = (
         payload_namespace.get("coding")
@@ -8653,6 +8705,7 @@ def cmd_check(args: argparse.Namespace, output_func=print) -> int:
             coding_payload,
             args.model,
             output_func,
+            attempt=attempt,
         )
     function_name = coding_payload.get("function_name")
     test_cases = coding_payload.get("test_cases")
@@ -8672,6 +8725,22 @@ def cmd_check(args: argparse.Namespace, output_func=print) -> int:
             "WARNING: reduced-isolation execution is not a sandbox. Learner code can "
             "access your account's files and network and may escape resource limits."
         )
+    for prior_run in attempt["test_runs"]:
+        if isinstance(prior_run, dict) and prior_run.get("outcome") == "pending":
+            try:
+                attempt = store.finish_test(
+                    topic.slug,
+                    attempt_id,
+                    str(prior_run["run_id"]),
+                    outcome="interrupted",
+                    output="The previous CLI process ended before the runner returned.",
+                )
+            except interview_attempts.AttemptError as exc:
+                raise OpenLearnError(f"could not recover interrupted test: {exc}") from exc
+    try:
+        attempt, run_id = store.start_test(topic.slug, attempt_id)
+    except interview_attempts.AttemptError as exc:
+        raise OpenLearnError(f"could not save test start: {exc}") from exc
     try:
         run_result = code_runner.run_python_tests(
             drill_path,
@@ -8680,6 +8749,18 @@ def cmd_check(args: argparse.Namespace, output_func=print) -> int:
             reduced_isolation=reduced_isolation,
         )
     except (OSError, ValueError, code_runner.RunnerUnavailableError) as exc:
+        try:
+            store.finish_test(
+                topic.slug,
+                attempt_id,
+                run_id,
+                outcome="runner_unavailable",
+                output=str(exc),
+            )
+        except interview_attempts.AttemptError as persistence_exc:
+            raise OpenLearnError(
+                f"runner failed and its attempt outcome could not be saved: {persistence_exc}"
+            ) from exc
         log_activity_tool_failure(topic.slug, activity, "run_drill_tests", exc)
         raise OpenLearnError(f"could not run drill tests: {exc}") from exc
     if run_result.kind == "runner_error":
@@ -8693,9 +8774,30 @@ def cmd_check(args: argparse.Namespace, output_func=print) -> int:
             f"({run_result.kind}{': ' + run_result.limit_reason if run_result.limit_reason else ''})"
             f"{': ' + detail[:500] if detail else ''}"
         )
+        try:
+            store.finish_test(
+                topic.slug,
+                attempt_id,
+                run_id,
+                outcome="runner_error",
+                output=detail,
+                limits={"reason": run_result.limit_reason},
+            )
+        except interview_attempts.AttemptError as exc:
+            raise OpenLearnError(f"could not save runner failure: {exc}") from exc
         log_activity_tool_failure(topic.slug, activity, "run_drill_tests", error)
         raise error
     if run_result.kind == "cancelled":
+        try:
+            store.finish_test(
+                topic.slug,
+                attempt_id,
+                run_id,
+                outcome="cancelled",
+                output="Learner cancelled the test run.",
+            )
+        except interview_attempts.AttemptError as exc:
+            raise OpenLearnError(f"could not save test cancellation: {exc}") from exc
         raise OpenLearnError("drill check cancelled; the active attempt was preserved")
     output = "\n".join(
         part
@@ -8708,6 +8810,22 @@ def cmd_check(args: argparse.Namespace, output_func=print) -> int:
             f"{' (' + run_result.limit_reason + ')' if run_result.limit_reason else ''}"
         )
         output = "\n".join(part for part in (outcome_summary, output) if part)
+    attempt_outcome = "passed" if run_result.passed else run_result.kind
+    try:
+        attempt = store.finish_test(
+            topic.slug,
+            attempt_id,
+            run_id,
+            outcome=attempt_outcome,
+            output=output,
+            limits={
+                "isolation": run_result.isolation,
+                "limit_reason": run_result.limit_reason,
+                "exit_code": run_result.exit_code,
+            },
+        )
+    except interview_attempts.AttemptError as exc:
+        raise OpenLearnError(f"could not save test outcome: {exc}") from exc
     refs = activity.get("evidence_refs")
     attempt_number = len(refs) + 1 if isinstance(refs, list) else 1
     hints = coding_payload.get("hints")
@@ -8737,8 +8855,27 @@ def cmd_check(args: argparse.Namespace, output_func=print) -> int:
             "tests_passed": run_result.passed,
         },
     )
+    attempt_evidence_refs = activity.get("evidence_refs")
+    if isinstance(attempt_evidence_refs, list) and attempt_evidence_refs:
+        latest_evidence = attempt_evidence_refs[-1]
+        if isinstance(latest_evidence, dict) and isinstance(
+            latest_evidence.get("evidence_id"), str
+        ):
+            try:
+                store.add_evidence(
+                    topic.slug,
+                    attempt_id,
+                    str(latest_evidence["evidence_id"]),
+                    kind="pytest_result",
+                )
+            except interview_attempts.AttemptError as exc:
+                raise OpenLearnError(f"could not link attempt evidence: {exc}") from exc
     if run_result.passed:
         activity = transition_topic_activity(topic.slug, activity, "completed")
+        try:
+            attempt = store.complete(topic.slug, attempt_id)
+        except interview_attempts.AttemptError as exc:
+            raise OpenLearnError(f"could not complete coding attempt: {exc}") from exc
     purpose = str(activity.get("purpose"))
     reflection = str(
         coding_payload.get("reflection_prompt")
@@ -8785,6 +8922,16 @@ def cmd_check(args: argparse.Namespace, output_func=print) -> int:
         model=model, system=system_prompt(topic), user=user, output_func=output_func
     )
     print_and_append_model_answer(topic, "check", user, answer, output_func=output_func)
+    if selected_hint:
+        try:
+            store.record_assistance(
+                topic.slug,
+                attempt_id,
+                hint=selected_hint,
+                intervention=answer[: interview_attempts.MAX_TEXT],
+            )
+        except interview_attempts.AttemptError as exc:
+            raise OpenLearnError(f"could not save tutor intervention: {exc}") from exc
     if run_result.passed:
         register_mastery_drill_reflection(
             topic,
@@ -8820,6 +8967,8 @@ def check_linked_coding_drill(
     coding_payload: dict[str, object],
     model: str | None,
     output_func=print,
+    *,
+    attempt: dict[str, object],
 ) -> int:
     """Return artifact feedback for official link-outs that intentionally have no tests."""
     try:
@@ -8835,6 +8984,19 @@ def check_linked_coding_drill(
         "artifact_snapshot",
         {"artifact_excerpt": artifact_excerpt, "attempt_number": attempt_number},
     )
+    refs_after = activity.get("evidence_refs")
+    if isinstance(refs_after, list) and refs_after:
+        latest = refs_after[-1]
+        if isinstance(latest, dict) and isinstance(latest.get("evidence_id"), str):
+            try:
+                attempt_store().add_evidence(
+                    topic.slug,
+                    str(attempt["attempt_id"]),
+                    str(latest["evidence_id"]),
+                    kind="artifact_snapshot",
+                )
+            except interview_attempts.AttemptError as exc:
+                raise OpenLearnError(f"could not link attempt evidence: {exc}") from exc
     reflection = str(
         coding_payload.get("reflection_prompt")
         or "Explain the approach, one edge case, and its complexity."
@@ -9080,6 +9242,119 @@ def drill_filename(title: str) -> str:
     return f"{slugify(title)}.py"
 
 
+def attempt_store() -> interview_attempts.AttemptStore:
+    return interview_attempts.AttemptStore(
+        topics_dir(),
+        file_lock,
+        write_text_atomic,
+        current_topic_generation,
+    )
+
+
+def legacy_attempt_problem_reference(
+    topic: Topic, activity: dict[str, object], workspace: Path
+) -> dict[str, object]:
+    payload = activity.get("domain_payload")
+    coding = payload.get("coding") if isinstance(payload, dict) else {}
+    if not isinstance(coding, dict):
+        coding = {}
+    supplied = coding.get("problem_reference")
+    if isinstance(supplied, dict):
+        try:
+            return interview_attempts.validate_problem_reference(supplied)
+        except interview_attempts.AttemptError as exc:
+            raise OpenLearnError(str(exc)) from exc
+    identity = {
+        "topic": topic.slug,
+        "title": coding.get("title") or workspace.stem,
+        "objective": activity.get("objective"),
+        "function_name": coding.get("function_name"),
+        "test_cases": coding.get("test_cases"),
+    }
+    canonical = json.dumps(identity, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    checksum = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return {
+        "catalog_id": "legacy-drill",
+        "catalog_revision": 1,
+        "problem_id": f"legacy-{checksum[:24]}",
+        "problem_revision": 1,
+        "problem_checksum": checksum,
+    }
+
+
+def ensure_attempt_for_drill(
+    topic: Topic,
+    activity: dict[str, object],
+    workspace: Path,
+    *,
+    snapshot: bool = False,
+) -> dict[str, object]:
+    store = attempt_store()
+    try:
+        record = store.find_for_workspace(topic.slug, workspace, unfinished_only=True)
+        if record is None:
+            generation = current_topic_generation(topic.slug)
+            if generation is None:
+                raise OpenLearnError("topic was deleted before the attempt could be saved")
+            payload = activity.get("domain_payload")
+            coding = payload.get("coding") if isinstance(payload, dict) else {}
+            if not isinstance(coding, dict):
+                coding = {}
+            scaffolding: list[str] = []
+            level = activity.get("scaffolding_level")
+            if isinstance(level, int) and level > 0:
+                scaffolding.append(f"scaffolding_level_{level}")
+            if coding.get("todo_steps"):
+                scaffolding.append("todo_steps")
+            if coding.get("worked_example"):
+                scaffolding.append("worked_example")
+            hints = coding.get("hints")
+            exposed_hints = (
+                [str(hints[0])]
+                if isinstance(hints, list)
+                and hints
+                and isinstance(hints[0], str)
+                and isinstance(level, int)
+                and level >= 2
+                else []
+            )
+            record = store.create(
+                topic=topic.slug,
+                topic_generation=generation,
+                problem=legacy_attempt_problem_reference(topic, activity, workspace),
+                workspace=workspace,
+                language=str(coding.get("language") or "python"),
+                activity_id=str(activity.get("activity_id") or ""),
+                purpose=str(activity.get("purpose") or "practice"),
+                profile_ref=(
+                    interview_profile_path(topic.slug).name
+                    if interview_profile_path(topic.slug).exists()
+                    else ""
+                ),
+                assistance={"hints": exposed_hints, "scaffolding": scaffolding},
+            )
+        if snapshot:
+            record = store.snapshot(topic.slug, str(record["attempt_id"]))
+        return record
+    except interview_attempts.AttemptError as exc:
+        raise OpenLearnError(f"could not persist coding attempt: {exc}") from exc
+
+
+def abandon_active_drill_attempt(topic: Topic, reason: str) -> None:
+    value = topic.metadata.get("active_drill")
+    if not isinstance(value, str) or not value.strip():
+        return
+    store = attempt_store()
+    try:
+        record = store.find_for_workspace(
+            topic.slug, Path(value).expanduser(), unfinished_only=True
+        )
+        if record is not None:
+            store.abandon(topic.slug, str(record["attempt_id"]), reason)
+    except interview_attempts.AttemptError as exc:
+        raise OpenLearnError(f"could not preserve the replaced coding attempt: {exc}") from exc
+
+
 def topic_drill_dir(slug: str) -> Path:
     path = topics_dir() / "drills" / slug
     path.mkdir(parents=True, exist_ok=True)
@@ -9237,6 +9512,90 @@ def active_drill_path(topic: Topic) -> Path:
     if not path.is_relative_to(owned_root):
         raise OpenLearnError(f"active drill is outside its owned workspace: {path}")
     return path
+
+
+def _attempt_topic(value: str | None) -> str:
+    return resolve_topic_slug(value)
+
+
+def cmd_attempt_list(args: argparse.Namespace, output_func=print) -> int:
+    slug = _attempt_topic(getattr(args, "topic", None))
+    try:
+        records = attempt_store().list(slug)
+    except interview_attempts.AttemptError as exc:
+        raise OpenLearnError(str(exc)) from exc
+    if not records:
+        output_func(f"No coding attempts for {slug}.")
+        return 0
+    for record in records:
+        problem = record["problem"]
+        assert isinstance(problem, dict)
+        output_func(
+            f"{record['attempt_id']}  {record['status']}  {record['purpose']}  "
+            f"{problem['problem_id']}@{problem['problem_revision']}  "
+            f"{record['last_active_at']}"
+        )
+    return 0
+
+
+def _load_cli_attempt(args: argparse.Namespace) -> tuple[str, dict[str, object]]:
+    slug = _attempt_topic(getattr(args, "topic", None))
+    try:
+        return slug, attempt_store().load(slug, str(args.attempt_id))
+    except interview_attempts.AttemptError as exc:
+        raise OpenLearnError(str(exc)) from exc
+
+
+def cmd_attempt_inspect(args: argparse.Namespace, output_func=print) -> int:
+    _slug, record = _load_cli_attempt(args)
+    output_func(json.dumps(record, indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_attempt_resume(args: argparse.Namespace, output_func=print) -> int:
+    slug, record = _load_cli_attempt(args)
+    store = attempt_store()
+    try:
+        record = store.resume(slug, str(record["attempt_id"]))
+        workspace = store.resolve_workspace(record)
+        store.snapshot(slug, str(record["attempt_id"]))
+    except interview_attempts.AttemptError as exc:
+        raise OpenLearnError(str(exc)) from exc
+    save_active_drill(slug, workspace)
+    output_func(f"Resuming {record['attempt_id']}: {workspace}")
+    try:
+        editor = open_drill_in_editor(workspace)
+    except OpenLearnError as exc:
+        output_func(str(exc))
+        return 0
+    output_func(f"Opened in {editor}. Continue the attempt, then type /check.")
+    return 0
+
+
+def cmd_attempt_abandon(args: argparse.Namespace, output_func=print) -> int:
+    slug, record = _load_cli_attempt(args)
+    try:
+        updated = attempt_store().abandon(
+            slug, str(record["attempt_id"]), "learner requested abandonment"
+        )
+    except interview_attempts.AttemptError as exc:
+        raise OpenLearnError(str(exc)) from exc
+    output_func(f"Abandoned {updated['attempt_id']}. The workspace was preserved.")
+    return 0
+
+
+def cmd_attempt_retry(args: argparse.Namespace, output_func=print) -> int:
+    slug, record = _load_cli_attempt(args)
+    try:
+        retried = attempt_store().retry(slug, str(record["attempt_id"]))
+        workspace = attempt_store().resolve_workspace(retried)
+    except interview_attempts.AttemptError as exc:
+        raise OpenLearnError(str(exc)) from exc
+    save_active_drill(slug, workspace)
+    output_func(
+        f"Created retry {retried['attempt_id']} from {record['attempt_id']}: {workspace}"
+    )
+    return 0
 
 
 def open_drill_in_editor(path: Path) -> str:
