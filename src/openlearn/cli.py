@@ -2392,8 +2392,20 @@ def interview_profile_values(args: argparse.Namespace) -> dict[str, object]:
     }
 
 
-def _interview_event_appender(slug: str) -> interview_prep.EventAppender:
-    return lambda event_type, data: log_event(slug, event_type, data)
+@contextlib.contextmanager
+def interview_profile_write_lock(slug: str):
+    """Serialize profile writes after the topic identity lock.
+
+    Topic deletion takes the same first lock, so it cannot race a profile write
+    into recreating adjacent state after the topic and tombstone are published.
+    """
+    with file_lock(topic_path(slug)), file_lock(interview_profile_path(slug)):
+        if (
+            not topic_path(slug).exists()
+            or topic_deletion_tombstone_path(slug).exists()
+        ):
+            raise OpenLearnError("topic was deleted during the interview-prep update")
+        yield
 
 
 def _load_interview_profile(slug: str) -> dict[str, object]:
@@ -2412,7 +2424,7 @@ def cmd_interview_setup(args: argparse.Namespace, output_func=print) -> int:
         raise OpenLearnError(f"topic not found: {slug}")
     path = interview_profile_path(slug)
     try:
-        with file_lock(path):
+        with interview_profile_write_lock(slug):
             value = interview_prep.create_profile(path, interview_profile_values(args))
     except ValueError as exc:
         raise OpenLearnError(str(exc)) from exc
@@ -2469,6 +2481,15 @@ def cmd_interview_profile(args: argparse.Namespace, output_func=print) -> int:
 def cmd_interview_edit(args: argparse.Namespace, output_func=print) -> int:
     slug = resolve_topic_slug(args.topic)
     path = interview_profile_path(slug)
+    current_profile = _load_interview_profile(slug)
+    current_placement = current_profile["placement"]
+    assert isinstance(current_placement, dict)
+    if current_placement.get("status") == "in_progress":
+        activity = _current_interview_activity(slug)
+        if activity is not None and activity.get("status") == "active":
+            transition_topic_activity(
+                slug, activity, "abandoned", reason="interview_profile_edited"
+            )
     value: object = args.value
     if args.field in {"weekly_minutes", "session_minutes"}:
         try:
@@ -2476,14 +2497,17 @@ def cmd_interview_edit(args: argparse.Namespace, output_func=print) -> int:
         except ValueError as exc:
             raise OpenLearnError(f"{args.field} must be a positive integer") from exc
     try:
-        with file_lock(path):
+        queued_events: list[tuple[str, dict[str, object]]] = []
+        with interview_profile_write_lock(slug):
             updated = interview_prep.edit_profile(
                 path,
                 {args.field: value},
-                _interview_event_appender(slug),
+                lambda event_type, data: queued_events.append((event_type, data)),
             )
     except ValueError as exc:
         raise OpenLearnError(str(exc)) from exc
+    for event_type, data in queued_events:
+        log_event(slug, event_type, data)
     placement = updated["placement"]
     assert isinstance(placement, dict)
     output_func(f"Updated {args.field}; profile revision {updated['profile_revision']}.")
@@ -2503,12 +2527,27 @@ def cmd_interview_clear(
         if confirmation.strip().lower() not in {"y", "yes"}:
             output_func("Cancelled.")
             return 0
+    current_profile = _load_interview_profile(slug)
+    current_placement = current_profile["placement"]
+    assert isinstance(current_placement, dict)
+    if current_placement.get("status") == "in_progress":
+        activity = _current_interview_activity(slug)
+        if activity is not None and activity.get("status") == "active":
+            transition_topic_activity(
+                slug, activity, "abandoned", reason="interview_profile_cleared"
+            )
     path = interview_profile_path(slug)
     try:
-        with file_lock(path):
-            interview_prep.clear_profile(path, _interview_event_appender(slug))
+        queued_events = []
+        with interview_profile_write_lock(slug):
+            interview_prep.clear_profile(
+                path,
+                lambda event_type, data: queued_events.append((event_type, data)),
+            )
     except ValueError as exc:
         raise OpenLearnError(str(exc)) from exc
+    for event_type, data in queued_events:
+        log_event(slug, event_type, data)
     output_func("Interview-prep profile cleared. Append-only attempt evidence was preserved.")
     return 0
 
@@ -2546,33 +2585,219 @@ def _print_placement_status(value: dict[str, object], output_func=print) -> None
         output_func(f"Next evidence: {placement['next_stage']}")
 
 
+def interview_placement_activity_request(
+    profile: dict[str, object],
+) -> dict[str, object]:
+    language = str(profile.get("coding_language") or "python")
+    return {
+        "domain": "coding",
+        "kind": "interview_problem",
+        "objective": "Establish a provisional coding-interview starting point.",
+        "concept_ids": ["coding_interview_baseline"],
+        "requested_evidence": ["interview_observation"],
+        "scaffolding_level": 0,
+        "purpose": "placement",
+        "domain_payload": {
+            "title": interview_prep.PLACEMENT_PROBLEM["title"],
+            "language": language,
+            "problem_id": interview_prep.PLACEMENT_PROBLEM["problem_id"],
+            "tool_requests": [],
+        },
+        "resources": [
+            {
+                "resource_id": str(interview_prep.PLACEMENT_PROBLEM["problem_id"]),
+                "source": str(interview_prep.PLACEMENT_PROBLEM["source"]),
+                "license": str(interview_prep.PLACEMENT_PROBLEM["license"]),
+            }
+        ],
+    }
+
+
+def _current_interview_activity(slug: str) -> dict[str, object] | None:
+    recover_activity_update(slug)
+    raw = load_state(slug).get("active_activity")
+    if raw is None:
+        return None
+    activity = _validated_persisted_activity(raw)
+    if activity.get("domain") != "coding" or activity.get("kind") != "interview_problem":
+        return None
+    return activity
+
+
+def _interview_activity_evidence(
+    slug: str, activity: dict[str, object]
+) -> list[tuple[str, str, str]]:
+    refs = activity.get("evidence_refs")
+    if not isinstance(refs, list):
+        return []
+    referenced_ids = {
+        str(ref["evidence_id"])
+        for ref in refs
+        if isinstance(ref, dict) and isinstance(ref.get("evidence_id"), str)
+    }
+    evidence: list[tuple[str, str, str]] = []
+    for event in load_event_log(topic_events_path(slug)):
+        if event.get("event_type") != "activity_evidence_recorded":
+            continue
+        data = event.get("data")
+        if (
+            not isinstance(data, dict)
+            or data.get("activity_id") != activity.get("activity_id")
+            or data.get("evidence_id") not in referenced_ids
+            or data.get("evidence_kind") != "interview_observation"
+        ):
+            continue
+        domain = data.get("domain_evidence")
+        coding = domain.get("coding") if isinstance(domain, dict) else None
+        if (
+            isinstance(coding, dict)
+            and isinstance(coding.get("stage"), str)
+            and isinstance(coding.get("response"), str)
+        ):
+            evidence.append(
+                (
+                    str(data["evidence_id"]),
+                    str(coding["stage"]),
+                    str(coding["response"]),
+                )
+            )
+    return evidence
+
+
+def sync_interview_placement(slug: str) -> dict[str, object]:
+    """Recover contract evidence into the profile projection idempotently."""
+    profile_value = _load_interview_profile(slug)
+    placement = profile_value["placement"]
+    assert isinstance(placement, dict)
+    activity = _current_interview_activity(slug)
+    if placement.get("status") == "in_progress" and (
+        activity is None or placement.get("activity_id") != activity.get("activity_id")
+    ):
+        raise OpenLearnError(
+            "interview placement activity reference does not match durable activity state"
+        )
+    if activity is None or placement.get("status") not in {"in_progress", "provisional"}:
+        return profile_value
+    existing_refs = placement.get("evidence_refs")
+    assert isinstance(existing_refs, list)
+    existing_ids = {
+        str(ref["evidence_id"])
+        for ref in existing_refs
+        if isinstance(ref, dict) and isinstance(ref.get("evidence_id"), str)
+    }
+    activity_ref_ids = {
+        str(ref["evidence_id"])
+        for ref in activity.get("evidence_refs", [])
+        if isinstance(ref, dict) and isinstance(ref.get("evidence_id"), str)
+    }
+    if not existing_ids <= activity_ref_ids:
+        raise OpenLearnError(
+            "interview profile evidence references do not match durable activity evidence"
+        )
+    recovered_evidence = _interview_activity_evidence(slug, activity)
+    with interview_profile_write_lock(slug):
+        for evidence_id, stage, response in recovered_evidence:
+            if evidence_id in existing_ids:
+                continue
+            if stage == "baseline":
+                profile_value = interview_prep.complete_with_baseline(
+                    interview_profile_path(slug),
+                    evidence_id=evidence_id,
+                    reason=response,
+                )
+            else:
+                profile_value = interview_prep.record_placement_evidence(
+                    interview_profile_path(slug),
+                    stage,
+                    response,
+                    evidence_id=evidence_id,
+                )
+            existing_ids.add(evidence_id)
+    placement = profile_value["placement"]
+    assert isinstance(placement, dict)
+    observations = placement.get("observations")
+    baseline_selected = isinstance(observations, dict) and "baseline" in observations
+    if placement.get("status") == "provisional" and activity.get("status") == "active":
+        transition_topic_activity(
+            slug,
+            activity,
+            "abandoned" if baseline_selected else "completed",
+            reason="learner_selected_less_demanding_baseline" if baseline_selected else "",
+        )
+    return profile_value
+
+
+def _begin_interview_activity(
+    slug: str, profile_value: dict[str, object]
+) -> dict[str, object]:
+    current = _current_interview_activity(slug)
+    if current is not None and current.get("status") == "active":
+        return current
+    profile = profile_value["profile"]
+    assert isinstance(profile, dict)
+    activity = propose_topic_activity(
+        slug, interview_placement_activity_request(profile)
+    )
+    activity = accept_topic_activity(slug, activity, learner_confirmed=True)
+    return transition_topic_activity(slug, activity, "active")
+
+
 def cmd_interview_placement(
     args: argparse.Namespace, input_func=input, output_func=print
 ) -> int:
     slug = resolve_topic_slug(args.topic)
     path = interview_profile_path(slug)
-    append_event = _interview_event_appender(slug)
     action = args.action
     try:
         if action == "status":
-            _print_placement_status(_load_interview_profile(slug), output_func)
+            _print_placement_status(sync_interview_placement(slug), output_func)
             return 0
-        with file_lock(path):
-            if action == "defer":
-                value = interview_prep.defer_placement(path, append_event)
-                _print_placement_status(value, output_func)
-                return 0
-            if action == "discard":
-                value = interview_prep.discard_placement(path, append_event)
-                output_func("Placement discarded. Append-only attempt evidence was preserved.")
-                _print_placement_status(value, output_func)
-                return 0
-            value = interview_prep.start_placement(path, append_event)
+        if action == "defer":
+            queued_events: list[tuple[str, dict[str, object]]] = []
+            with interview_profile_write_lock(slug):
+                value = interview_prep.defer_placement(
+                    path,
+                    lambda event_type, data: queued_events.append((event_type, data)),
+                )
+            for event_type, data in queued_events:
+                log_event(slug, event_type, data)
+            _print_placement_status(value, output_func)
+            return 0
+        if action == "discard":
+            value = sync_interview_placement(slug)
+            activity = _current_interview_activity(slug)
+            if activity is not None and activity.get("status") == "active":
+                transition_topic_activity(
+                    slug, activity, "abandoned", reason="learner_discarded_placement"
+                )
+            queued_events = []
+            with interview_profile_write_lock(slug):
+                value = interview_prep.discard_placement(
+                    path,
+                    lambda event_type, data: queued_events.append((event_type, data)),
+                )
+            for event_type, data in queued_events:
+                log_event(slug, event_type, data)
+            output_func("Placement discarded. Append-only attempt evidence was preserved.")
+            _print_placement_status(value, output_func)
+            return 0
+        value = sync_interview_placement(slug)
+        placement = value["placement"]
+        assert isinstance(placement, dict)
+        if placement.get("status") != "in_progress":
+            activity = _begin_interview_activity(slug, value)
+            with interview_profile_write_lock(slug):
+                value = interview_prep.start_placement(
+                    path,
+                    activity_id=str(activity["activity_id"]),
+                )
         output_func(
             "Bounded coding placement started. Type /stop to resume later, /discard to "
-            "discard this attempt, or /skip to record uncertainty for a stage."
+            "discard this attempt, /skip to leave one stage uncertain, or /baseline "
+            "to end with a reduced-demand baseline."
         )
         while True:
+            value = sync_interview_placement(slug)
             placement = value["placement"]
             assert isinstance(placement, dict)
             stage = placement.get("next_stage")
@@ -2589,16 +2814,54 @@ def cmd_interview_placement(
                 output_func("Placement saved. Resume when ready.")
                 return 0
             if command in {"/discard", "discard"}:
-                with file_lock(path):
-                    interview_prep.discard_placement(path, append_event)
+                activity = _current_interview_activity(slug)
+                if activity is not None and activity.get("status") == "active":
+                    transition_topic_activity(
+                        slug,
+                        activity,
+                        "abandoned",
+                        reason="learner_discarded_placement",
+                    )
+                queued_events = []
+                with interview_profile_write_lock(slug):
+                    interview_prep.discard_placement(
+                        path,
+                        lambda event_type, data: queued_events.append((event_type, data)),
+                    )
+                for event_type, data in queued_events:
+                    log_event(slug, event_type, data)
                 output_func("Placement discarded. Append-only attempt evidence was preserved.")
                 return 0
-            if command in {"/skip", "skip", "/baseline", "baseline"}:
-                response = f"Learner chose a less demanding baseline and skipped {stage}."
-            with file_lock(path):
-                value = interview_prep.record_placement_evidence(
-                    path, stage, response, append_event
+            activity = _current_interview_activity(slug)
+            if activity is None or activity.get("status") != "active":
+                raise OpenLearnError("validated interview placement activity is not active")
+            if command in {"/baseline", "baseline"}:
+                record_topic_activity_evidence(
+                    slug,
+                    activity,
+                    "interview_observation",
+                    {
+                        "stage": "baseline",
+                        "response": (
+                            f"Learner selected a less demanding baseline during {stage}."
+                        ),
+                    },
                 )
+                value = sync_interview_placement(slug)
+                output_func(
+                    "Placement ended with a learner-selected baseline. "
+                    "All unobserved axes remain uncertain."
+                )
+                break
+            if command in {"/skip", "skip"}:
+                response = f"Learner skipped {stage}; evidence remains uncertain."
+            record_topic_activity_evidence(
+                slug,
+                activity,
+                "interview_observation",
+                {"stage": stage, "response": response},
+            )
+            value = sync_interview_placement(slug)
         output_func("Placement complete. Results are provisional and grant no mastery.")
         return cmd_interview_profile(argparse.Namespace(topic=slug), output_func=output_func)
     except ValueError as exc:
@@ -2691,10 +2954,11 @@ def cmd_new(args: argparse.Namespace, output_func=print) -> int:
     if template is not None:
         output_func(f"Template '{template.name}' loaded ({len(template.units)} units).")
     if getattr(args, "interview_prep", False):
-        interview_prep.create_profile(
-            interview_profile_path(slug),
-            default_interview_profile_values(),
-        )
+        with interview_profile_write_lock(slug):
+            interview_prep.create_profile(
+                interview_profile_path(slug),
+                default_interview_profile_values(),
+            )
         log_event(
             slug,
             "interview_profile_created",

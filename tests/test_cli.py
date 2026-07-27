@@ -400,6 +400,184 @@ class CliStorageTests(unittest.TestCase):
         self.assertFalse(completed["placement"]["result"]["mastery_update_applied"])
         self.assertEqual(cli.load_state("algorithms").get("concept_attempts"), None)
 
+        activity = cli._current_interview_activity("algorithms")
+        self.assertEqual(activity["status"], "completed")
+        self.assertEqual(activity["purpose"], "placement")
+        self.assertEqual(len(activity["evidence_refs"]), 7)
+        evidence_events = [
+            event
+            for event in cli.load_event_log(cli.topic_events_path("algorithms"))
+            if event.get("event_type") == "activity_evidence_recorded"
+        ]
+        self.assertTrue(evidence_events)
+        self.assertTrue(
+            all(
+                event["data"]["evidence_kind"] == "interview_observation"
+                and event["data"]["mastery_update_applied"] is False
+                for event in evidence_events
+            )
+        )
+
+    def test_interview_placement_recovers_activity_evidence_after_fault(self) -> None:
+        call_silent(
+            cli.cmd_new,
+            Namespace(
+                topic="Algorithms",
+                goal="Practice algorithms",
+                interview_prep=True,
+                mastery_profile=None,
+                template=None,
+            ),
+        )
+        cli.cmd_interview_placement(
+            Namespace(topic="algorithms", action="start"),
+            input_func=lambda _prompt: "/stop",
+            output_func=lambda _line: None,
+        )
+        original_checkpoint = cli._activity_update_checkpoint
+
+        def fail_after_event(stage: str) -> None:
+            if stage == "after_event":
+                raise RuntimeError("simulated process exit after activity event")
+
+        cli._activity_update_checkpoint = fail_after_event
+        try:
+            with self.assertRaisesRegex(RuntimeError, "simulated process exit"):
+                cli.cmd_interview_placement(
+                    Namespace(topic="algorithms", action="resume"),
+                    input_func=lambda _prompt: "I write Python weekly.",
+                    output_func=lambda _line: None,
+                )
+        finally:
+            cli._activity_update_checkpoint = original_checkpoint
+
+        cli.cmd_interview_placement(
+            Namespace(topic="algorithms", action="resume"),
+            input_func=lambda _prompt: "/stop",
+            output_func=lambda _line: None,
+        )
+        profile = cli.interview_prep.load_profile(
+            cli.interview_profile_path("algorithms")
+        )
+        self.assertEqual(profile["placement"]["next_stage"], "clarification")
+        self.assertEqual(len(profile["placement"]["evidence_refs"]), 1)
+        evidence_events = [
+            event
+            for event in cli.load_event_log(cli.topic_events_path("algorithms"))
+            if event.get("event_type") == "activity_evidence_recorded"
+        ]
+        self.assertEqual(len(evidence_events), 1)
+
+    def test_interview_baseline_is_distinct_and_abandons_activity(self) -> None:
+        call_silent(
+            cli.cmd_new,
+            Namespace(
+                topic="Algorithms",
+                goal="Practice algorithms",
+                interview_prep=True,
+                mastery_profile=None,
+                template=None,
+            ),
+        )
+        cli.cmd_interview_placement(
+            Namespace(topic="algorithms", action="start"),
+            input_func=lambda _prompt: "/baseline",
+            output_func=lambda _line: None,
+        )
+
+        profile = cli.interview_prep.load_profile(
+            cli.interview_profile_path("algorithms")
+        )
+        activity = cli._current_interview_activity("algorithms")
+        self.assertEqual(
+            profile["placement"]["result"]["starting_level"],
+            "learner-selected-baseline",
+        )
+        self.assertEqual(activity["status"], "abandoned")
+        self.assertEqual(
+            activity["status_reason"], "learner_selected_less_demanding_baseline"
+        )
+
+    def test_interview_profile_write_cannot_recreate_after_concurrent_delete(self) -> None:
+        call_silent(
+            cli.cmd_new,
+            Namespace(
+                topic="Algorithms",
+                goal="Practice algorithms",
+                interview_prep=True,
+                mastery_profile=None,
+                template=None,
+            ),
+        )
+        entered = threading.Event()
+        release = threading.Event()
+        errors: list[BaseException] = []
+        original_checkpoint = cli.interview_prep._write_checkpoint
+
+        def block_before_replace(stage: str, _path: Path) -> None:
+            if stage == "before_replace":
+                entered.set()
+                release.wait(timeout=5)
+
+        cli.interview_prep._write_checkpoint = block_before_replace
+
+        def run_placement() -> None:
+            try:
+                cli.cmd_interview_placement(
+                    Namespace(topic="algorithms", action="start"),
+                    input_func=lambda _prompt: "/stop",
+                    output_func=lambda _line: None,
+                )
+            except BaseException as exc:
+                errors.append(exc)
+
+        placement_thread = threading.Thread(target=run_placement)
+        deletion_thread = threading.Thread(
+            target=lambda: cli.delete_topic_files("algorithms")
+        )
+        try:
+            placement_thread.start()
+            self.assertTrue(entered.wait(timeout=5))
+            deletion_thread.start()
+            release.set()
+            placement_thread.join(timeout=5)
+            deletion_thread.join(timeout=5)
+        finally:
+            cli.interview_prep._write_checkpoint = original_checkpoint
+            release.set()
+
+        self.assertFalse(placement_thread.is_alive())
+        self.assertFalse(deletion_thread.is_alive())
+        self.assertFalse(cli.topic_path("algorithms").exists())
+        self.assertFalse(cli.interview_profile_path("algorithms").exists())
+        self.assertTrue(
+            not errors
+            or all(isinstance(error, cli.OpenLearnError) for error in errors)
+        )
+
+    def test_malformed_interview_profile_surfaces_clear_cli_error(self) -> None:
+        call_silent(
+            cli.cmd_new,
+            Namespace(
+                topic="Algorithms",
+                goal="Practice algorithms",
+                interview_prep=True,
+                mastery_profile=None,
+                template=None,
+            ),
+        )
+        cli.interview_profile_path("algorithms").write_text(
+            '{"schema_version": 1, "profile": {}, "placement": "broken"}',
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(
+            cli.OpenLearnError, "interview-prep profile has an unsupported format"
+        ):
+            cli.cmd_interview_profile(
+                Namespace(topic="algorithms"), output_func=lambda _line: None
+            )
+
     def test_delayed_retrieval_metric_counts_spaced_review_and_quiz_events(self) -> None:
         path = Path(self.home.name) / "events.jsonl"
         events = [

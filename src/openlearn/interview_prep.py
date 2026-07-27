@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import os
+import re
 import tempfile
 from collections.abc import Callable, Mapping
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -58,6 +60,10 @@ def _timestamp(now: Clock) -> str:
     return now().astimezone(timezone.utc).isoformat()
 
 
+def _write_checkpoint(_stage: str, _path: Path) -> None:
+    """Test seam for deterministic interruption around profile publication."""
+
+
 def _write(path: Path, value: Mapping[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     text = json.dumps(value, indent=2, sort_keys=True) + "\n"
@@ -67,7 +73,9 @@ def _write(path: Path, value: Mapping[str, object]) -> None:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
+        _write_checkpoint("before_replace", path)
         os.replace(temporary, path)
+        _write_checkpoint("after_replace", path)
     finally:
         try:
             os.unlink(temporary)
@@ -82,7 +90,20 @@ def load_profile(path: Path) -> dict[str, object]:
         raise ValueError("interview-prep profile does not exist") from exc
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError("interview-prep profile is unreadable") from exc
-    if not isinstance(value, dict) or value.get("schema_version") != PROFILE_SCHEMA_VERSION:
+    if (
+        not isinstance(value, dict)
+        or set(value)
+        != {
+            "schema_version",
+            "profile_revision",
+            "created_at",
+            "updated_at",
+            "profile",
+            "placement",
+            "recommendations",
+        }
+        or value.get("schema_version") != PROFILE_SCHEMA_VERSION
+    ):
         raise ValueError("interview-prep profile has an unsupported format")
     profile = value.get("profile")
     placement = value.get("placement")
@@ -97,6 +118,16 @@ def load_profile(path: Path) -> dict[str, object]:
         raise ValueError("interview-prep profile is malformed")
     if _normalized_profile(profile) != profile:
         raise ValueError("interview-prep profile is not canonical")
+    _validated_timestamp(value.get("created_at"), "profile created_at")
+    _validated_timestamp(value.get("updated_at"), "profile updated_at")
+    _validate_placement(placement)
+    if placement.get("status") in {"in_progress", "provisional"} and (
+        placement.get("profile_revision") != revision
+    ):
+        raise ValueError(
+            "interview-prep placement does not match the current profile revision"
+        )
+    _validate_recommendations(value.get("recommendations"), expected_revision=revision)
     return value
 
 
@@ -150,6 +181,207 @@ def _empty_placement() -> dict[str, object]:
     }
 
 
+def _validated_timestamp(value: object, label: str, *, optional: bool = False) -> None:
+    if optional and value is None:
+        return
+    if not isinstance(value, str):
+        raise ValueError(f"interview-prep {label} is invalid")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"interview-prep {label} is invalid") from exc
+    if parsed.tzinfo is None:
+        raise ValueError(f"interview-prep {label} must include a timezone")
+
+
+def _validate_placement(placement: Mapping[str, object]) -> None:
+    if set(placement) != set(_empty_placement()):
+        raise ValueError("interview-prep placement state is malformed")
+    status = placement.get("status")
+    if status not in {
+        "not_started",
+        "deferred",
+        "in_progress",
+        "provisional",
+        "stale",
+    }:
+        raise ValueError("interview-prep placement status is invalid")
+    if placement.get("rubric_version") != PLACEMENT_RUBRIC_VERSION:
+        raise ValueError("interview-prep placement rubric is unsupported")
+    activity_id = placement.get("activity_id")
+    if activity_id is not None and (
+        not isinstance(activity_id, str)
+        or re.fullmatch(r"act_[a-f0-9]{32}", activity_id) is None
+    ):
+        raise ValueError("interview-prep placement activity reference is invalid")
+    attempt_id = placement.get("attempt_id")
+    if attempt_id is not None and (
+        not isinstance(attempt_id, str)
+        or re.fullmatch(r"interview_attempt_[a-f0-9]{32}", attempt_id) is None
+    ):
+        raise ValueError("interview-prep placement attempt reference is invalid")
+    for key in ("started_at", "updated_at", "completed_at"):
+        _validated_timestamp(
+            placement.get(key), f"placement {key}", optional=True
+        )
+    placement_revision = placement.get("profile_revision")
+    if placement_revision is not None and (
+        not isinstance(placement_revision, int)
+        or isinstance(placement_revision, bool)
+        or placement_revision < 1
+    ):
+        raise ValueError("interview-prep placement profile revision is invalid")
+    problem_id = placement.get("problem_id")
+    if problem_id is not None and problem_id != PLACEMENT_PROBLEM["problem_id"]:
+        raise ValueError("interview-prep placement problem reference is invalid")
+    next_stage = placement.get("next_stage")
+    if next_stage is not None and next_stage not in PLACEMENT_STAGES:
+        raise ValueError("interview-prep placement next stage is invalid")
+    refs = placement.get("evidence_refs")
+    if not isinstance(refs, list) or len(refs) > len(PLACEMENT_STAGES) + 1:
+        raise ValueError("interview-prep placement evidence references are invalid")
+    for ref in refs:
+        if (
+            not isinstance(ref, dict)
+            or set(ref) != {"evidence_id", "event_type"}
+            or ref.get("event_type") != "activity_evidence_recorded"
+            or not isinstance(ref.get("evidence_id"), str)
+            or re.fullmatch(r"evidence_[a-f0-9]{32}", str(ref["evidence_id"])) is None
+        ):
+            raise ValueError("interview-prep placement evidence reference is invalid")
+    observations = placement.get("observations")
+    if not isinstance(observations, dict) or not set(observations) <= {
+        *PLACEMENT_STAGES,
+        "baseline",
+    }:
+        raise ValueError("interview-prep placement observations are invalid")
+    for stage, observation in observations.items():
+        if (
+            not isinstance(observation, dict)
+            or set(observation)
+            != {"status", "substantive", "skipped", "non_attempt", "signals"}
+            or observation.get("status")
+            not in {"observed", "not_observed", "uncertain"}
+            or not isinstance(observation.get("signals"), list)
+            or not all(isinstance(item, str) for item in observation["signals"])
+            or not isinstance(observation.get("substantive"), bool)
+            or not isinstance(observation.get("skipped"), bool)
+            or not isinstance(observation.get("non_attempt"), bool)
+        ):
+            raise ValueError(
+                f"interview-prep placement observation for {stage} is malformed"
+            )
+    result = placement.get("result")
+    if result is not None:
+        _validate_result(result)
+    if status in {"not_started", "deferred"} and any(
+        placement.get(key) is not None
+        for key in (
+            "attempt_id",
+            "activity_id",
+            "started_at",
+            "completed_at",
+            "profile_revision",
+            "problem_id",
+            "next_stage",
+            "result",
+        )
+    ):
+        raise ValueError("interview-prep empty placement state is inconsistent")
+    if status == "in_progress" and (
+        activity_id is None
+        or attempt_id is None
+        or next_stage is None
+        or result is not None
+        or placement.get("completed_at") is not None
+    ):
+        raise ValueError("interview-prep active placement state is inconsistent")
+    if status in {"provisional", "stale"} and (
+        activity_id is None
+        or attempt_id is None
+        or next_stage is not None
+        or result is None
+        or not isinstance(placement.get("completed_at"), str)
+    ):
+        raise ValueError("interview-prep completed placement state is inconsistent")
+
+
+def _validate_result(result: object) -> None:
+    if not isinstance(result, dict) or set(result) != {
+        "provisional",
+        "starting_level",
+        "mastery_update_applied",
+        "patterns_marked_known",
+        "gaps",
+        "uncertainty",
+    }:
+        raise ValueError("interview-prep placement result is malformed")
+    if (
+        result.get("provisional") is not True
+        or result.get("mastery_update_applied") is not False
+        or result.get("patterns_marked_known") != []
+        or not isinstance(result.get("starting_level"), str)
+        or not isinstance(result.get("uncertainty"), list)
+    ):
+        raise ValueError("interview-prep placement result is invalid")
+    gaps = result.get("gaps")
+    if not isinstance(gaps, dict) or set(gaps) != {
+        "prerequisites",
+        "coding_fluency",
+        "reasoning",
+        "interview_process",
+    }:
+        raise ValueError("interview-prep placement gap result is invalid")
+    for detail in gaps.values():
+        if (
+            not isinstance(detail, dict)
+            or set(detail) != {"status", "evidence", "note"}
+            or detail.get("status") not in {"observed", "not_observed", "uncertain"}
+            or not isinstance(detail.get("evidence"), list)
+            or not isinstance(detail.get("note"), str)
+        ):
+            raise ValueError("interview-prep placement gap detail is invalid")
+
+
+def _validate_recommendations(
+    recommendations: object, *, expected_revision: int
+) -> None:
+    if recommendations is None:
+        return
+    if not isinstance(recommendations, dict):
+        raise ValueError("interview-prep recommendations are malformed")
+    required = {
+        "profile_revision",
+        "weekly_minutes",
+        "session_minutes",
+        "sessions_per_week",
+        "target",
+        "horizon",
+        "priorities",
+    }
+    if set(recommendations) != required:
+        raise ValueError("interview-prep recommendations are malformed")
+    if (
+        not all(
+            isinstance(recommendations[key], int)
+            and not isinstance(recommendations[key], bool)
+            and int(recommendations[key]) > 0
+            for key in (
+                "profile_revision",
+                "weekly_minutes",
+                "session_minutes",
+                "sessions_per_week",
+            )
+        )
+        or recommendations["profile_revision"] != expected_revision
+        or not isinstance(recommendations["target"], str)
+        or not isinstance(recommendations["horizon"], str)
+        or not isinstance(recommendations["priorities"], list)
+        or not all(isinstance(item, str) for item in recommendations["priorities"])
+    ):
+        raise ValueError("interview-prep recommendations are invalid")
+
+
 def create_profile(
     path: Path, values: Mapping[str, object], *, now: Clock = _utcnow
 ) -> dict[str, object]:
@@ -196,8 +428,7 @@ def edit_profile(
         placement["status"] = "stale"
         placement["updated_at"] = _timestamp(now)
     elif placement.get("status") == "in_progress":
-        placement["status"] = "stale"
-        placement["updated_at"] = _timestamp(now)
+        value["placement"] = _empty_placement()
     _write(path, value)
     append_event(
         "interview_profile_edited",
@@ -249,7 +480,10 @@ def defer_placement(
 
 
 def start_placement(
-    path: Path, append_event: EventAppender, *, now: Clock = _utcnow
+    path: Path,
+    *,
+    activity_id: str,
+    now: Clock = _utcnow,
 ) -> dict[str, object]:
     value = refresh_staleness(path, now=now)
     placement = value["placement"]
@@ -262,7 +496,7 @@ def start_placement(
             **_empty_placement(),
             "status": "in_progress",
             "attempt_id": f"interview_attempt_{uuid4().hex}",
-            "activity_id": f"act_{uuid4().hex}",
+            "activity_id": activity_id,
             "started_at": timestamp,
             "updated_at": timestamp,
             "profile_revision": value["profile_revision"],
@@ -272,18 +506,6 @@ def start_placement(
     )
     value["recommendations"] = None
     _write(path, value)
-    append_event(
-        "interview_placement_started",
-        {
-            "attempt_id": placement["attempt_id"],
-            "activity_id": placement["activity_id"],
-            "rubric_version": PLACEMENT_RUBRIC_VERSION,
-            "profile_revision": value["profile_revision"],
-            "problem": dict(PLACEMENT_PROBLEM),
-            "purpose": "placement",
-            "mastery_update_applied": False,
-        },
-    )
     return value
 
 
@@ -301,9 +523,10 @@ def discard_placement(
     value["recommendations"] = None
     _write(path, value)
     append_event(
-        "interview_placement_discarded",
+        "interview_placement_state_discarded",
         {
             "attempt_id": attempt_id,
+            "activity_id": placement.get("activity_id"),
             "evidence_refs": refs,
             "attempt_evidence_deleted": False,
             "discarded_at": _timestamp(now),
@@ -316,8 +539,8 @@ def record_placement_evidence(
     path: Path,
     stage: str,
     response: str,
-    append_event: EventAppender,
     *,
+    evidence_id: str,
     now: Clock = _utcnow,
 ) -> dict[str, object]:
     value = load_profile(path)
@@ -333,26 +556,12 @@ def record_placement_evidence(
     response = response.strip()
     if len(response) > 40_000:
         raise ValueError("placement evidence is too large")
-    evidence_id = f"evidence_{uuid4().hex}"
-    append_event(
-        "interview_placement_evidence",
-        {
-            "evidence_id": evidence_id,
-            "attempt_id": placement["attempt_id"],
-            "activity_id": placement["activity_id"],
-            "rubric_version": PLACEMENT_RUBRIC_VERSION,
-            "evidence_kind": stage,
-            "domain_evidence": {"coding": {"response": response}},
-            "mastery_update_applied": False,
-        },
-    )
     refs = placement.get("evidence_refs")
     assert isinstance(refs, list)
     refs.append(
         {
             "evidence_id": evidence_id,
-            "event_type": "interview_placement_evidence",
-            "evidence_kind": stage,
+            "event_type": "activity_evidence_recorded",
         }
     )
     observations = placement.get("observations")
@@ -367,18 +576,54 @@ def record_placement_evidence(
         placement["status"] = "provisional"
         placement["completed_at"] = _timestamp(now)
         placement["result"] = _provisional_result(observations)
-        value["recommendations"] = _recommendations(value)
-        append_event(
-            "interview_placement_completed",
-            {
-                "attempt_id": placement["attempt_id"],
-                "activity_id": placement["activity_id"],
-                "rubric_version": PLACEMENT_RUBRIC_VERSION,
-                "evidence_refs": list(refs),
-                "result": placement["result"],
-                "mastery_update_applied": False,
-            },
-        )
+        value["recommendations"] = _recommendations(value, current_date=now().date())
+    _write(path, value)
+    return value
+
+
+def complete_with_baseline(
+    path: Path,
+    *,
+    evidence_id: str,
+    reason: str,
+    now: Clock = _utcnow,
+) -> dict[str, object]:
+    value = load_profile(path)
+    placement = value["placement"]
+    assert isinstance(placement, dict)
+    if placement.get("status") != "in_progress":
+        raise ValueError("placement is not in progress")
+    refs = placement["evidence_refs"]
+    observations = placement["observations"]
+    assert isinstance(refs, list) and isinstance(observations, dict)
+    refs.append(
+        {
+            "evidence_id": evidence_id,
+            "event_type": "activity_evidence_recorded",
+        }
+    )
+    observations["baseline"] = {
+        "status": "uncertain",
+        "substantive": bool(reason.strip()),
+        "skipped": False,
+        "non_attempt": False,
+        "signals": ["learner_selected_baseline"],
+    }
+    timestamp = _timestamp(now)
+    placement["status"] = "provisional"
+    placement["next_stage"] = None
+    placement["updated_at"] = timestamp
+    placement["completed_at"] = timestamp
+    result = _provisional_result(observations)
+    result["starting_level"] = "learner-selected-baseline"
+    uncertainty = result["uncertainty"]
+    assert isinstance(uncertainty, list)
+    uncertainty.insert(
+        0,
+        "The learner selected a reduced-demand baseline before full placement evidence.",
+    )
+    placement["result"] = result
+    value["recommendations"] = _recommendations(value, current_date=now().date())
     _write(path, value)
     return value
 
@@ -386,88 +631,132 @@ def record_placement_evidence(
 def _evidence_observation(stage: str, response: str) -> dict[str, object]:
     normalized = response.lower()
     skipped = "skipped" in normalized or "less demanding baseline" in normalized
+    non_attempt = bool(
+        re.search(
+            r"\b(?:i\s+(?:do not|don't|cannot|can't|could not|couldn't)\s+"
+            r"(?:know|do|answer|implement|explain)|no idea|unable to|not sure how)\b",
+            normalized,
+        )
+    )
     signals: list[str] = []
-    if stage == "clarification" and "?" in response:
+    if not skipped and not non_attempt and stage == "clarification" and "?" in response:
         signals.append("asked_clarifying_question")
-    if stage == "plan" and any(
+    if not skipped and not non_attempt and stage == "plan" and any(
         term in normalized for term in ("set", "dict", "map", "window", "index")
     ):
         signals.append("named_data_structure_or_strategy")
-    if stage == "implementation":
-        if any(term in normalized for term in ("def ", "function ", "fn ")):
+    if not skipped and not non_attempt and stage == "implementation":
+        try:
+            tree = ast.parse(response)
+        except SyntaxError:
+            tree = None
+        functions = (
+            [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)]
+            if tree is not None
+            else []
+        )
+        if functions:
             signals.append("produced_function")
-        if "return" in normalized:
+        if any(
+            isinstance(node, ast.Return) and node.value is not None
+            for function in functions
+            for node in ast.walk(function)
+        ):
             signals.append("produced_return_path")
-    if stage == "tests" and any(
+    if not skipped and not non_attempt and stage == "tests" and any(
         term in normalized for term in ("empty", "edge", "duplicate", "no match", "assert")
     ):
         signals.append("named_edge_case")
-    if stage == "complexity" and ("o(" in normalized or "complexity" in normalized):
+    if (
+        not skipped
+        and not non_attempt
+        and stage == "complexity"
+        and re.search(r"\bo\s*\([^)]{1,30}\)", normalized)
+    ):
         signals.append("stated_complexity")
-    if stage == "follow_up" and len(response.split()) >= 5:
+    if (
+        not skipped
+        and not non_attempt
+        and stage == "follow_up"
+        and len(response.split()) >= 5
+    ):
         signals.append("engaged_with_follow_up")
+    required_by_stage = {
+        "clarification": {"asked_clarifying_question"},
+        "plan": {"named_data_structure_or_strategy"},
+        "implementation": {"produced_function", "produced_return_path"},
+        "tests": {"named_edge_case"},
+        "complexity": {"stated_complexity"},
+        "follow_up": {"engaged_with_follow_up"},
+    }
+    required = required_by_stage.get(stage, set())
+    status = (
+        "uncertain"
+        if skipped
+        else "not_observed"
+        if non_attempt or (required and not required <= set(signals))
+        else "observed"
+    )
     return {
-        "substantive": not skipped and len(response.split()) >= 3,
+        "status": status,
+        "substantive": not skipped and not non_attempt and len(response.split()) >= 3,
         "skipped": skipped,
+        "non_attempt": non_attempt,
         "signals": signals,
     }
 
 
-def _observation_has(
-    observations: Mapping[str, object], stage: str, signal: str
-) -> bool:
+def _observation_status(observations: Mapping[str, object], stage: str) -> str:
     value = observations.get(stage)
-    return (
-        isinstance(value, dict)
-        and value.get("skipped") is not True
-        and isinstance(value.get("signals"), list)
-        and signal in value["signals"]
-    )
+    if isinstance(value, dict) and value.get("status") in {
+        "observed",
+        "not_observed",
+        "uncertain",
+    }:
+        return str(value["status"])
+    return "uncertain"
+
+
+def _axis_status(observations: Mapping[str, object], stages: tuple[str, ...]) -> str:
+    statuses = {_observation_status(observations, stage) for stage in stages}
+    if statuses == {"observed"}:
+        return "observed"
+    if "not_observed" in statuses:
+        return "not_observed"
+    return "uncertain"
 
 
 def _provisional_result(observations: Mapping[str, object]) -> dict[str, object]:
-    prerequisite_observed = _observation_has(
-        observations, "plan", "named_data_structure_or_strategy"
+    axis_statuses = {
+        "prerequisites": _axis_status(observations, ("plan",)),
+        "coding_fluency": _axis_status(observations, ("implementation", "tests")),
+        "reasoning": _axis_status(observations, ("plan", "complexity", "follow_up")),
+        "interview_process": _axis_status(
+            observations, ("clarification", "tests", "follow_up")
+        ),
+    }
+    not_observed_count = sum(
+        status == "not_observed" for status in axis_statuses.values()
     )
-    implementation_observed = _observation_has(
-        observations, "implementation", "produced_function"
-    ) and _observation_has(observations, "implementation", "produced_return_path")
-    tests_observed = _observation_has(observations, "tests", "named_edge_case")
-    reasoning_observed = prerequisite_observed and _observation_has(
-        observations, "complexity", "stated_complexity"
-    )
-    process_observed = _observation_has(
-        observations, "clarification", "asked_clarifying_question"
-    ) and _observation_has(observations, "follow_up", "engaged_with_follow_up")
-    likely_gap_count = sum(
-        not signal
-        for signal in (
-            prerequisite_observed,
-            implementation_observed and tests_observed,
-            reasoning_observed,
-            process_observed,
-        )
-    )
+    uncertain_count = sum(status == "uncertain" for status in axis_statuses.values())
     gaps: dict[str, dict[str, object]] = {
         "prerequisites": {
-            "status": "observed" if prerequisite_observed else "likely_gap",
+            "status": axis_statuses["prerequisites"],
             "evidence": ["plan", "implementation"],
             "note": "Data-structure prerequisites need confirmation through later retrieval.",
         },
         "coding_fluency": {
-            "status": (
-                "observed" if implementation_observed and tests_observed else "likely_gap"
-            ),
+            "status": axis_statuses["coding_fluency"],
             "evidence": ["implementation", "tests"],
             "note": "Placement observes production fluency but does not establish mastery.",
         },
         "reasoning": {
-            "status": "observed" if reasoning_observed else "likely_gap",
+            "status": axis_statuses["reasoning"],
             "evidence": ["plan", "complexity", "follow_up"],
             "note": "Reasoning remains provisional until repeated on a novel problem.",
         },
         "interview_process": {
-            "status": "observed" if process_observed else "likely_gap",
+            "status": axis_statuses["interview_process"],
             "evidence": ["clarification", "tests", "follow_up"],
             "note": "Interview-format familiarity is separate from prerequisite knowledge.",
         },
@@ -476,9 +765,11 @@ def _provisional_result(observations: Mapping[str, object]) -> dict[str, object]
         "provisional": True,
         "starting_level": (
             "foundational"
-            if likely_gap_count >= 3
+            if not_observed_count >= 3
             else "developing"
-            if likely_gap_count
+            if not_observed_count
+            else "uncertain-baseline"
+            if uncertain_count
             else "observed-interview-baseline"
         ),
         "mastery_update_applied": False,
@@ -491,7 +782,9 @@ def _provisional_result(observations: Mapping[str, object]) -> dict[str, object]
     }
 
 
-def _recommendations(value: Mapping[str, object]) -> dict[str, object]:
+def _recommendations(
+    value: Mapping[str, object], *, current_date: date
+) -> dict[str, object]:
     profile = value["profile"]
     assert isinstance(profile, dict)
     weekly = profile["weekly_minutes"]
@@ -502,17 +795,54 @@ def _recommendations(value: Mapping[str, object]) -> dict[str, object]:
     scheduled = min(weekly, sessions * session)
     role = str(profile.get("role_family") or "general SWE")
     level = str(profile.get("target_level") or "target")
+    interview_date = str(profile.get("interview_date") or "")
+    horizon_days: int | None = None
+    if interview_date:
+        try:
+            horizon_days = (date.fromisoformat(interview_date) - current_date).days
+        except ValueError:
+            horizon_days = None
+    horizon = (
+        "open-ended"
+        if horizon_days is None
+        else "urgent"
+        if horizon_days <= 28
+        else "near-term"
+        if horizon_days <= 84
+        else "long-range"
+    )
+    placement = value["placement"]
+    assert isinstance(placement, dict)
+    result = placement.get("result")
+    gaps = result.get("gaps") if isinstance(result, dict) else {}
+    axis_labels = {
+        "prerequisites": "Rebuild the prerequisite data structures needed for the target bar.",
+        "coding_fluency": "Practice producing and testing complete code in the preferred language.",
+        "reasoning": "Make plans, invariants, and complexity tradeoffs explicit on novel problems.",
+        "interview_process": "Rehearse clarification and follow-up discussion in interview format.",
+    }
+    priorities = [
+        text
+        for axis, text in axis_labels.items()
+        if not isinstance(gaps, dict)
+        or not isinstance(gaps.get(axis), dict)
+        or gaps[axis].get("status") != "observed"
+    ]
+    if horizon == "urgent":
+        process = axis_labels["interview_process"]
+        priorities = [process, *[item for item in priorities if item != process]]
+    if not priorities:
+        priorities = [
+            f"Raise transfer difficulty toward the {role} {level} interview bar."
+        ]
     return {
         "profile_revision": value["profile_revision"],
         "weekly_minutes": scheduled,
         "session_minutes": session,
         "sessions_per_week": sessions,
         "target": f"{role} at {level} bar",
-        "priorities": [
-            "Validate prerequisite gaps with short retrieval checks.",
-            "Practice one original coding problem with explicit tests and complexity analysis.",
-            "Rehearse clarification and follow-up discussion without a timer.",
-        ],
+        "horizon": horizon,
+        "priorities": priorities[:3],
     }
 
 

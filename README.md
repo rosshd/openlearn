@@ -119,6 +119,7 @@ openlearn interview clear backend-interviews
 Placement observes clarification, planning, implementation, testing, complexity reasoning, and a follow-up on an original bundled problem.
 Its result is provisional, names uncertainty across prerequisite, coding-fluency, reasoning, and interview-process gaps, and never grants mastery.
 Interruptions are resumable, while explicit discard or profile clearing preserves append-only attempt evidence.
+During placement, `/skip` leaves only the current evidence axis uncertain and continues, while `/baseline` ends the attempt with an explicit reduced-demand provisional baseline.
 
 For assessment material, Quick Learn creates a separate focused topic and begins teaching without placement or outline approval:
 

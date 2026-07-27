@@ -51,8 +51,10 @@ Learner preferences capture explicit navigation choices such as skipped material
 Quick Learn topics also store `learning_mode`, `quick_source_type`, `quick_source_label`, and `coverage_contract` so they can remain visibly separate and enforce source-grounded concept coverage.
 
 Interview prep is explicitly opt-in and stores its learner-owned profile in `<slug>.interview.json`, separate from shareable topic metadata, general learner preferences, and concept mastery.
-The file contains a versioned profile revision, resumable placement status, opaque evidence references, a rubric version, a provisional gap assessment, and time-bounded recommendations.
-Raw calibration, code, tests, and reasoning remain in append-only namespaced evidence events rather than being copied into topic metadata or the interview profile.
+The file contains a versioned profile revision, resumable placement status, opaque activity and evidence references, derived tri-state observations, a rubric version, a provisional gap assessment, and target-horizon-aware recommendations.
+Raw calibration, code, tests, and reasoning pass through the validated coding activity adapter and remain in append-only namespaced activity evidence events rather than being copied into topic metadata or the interview profile.
+Interrupted activity transactions recover through the activity journal, and placement resume idempotently projects any recovered evidence into the profile before asking for the next stage.
+Profile publication takes the topic identity lock before the profile lock, so concurrent topic deletion cannot recreate an orphan profile.
 Profile edits invalidate affected recommendations and mark completed placement stale without deleting attempt events.
 Topics without the adjacent file behave exactly as ordinary topics and receive no interview prompts.
 
@@ -60,7 +62,7 @@ Topics without the adjacent file behave exactly as ordinary topics and receive n
 
 `openlearn.activities` defines the versioned, domain-neutral contract for hands-on practice.
 An activity has a stable ID, objective, concept IDs, domain and kind, requested evidence, scaffolding level, purpose, lifecycle status, resource provenance, an adapter-owned payload, and opaque evidence references.
-The purpose is either `practice` or `mastery_check`; completing either purpose does not itself change mastery.
+The purpose is `practice`, `mastery_check`, or `placement`; completing any purpose does not itself change mastery.
 
 The lifecycle is `proposed` to `accepted` to `active`, followed by `completed`, `abandoned`, `cancelled`, or `failed`.
 Transitions are validated and repeated transitions to the current state are idempotent.
