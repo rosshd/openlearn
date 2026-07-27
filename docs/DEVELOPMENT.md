@@ -23,6 +23,7 @@ pip install -e .[dev]
 | `make check` | Green gate: ruff, unittest, pytest, mocked smoke |
 | `make review` | Gate plus evidence bundle under `.artifacts/review/` |
 | `make e2e` | Full mocked manual smoke flow |
+| `make oci-live` | Opt-in live Docker/Podman runner boundary tests using only a pre-provisioned pinned image |
 | `make typecheck` | Pyright, useful but non-blocking |
 | `make repo-status` | Show local version, branch divergence, and worktree state |
 | `make worktree NAME=<task> TYPE=<type>` | Create a safe repo-local task worktree |
@@ -30,6 +31,10 @@ pip install -e .[dev]
 
 GitHub Actions runs the unittest lane across Ubuntu, Windows, and macOS on Python 3.11 and 3.13.
 Local `pytest` workflow smoke tests use `pexpect`; POSIX pty tests are skipped on Windows.
+The OCI live lane is excluded from `make check`, never pulls an image, and skips with runtime/image diagnostics unless `OPENLEARN_RUN_OCI_TESTS=1` and a supported runtime already has the pinned image.
+Run it with `make oci-live` after explicitly provisioning Docker or Podman and the exact image printed by `openlearn doctor`.
+The workflow-dispatch OCI job explicitly pre-provisions that image before invoking the same no-pull lane.
+The live tests iterate both Docker and Podman when both are ready, so the same lane can run on appropriately provisioned Linux, macOS, or Windows hosts.
 
 ## Releases
 

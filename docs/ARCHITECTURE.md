@@ -118,8 +118,32 @@ Model-generated function stubs are parsed as untrusted Python before writing and
 The existing `/drill` command is explicit learner consent and remains the reliable manual fallback.
 Future tutor-selected proposals must show the proposal and obtain an explicit learner acceptance before dispatch.
 Instrument and electronics shapes are contract fixtures only; their tools are not implemented.
-After the learner edits a drill, `/check` still executes learner-authored Python through pytest.
-That execution remains a trusted local workflow until the separate safe coding runner boundary is implemented, so learners should not run drills containing code they did not author or inspect.
+After the learner edits a drill, `/check` fails closed unless Docker or Podman and the digest-pinned Python runner image are already available.
+The runtime image is never acquired implicitly.
+Secure checks keep hidden expectations and the final completion decision in the trusted openLearn process.
+Each check creates one bounded worker, imports the learner module once, then supplies only the current call's input over a monitored framed channel.
+This preserves sequential function state without exposing future inputs.
+Returned values use a bounded tagged non-executable encoding that preserves comparison-relevant Python container and dictionary-key types.
+The child can inspect its input and worker protocol, but it never receives test expectations or a final success credential.
+openLearn rejects missing, malformed, duplicated, deeply nested, oversized, or output-contaminated frames and compares the returned value with the hidden expectation itself.
+Raw protocol output, learner stderr, and rendered feedback share one aggregate output budget.
+OCI calls mount only the learner solution directory plus a separate read-only generic call worker.
+The container receives no host credential directory, home directory, repository, or runtime socket mount.
+It runs with no network, a read-only root, a non-root UID, dropped capabilities, no-new-privileges, bounded CPU, memory, process count, output, file size, and wall time, and a small writable tmpfs.
+Timeout and cancellation force-remove the complete container.
+The shared result distinguishes successful tests, test failures, compile errors, runtime errors, resource limits, cancellation, and runner infrastructure failures.
+Infrastructure failures record no incorrect-answer evidence and leave the activity available for retry.
+
+Test cases remain in validated activity state outside the learner-editable drill workspace.
+Learner code may submit any return value, as any implementation can, but cannot inspect or emit the trusted pass/fail decision.
+
+`/check --reduced-isolation` is a per-command explicit fallback.
+It uses the same host-owned per-call protocol with a scrubbed subprocess environment plus best-effort resource and process-tree controls, prints a residual-risk warning, and is never described as a sandbox.
+It does not prevent filesystem or network access.
+Docker and Podman may enforce the Linux container contract through their normal VM on macOS and Windows.
+`openlearn doctor` reports missing runtimes, unavailable services, unpinned image configuration, and an absent local image without installing or pulling anything.
+`make oci-live` is the opt-in pre-provisioned security-fixture lane.
+It never acquires an image and exercises every ready Docker and Podman runtime against environment, mount, network, process, resource, timeout, cancellation, and cleanup boundaries.
 
 ## Model Calls
 

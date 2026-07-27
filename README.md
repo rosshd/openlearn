@@ -50,6 +50,8 @@ make check
 openLearn supports Linux, macOS, and Windows on Python 3.11 and newer.
 Topic file locking works on all supported platforms.
 Multiline paste detection requires a POSIX terminal; on Windows, the REPL accepts pasted input one line at a time.
+Secure Python drill checks require a locally running Docker or Podman runtime.
+On macOS and Windows, the runtime may provide its normal Linux VM while openLearn keeps the same container contract.
 
 ## Configuration
 
@@ -156,6 +158,7 @@ openlearn> /review
 openlearn> /drill
 openlearn> /drill --leetcode
 openlearn> /check
+openlearn> /check --reduced-isolation
 openlearn> /videos --n 3 registers
 openlearn> /status
 openlearn> /q
@@ -165,14 +168,19 @@ Use `/help --all` for the full REPL command list.
 
 `/drill` generates a topic-aware Python exercise, while `/drill --leetcode` selects one from the bundled interview-practice bank without calling the model.
 After the drill opens in your configured editor, implement the function, save the file, return to openLearn, and run `/check`.
-The check enables the embedded tests, runs them with pytest, and gives tutor feedback from the result.
+The secure default runs an attempt copy and a separate test harness in a bounded OCI container with no network, a read-only root, a non-root user, dropped capabilities, and CPU, memory, process, output, file, and wall-time limits.
+The pinned runner image is never pulled automatically.
+Run `openlearn doctor` for runtime status and the exact explicit image-acquisition command when setup is incomplete.
+Ordinary offline checks use only the already-present digest-pinned image.
+`/check --reduced-isolation` is an explicit per-run fallback that executes a local subprocess with warnings.
+It is not a sandbox and learner code can still access account files and the network or escape best-effort limits.
 If the editor cannot be launched, openLearn keeps the drill active and prints its path so you can open it manually before running `/check`.
 
 ## Command Surface
 
 | Area | Commands |
 | --- | --- |
-| Setup | `init`, `config show`, `config set-key`, `config set-model`, `config set-base-url`, `config set-editor`, `config clear-key` |
+| Setup | `init`, `doctor`, `config show`, `config set-key`, `config set-model`, `config set-base-url`, `config set-editor`, `config clear-key` |
 | Topics | `new`, `delete`, `list`, `recent`, `active`, `edit`, `status`, `summary`, `stats`, `repair` |
 | Learning | `menu`, `quick`, `repl`, `chat`, `resume`, `next`, `review`, `chapter`, `due` |
 | Sources | `import <topic> <file>`, `import <topic> --url <url>`, `import <topic> --scan <dir>`, `paste` |

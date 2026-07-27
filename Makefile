@@ -3,7 +3,7 @@ OPENLEARN ?= .venv/bin/openlearn
 REVIEW_DIR ?= .artifacts/review
 TYPE ?= feat
 
-.PHONY: test unit pytest lint typecheck smoke e2e codex-dogfood tutor-behavior-eval diff validate check review repo-status worktree finish
+.PHONY: test unit pytest lint typecheck smoke e2e oci-live codex-dogfood tutor-behavior-eval diff validate check review repo-status worktree finish
 
 # --- Individual lanes ---------------------------------------------------------
 
@@ -30,6 +30,9 @@ smoke:
 
 e2e:
 	OPENLEARN_MOCK=1 OPENLEARN_HOME="$$(mktemp -d)" ./manual-tests/smoke-full.sh --mock
+
+oci-live:
+	OPENLEARN_RUN_OCI_TESTS=1 PYTHONPATH=src $(PYTHON) -m unittest tests.test_code_runner_live -v
 
 # Opt-in and live. This target is deliberately absent from `check`.
 codex-dogfood:

@@ -5,6 +5,13 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      oci_live:
+        description: Run the explicitly provisioned live OCI security lane
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   test-matrix:
@@ -39,3 +46,26 @@ jobs:
     steps:
       - name: Check matrix result
         run: test "${{ needs.test-matrix.result }}" = "success"
+
+  oci-live:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.oci_live }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install package
+        run: python -m pip install -e ".[dev]"
+
+      - name: Explicitly provision the pinned runner image
+        run: >-
+          docker pull
+          docker.io/library/python:3.13.5-slim-bookworm@sha256:4c2cf9917bd1cbacc5e9b07320025bdb7cdf2df7b0ceaccb55e9dd7e30987419
+
+      - name: Run live OCI security fixtures without pulls
+        run: make oci-live PYTHON=python

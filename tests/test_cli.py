@@ -23,6 +23,28 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from openlearn import cli, ui
 
 
+def code_result(
+    returncode: int,
+    stdout: str,
+    stderr: str = "",
+    *,
+    kind: str | None = None,
+    limit_reason: str | None = None,
+) -> cli.code_runner.RunnerResult:
+    return cli.code_runner.RunnerResult(
+        kind=kind or ("success" if returncode == 0 else "test_failure"),
+        stdout=stdout,
+        stderr=stderr,
+        exit_code=returncode,
+        signal=None,
+        duration_seconds=0.1,
+        limit_reason=limit_reason,
+        isolation="oci",
+        runtime="docker",
+        protections=("oci-container",),
+    )
+
+
 class UiFormattingTests(unittest.TestCase):
     def test_tutor_markdown_renders_plain_text_for_capture(self) -> None:
         text = ui.render_plain(ui.tutor_markdown("**Lesson:** Learn this\n\n- A) One\n- B) Two"))
@@ -9818,14 +9840,21 @@ class InteractiveTests(unittest.TestCase):
         text = drill_path.read_text(encoding="utf-8")
         self.assertTrue(drill_path.exists())
         self.assertIn("def add_numbers(a, b):", text)
-        self.assertIn("if False:", text)
-        self.assertIn("assert add_numbers(*[1, 2]) == 3", text)
+        self.assertNotIn("test_case_", text)
+        self.assertNotIn("expected", text)
         self.assertEqual(run_calls, [(["nvim", str(drill_path)], True)])
         self.assertTrue(any("Drill saved:" in line for line in output))
         self.assertTrue(any("Opened in nvim" in line for line in output))
         activity = cli.load_state("python")["active_activity"]
         self.assertEqual(activity["status"], "active")
         self.assertEqual(activity["purpose"], "practice")
+        self.assertEqual(
+            activity["domain_payload"]["coding"]["test_cases"],
+            [
+                {"input": [1, 2], "expected": 3},
+                {"input": [-1, 5], "expected": 4},
+            ],
+        )
         self.assertEqual(set(activity["domain_payload"]), {"coding"})
         activity_events = [
             event["event_type"]
@@ -10988,33 +11017,42 @@ class InteractiveTests(unittest.TestCase):
             "function_stub": "def add_numbers(a, b):\n    pass",
             "test_cases": [{"input": [1, 2], "expected": 3}],
         }
-        drill_path = cli.write_drill_file("python", cli.validate_drill_data(drill))
-        cli.save_active_drill("python", drill_path)
-        original_run = cli.subprocess.run
         original_call_openai = cli.call_openai
-        run_calls = []
+        cli.call_openai = lambda *_args, **_kwargs: json.dumps(drill)
+        with mock.patch.object(cli, "open_drill_in_editor", return_value="nvim"):
+            cli.cmd_drill(
+                Namespace(topic="python", model=None, leetcode=False),
+                output_func=lambda _text: None,
+            )
+        drill_path = cli.active_drill_path(cli.read_topic("python"))
         output = []
 
-        def fake_run(args, capture_output=False, text=False):
-            run_calls.append((args, capture_output, text))
-            return types.SimpleNamespace(returncode=1, stdout="FAILED test_case_1", stderr="")
-
         captured_prompt = []
-        cli.subprocess.run = fake_run
         cli.call_openai = lambda _model, _system, user: (
             captured_prompt.append(user) or "Feedback: fix the return value."
         )
         try:
-            result = cli.cmd_check(Namespace(topic="python", model=None), output_func=output.append)
+            runner = mock.Mock(return_value=code_result(1, "FAILED test_case_1"))
+            with mock.patch.object(
+                cli.code_runner,
+                "run_python_tests",
+                new=runner,
+            ):
+                result = cli.cmd_check(
+                    Namespace(topic="python", model=None),
+                    output_func=output.append,
+                )
         finally:
-            cli.subprocess.run = original_run
             cli.call_openai = original_call_openai
 
         self.assertEqual(result, 1)
-        self.assertIn("if True:", drill_path.read_text(encoding="utf-8"))
+        self.assertNotIn("test_case_", drill_path.read_text(encoding="utf-8"))
         self.assertEqual(
-            run_calls[0][0], [sys.executable, "-m", "pytest", str(drill_path), "-v", "--tb=short"]
+            runner.call_args.kwargs["test_cases"],
+            [{"input": [1, 2], "expected": 3}],
         )
+        self.assertEqual(runner.call_args.kwargs["function_name"], "add_numbers")
+        self.assertFalse(runner.call_args.kwargs["reduced_isolation"])
         self.assertIn("FAILED test_case_1", captured_prompt[0])
         self.assertIn("do not claim mastery", captured_prompt[0])
         self.assertTrue(any("fix the return value" in line for line in output))
@@ -11022,6 +11060,245 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(migrated["domain"], "coding")
         self.assertEqual(migrated["status"], "active")
         self.assertEqual(len(migrated["evidence_refs"]), 1)
+
+    def test_check_migrates_legacy_embedded_tests_out_of_workspace(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Legacy", goal="practice functions"))
+        drill_dir = cli.topic_drill_dir("legacy")
+        drill_path = drill_dir / "legacy-add.py"
+        drill_path.write_text(
+            "def legacy_add(a, b):\n"
+            "    return a + b\n\n"
+            "if False:\n"
+            "    def test_case_1():\n"
+            "        assert legacy_add(*[1, 2]) == 3\n"
+            "\n"
+            "    def test_case_2():\n"
+            "        assert legacy_add(**{'a': -1, 'b': 5}) == 4\n",
+            encoding="utf-8",
+        )
+        cli.save_active_drill("legacy", drill_path)
+        runner = mock.Mock(return_value=code_result(0, "2 passed"))
+        with mock.patch.object(
+            cli.code_runner,
+            "run_python_tests",
+            new=runner,
+        ), mock.patch.object(
+            cli,
+            "call_openai",
+            new=lambda *_args, **_kwargs: "**Feedback:**\nBoth cases pass.",
+        ):
+            result = cli.cmd_check(
+                Namespace(topic="legacy", model=None),
+                output_func=lambda _text: None,
+            )
+
+        self.assertEqual(result, 0)
+        self.assertNotIn("test_case_", drill_path.read_text(encoding="utf-8"))
+        self.assertEqual(runner.call_args.kwargs["function_name"], "legacy_add")
+        self.assertEqual(
+            runner.call_args.kwargs["test_cases"],
+            [
+                {"input": [1, 2], "expected": 3},
+                {"input": {"a": -1, "b": 5}, "expected": 4},
+            ],
+        )
+
+    def test_check_fails_closed_without_runner_and_preserves_active_attempt(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Arrays", goal="practice arrays"))
+        with mock.patch.object(cli, "open_drill_in_editor", return_value="nvim"):
+            cli.cmd_drill(
+                Namespace(topic="arrays", model=None, leetcode=True),
+                output_func=lambda _text: None,
+            )
+
+        with mock.patch.object(
+            cli.code_runner,
+            "run_python_tests",
+            side_effect=cli.code_runner.RunnerUnavailableError(
+                "Install Docker or Podman, then run 'openlearn doctor'."
+            ),
+        ):
+            with self.assertRaises(cli.OpenLearnError) as caught:
+                cli.cmd_check(
+                    Namespace(topic="arrays", model=None),
+                    output_func=lambda _text: None,
+                )
+
+        self.assertIn("openlearn doctor", str(caught.exception))
+        activity = cli.load_state("arrays")["active_activity"]
+        self.assertEqual(activity["status"], "active")
+        self.assertEqual(activity["evidence_refs"], [])
+        events = cli.load_event_log(cli.topic_events_path("arrays"))
+        self.assertEqual(events[-1]["event_type"], "activity_tool_failed")
+
+    def test_repl_check_reduced_isolation_requires_explicit_flag_and_warns(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Arrays", goal="practice arrays"))
+        with mock.patch.object(cli, "open_drill_in_editor", return_value="nvim"):
+            cli.cmd_drill(
+                Namespace(topic="arrays", model=None, leetcode=True),
+                output_func=lambda _text: None,
+            )
+        output = []
+        runner = mock.Mock(return_value=code_result(1, "FAILED test_case_1"))
+        with mock.patch.object(
+            cli.code_runner,
+            "run_python_tests",
+            new=runner,
+        ), mock.patch.object(
+            cli,
+            "call_openai",
+            new=lambda *_args, **_kwargs: (
+                "**Feedback:**\nRetry after fixing the return value."
+            ),
+        ):
+            cli.handle_repl_command(
+                "check --reduced-isolation",
+                output_func=output.append,
+            )
+
+        self.assertTrue(runner.call_args.kwargs["reduced_isolation"])
+        self.assertTrue(any("not a sandbox" in line for line in output))
+
+    def test_runner_limits_are_failed_attempt_evidence_not_tool_failures(self) -> None:
+        for index, (kind, reason, expected_code) in enumerate(
+            (
+                ("timeout", "wall_time", 124),
+                ("output_limit", "captured_output", 125),
+                ("resource_limit", "memory_or_process", 137),
+            ),
+            start=1,
+        ):
+            with self.subTest(kind=kind):
+                slug = f"runner-limit-{index}"
+                call_silent(
+                    cli.cmd_new,
+                    Namespace(topic=slug, goal="practice loops"),
+                )
+                drill = {
+                    "title": f"Limit Drill {index}",
+                    "description": "Return one.",
+                    "function_stub": "def solve():\n    pass",
+                    "test_cases": [{"input": [], "expected": 1}],
+                }
+                with mock.patch.object(
+                    cli,
+                    "call_openai",
+                    new=lambda *_args, _drill=drill, **_kwargs: json.dumps(_drill),
+                ), mock.patch.object(
+                    cli,
+                    "open_drill_in_editor",
+                    return_value="nvim",
+                ):
+                    cli.cmd_drill(
+                        Namespace(topic=slug, model=None, leetcode=False),
+                        output_func=lambda _text: None,
+                    )
+                prompts = []
+                exit_code = 137 if kind == "resource_limit" else None
+                result = code_result(
+                    exit_code or 1,
+                    "",
+                    kind=kind,
+                    limit_reason=reason,
+                )
+                result = cli.code_runner.RunnerResult(
+                    **{
+                        **result.__dict__,
+                        "exit_code": exit_code,
+                    }
+                )
+                with mock.patch.object(
+                    cli.code_runner,
+                    "run_python_tests",
+                    return_value=result,
+                ), mock.patch.object(
+                    cli,
+                    "call_openai",
+                    new=lambda _model, _system, user: (
+                        prompts.append(user)
+                        or "**Feedback:**\nReduce the work and retry /check."
+                    ),
+                ):
+                    return_code = cli.cmd_check(
+                        Namespace(topic=slug, model=None),
+                        output_func=lambda _text: None,
+                    )
+
+                self.assertEqual(return_code, 1)
+                self.assertIn(f"Runner outcome: {kind}", prompts[0])
+                self.assertIn("one retry with /check", prompts[0])
+                events = cli.load_event_log(cli.topic_events_path(slug))
+                self.assertNotIn(
+                    "activity_tool_failed",
+                    [event["event_type"] for event in events],
+                )
+                evidence = [
+                    event
+                    for event in events
+                    if event["event_type"] == "activity_evidence_recorded"
+                ]
+                coding = evidence[-1]["data"]["domain_evidence"]["coding"]
+                self.assertEqual(coding["return_code"], expected_code)
+                self.assertFalse(coding["tests_passed"])
+                self.assertEqual(cli.load_state(slug)["active_activity"]["status"], "active")
+
+    def test_cancelled_runner_preserves_attempt_without_failure_event(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Cancel Run", goal="practice arrays"))
+        with mock.patch.object(cli, "open_drill_in_editor", return_value="nvim"):
+            cli.cmd_drill(
+                Namespace(topic="cancel-run", model=None, leetcode=True),
+                output_func=lambda _text: None,
+            )
+        cancelled = code_result(
+            1,
+            "",
+            kind="cancelled",
+            limit_reason="cancelled",
+        )
+        cancelled = cli.code_runner.RunnerResult(
+            **{**cancelled.__dict__, "exit_code": None}
+        )
+
+        with mock.patch.object(
+            cli.code_runner,
+            "run_python_tests",
+            return_value=cancelled,
+        ):
+            with self.assertRaises(cli.OpenLearnError):
+                cli.cmd_check(
+                    Namespace(topic="cancel-run", model=None),
+                    output_func=lambda _text: None,
+                )
+
+        events = cli.load_event_log(cli.topic_events_path("cancel-run"))
+        self.assertNotIn("activity_tool_failed", [event["event_type"] for event in events])
+        self.assertNotIn(
+            "activity_evidence_recorded",
+            [event["event_type"] for event in events],
+        )
+
+    def test_doctor_reports_runtime_and_explicit_image_acquisition(self) -> None:
+        diagnostic = cli.code_runner.RuntimeDiagnostic(
+            runtime="podman",
+            executable="/usr/bin/podman",
+            runtime_ready=True,
+            image_ready=False,
+            image=cli.code_runner.DEFAULT_RUNNER_IMAGE,
+            detail="pinned runner image is not present locally",
+        )
+        output = []
+
+        result = cli.cmd_doctor(
+            Namespace(),
+            output_func=output.append,
+            diagnose=lambda: diagnostic,
+        )
+
+        self.assertEqual(result, 1)
+        rendered = "\n".join(output)
+        self.assertIn("Runtime: podman", rendered)
+        self.assertIn("podman pull", rendered)
+        self.assertIn("@sha256:", rendered)
 
     def test_successful_coding_activity_records_evidence_without_mastery(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Arrays", goal="practice arrays"))
@@ -11033,17 +11310,18 @@ class InteractiveTests(unittest.TestCase):
         finally:
             cli.subprocess.run = original_run
 
-        def fake_run(_args, capture_output=False, text=False):
-            return types.SimpleNamespace(returncode=0, stdout="1 passed", stderr="")
-
-        cli.subprocess.run = fake_run
         cli.call_openai = lambda *_args, **_kwargs: "Good attempt. Try a transfer case next."
         try:
-            result = cli.cmd_check(
-                Namespace(topic="arrays", model=None), output_func=lambda _text: None
-            )
+            with mock.patch.object(
+                cli.code_runner,
+                "run_python_tests",
+                return_value=code_result(0, "1 passed"),
+            ):
+                result = cli.cmd_check(
+                    Namespace(topic="arrays", model=None),
+                    output_func=lambda _text: None,
+                )
         finally:
-            cli.subprocess.run = original_run
             cli.call_openai = original_call_openai
 
         self.assertEqual(result, 0)
@@ -11096,8 +11374,10 @@ class InteractiveTests(unittest.TestCase):
                 input_func=lambda _prompt: "yes",
                 output_func=lambda _text: None,
             )
-        passed = types.SimpleNamespace(returncode=0, stdout="1 passed", stderr="")
-        with mock.patch.object(cli.subprocess, "run", return_value=passed), mock.patch.object(
+        passed = code_result(0, "1 passed")
+        with mock.patch.object(
+            cli.code_runner, "run_python_tests", return_value=passed
+        ), mock.patch.object(
             cli,
             "call_openai",
             new=lambda *_args, **_kwargs: (
@@ -11212,11 +11492,11 @@ class InteractiveTests(unittest.TestCase):
                         input_func=lambda _prompt: "yes",
                         output_func=lambda _text: None,
                     )
-                passed = types.SimpleNamespace(returncode=0, stdout="1 passed", stderr="")
+                passed = code_result(0, "1 passed")
                 output = []
                 with mock.patch.object(
-                    cli.subprocess,
-                    "run",
+                    cli.code_runner,
+                    "run_python_tests",
                     return_value=passed,
                 ), mock.patch.object(
                     cli,
@@ -11279,14 +11559,11 @@ class InteractiveTests(unittest.TestCase):
                 output_func=output.append,
             )
 
-        def failed_run(_args, capture_output=False, text=False):
-            return types.SimpleNamespace(
-                returncode=1,
-                stdout="FAILED test_case_1 - assert None == 3",
-                stderr="",
-            )
+        failed = code_result(1, "FAILED test_case_1 - assert None == 3")
 
-        with mock.patch.object(cli.subprocess, "run", side_effect=failed_run), mock.patch.object(
+        with mock.patch.object(
+            cli.code_runner, "run_python_tests", return_value=failed
+        ), mock.patch.object(
             cli,
             "call_openai",
             new=lambda _model, _system, user: (
@@ -11549,24 +11826,6 @@ class InteractiveTests(unittest.TestCase):
         for text in rendered:
             self.assertNotIn("PROTECTED REMOTE PROBLEM CONTENT", text)
             self.assertNotIn("test_case_", text)
-
-    def test_enable_drill_tests_replaces_only_standalone_guard_line(self) -> None:
-        path = Path(self.home.name) / "drill.py"
-        path.write_text(
-            '"""This docstring mentions if False: but is not the guard."""\n\n'
-            "def solve():\n"
-            "    pass\n\n"
-            "if False:\n"
-            "    def test_case_1():\n"
-            "        assert solve() is None\n",
-            encoding="utf-8",
-        )
-
-        cli.enable_drill_tests(path)
-
-        text = path.read_text(encoding="utf-8")
-        self.assertIn("mentions if False: but is not the guard", text)
-        self.assertIn("if True:\n    def test_case_1", text)
 
     def test_repl_plan_command_prints_course_units(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
