@@ -275,6 +275,130 @@ class CliStorageTests(unittest.TestCase):
         self.assertNotIn("description", topic.metadata)
         self.assertNotIn("## Description", topic.body)
         self.assertIn("Understand AI fundamentals", topic.body)
+        self.assertFalse(cli.interview_profile_path("intro-ai").exists())
+        self.assertNotIn("interview", json.dumps(topic.metadata).lower())
+
+    def test_interview_prep_new_is_explicit_and_offers_deferrable_placement(self) -> None:
+        output: list[str] = []
+
+        result = cli.cmd_new(
+            Namespace(
+                topic="Interview Prep",
+                goal="Prepare for backend interviews",
+                interview_prep=True,
+                mastery_profile=None,
+                template=None,
+            ),
+            output_func=output.append,
+        )
+
+        self.assertEqual(result, 0)
+        profile = cli.interview_prep.load_profile(
+            cli.interview_profile_path("interview-prep")
+        )
+        self.assertEqual(profile["placement"]["status"], "not_started")
+        topic = cli.read_topic("interview-prep")
+        self.assertFalse(
+            any(key.startswith("interview") for key in topic.metadata)
+        )
+        self.assertTrue(any("defer" in line for line in output))
+
+    def test_interview_profile_commands_create_edit_inspect_defer_and_clear(self) -> None:
+        call_silent(
+            cli.cmd_new,
+            Namespace(topic="Algorithms", goal="Practice algorithms"),
+        )
+        setup = Namespace(
+            topic="algorithms",
+            role_family="backend",
+            target_level="senior",
+            interview_date="",
+            coding_language="python",
+            weekly_minutes=120,
+            session_minutes=30,
+            data_structures_experience="intermediate",
+            algorithms_experience="rusty",
+            interview_experience="limited",
+            target_notes="",
+            accessibility_preferences="no timers",
+        )
+
+        self.assertEqual(cli.cmd_interview_setup(setup, output_func=lambda _line: None), 0)
+        output: list[str] = []
+        cli.cmd_interview_profile(Namespace(topic="algorithms"), output_func=output.append)
+        self.assertTrue(any("backend" in line for line in output))
+
+        cli.cmd_interview_edit(
+            Namespace(topic="algorithms", field="weekly_minutes", value="60"),
+            output_func=lambda _line: None,
+        )
+        profile = cli.interview_prep.load_profile(
+            cli.interview_profile_path("algorithms")
+        )
+        self.assertEqual(profile["profile"]["weekly_minutes"], 60)
+
+        deferred_output: list[str] = []
+        cli.cmd_interview_placement(
+            Namespace(topic="algorithms", action="defer"),
+            output_func=deferred_output.append,
+        )
+        self.assertTrue(any("deferred" in line for line in deferred_output))
+
+        cli.cmd_interview_clear(
+            Namespace(topic="algorithms", yes=True),
+            output_func=lambda _line: None,
+        )
+        self.assertFalse(cli.interview_profile_path("algorithms").exists())
+
+    def test_interview_placement_cli_interrupts_resumes_and_stays_provisional(self) -> None:
+        call_silent(
+            cli.cmd_new,
+            Namespace(
+                topic="Algorithms",
+                goal="Practice algorithms",
+                interview_prep=True,
+                mastery_profile=None,
+                template=None,
+            ),
+        )
+        first_inputs = iter(["Some Python experience", "/stop"])
+        first_output: list[str] = []
+
+        cli.cmd_interview_placement(
+            Namespace(topic="algorithms", action="start"),
+            input_func=lambda _prompt: next(first_inputs),
+            output_func=first_output.append,
+        )
+
+        interrupted = cli.interview_prep.load_profile(
+            cli.interview_profile_path("algorithms")
+        )
+        self.assertEqual(interrupted["placement"]["status"], "in_progress")
+        self.assertEqual(interrupted["placement"]["next_stage"], "clarification")
+        self.assertTrue(any("saved" in line.lower() for line in first_output))
+
+        remaining = iter(
+            [
+                "Can width exceed the text length?",
+                "Scan each window with a set.",
+                "def first_unique_window(text, width): return -1",
+                "Empty, duplicates, and a matching window.",
+                "O(n * width) time and O(width) space.",
+                "Use last-seen positions.",
+            ]
+        )
+        cli.cmd_interview_placement(
+            Namespace(topic="algorithms", action="resume"),
+            input_func=lambda _prompt: next(remaining),
+            output_func=lambda _line: None,
+        )
+
+        completed = cli.interview_prep.load_profile(
+            cli.interview_profile_path("algorithms")
+        )
+        self.assertEqual(completed["placement"]["status"], "provisional")
+        self.assertFalse(completed["placement"]["result"]["mastery_update_applied"])
+        self.assertEqual(cli.load_state("algorithms").get("concept_attempts"), None)
 
     def test_delayed_retrieval_metric_counts_spaced_review_and_quiz_events(self) -> None:
         path = Path(self.home.name) / "events.jsonl"

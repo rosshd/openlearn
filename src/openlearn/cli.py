@@ -38,6 +38,7 @@ from urllib.request import Request, urlopen
 from platformdirs import user_data_dir
 
 from openlearn import __version__
+from openlearn import interview_prep
 from openlearn import stats as stats_metrics
 from openlearn.activities import (
     ActivityContractError,
@@ -395,6 +396,20 @@ def add_dry_run_argument(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def add_interview_profile_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--role-family", default="general SWE")
+    parser.add_argument("--target-level", default="unspecified")
+    parser.add_argument("--interview-date", default="")
+    parser.add_argument("--coding-language", default="python")
+    parser.add_argument("--weekly-minutes", type=int, default=120)
+    parser.add_argument("--session-minutes", type=int, default=45)
+    parser.add_argument("--data-structures-experience", default="unknown")
+    parser.add_argument("--algorithms-experience", default="unknown")
+    parser.add_argument("--interview-experience", default="unknown")
+    parser.add_argument("--target-notes", default="")
+    parser.add_argument("--accessibility-preferences", default="")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="openlearn",
@@ -529,7 +544,49 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="SLUG",
         help="Start from a course template (see 'openlearn templates')",
     )
+    new_parser.add_argument(
+        "--interview-prep",
+        action="store_true",
+        help="Opt into a local interview-prep profile and coding placement",
+    )
     new_parser.set_defaults(func=cmd_new)
+
+    interview_parser = sub.add_parser(
+        "interview", help="Manage interview-prep profile and coding placement"
+    )
+    interview_sub = interview_parser.add_subparsers(required=True)
+
+    interview_setup = interview_sub.add_parser("setup", help="Create a local profile")
+    interview_setup.add_argument("topic", nargs="?", help="Topic slug")
+    add_interview_profile_arguments(interview_setup)
+    interview_setup.set_defaults(func=cmd_interview_setup)
+
+    interview_profile = interview_sub.add_parser("profile", help="Inspect a local profile")
+    interview_profile.add_argument("topic", nargs="?", help="Topic slug")
+    interview_profile.set_defaults(func=cmd_interview_profile)
+
+    interview_edit = interview_sub.add_parser("edit", help="Edit one profile field")
+    interview_edit.add_argument("topic", help="Topic slug")
+    interview_edit.add_argument("field", choices=interview_prep.PROFILE_FIELDS)
+    interview_edit.add_argument("value", help="New field value")
+    interview_edit.set_defaults(func=cmd_interview_edit)
+
+    interview_clear = interview_sub.add_parser("clear", help="Clear the local profile")
+    interview_clear.add_argument("topic", help="Topic slug")
+    interview_clear.add_argument("--yes", action="store_true", help="Confirm without prompting")
+    interview_clear.set_defaults(func=cmd_interview_clear)
+
+    interview_placement = interview_sub.add_parser(
+        "placement", help="Run or manage bounded coding placement"
+    )
+    interview_placement.add_argument("topic", help="Topic slug")
+    interview_placement.add_argument(
+        "action",
+        choices=("start", "resume", "status", "defer", "discard"),
+        nargs="?",
+        default="status",
+    )
+    interview_placement.set_defaults(func=cmd_interview_placement)
 
     delete_parser = sub.add_parser("delete", help="Delete a local learning topic")
     delete_parser.add_argument("topic", nargs="?", help="Topic slug")
@@ -2308,6 +2365,246 @@ def cmd_config_clear_key(_args: argparse.Namespace) -> int:
     return 0
 
 
+def interview_profile_path(slug: str) -> Path:
+    return topics_dir() / f"{slug}.interview.json"
+
+
+def default_interview_profile_values() -> dict[str, object]:
+    return {
+        "role_family": "general SWE",
+        "target_level": "unspecified",
+        "interview_date": "",
+        "coding_language": "python",
+        "weekly_minutes": 120,
+        "session_minutes": 45,
+        "data_structures_experience": "unknown",
+        "algorithms_experience": "unknown",
+        "interview_experience": "unknown",
+        "target_notes": "",
+        "accessibility_preferences": "",
+    }
+
+
+def interview_profile_values(args: argparse.Namespace) -> dict[str, object]:
+    return {
+        field: getattr(args, field)
+        for field in interview_prep.PROFILE_FIELDS
+    }
+
+
+def _interview_event_appender(slug: str) -> interview_prep.EventAppender:
+    return lambda event_type, data: log_event(slug, event_type, data)
+
+
+def _load_interview_profile(slug: str) -> dict[str, object]:
+    if not topic_path(slug).exists():
+        raise OpenLearnError(f"topic not found: {slug}")
+    try:
+        with file_lock(interview_profile_path(slug)):
+            return interview_prep.load_profile(interview_profile_path(slug))
+    except ValueError as exc:
+        raise OpenLearnError(str(exc)) from exc
+
+
+def cmd_interview_setup(args: argparse.Namespace, output_func=print) -> int:
+    slug = resolve_topic_slug(getattr(args, "topic", None))
+    if not topic_path(slug).exists():
+        raise OpenLearnError(f"topic not found: {slug}")
+    path = interview_profile_path(slug)
+    try:
+        with file_lock(path):
+            value = interview_prep.create_profile(path, interview_profile_values(args))
+    except ValueError as exc:
+        raise OpenLearnError(str(exc)) from exc
+    log_event(
+        slug,
+        "interview_profile_created",
+        {"profile_revision": value["profile_revision"], "placement_status": "not_started"},
+    )
+    output_func(f"Created local interview-prep profile for {slug}.")
+    output_func(
+        f"Placement is optional: run 'openlearn interview placement {slug} start' "
+        f"or defer it with 'openlearn interview placement {slug} defer'."
+    )
+    return 0
+
+
+def cmd_interview_profile(args: argparse.Namespace, output_func=print) -> int:
+    slug = resolve_topic_slug(getattr(args, "topic", None))
+    value = _load_interview_profile(slug)
+    profile = value["profile"]
+    placement = value["placement"]
+    assert isinstance(profile, dict) and isinstance(placement, dict)
+    output_func(f"Interview-prep profile: {slug} (revision {value['profile_revision']})")
+    for field in interview_prep.PROFILE_FIELDS:
+        output_func(f"- {field.replace('_', ' ')}: {profile.get(field, '')}")
+    output_func(
+        f"Placement: {placement.get('status')} "
+        f"(rubric {placement.get('rubric_version')}, updated {placement.get('updated_at') or 'never'})"
+    )
+    result = placement.get("result")
+    if isinstance(result, dict):
+        output_func(f"Starting level: {result.get('starting_level')} (provisional)")
+        gaps = result.get("gaps")
+        if isinstance(gaps, dict):
+            for axis in ("prerequisites", "coding_fluency", "reasoning", "interview_process"):
+                detail = gaps.get(axis)
+                if isinstance(detail, dict):
+                    output_func(f"- {axis.replace('_', ' ')}: {detail.get('status')}")
+        for uncertainty in result.get("uncertainty", []):
+            output_func(f"- uncertainty: {uncertainty}")
+    recommendations = value.get("recommendations")
+    if isinstance(recommendations, dict):
+        output_func(
+            "Study plan: "
+            f"{recommendations.get('sessions_per_week')} x "
+            f"{recommendations.get('session_minutes')} minutes "
+            f"({recommendations.get('weekly_minutes')} minutes/week)"
+        )
+        for priority in recommendations.get("priorities", []):
+            output_func(f"- {priority}")
+    return 0
+
+
+def cmd_interview_edit(args: argparse.Namespace, output_func=print) -> int:
+    slug = resolve_topic_slug(args.topic)
+    path = interview_profile_path(slug)
+    value: object = args.value
+    if args.field in {"weekly_minutes", "session_minutes"}:
+        try:
+            value = int(args.value)
+        except ValueError as exc:
+            raise OpenLearnError(f"{args.field} must be a positive integer") from exc
+    try:
+        with file_lock(path):
+            updated = interview_prep.edit_profile(
+                path,
+                {args.field: value},
+                _interview_event_appender(slug),
+            )
+    except ValueError as exc:
+        raise OpenLearnError(str(exc)) from exc
+    placement = updated["placement"]
+    assert isinstance(placement, dict)
+    output_func(f"Updated {args.field}; profile revision {updated['profile_revision']}.")
+    if placement.get("status") == "stale":
+        output_func("Placement recommendations are stale; rerun placement to recompute them.")
+    return 0
+
+
+def cmd_interview_clear(
+    args: argparse.Namespace, input_func=input, output_func=print
+) -> int:
+    slug = resolve_topic_slug(args.topic)
+    if not getattr(args, "yes", False):
+        confirmation = input_func(
+            f"Clear the local interview-prep profile for {slug}? Attempt events stay in history. [y/N]: "
+        )
+        if confirmation.strip().lower() not in {"y", "yes"}:
+            output_func("Cancelled.")
+            return 0
+    path = interview_profile_path(slug)
+    try:
+        with file_lock(path):
+            interview_prep.clear_profile(path, _interview_event_appender(slug))
+    except ValueError as exc:
+        raise OpenLearnError(str(exc)) from exc
+    output_func("Interview-prep profile cleared. Append-only attempt evidence was preserved.")
+    return 0
+
+
+INTERVIEW_PLACEMENT_PROMPTS = {
+    "calibration": (
+        "Brief calibration: describe your recent coding work and interview practice. "
+        "Self-report provides context but will not determine the result."
+    ),
+    "clarification": (
+        f"Original coding problem: {interview_prep.PLACEMENT_PROBLEM['prompt']}\n"
+        "Before solving, ask the clarifying questions you would ask an interviewer."
+    ),
+    "plan": "Explain your initial approach and the data structures you would use.",
+    "implementation": (
+        "Write your implementation now. The placement will not reveal a full solution."
+    ),
+    "tests": "List or run representative tests, including edge cases, and report what happened.",
+    "complexity": "Analyze the time and space complexity of your implementation.",
+    "follow_up": (
+        "Follow-up: how would you improve the approach for a very long input or streaming text?"
+    ),
+}
+
+
+def _print_placement_status(value: dict[str, object], output_func=print) -> None:
+    placement = value["placement"]
+    assert isinstance(placement, dict)
+    output_func(
+        f"Placement: {placement.get('status')} "
+        f"(rubric {placement.get('rubric_version')}, "
+        f"evidence {len(placement.get('evidence_refs', []))}/{len(interview_prep.PLACEMENT_STAGES)})"
+    )
+    if placement.get("next_stage"):
+        output_func(f"Next evidence: {placement['next_stage']}")
+
+
+def cmd_interview_placement(
+    args: argparse.Namespace, input_func=input, output_func=print
+) -> int:
+    slug = resolve_topic_slug(args.topic)
+    path = interview_profile_path(slug)
+    append_event = _interview_event_appender(slug)
+    action = args.action
+    try:
+        if action == "status":
+            _print_placement_status(_load_interview_profile(slug), output_func)
+            return 0
+        with file_lock(path):
+            if action == "defer":
+                value = interview_prep.defer_placement(path, append_event)
+                _print_placement_status(value, output_func)
+                return 0
+            if action == "discard":
+                value = interview_prep.discard_placement(path, append_event)
+                output_func("Placement discarded. Append-only attempt evidence was preserved.")
+                _print_placement_status(value, output_func)
+                return 0
+            value = interview_prep.start_placement(path, append_event)
+        output_func(
+            "Bounded coding placement started. Type /stop to resume later, /discard to "
+            "discard this attempt, or /skip to record uncertainty for a stage."
+        )
+        while True:
+            placement = value["placement"]
+            assert isinstance(placement, dict)
+            stage = placement.get("next_stage")
+            if not isinstance(stage, str):
+                break
+            output_func(f"\n{INTERVIEW_PLACEMENT_PROMPTS[stage]}")
+            try:
+                response = input_func(f"{stage}> ")
+            except (EOFError, KeyboardInterrupt):
+                output_func("\nPlacement interrupted and saved. Resume with the same command.")
+                return 0
+            command = response.strip().lower()
+            if command in {"/stop", "stop"}:
+                output_func("Placement saved. Resume when ready.")
+                return 0
+            if command in {"/discard", "discard"}:
+                with file_lock(path):
+                    interview_prep.discard_placement(path, append_event)
+                output_func("Placement discarded. Append-only attempt evidence was preserved.")
+                return 0
+            if command in {"/skip", "skip", "/baseline", "baseline"}:
+                response = f"Learner chose a less demanding baseline and skipped {stage}."
+            with file_lock(path):
+                value = interview_prep.record_placement_evidence(
+                    path, stage, response, append_event
+                )
+        output_func("Placement complete. Results are provisional and grant no mastery.")
+        return cmd_interview_profile(argparse.Namespace(topic=slug), output_func=output_func)
+    except ValueError as exc:
+        raise OpenLearnError(str(exc)) from exc
+
+
 def cmd_new(args: argparse.Namespace, output_func=print) -> int:
     template_slug = getattr(args, "template", None)
     template = None
@@ -2393,6 +2690,21 @@ def cmd_new(args: argparse.Namespace, output_func=print) -> int:
     output_func(f"Mastery profile: {selected_profile}")
     if template is not None:
         output_func(f"Template '{template.name}' loaded ({len(template.units)} units).")
+    if getattr(args, "interview_prep", False):
+        interview_prep.create_profile(
+            interview_profile_path(slug),
+            default_interview_profile_values(),
+        )
+        log_event(
+            slug,
+            "interview_profile_created",
+            {"profile_revision": 1, "placement_status": "not_started"},
+        )
+        output_func("Interview-prep mode enabled with a local editable profile.")
+        output_func(
+            f"Review it with 'openlearn interview profile {slug}', then run placement "
+            f"or defer it with 'openlearn interview placement {slug} defer'."
+        )
     return 0
 
 
@@ -5295,6 +5607,7 @@ def delete_topic_files(slug: str) -> None:
         durable_unlink(topic_path(slug))
         _topic_delete_checkpoint("after_topic")
         durable_unlink(topic_state_path(slug))
+        durable_unlink(interview_profile_path(slug))
         durable_unlink(topic_activity_journal_path(slug))
         _topic_delete_checkpoint("after_state")
         durable_unlink(topic_events_path(slug))

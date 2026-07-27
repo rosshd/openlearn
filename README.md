@@ -95,11 +95,30 @@ If `OPENLEARN_HOME` is unset, openLearn uses the current directory when it conta
 ```bash
 openlearn new vim --goal "Use Vim comfortably for real editing"
 openlearn new interview-prep --template algorithms
+openlearn new backend-interviews --interview-prep
 openlearn resume
 ```
 
 Run `openlearn templates` to list the bundled Vim, Git, Python, SQL, algorithms, and other starter outlines.
 An explicit `--goal` takes precedence over a template's default goal.
+`--interview-prep` is an explicit opt-in that creates a separate learner-owned local profile and offers a bounded coding placement.
+Normal topic creation does not create interview metadata or show placement prompts.
+
+Manage the profile and optional placement independently:
+
+```bash
+openlearn interview profile backend-interviews
+openlearn interview edit backend-interviews weekly_minutes 180
+openlearn interview placement backend-interviews defer
+openlearn interview placement backend-interviews start
+openlearn interview placement backend-interviews resume
+openlearn interview placement backend-interviews discard
+openlearn interview clear backend-interviews
+```
+
+Placement observes clarification, planning, implementation, testing, complexity reasoning, and a follow-up on an original bundled problem.
+Its result is provisional, names uncertainty across prerequisite, coding-fluency, reasoning, and interview-process gaps, and never grants mastery.
+Interruptions are resumable, while explicit discard or profile clearing preserves append-only attempt evidence.
 
 For assessment material, Quick Learn creates a separate focused topic and begins teaching without placement or outline approval:
 
@@ -155,6 +174,7 @@ If the editor cannot be launched, openLearn keeps the drill active and prints it
 | Learning | `menu`, `quick`, `repl`, `chat`, `resume`, `next`, `review`, `chapter`, `due` |
 | Sources | `import <topic> <file>`, `import <topic> --url <url>`, `import <topic> --scan <dir>`, `paste` |
 | Practice | `videos`, REPL `/drill`, REPL `/check` |
+| Interview prep | `interview setup`, `interview profile`, `interview edit`, `interview placement`, `interview clear` |
 | Utilities | `templates`, `test`, `tui` |
 
 Model-backed commands require an API key for non-local providers, but localhost OpenAI-compatible endpoints such as Ollama may be used keylessly.
@@ -170,6 +190,7 @@ Transient provider failures such as rate limits, server errors, URL errors, and 
 - `learning-topics/*.md`: user-owned topic notes, course plan, metadata, and session log.
 - `learning-topics/<slug>.state.json`: dynamic learner model and any in-flight REPL answer.
 - `learning-topics/<slug>.events.jsonl`: append-only learning events.
+- `learning-topics/<slug>.interview.json`: optional editable interview profile, placement status, evidence references, and provisional recommendations.
 - `learning-topics/<slug>/context/`: imported source text, manifests, bundles, and summaries.
 - `learning-topics/drills/<slug>/`: generated drill files.
 - `state.json`: active-topic state.

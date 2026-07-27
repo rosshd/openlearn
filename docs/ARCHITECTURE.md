@@ -50,6 +50,12 @@ Pending questions may be multiple choice with an answer key, multiple choice wit
 Learner preferences capture explicit navigation choices such as skipped material and should constrain future tutor turns.
 Quick Learn topics also store `learning_mode`, `quick_source_type`, `quick_source_label`, and `coverage_contract` so they can remain visibly separate and enforce source-grounded concept coverage.
 
+Interview prep is explicitly opt-in and stores its learner-owned profile in `<slug>.interview.json`, separate from shareable topic metadata, general learner preferences, and concept mastery.
+The file contains a versioned profile revision, resumable placement status, opaque evidence references, a rubric version, a provisional gap assessment, and time-bounded recommendations.
+Raw calibration, code, tests, and reasoning remain in append-only namespaced evidence events rather than being copied into topic metadata or the interview profile.
+Profile edits invalidate affected recommendations and mark completed placement stale without deleting attempt events.
+Topics without the adjacent file behave exactly as ordinary topics and receive no interview prompts.
+
 ## Practice Activities
 
 `openlearn.activities` defines the versioned, domain-neutral contract for hands-on practice.
