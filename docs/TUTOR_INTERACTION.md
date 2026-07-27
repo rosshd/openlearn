@@ -71,6 +71,30 @@ Original, curated, and licensed exercises preserve source and license metadata i
 Official LeetCode integration is link-out only: openLearn validates the official HTTPS problem URL, opens it after consent, and creates a local learner-owned solution scaffold without copying the remote statement, examples, or tests.
 The durable manual dogfood flow for Neovim and a graphical IDE is in `manual-tests/tutor-coding-drills.md`.
 
+## Interview Skill Evidence
+
+Interview readiness uses a versioned static skill graph rather than model prose as its source of skill identity and prerequisites.
+The graph separates concept, pattern, process, and communication skills and keeps learner evidence in append-only local history.
+A problem declares primary and supporting skills.
+An unaided attempt may infer only evidence kinds allowed by the primary skill's policy.
+Supporting skills receive no automatic credit and require an explicit bounded check.
+Complexity, edge-case, testing, debugging, and communication claims always require explicit evidence.
+
+Pattern readiness requires unaided production, novel transfer, and delayed retrieval under the skill's current policy.
+Recognition, editorial reading, a worked example, copied structure, partial code, or hint-dependent success can guide the next move but cannot satisfy independent production or transfer.
+Assistance and completion provenance use closed validated values rather than free-form model labels.
+Historical delayed retrieval must satisfy the delay and qualifying-prior relationship from its source graph and mastery-policy bundle.
+The same independent, unassisted, novel, complete delayed-observation rule controls both passing credit and whether a failed latest check makes a skill due.
+Repeated success for one stable problem or one canonical problem family counts once, so family renames, near-duplicate problems, and spoofed family labels do not manufacture breadth.
+An identical replay of one evidence ID is processed once, and conflicting duplicate IDs invalidate the assessment input.
+Communication evidence remains separate from algorithm correctness even when both come from one interview attempt.
+
+The tutor may present a skill as ready, provisional, weak, due, unassessed, or blocked only with the deterministic assessment's learner-visible reasons.
+A failed latest delayed check makes the skill due and provisional even when older evidence was strong.
+A blocking prerequisite must itself be selection-ready, so blocks propagate through longer prerequisite chains.
+Blocking still follows bounded remediation and deferral instead of endless drilling.
+Graph and mastery-policy versions remain attached to historical evidence when the canonical graph changes, and historical qualification is resolved against that exact immutable bundle.
+
 ## Learner State
 
 | Scope | Examples |
