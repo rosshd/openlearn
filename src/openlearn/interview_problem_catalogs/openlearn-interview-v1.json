@@ -1,0 +1,469 @@
+{
+  "schema_version": 1,
+  "catalog_id": "openlearn-interview",
+  "catalog_revision": 2,
+  "graph_id": "coding-interview",
+  "graph_version": "1.0.0",
+  "mastery_policy_version": "interview-mastery-v1",
+  "problems": [
+    {
+      "id": "problem.pair-sum-sorted",
+      "revision": 1,
+      "introduced_catalog_revision": 1,
+      "title": "Locate a target pair in sorted readings",
+      "delivery": "packaged",
+      "evidence_eligible": true,
+      "transfer_family": "converging-pointers",
+      "statement": "A sensor produced integer readings in nondecreasing order. Return the zero-based positions of two distinct readings whose sum equals the target. Return [-1, -1] when no pair exists.",
+      "source": {
+        "type": "packaged",
+        "provider": "openlearn",
+        "rights_basis": "openlearn_original",
+        "url": "https://github.com/rosshd/openlearn",
+        "license": "AGPL-3.0-or-later",
+        "attribution": "Original problem by openlearn contributors.",
+        "permission": "Authored for redistribution in the openlearn catalog."
+      },
+      "languages": {
+        "python": {
+          "interface": {
+            "kind": "function",
+            "function": "pair_sum_sorted",
+            "parameters": ["values", "target"]
+          },
+          "starter_code": "def pair_sum_sorted(values, target):\n    pass\n",
+          "reference": "openlearn.interview_problem_references:pair_sum_sorted",
+          "tests": {
+            "public": [
+              {"args": [[1, 4, 7, 9], 10], "kwargs": {}, "expected": [0, 3]},
+              {"args": [[-5, -1, 3, 8], 2], "kwargs": {}, "expected": [1, 2]}
+            ],
+            "hidden": [
+              {"args": [[], 5], "kwargs": {}, "expected": [-1, -1]},
+              {"args": [[2, 2], 4], "kwargs": {}, "expected": [0, 1]},
+              {"args": [[1, 2, 4], 20], "kwargs": {}, "expected": [-1, -1]}
+            ]
+          }
+        }
+      },
+      "difficulty": "foundation",
+      "expected_minutes": 20,
+      "skills": [
+        {"skill_id": "pattern.two-pointers", "role": "primary"},
+        {"skill_id": "concept.arrays-strings", "role": "supporting"},
+        {"skill_id": "communication.problem-clarification", "role": "supporting"}
+      ],
+      "prerequisites": [],
+      "near_duplicate_exclusions": ["external.leetcode.two-sum"],
+      "constraints": [
+        "values contains at most 100000 integers.",
+        "The input order is nondecreasing.",
+        "Any valid pair is acceptable only when a test has one unique pair."
+      ],
+      "examples": [
+        {
+          "input": {"values": [2, 6, 11, 14], "target": 16},
+          "output": [0, 3],
+          "explanation": "The readings at positions 0 and 3 add to 16."
+        }
+      ],
+      "edge_families": ["empty-input", "duplicate-values", "negative-values", "no-solution"],
+      "references": [
+        "Maintain one position at each end and use the sum to decide which position can move."
+      ],
+      "complexity": {"time": "O(n)", "space": "O(1)"},
+      "misconceptions": [
+        "Moving both positions after a low or high sum can skip the only valid pair."
+      ],
+      "hints": [
+        "What does sorted order tell you when the current sum is too small?",
+        "Keep the two positions distinct."
+      ],
+      "follow_ups": [
+        {
+          "id": "pair-to-window",
+          "prompt": "Adapt the coordinated-boundary idea to a variable-size contiguous span.",
+          "problem_id": "problem.longest-repeating-replacement"
+        }
+      ],
+      "checksum": "sha256:5db858f43dd3614288f4c6fbfdc3bef1696bfb20364e2ee0fa6488b7958f13f2"
+    },
+    {
+      "id": "problem.pair-sum-sorted",
+      "revision": 2,
+      "introduced_catalog_revision": 2,
+      "title": "Locate the unique target pair in sorted readings",
+      "delivery": "packaged",
+      "evidence_eligible": true,
+      "transfer_family": "converging-pointers",
+      "statement": "A sensor produced integer readings in nondecreasing order. At most one pair of distinct positions has readings that sum to the target. Return that zero-based position pair, or [-1, -1] when no pair exists.",
+      "source": {
+        "type": "packaged",
+        "provider": "openlearn",
+        "rights_basis": "openlearn_original",
+        "url": "https://github.com/rosshd/openlearn",
+        "license": "AGPL-3.0-or-later",
+        "attribution": "Original problem by openlearn contributors.",
+        "permission": "Authored for redistribution in the openlearn catalog."
+      },
+      "languages": {
+        "python": {
+          "interface": {
+            "kind": "function",
+            "function": "pair_sum_sorted",
+            "parameters": ["values", "target"]
+          },
+          "starter_code": "def pair_sum_sorted(values, target):\n    pass\n",
+          "reference": "openlearn.interview_problem_references:pair_sum_sorted",
+          "tests": {
+            "public": [
+              {"args": [[1, 4, 7, 9], 10], "kwargs": {}, "expected": [0, 3]},
+              {"args": [[-5, -1, 3, 8], 2], "kwargs": {}, "expected": [1, 2]}
+            ],
+            "hidden": [
+              {"args": [[], 5], "kwargs": {}, "expected": [-1, -1]},
+              {"args": [[2, 2], 4], "kwargs": {}, "expected": [0, 1]},
+              {"args": [[1, 2, 4], 20], "kwargs": {}, "expected": [-1, -1]}
+            ]
+          }
+        }
+      },
+      "difficulty": "foundation",
+      "expected_minutes": 20,
+      "skills": [
+        {"skill_id": "pattern.two-pointers", "role": "primary"},
+        {"skill_id": "concept.arrays-strings", "role": "supporting"},
+        {"skill_id": "communication.problem-clarification", "role": "supporting"}
+      ],
+      "prerequisites": [],
+      "near_duplicate_exclusions": ["external.leetcode.two-sum"],
+      "constraints": [
+        "values contains at most 100000 integers.",
+        "The input order is nondecreasing.",
+        "There is at most one valid pair."
+      ],
+      "examples": [
+        {
+          "input": {"values": [2, 6, 11, 14], "target": 16},
+          "output": [0, 3],
+          "explanation": "The readings at positions 0 and 3 form the unique pair that adds to 16."
+        }
+      ],
+      "edge_families": ["empty-input", "duplicate-values", "negative-values", "no-solution"],
+      "references": [
+        "Maintain one position at each end and use the sum to decide which position can move."
+      ],
+      "complexity": {"time": "O(n)", "space": "O(1)"},
+      "misconceptions": [
+        "Moving both positions after a low or high sum can skip the only valid pair."
+      ],
+      "hints": [
+        "What does sorted order tell you when the current sum is too small?",
+        "Keep the two positions distinct."
+      ],
+      "follow_ups": [
+        {
+          "id": "pair-to-window",
+          "prompt": "Adapt the coordinated-boundary idea to a variable-size contiguous span.",
+          "problem_id": "problem.longest-repeating-replacement"
+        }
+      ],
+      "checksum": "sha256:e163e8a85fa926219f0ab1623ab4805bade04dae9bdc81785c106056d7bc6023"
+    },
+    {
+      "id": "problem.longest-repeating-replacement",
+      "revision": 1,
+      "introduced_catalog_revision": 1,
+      "title": "Longest uniform segment after edits",
+      "delivery": "packaged",
+      "evidence_eligible": true,
+      "transfer_family": "window-invariant",
+      "statement": "Given a text and a nonnegative edit budget, find the greatest length of a contiguous segment that can be made entirely one character by replacing at most that many characters.",
+      "source": {
+        "type": "packaged",
+        "provider": "openlearn",
+        "rights_basis": "openlearn_original",
+        "url": "https://github.com/rosshd/openlearn",
+        "license": "AGPL-3.0-or-later",
+        "attribution": "Original problem by openlearn contributors.",
+        "permission": "Authored for redistribution in the openlearn catalog."
+      },
+      "languages": {
+        "python": {
+          "interface": {
+            "kind": "function",
+            "function": "longest_uniform_span_after_replacements",
+            "parameters": ["text", "budget"]
+          },
+          "starter_code": "def longest_uniform_span_after_replacements(text, budget):\n    pass\n",
+          "reference": "openlearn.interview_problem_references:longest_uniform_span_after_replacements",
+          "tests": {
+            "public": [
+              {"args": ["ABBA", 1], "kwargs": {}, "expected": 3},
+              {"args": ["CABBAA", 2], "kwargs": {}, "expected": 5}
+            ],
+            "hidden": [
+              {"args": ["", 3], "kwargs": {}, "expected": 0},
+              {"args": ["AAAA", 0], "kwargs": {}, "expected": 4},
+              {"args": ["ABCDE", 1], "kwargs": {}, "expected": 2}
+            ]
+          }
+        }
+      },
+      "difficulty": "intermediate",
+      "expected_minutes": 35,
+      "skills": [
+        {"skill_id": "pattern.sliding-window", "role": "primary"},
+        {"skill_id": "concept.arrays-strings", "role": "supporting"},
+        {"skill_id": "concept.hashing", "role": "supporting"},
+        {"skill_id": "process.counterexample-construction", "role": "supporting"}
+      ],
+      "prerequisites": ["problem.pair-sum-sorted"],
+      "near_duplicate_exclusions": [],
+      "constraints": [
+        "text contains at most 100000 uppercase English letters.",
+        "budget is nonnegative."
+      ],
+      "examples": [
+        {
+          "input": {"text": "ABBAC", "budget": 1},
+          "output": 3,
+          "explanation": "The first three characters can become one repeated character with one edit."
+        }
+      ],
+      "edge_families": ["empty-text", "zero-budget", "already-uniform", "budget-exceeds-length"],
+      "references": [
+        "A span is feasible when its length minus its most frequent character count fits the budget."
+      ],
+      "complexity": {"time": "O(n)", "space": "O(a)"},
+      "misconceptions": [
+        "Recomputing the maximum count after every left move is unnecessary for finding the maximum feasible length."
+      ],
+      "hints": [
+        "Track character counts inside one moving span.",
+        "Express the number of required edits using the span length and its largest count."
+      ],
+      "follow_ups": [
+        {
+          "id": "window-stream",
+          "prompt": "Explain what changes if characters arrive as a stream and old input cannot be reread.",
+          "problem_id": "problem.longest-repeating-replacement"
+        }
+      ],
+      "checksum": "sha256:130790940a82e0e2f1fc2b8162d8f80cf8a86a9a4f7c0257c042687b9c3a875a"
+    },
+    {
+      "id": "problem.merge-intervals",
+      "revision": 1,
+      "introduced_catalog_revision": 1,
+      "title": "Combine overlapping busy periods",
+      "delivery": "packaged",
+      "evidence_eligible": true,
+      "transfer_family": "sorted-interval-sweep",
+      "statement": "A calendar exports busy periods as inclusive [start, end] integer pairs in arbitrary order. Return an ordered list that combines every pair of periods that overlaps or touches.",
+      "source": {
+        "type": "packaged",
+        "provider": "openlearn",
+        "rights_basis": "openlearn_original",
+        "url": "https://github.com/rosshd/openlearn",
+        "license": "AGPL-3.0-or-later",
+        "attribution": "Original problem by openlearn contributors.",
+        "permission": "Authored for redistribution in the openlearn catalog."
+      },
+      "languages": {
+        "python": {
+          "interface": {
+            "kind": "function",
+            "function": "merge_busy_periods",
+            "parameters": ["intervals"]
+          },
+          "starter_code": "def merge_busy_periods(intervals):\n    pass\n",
+          "reference": "openlearn.interview_problem_references:merge_busy_periods",
+          "tests": {
+            "public": [
+              {"args": [[[5, 8], [1, 3], [3, 4]]], "kwargs": {}, "expected": [[1, 4], [5, 8]]},
+              {"args": [[[1, 9], [2, 4], [6, 7]]], "kwargs": {}, "expected": [[1, 9]]}
+            ],
+            "hidden": [
+              {"args": [[]], "kwargs": {}, "expected": []},
+              {"args": [[[4, 4]]], "kwargs": {}, "expected": [[4, 4]]},
+              {"args": [[[2, 3], [-2, 0], [0, 2]]], "kwargs": {}, "expected": [[-2, 3]]}
+            ]
+          }
+        }
+      },
+      "difficulty": "foundation",
+      "expected_minutes": 25,
+      "skills": [
+        {"skill_id": "pattern.intervals", "role": "primary"},
+        {"skill_id": "concept.arrays-strings", "role": "supporting"},
+        {"skill_id": "process.edge-case-design", "role": "supporting"}
+      ],
+      "prerequisites": [],
+      "near_duplicate_exclusions": [],
+      "constraints": [
+        "Each period has exactly two integers and start is at most end.",
+        "The input contains at most 100000 periods.",
+        "Touching inclusive periods are combined."
+      ],
+      "examples": [
+        {
+          "input": {"intervals": [[8, 10], [1, 2], [2, 6]]},
+          "output": [[1, 6], [8, 10]],
+          "explanation": "The first two periods in sorted order touch at 2."
+        }
+      ],
+      "edge_families": ["empty-input", "single-period", "nested-periods", "touching-endpoints"],
+      "references": [
+        "Sorting by start time makes the last merged period sufficient state."
+      ],
+      "complexity": {"time": "O(n log n)", "space": "O(n)"},
+      "misconceptions": [
+        "Comparing only adjacent original periods misses chains of overlap."
+      ],
+      "hints": [
+        "First impose an order that makes future starts predictable.",
+        "Compare each next period with the end of the current merged period."
+      ],
+      "follow_ups": [
+        {
+          "id": "interval-volume",
+          "prompt": "Return the total covered duration without retaining the full merged list.",
+          "problem_id": "problem.merge-intervals"
+        }
+      ],
+      "checksum": "sha256:eb43a1d5360f6630f371a9798b41c4f5e159568614d24cb1a8b687e2b1ed3185"
+    },
+    {
+      "id": "problem.connected-components",
+      "revision": 1,
+      "introduced_catalog_revision": 1,
+      "title": "Count isolated device groups",
+      "delivery": "packaged",
+      "evidence_eligible": true,
+      "transfer_family": "disjoint-connectivity",
+      "statement": "Devices are numbered from 0 through node_count - 1. Undirected links connect pairs of devices. Return the number of connected device groups, counting an isolated device as its own group.",
+      "source": {
+        "type": "packaged",
+        "provider": "openlearn",
+        "rights_basis": "openlearn_original",
+        "url": "https://github.com/rosshd/openlearn",
+        "license": "AGPL-3.0-or-later",
+        "attribution": "Original problem by openlearn contributors.",
+        "permission": "Authored for redistribution in the openlearn catalog."
+      },
+      "languages": {
+        "python": {
+          "interface": {
+            "kind": "function",
+            "function": "connected_component_count",
+            "parameters": ["node_count", "edges"]
+          },
+          "starter_code": "def connected_component_count(node_count, edges):\n    pass\n",
+          "reference": "openlearn.interview_problem_references:connected_component_count",
+          "tests": {
+            "public": [
+              {"args": [5, [[0, 1], [1, 2], [3, 4]]], "kwargs": {}, "expected": 2},
+              {"args": [4, []], "kwargs": {}, "expected": 4}
+            ],
+            "hidden": [
+              {"args": [0, []], "kwargs": {}, "expected": 0},
+              {"args": [3, [[0, 1], [1, 2], [0, 2]]], "kwargs": {}, "expected": 1},
+              {"args": [6, [[0, 5], [2, 3]]], "kwargs": {}, "expected": 4}
+            ]
+          }
+        }
+      },
+      "difficulty": "intermediate",
+      "expected_minutes": 35,
+      "skills": [
+        {"skill_id": "concept.union-find", "role": "primary"},
+        {"skill_id": "concept.graphs", "role": "supporting"},
+        {"skill_id": "concept.complexity-analysis", "role": "supporting"}
+      ],
+      "prerequisites": [],
+      "near_duplicate_exclusions": [],
+      "constraints": [
+        "node_count is nonnegative and at most 100000.",
+        "Every endpoint is a valid device number.",
+        "Repeated links do not create additional groups."
+      ],
+      "examples": [
+        {
+          "input": {"node_count": 4, "edges": [[0, 1], [2, 3]]},
+          "output": 2,
+          "explanation": "Each link forms one separate two-device group."
+        }
+      ],
+      "edge_families": ["no-devices", "isolated-devices", "redundant-links", "single-group"],
+      "references": [
+        "Start with one group per device and reduce the count only when a link joins different roots."
+      ],
+      "complexity": {"time": "O((n + e) alpha(n))", "space": "O(n)"},
+      "misconceptions": [
+        "Reducing the group count for a redundant link double-counts a connection."
+      ],
+      "hints": [
+        "Give every device a representative.",
+        "A link changes the answer only when its endpoints have different representatives."
+      ],
+      "follow_ups": [
+        {
+          "id": "component-stream",
+          "prompt": "Describe how to report the count after every newly arriving link.",
+          "problem_id": "problem.connected-components"
+        }
+      ],
+      "checksum": "sha256:7fa1d92407b84c5c15589fc73f90956da79f432b74aca54bc1834657e6f4746e"
+    },
+    {
+      "id": "external.leetcode.two-sum",
+      "revision": 1,
+      "introduced_catalog_revision": 1,
+      "title": "Official external practice link",
+      "delivery": "official_link",
+      "evidence_eligible": false,
+      "transfer_family": null,
+      "statement": null,
+      "source": {
+        "type": "official_link",
+        "provider": "leetcode",
+        "rights_basis": "official_link_only",
+        "url": "https://leetcode.com/problems/two-sum/",
+        "license": "External content is not redistributed.",
+        "attribution": "Problem content remains on the official provider page.",
+        "permission": "openlearn stores and opens only this official URL and neutral metadata."
+      },
+      "languages": {
+        "python": {
+          "interface": {
+            "kind": "function",
+            "function": "solve",
+            "parameters": []
+          },
+          "starter_code": "def solve():\n    pass\n",
+          "reference": null,
+          "tests": {"public": [], "hidden": []}
+        }
+      },
+      "difficulty": "foundation",
+      "expected_minutes": 25,
+      "skills": [
+        {"skill_id": "concept.hashing", "role": "primary"},
+        {"skill_id": "concept.arrays-strings", "role": "supporting"}
+      ],
+      "prerequisites": [],
+      "near_duplicate_exclusions": ["problem.pair-sum-sorted"],
+      "constraints": [],
+      "examples": [],
+      "edge_families": [],
+      "references": [],
+      "complexity": {},
+      "misconceptions": [],
+      "hints": [],
+      "follow_ups": [],
+      "checksum": "sha256:e831867f4896d552105db4635a910fc7e0bcc4524de96acf5d86530408924b46"
+    }
+  ],
+  "catalog_checksum": "sha256:1c9937f5b8237dad047ceab70f74c8497fa4fc7eb3c38891744544dba756eff3"
+}

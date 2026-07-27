@@ -89,6 +89,23 @@ Repeated append-only delivery of an identical evidence ID is idempotent, while c
 Blocking prerequisites propagate through the graph and require each prerequisite to be selection-ready.
 Blocking is a selection constraint rather than an instruction to drill indefinitely.
 
+## Interview Problem Catalog
+
+`openlearn.interview_catalog` owns the immutable, rights-aware interview problem catalog and its deterministic validation pipeline.
+The catalog pins the exact interview skill graph version and gives every problem a stable ID, integer revision, and content checksum.
+Evidence-eligible records must exactly match the pinned graph and mastery-policy versions, problem identity, transfer family, skill IDs, and primary or supporting roles.
+Official link-outs are explicitly evidence-ineligible.
+Attempt references include the catalog revision, problem revision, and problem checksum so later catalog updates cannot change what an earlier learner saw.
+The catalog retains immutable problem revisions keyed by `(problem_id, revision)` and resolves an attempt only when its exact checksum remains available.
+Packaged problems contain only redistributable material, while official-link entries store no external statement, examples, tests, editorial, or reference implementation.
+Official-link teaching and feedback fields are empty, and their local scaffold is an inert function that cannot execute on import.
+Official URLs are canonical HTTPS values bound to an allowed provider host and exclude credentials, query data, fragments, and control characters.
+Trusted package reference implementations run directly during catalog validation and remain separate from the untrusted learner-code runner.
+Validated tests and examples are recursively immutable after parsing.
+Private entries use bounded descriptor-based reads from an explicit learner-owned directory and never enter package data.
+Directory descriptors and descriptor-relative entry opens prevent a replaced directory path from redirecting private reads; unsupported platforms fail closed.
+See [Interview Problem Catalog](INTERVIEW_PROBLEM_CATALOG.md) for the full rights policy and contributor workflow.
+
 ## Practice Activities
 
 `openlearn.activities` defines the versioned, domain-neutral contract for hands-on practice.
