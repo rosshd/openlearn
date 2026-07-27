@@ -1087,6 +1087,8 @@ def _valid_close_response(line: bytes, request_id: str) -> bool:
         return False
     try:
         payload = json.loads(line[len(PROTOCOL_PREFIX) :])
+        if not isinstance(payload, dict):
+            return False
     except (
         json.JSONDecodeError,
         TypeError,

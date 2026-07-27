@@ -180,8 +180,8 @@ class CodeRunnerTests(unittest.TestCase):
             solution = Path(raw) / "solution.py"
             solution.write_text(
                 "def noisy():\n"
-                "    while True:\n"
-                "        print('x' * 1024)\n",
+                "    print('x' * 8192)\n"
+                "    return None\n",
                 encoding="utf-8",
             )
             result = code_runner.run_python_tests(
@@ -201,6 +201,51 @@ class CodeRunnerTests(unittest.TestCase):
 
         self.assertEqual(result.kind, "output_limit")
         self.assertEqual(result.limit_reason, "captured_output")
+
+    def test_close_response_rejects_non_object_json_values(self) -> None:
+        for payload in (
+            [],
+            None,
+            "closed",
+            1,
+            True,
+            {},
+            {"version": 1, "request_id": "request", "status": "closed", "extra": 1},
+        ):
+            with self.subTest(payload=payload):
+                line = (
+                    code_runner.PROTOCOL_PREFIX
+                    + json.dumps(payload, separators=(",", ":"))
+                ).encode()
+                self.assertFalse(
+                    code_runner._valid_close_response(line, "request")
+                )
+
+    def test_learner_cannot_replace_close_response_with_json_list(self) -> None:
+        source = """\
+import inspect
+import sys
+
+def solve():
+    worker = inspect.currentframe().f_back.f_globals
+    original_emit = worker["emit"]
+    prefix = worker["prefix"]
+
+    def forged_emit(request_id, status, **kwargs):
+        if status == "closed":
+            sys.stdout.write(prefix + "[]\\n")
+            sys.stdout.flush()
+            return
+        original_emit(request_id, status, **kwargs)
+
+    worker["emit"] = forged_emit
+    return 1
+"""
+        result = self._run_reduced(source, 1)
+
+        self.assertEqual(result.kind, "runtime_error")
+        self.assertEqual(result.limit_reason, "invalid_worker_protocol")
+        self.assertFalse(result.passed)
 
     def test_solution_outcome_types_remain_distinct_from_runner_failure(self) -> None:
         cases = [
