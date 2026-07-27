@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 from argparse import Namespace
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
@@ -18,9 +19,11 @@ from tests.dogfood.evidence import EvidenceRecorder
 
 SCHEMA_VERSION = 2
 RUBRIC_VERSION = "tutor-behavior-v2"
+MULTI_TURN_CONTRACT_VERSION = "adaptive-sequence-v1"
 JUDGE_THRESHOLD = 0.7
 DIMENSION_FLOOR = 0.5
 SCENARIOS_DIR = Path(__file__).parent / "scenarios"
+MULTI_TURN_SCENARIOS_DIR = Path(__file__).parent / "multi_turn_scenarios"
 CALIBRATION_FIXTURE_PATH = (
     Path(__file__).parent / "fixtures" / "tutor_judge_calibration_v2.json"
 )
@@ -105,9 +108,57 @@ def load_scenarios(directory: Path = SCENARIOS_DIR) -> list[dict[str, object]]:
         for key in ("name", "persona", "topic", "goal", "turns", "rubric"):
             if not value.get(key):
                 raise ValueError(f"scenario {path.name} is missing {key}")
+        _validate_scenario_turns(value, path)
         value["_fixture_path"] = path
         scenarios.append(value)
     return scenarios
+
+
+def _validate_scenario_turns(scenario: dict[str, object], path: Path) -> None:
+    turns = scenario["turns"]
+    if not isinstance(turns, list):
+        raise ValueError(f"scenario {path.name} turns must be a list")
+    for index, turn in enumerate(turns):
+        if not isinstance(turn, dict):
+            raise ValueError(f"scenario {path.name} turn {index} must be an object")
+        if turn.get("role") not in {"user", "assistant"}:
+            raise ValueError(f"scenario {path.name} turn {index} has an invalid role")
+        content = turn.get("content")
+        if content is not None and (
+            not isinstance(content, str) or not content.strip()
+        ):
+            raise ValueError(f"scenario {path.name} turn {index} has invalid content")
+    generated = [
+        index
+        for index, turn in enumerate(turns)
+        if turn.get("role") == "assistant" and turn.get("content") is None
+    ]
+    if not generated:
+        raise ValueError(f"scenario {path.name} has no generated tutor move")
+    if len(generated) > 1:
+        family = scenario.get("family")
+        if not isinstance(family, str) or not family.strip():
+            raise ValueError(f"multi-turn scenario {path.name} is missing family")
+        turn_rubrics = scenario.get("turn_rubrics")
+        if (
+            not isinstance(turn_rubrics, list)
+            or len(turn_rubrics) != len(generated)
+            or not all(
+                isinstance(rubric, list)
+                and rubric
+                and all(isinstance(item, str) and item.strip() for item in rubric)
+                for rubric in turn_rubrics
+            )
+        ):
+            raise ValueError(
+                f"multi-turn scenario {path.name} needs one non-empty turn rubric "
+                "per generated tutor move"
+            )
+        for index in generated:
+            if index == 0 or turns[index - 1].get("role") != "user":
+                raise ValueError(
+                    f"generated tutor move in {path.name} must follow learner input"
+                )
 
 
 def load_calibration_cases(
@@ -328,6 +379,18 @@ def _run_scenario(
     tutor_model: str,
     judge_model: str,
 ) -> dict[str, object]:
+    turns = scenario.get("turns")
+    if isinstance(turns, list) and sum(
+        turn.get("role") == "assistant" and turn.get("content") is None
+        for turn in turns
+        if isinstance(turn, dict)
+    ) > 1:
+        return _run_multi_turn_scenario(
+            scenario,
+            home=home,
+            tutor_model=tutor_model,
+            judge_model=judge_model,
+        )
     fixture_path = scenario["_fixture_path"]
     if not isinstance(fixture_path, Path):
         raise ValueError("scenario fixture path is invalid")
@@ -393,6 +456,668 @@ def _run_scenario(
                 "judge_prompt_sha256": _sha256(judge_prompt.encode("utf-8")),
             },
         }
+
+
+def _run_multi_turn_scenario(
+    scenario: dict[str, object],
+    *,
+    home: Path,
+    tutor_model: str,
+    judge_model: str,
+) -> dict[str, object]:
+    fixture_path = scenario["_fixture_path"]
+    if not isinstance(fixture_path, Path):
+        raise ValueError("scenario fixture path is invalid")
+    with _isolated_environment(home, tutor_model):
+        learner_inputs, scripted_history = _seed_multi_turn_scenario(scenario)
+        slug = cli.slugify(str(scenario["topic"]))
+        assessment_mode, assessment_item_count = _validated_assessment_evidence(
+            scenario
+        )
+        turn_records: list[dict[str, object]] = []
+        previous_state_hash: str | None = None
+
+        for index, learner_input in enumerate(learner_inputs, start=1):
+            topic_before = cli.read_topic(slug)
+            state_before = dict(topic_before.metadata)
+            state_before_hash = _stable_hash(state_before)
+            event_path = cli.topic_events_path(slug)
+            event_count_before = len(cli.load_event_log(event_path))
+            actual_system_prompts: list[str] = []
+            tutor_output = ""
+            error: dict[str, str] | None = None
+
+            try:
+                if cli.learner_requests_advance(learner_input):
+                    cli.save_learner_navigation_preference(topic_before, learner_input)
+                tutor_output = cli.ask_topic(
+                    slug,
+                    learner_input,
+                    tutor_model,
+                    output_func=lambda _text: None,
+                    system_prompt_sink=actual_system_prompts.append,
+                )
+            except (cli.OpenLearnError, OSError, ValueError, json.JSONDecodeError) as exc:
+                error = {"stage": "tutor_provider", "message": str(exc)}
+
+            topic_after = cli.read_topic(slug)
+            state_after = dict(topic_after.metadata)
+            new_events = cli.load_event_log(event_path)[event_count_before:]
+            judgment = _learner_judgment(learner_input, new_events)
+            selected_move = _selected_move(
+                learner_input,
+                tutor_output,
+                state_after,
+                judgment,
+            )
+            if error:
+                judge = _failed_judge(error["message"])
+            else:
+                try:
+                    turn_scenario = _turn_scoped_scenario(scenario, index - 1)
+                    judge = _judge_response(
+                        judge_model,
+                        _judge_prompt(
+                            turn_scenario,
+                            learner_input,
+                            tutor_output,
+                            scripted_history=[
+                                *scripted_history,
+                                *[
+                                    {
+                                        "learner": str(turn["learner_input"]),
+                                        "tutor": str(turn["tutor_output"]),
+                                    }
+                                    for turn in turn_records
+                                    if turn.get("tutor_output")
+                                ],
+                            ],
+                            authoritative_state_before=state_before,
+                            authoritative_state_after=state_after,
+                            events=new_events,
+                            assessment_mode=assessment_mode,
+                            assessment_item_count=assessment_item_count,
+                        ),
+                    )
+                except (
+                    cli.OpenLearnError,
+                    OSError,
+                    ValueError,
+                    json.JSONDecodeError,
+                ) as exc:
+                    error = {
+                        "stage": "turn_judge_provider",
+                        "message": str(exc),
+                    }
+                    judge = _failed_judge(error["message"])
+            state_after_hash = _stable_hash(state_after)
+            actual_system_prompt = (
+                actual_system_prompts[-1] if actual_system_prompts else ""
+            )
+            turn_records.append(
+                {
+                    "turn": index,
+                    "learner_input": learner_input,
+                    "tutor_output": tutor_output,
+                    "selected_move": selected_move,
+                    "judgment": judgment,
+                    "judge": judge,
+                    "rubric": _effective_rubric(
+                        _turn_scoped_scenario(scenario, index - 1)
+                    ),
+                    "state_delta": _mapping_delta(state_before, state_after),
+                    "state_before_sha256": state_before_hash,
+                    "state_after_sha256": state_after_hash,
+                    "state_before_replay_sha256": _stable_replay_hash(
+                        state_before, home
+                    ),
+                    "state_after_replay_sha256": _stable_replay_hash(
+                        state_after, home
+                    ),
+                    "prior_state_sha256": previous_state_hash,
+                    "prior_state_used": (
+                        previous_state_hash is not None
+                        and previous_state_hash == state_before_hash
+                    ),
+                    "policy_state": _policy_state(state_after),
+                    "events": new_events,
+                    "actual_system_prompt_sha256": (
+                        _sha256(actual_system_prompt.encode("utf-8"))
+                        if actual_system_prompt
+                        else ""
+                    ),
+                    "actual_system_prompt_replay_sha256": (
+                        _stable_prompt_replay_hash(actual_system_prompt, home)
+                        if actual_system_prompt
+                        else ""
+                    ),
+                    **({"error": error} if error else {}),
+                }
+            )
+            previous_state_hash = state_after_hash
+            if error:
+                break
+
+        all_events = [
+            event for turn in turn_records for event in turn.get("events", [])
+        ]
+        final_metadata = dict(cli.read_topic(slug).metadata)
+        state_assertions = _evaluate_state_assertions(scenario, final_metadata)
+        event_assertions = _evaluate_event_assertions(scenario, all_events)
+        completed = len(turn_records) == len(learner_inputs) and all(
+            not turn.get("error") for turn in turn_records
+        )
+        turn_judges = [turn["judge"] for turn in turn_records]
+        sequence_error: dict[str, str] | None = None
+        if completed:
+            try:
+                sequence_judge = _judge_response(
+                    judge_model,
+                    _sequence_judge_prompt(
+                        scenario,
+                        turn_records,
+                        final_metadata=final_metadata,
+                        events=all_events,
+                    ),
+                )
+            except (
+                cli.OpenLearnError,
+                OSError,
+                ValueError,
+                json.JSONDecodeError,
+            ) as exc:
+                sequence_error = {
+                    "stage": "sequence_judge_provider",
+                    "message": str(exc),
+                }
+                sequence_judge = _failed_judge(sequence_error["message"])
+        else:
+            sequence_judge = _failed_judge(
+                "Sequence did not complete; cross-turn judgment was not run."
+            )
+        passed = (
+            completed
+            and all(judge.get("pass") is True for judge in turn_judges)
+            and sequence_judge.get("pass") is True
+            and state_assertions["pass"] is True
+            and event_assertions["pass"] is True
+        )
+        scored_judges = [*turn_judges, sequence_judge]
+        score = (
+            sum(float(judge["score"]) for judge in scored_judges)
+            / len(scored_judges)
+            if scored_judges
+            else 0.0
+        )
+        record: dict[str, object] = {
+            "schema_version": SCHEMA_VERSION,
+            "suite": "multi-turn",
+            "contract_version": MULTI_TURN_CONTRACT_VERSION,
+            "scenario": scenario["name"],
+            "family": scenario["family"],
+            "persona": scenario["persona"],
+            "description": scenario.get("description", ""),
+            "scripted_history": scripted_history,
+            "learner_message": (
+                turn_records[-1]["learner_input"] if turn_records else ""
+            ),
+            "tutor_response": (
+                turn_records[-1]["tutor_output"] if turn_records else ""
+            ),
+            "turns": turn_records,
+            "partial_evidence": bool(turn_records) and not completed,
+            "sequence_judge": sequence_judge,
+            **({"sequence_error": sequence_error} if sequence_error else {}),
+            "rubric": _effective_rubric(scenario),
+            "rubric_version": RUBRIC_VERSION,
+            "assessment_mode": assessment_mode,
+            "assessment_item_count": assessment_item_count,
+            "judge": {
+                "pass": passed,
+                "score": round(score, 3),
+                "reason": (
+                    "Every generated turn and deterministic assertion passed."
+                    if passed
+                    else "One or more generated turns or deterministic assertions failed."
+                ),
+            },
+            "state_assertions": state_assertions,
+            "event_assertions": event_assertions,
+            "state_delta": (
+                _mapping_delta(
+                    dict(cli.read_topic(slug).metadata),
+                    final_metadata,
+                )
+                if not turn_records
+                else turn_records[-1]["state_delta"]
+            ),
+            "events": all_events,
+            "provenance": _fixture_provenance(
+                fixture_path,
+                home=home,
+                tutor_model=tutor_model,
+                judge_model=judge_model,
+            ),
+        }
+        record["replay_fingerprint"] = _multi_turn_replay_fingerprint(record)
+        return record
+
+
+def _turn_scoped_scenario(
+    scenario: dict[str, object], turn_index: int
+) -> dict[str, object]:
+    turn_rubrics = scenario.get("turn_rubrics")
+    if not isinstance(turn_rubrics, list) or turn_index >= len(turn_rubrics):
+        raise ValueError(
+            f"scenario {scenario['name']} has no rubric for generated turn "
+            f"{turn_index + 1}"
+        )
+    scoped = dict(scenario)
+    scoped["rubric"] = turn_rubrics[turn_index]
+    return scoped
+
+
+def _sequence_judge_prompt(
+    scenario: dict[str, object],
+    turns: list[dict[str, object]],
+    *,
+    final_metadata: dict[str, object],
+    events: list[dict[str, object]],
+) -> str:
+    transcript = "\n\n".join(
+        "\n".join(
+            (
+                f"Turn {turn['turn']}",
+                f"Learner: {turn['learner_input']}",
+                f"Selected move: {json.dumps(turn['selected_move'], sort_keys=True)}",
+                f"Tutor: {turn['tutor_output']}",
+                f"Learner judgment: {json.dumps(turn['judgment'], sort_keys=True)}",
+                f"State delta: {json.dumps(turn['state_delta'], sort_keys=True)}",
+            )
+        )
+        for turn in turns
+    )
+    sequence_rubric = [
+        *scenario["rubric"],
+        *DIMENSION_RUBRIC,
+        (
+            "Across the sequence, every tutor response is concise and contains exactly "
+            "one primary tutoring or assessment move."
+        ),
+        (
+            "Across the sequence, every normal tutor turn contains at most one check "
+            "and one learner action."
+        ),
+        "Each tutor turn stays on one concept.",
+        (
+            "Every progress, mastery, environment, tool, or configuration claim is "
+            "supported by the visible sequence or authoritative scenario state."
+        ),
+    ]
+    rubric_text = "\n".join(f"- {item}" for item in sequence_rubric)
+    return (
+        f"Scenario: {scenario['name']}\n"
+        f"Learner persona: {scenario['persona']}\n\n"
+        "Judge the completed adaptive sequence as a whole. Cross-turn criteria apply "
+        "to the completed sequence, not to any earlier turn in isolation.\n\n"
+        f"Completed transcript and turn evidence:\n{transcript}\n\n"
+        "Authoritative final scenario state:\n"
+        f"{json.dumps(final_metadata, indent=2, sort_keys=True)}\n\n"
+        "Durable events in order:\n"
+        f"{json.dumps(events, indent=2, sort_keys=True)}\n\n"
+        f"Rubric:\n{rubric_text}"
+    )
+
+
+def _seed_multi_turn_scenario(
+    scenario: dict[str, object],
+) -> tuple[list[str], list[dict[str, str]]]:
+    cli.cmd_new(
+        Namespace(
+            topic=str(scenario["topic"]),
+            goal=str(scenario["goal"]),
+            template=None,
+            mastery_profile=str(scenario.get("mastery_profile") or "proficient"),
+        ),
+        output_func=lambda _text: None,
+    )
+    slug = cli.slugify(str(scenario["topic"]))
+    _seed_course_state(slug, scenario)
+    _seed_context(slug, scenario)
+    turns = scenario["turns"]
+    if not isinstance(turns, list):
+        raise ValueError(f"scenario {scenario['name']} turns must be a list")
+
+    learner_inputs: list[str] = []
+    history: list[dict[str, str]] = []
+    pending_learner = ""
+    for index, turn in enumerate(turns):
+        if not isinstance(turn, dict):
+            raise ValueError(f"scenario {scenario['name']} turn {index} must be an object")
+        role = turn.get("role")
+        content = turn.get("content")
+        if role == "user" and isinstance(content, str):
+            pending_learner = content.strip()
+            continue
+        if role != "assistant":
+            continue
+        if content is None:
+            if not pending_learner:
+                raise ValueError(
+                    f"scenario {scenario['name']} generated tutor move lacks learner input"
+                )
+            learner_inputs.append(pending_learner)
+            pending_learner = ""
+            continue
+        if not isinstance(content, str) or not content.strip():
+            continue
+        tutor_text = content.strip()
+        prompt = pending_learner or "[scenario setup]"
+        topic = cli.read_topic(slug)
+        cli.append_session(topic, "chat", prompt, tutor_text)
+        topic = cli.read_topic(slug)
+        cli.save_pending_question(topic, tutor_text, "", question_text=tutor_text)
+        history.append({"learner": prompt, "tutor": tutor_text})
+        pending_learner = ""
+    if pending_learner:
+        raise ValueError(
+            f"scenario {scenario['name']} learner input lacks a generated tutor move"
+        )
+    return learner_inputs, history
+
+
+def _seed_context(slug: str, scenario: dict[str, object]) -> None:
+    context = scenario.get("context")
+    if context is None:
+        return
+    if not isinstance(context, dict) or not all(
+        isinstance(name, str)
+        and name.endswith(".summary.txt")
+        and isinstance(text, str)
+        and text.strip()
+        for name, text in context.items()
+    ):
+        raise ValueError(
+            f"scenario {scenario['name']} context must map summary filenames to text"
+        )
+    directory = cli.topic_context_dir(slug)
+    directory.mkdir(parents=True, mode=0o700)
+    for name, text in context.items():
+        path = directory / Path(name).name
+        path.write_text(text.strip() + "\n", encoding="utf-8")
+        path.chmod(0o600)
+
+
+def _learner_judgment(
+    learner_input: str, events: list[dict[str, object]]
+) -> dict[str, object]:
+    for event in reversed(events):
+        if event.get("event_type") != "answer_judged":
+            continue
+        data = event.get("data")
+        if isinstance(data, dict):
+            return {
+                "graded": True,
+                "status": data.get("status"),
+                "score": data.get("score"),
+                "answer_kind": data.get("answer_kind"),
+                "is_transfer": data.get("is_transfer"),
+                "gaming_suspected": data.get("gaming_suspected"),
+            }
+    return {
+        "graded": False,
+        "status": None,
+        "score": None,
+        "answer_kind": None,
+        "is_transfer": None,
+        "gaming_suspected": None,
+        "message_kind": (
+            "navigation"
+            if cli.learner_requests_advance(learner_input)
+            else cli.classify_ungraded_learner_message(learner_input)
+        ),
+    }
+
+
+def _selected_move(
+    learner_input: str,
+    tutor_output: str,
+    state: dict[str, object],
+    judgment: dict[str, object],
+) -> dict[str, object]:
+    if cli.learner_requests_advance(learner_input):
+        name = "navigation"
+        reason = "explicit learner navigation"
+    else:
+        remediation = state.get("pending_remediation")
+        stage = remediation.get("stage") if isinstance(remediation, dict) else None
+        if isinstance(stage, str):
+            name = {
+                "hint": "remediation_hint",
+                "worked_example": "worked_example",
+                "faded_check": "faded_check",
+                "deferred": "deferred_review",
+            }.get(stage, "remediation")
+            reason = f"saved remediation stage: {stage}"
+        elif isinstance(state.get("pending_verify"), dict):
+            name = "transfer_check"
+            reason = "saved copying verification gate"
+        elif judgment.get("status") == "correct":
+            name = "transfer_check" if "**Check:**" in tutor_output else "advance"
+            reason = "correct learner answer"
+        elif judgment.get("graded") is False:
+            name = "conversation"
+            reason = f"ungraded {judgment.get('message_kind') or 'message'}"
+        else:
+            name = "feedback"
+            reason = f"learner judgment: {judgment.get('status')}"
+    return {
+        "name": name,
+        "reason": reason,
+        "state_fields": _policy_state(state),
+    }
+
+
+def _policy_state(state: dict[str, object]) -> dict[str, object]:
+    keys = (
+        "current_focus",
+        "last_answer_status",
+        "last_answer_score",
+        "consecutive_misses",
+        "consecutive_correct",
+        "difficulty_tier",
+        "pending_question",
+        "pending_remediation",
+        "pending_verify",
+        "learner_preferences",
+        "review_due",
+    )
+    return {key: state[key] for key in keys if key in state}
+
+
+def _failed_judge(error: str) -> dict[str, object]:
+    return {
+        "pass": False,
+        "score": 0.0,
+        "reason": f"Harness error: {error}",
+        "threshold": JUDGE_THRESHOLD,
+        "dimension_floor": DIMENSION_FLOOR,
+        "base_criteria": {key: False for key in BASE_CRITERION_KEYS},
+        "dimensions": {
+            key: {"score": 0.0, "evidence": "Turn did not complete."}
+            for key in JUDGE_DIMENSIONS
+        },
+        "hard_failures": {key: False for key in HARD_FAILURE_KEYS},
+    }
+
+
+def _stable_hash(value: object) -> str:
+    return _sha256(
+        json.dumps(value, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    )
+
+
+def _stable_replay_hash(value: object, home: Path) -> str:
+    return _stable_hash(
+        _normalize_replay_value(value, home=home, path=("state",))
+    )
+
+
+def _stable_prompt_replay_hash(prompt: str, home: Path) -> str:
+    normalized = prompt.replace(str(home), "<SCENARIO_HOME>")
+    normalized = re.sub(r"\bturn_[0-9a-f]{32}\b", "turn_<ID>", normalized)
+    normalized = re.sub(r"\btopic_[0-9a-f]{32}\b", "topic_<ID>", normalized)
+    normalized = _normalize_prompt_topic_metadata(normalized)
+    return _stable_hash(normalized)
+
+
+def _normalize_prompt_topic_metadata(prompt: str) -> str:
+    marker = "Topic metadata:\n"
+    marker_start = prompt.find(marker)
+    if marker_start < 0:
+        return prompt
+    value_start = marker_start + len(marker)
+    while value_start < len(prompt) and prompt[value_start].isspace():
+        value_start += 1
+    try:
+        metadata, consumed = json.JSONDecoder().raw_decode(prompt[value_start:])
+    except json.JSONDecodeError:
+        return prompt
+    if not isinstance(metadata, dict):
+        return prompt
+    normalized = _normalize_replay_value(metadata, path=("state",))
+    return (
+        prompt[:value_start]
+        + json.dumps(normalized, indent=2, ensure_ascii=False, sort_keys=True)
+        + prompt[value_start + consumed :]
+    )
+
+
+def _is_generated_creation_field(path: tuple[str, ...], key: str) -> bool:
+    if key != "created":
+        return False
+    generated_containers = {
+        "pending_question",
+        "previous_pending_question",
+        "pending_remediation",
+        "previous_pending_remediation",
+    }
+    return (
+        path == ("state",)
+        or (path and path[-1] == "policy_state")
+        or any(part in generated_containers for part in path)
+        or (path and path[-1] == "state_delta")
+    )
+
+
+def _normalize_replay_value(
+    value: object,
+    *,
+    home: Path | None = None,
+    path: tuple[str, ...] = (),
+) -> object:
+    if isinstance(value, dict):
+        normalized: dict[str, object] = {}
+        for key, item in sorted(value.items()):
+            if key == "_turn_receipts":
+                continue
+            child_path = (*path, key)
+            if key == "mutation_id":
+                normalized[key] = "<MUTATION_ID>"
+            elif key == "topic_generation":
+                normalized[key] = "<TOPIC_ID>"
+            elif key == "event_id" and "events" in path:
+                normalized[key] = "<EVENT_ID>"
+            elif key == "ts" and "events" in path:
+                normalized[key] = "<EVENT_TIMESTAMP>"
+            elif _is_generated_creation_field(path, key):
+                normalized[key] = "<CREATED_AT>"
+            else:
+                normalized[key] = _normalize_replay_value(
+                    item,
+                    home=home,
+                    path=child_path,
+                )
+        return normalized
+    if isinstance(value, list):
+        return [
+            _normalize_replay_value(item, home=home, path=(*path, "[]"))
+            for item in value
+        ]
+    if not isinstance(value, str):
+        return value
+    normalized = value
+    if home is not None:
+        normalized = normalized.replace(str(home), "<SCENARIO_HOME>")
+    return normalized
+
+
+def _multi_turn_replay_fingerprint(record: dict[str, object]) -> str:
+    return _stable_hash(_multi_turn_replay_evidence(record))
+
+
+def _multi_turn_replay_evidence(record: dict[str, object]) -> object:
+    turns = record.get("turns")
+    stable_turns: list[dict[str, object]] = []
+    if isinstance(turns, list):
+        for turn in turns:
+            if not isinstance(turn, dict):
+                continue
+            stable_turns.append(
+                {
+                    key: turn.get(key)
+                    for key in (
+                        "turn",
+                        "learner_input",
+                        "tutor_output",
+                        "selected_move",
+                        "judgment",
+                        "judge",
+                        "rubric",
+                        "state_delta",
+                        "events",
+                        "actual_system_prompt_replay_sha256",
+                        "state_before_replay_sha256",
+                        "state_after_replay_sha256",
+                        "policy_state",
+                        "error",
+                    )
+                    if key in turn
+                }
+            )
+    semantic_evidence = {
+        "schema_version": record.get("schema_version"),
+        "suite": record.get("suite"),
+        "contract_version": record.get("contract_version"),
+        "scenario": record.get("scenario"),
+        "family": record.get("family"),
+        "rubric_version": record.get("rubric_version"),
+        "rubric": record.get("rubric"),
+        "assessment_mode": record.get("assessment_mode"),
+        "assessment_item_count": record.get("assessment_item_count"),
+        "fixture_sha256": (
+            record.get("provenance", {}).get("fixture_sha256")
+            if isinstance(record.get("provenance"), dict)
+            else None
+        ),
+        "turns": stable_turns,
+        "sequence_judge": record.get("sequence_judge"),
+        "sequence_error": record.get("sequence_error"),
+        "state_assertions": record.get("state_assertions"),
+        "event_assertions": record.get("event_assertions"),
+        "partial_evidence": record.get("partial_evidence"),
+    }
+    home: Path | None = None
+    provenance = record.get("provenance")
+    if isinstance(provenance, dict):
+        openlearn_home = provenance.get("openlearn_home")
+        if isinstance(openlearn_home, str) and openlearn_home:
+            home = Path(openlearn_home)
+    return _normalize_replay_value(
+        semantic_evidence,
+        home=home,
+        path=("record",),
+    )
 
 
 def _seed_scenario(
@@ -900,6 +1625,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--judge-model",
         default=os.environ.get("OPENLEARN_EVAL_JUDGE_MODEL"),
     )
+    parser.add_argument(
+        "--suite",
+        choices=("single-turn", "multi-turn"),
+        default="single-turn",
+        help="Select the existing single-turn suite or the adaptive multi-turn suite.",
+    )
     parser.add_argument("--scenario", action="append", dest="scenario_ids")
     args = parser.parse_args(argv)
     if not args.judge_model:
@@ -920,6 +1651,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             tutor_model=args.tutor_model,
             judge_model=args.judge_model,
             scenario_ids=args.scenario_ids,
+            scenarios_dir=(
+                MULTI_TURN_SCENARIOS_DIR
+                if args.suite == "multi-turn"
+                else SCENARIOS_DIR
+            ),
         )
     except (cli.OpenLearnError, OSError, ValueError) as exc:
         parser.exit(2, f"tutor behavior eval: {exc}\n")

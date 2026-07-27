@@ -1,0 +1,27 @@
+{
+  "name": "prerequisite_repair",
+  "family": "prerequisite_repair",
+  "persona": "A learner whose dependent concept is blocked by a missing prerequisite.",
+  "description": "Exercises prerequisite repair before returning to pointer dereferencing.",
+  "topic": "pointer dereferencing",
+  "goal": "Understand pointer dereferencing in C",
+  "turns": [
+    {"role": "assistant", "content": "If p is an int pointer, what does *p mean?"},
+    {"role": "user", "content": "It is the pointer's name; I do not understand what an address represents."},
+    {"role": "assistant", "content": null},
+    {"role": "user", "content": "An address identifies a memory location where a value can be stored."},
+    {"role": "assistant", "content": null},
+    {"role": "user", "content": "Then *p accesses the int stored at the memory address held in p."},
+    {"role": "assistant", "content": null}
+  ],
+  "rubric": [
+    "the address prerequisite stays active until repaired",
+    "the tutor verifies the prerequisite before resuming dereferencing",
+    "the dependent concept resumes only after sufficient prerequisite evidence"
+  ],
+  "turn_rubrics": [
+    ["identify the memory-address prerequisite and keep it active"],
+    ["verify the repaired address concept before resuming dereferencing"],
+    ["respond to the dependent dereferencing explanation only after prerequisite repair"]
+  ]
+}

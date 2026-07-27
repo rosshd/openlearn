@@ -41,8 +41,8 @@ codex-dogfood:
 
 # Opt-in, live, and intentionally absent from `check`.
 tutor-behavior-eval:
-	@test -n "$(RUN_ROOT)" || { echo "usage: make tutor-behavior-eval RUN_ROOT=<new-private-path> JUDGE_MODEL=<model-distinct-from-tutor>" >&2; exit 2; }
-	PYTHON=$(PYTHON) ./scripts/run-tutor-behavior-eval "$(RUN_ROOT)" $(if $(JUDGE_MODEL),--judge-model "$(JUDGE_MODEL)",)
+	@test -n "$(RUN_ROOT)" || { echo "usage: make tutor-behavior-eval RUN_ROOT=<new-private-path> JUDGE_MODEL=<model-distinct-from-tutor> [SUITE=multi-turn] [SCENARIO=<name>]" >&2; exit 2; }
+	PYTHON=$(PYTHON) ./scripts/run-tutor-behavior-eval "$(RUN_ROOT)" $(if $(JUDGE_MODEL),--judge-model "$(JUDGE_MODEL)",) $(if $(SUITE),--suite "$(SUITE)",) $(if $(SCENARIO),--scenario "$(SCENARIO)",)
 
 diff:
 	git diff --stat

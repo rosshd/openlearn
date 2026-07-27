@@ -1,0 +1,24 @@
+{
+  "name": "copied_answer_transfer",
+  "family": "copied_answer_transfer",
+  "persona": "A learner who repeats wording from the tutor before demonstrating transfer.",
+  "description": "Exercises copied-answer detection and a novel transfer check.",
+  "topic": "stack frames",
+  "goal": "Reason about stack frames",
+  "turns": [
+    {"role": "assistant", "content": "A stack frame stores one call's parameters, locals, and return location. What does a stack frame store?"},
+    {"role": "user", "content": "A stack frame stores one call's parameters, locals, and return location."},
+    {"role": "assistant", "content": null},
+    {"role": "user", "content": "In recursive factorial(3), each active call needs a separate frame so its own n and return point remain available."},
+    {"role": "assistant", "content": null}
+  ],
+  "rubric": [
+    "the copied response does not earn mastery credit",
+    "the next move is a novel transfer check without accusing the learner",
+    "successful transfer can clear the verification gate"
+  ],
+  "turn_rubrics": [
+    ["do not grant mastery and ask one novel transfer check without accusation"],
+    ["judge the novel recursive-call application and respond to demonstrated transfer"]
+  ]
+}

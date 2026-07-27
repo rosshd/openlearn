@@ -1,0 +1,30 @@
+{
+  "name": "repeated_miss_fading",
+  "family": "repeated_miss_fading",
+  "persona": "A persistent beginner who needs support faded across several attempts.",
+  "description": "Exercises hint, worked-example, faded-check, and independent-production moves.",
+  "topic": "loop invariants",
+  "goal": "Explain and apply loop invariants",
+  "turns": [
+    {"role": "assistant", "content": "What must a loop invariant establish before the loop starts?"},
+    {"role": "user", "content": "It proves the loop eventually stops."},
+    {"role": "assistant", "content": null},
+    {"role": "user", "content": "Maybe it only needs to be true after the loop finishes."},
+    {"role": "assistant", "content": null},
+    {"role": "user", "content": "I still cannot identify what is true before the first iteration."},
+    {"role": "assistant", "content": null},
+    {"role": "user", "content": "For a sum loop, total equals the sum of the items already processed before each iteration, including before the first."},
+    {"role": "assistant", "content": null}
+  ],
+  "rubric": [
+    "support progresses from a targeted hint to a worked example and then a faded check",
+    "the later correct production receives less guidance than the earlier misses",
+    "the tutor never claims mastery from a scaffolded attempt alone"
+  ],
+  "turn_rubrics": [
+    ["give one targeted hint for the first miss"],
+    ["use a compact worked example after the repeated miss"],
+    ["fade most scaffolding and ask for one analogous production attempt"],
+    ["respond to independent production with less guidance and no false mastery claim"]
+  ]
+}
