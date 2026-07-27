@@ -89,6 +89,16 @@ Repeated append-only delivery of an identical evidence ID is idempotent, while c
 Blocking prerequisites propagate through the graph and require each prerequisite to be selection-ready.
 Blocking is a selection constraint rather than an instruction to drill indefinitely.
 
+## Interview Problem Catalog
+
+`openlearn.interview_catalog` owns the immutable, rights-aware interview problem catalog and its deterministic validation pipeline.
+The catalog pins the exact interview skill graph version and gives every problem a stable ID, integer revision, and content checksum.
+Attempt references include the catalog revision, problem revision, and problem checksum so later catalog updates cannot change what an earlier learner saw.
+Packaged problems contain only redistributable material, while official-link entries store no external statement, examples, tests, editorial, or reference implementation.
+Trusted package reference implementations run directly during catalog validation and remain separate from the untrusted learner-code runner.
+Private entries load only from an explicit learner-owned directory and never enter package data.
+See [Interview Problem Catalog](INTERVIEW_PROBLEM_CATALOG.md) for the full rights policy and contributor workflow.
+
 ## Practice Activities
 
 `openlearn.activities` defines the versioned, domain-neutral contract for hands-on practice.
