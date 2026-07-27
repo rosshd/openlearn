@@ -230,7 +230,7 @@ def test_metrics_surface_efficiency_dependency_and_false_mastery() -> None:
     metrics = scenario_metrics(turns, maximum_probes=2)
 
     assert metrics["delayed_retrieval"]["attempts"] == 2
-    assert metrics["delayed_retrieval"]["passed"] == 1
+    assert metrics["delayed_retrieval"]["passed"] == 0
     assert metrics["novel_transfer"] == {
         "attempts": 0,
         "passed": 0,
@@ -253,11 +253,129 @@ def test_metrics_surface_efficiency_dependency_and_false_mastery() -> None:
     assert metrics["diagnostics"]["false_mastery"] == ["beta"]
     assert metrics["diagnostics"]["excessive_probing"]["excess"] == 2
     assert metrics["diagnostics"]["unresolved_hint_dependency"] == ["beta"]
-    assert metrics["diagnostics"]["delayed_retrieval_failures"] == 1
+    assert metrics["diagnostics"]["delayed_retrieval_failures"] == 2
     baseline = json.loads(OUTCOME_BASELINE_PATH.read_text(encoding="utf-8"))
     aggregate = aggregate_metrics([{"metrics": metrics, "turns": turns}])
     for key, value in baseline["results"].items():
         assert aggregate[key] == value
+
+
+def test_delayed_retrieval_counts_disqualified_evidence_as_failure() -> None:
+    concepts = ("recognition", "gamed", "hinted", "worked", "independent")
+    turns = [
+        _turn(
+            1,
+            events=[
+                _event("concept_exposed", day=1, concept=concept)
+                for concept in concepts
+            ],
+            move="advance",
+            tutor_output="Return after the scheduled gap.",
+        ),
+        _turn(
+            2,
+            events=[
+                _event(
+                    "answer_judged",
+                    day=3,
+                    concept="recognition",
+                    status="correct",
+                    score=0.9,
+                    answer_kind="recognition",
+                    source="review",
+                )
+            ],
+            move="advance",
+            tutor_output="Continue.",
+            probe="retrieval",
+        ),
+        _turn(
+            3,
+            events=[
+                _event(
+                    "answer_judged",
+                    day=3,
+                    concept="gamed",
+                    status="correct",
+                    score=0.9,
+                    answer_kind="production",
+                    gaming_suspected=True,
+                    source="review",
+                )
+            ],
+            move="remediation_hint",
+            tutor_output="**Hint:** Isolate one relationship.",
+            probe="retrieval",
+        ),
+        _turn(
+            4,
+            events=[
+                _event(
+                    "answer_judged",
+                    day=3,
+                    concept="hinted",
+                    status="correct",
+                    score=0.9,
+                    answer_kind="production",
+                    source="review",
+                )
+            ],
+            move="worked_example",
+            tutor_output="Here is one worked example.",
+            probe="retrieval",
+        ),
+        _turn(
+            5,
+            events=[
+                _event(
+                    "answer_judged",
+                    day=3,
+                    concept="worked",
+                    status="correct",
+                    score=0.9,
+                    answer_kind="production",
+                    source="review",
+                )
+            ],
+            move="advance",
+            tutor_output="Now work independently.",
+            probe="retrieval",
+        ),
+        _turn(
+            6,
+            events=[
+                _event(
+                    "answer_judged",
+                    day=3,
+                    concept="independent",
+                    status="correct",
+                    score=0.9,
+                    answer_kind="production",
+                    source="review",
+                )
+            ],
+            move="advance",
+            tutor_output="Continue.",
+            probe="retrieval",
+        ),
+    ]
+
+    metrics = scenario_metrics(turns, maximum_probes=6)
+
+    assert metrics["delayed_retrieval"] == {
+        "attempts": 5,
+        "passed": 1,
+        "pass_rate": 0.2,
+        "by_concept": {
+            "recognition": {"attempts": 1, "passed": 0},
+            "gamed": {"attempts": 1, "passed": 0},
+            "hinted": {"attempts": 1, "passed": 0},
+            "worked": {"attempts": 1, "passed": 0},
+            "independent": {"attempts": 1, "passed": 1},
+        },
+    }
+    assert metrics["diagnostics"]["delayed_retrieval_failures"] == 4
+    assert metrics["turns_to_criterion"] == 6
 
 
 def test_only_independent_production_counts_as_qualifying_outcome() -> None:
@@ -339,6 +457,15 @@ def test_only_independent_production_counts_as_qualifying_outcome() -> None:
 
     metrics = scenario_metrics(turns, maximum_probes=4)
 
+    assert metrics["delayed_retrieval"] == {
+        "attempts": 2,
+        "passed": 1,
+        "pass_rate": 0.5,
+        "by_concept": {
+            "supported": {"attempts": 1, "passed": 0},
+            "independent": {"attempts": 1, "passed": 1},
+        },
+    }
     assert metrics["turns_to_criterion"] == 4
     assert metrics["novel_transfer"] == {
         "attempts": 1,

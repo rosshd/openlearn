@@ -40,7 +40,10 @@ Each run writes the following private artifacts:
 Scenario fixtures declare `gap_days_before` values.
 The outcome lane projects those gaps onto copied event evidence from a fixed UTC start time.
 It never sleeps, changes the system clock, or mutates learner-owned state.
-The existing event-log delayed-retrieval function computes its metric from those projected durable events.
+The outcome lane reuses the core event timestamp, concept, and retrieval-source helpers while leaving the existing aggregate unchanged.
+It applies the stricter qualifying-evidence rule when classifying delayed success.
+The delayed-retrieval denominator includes every scheduled retrieval with valid source, concept, timestamp, and minimum spacing.
+Recognition-only, gamed, hint-supported, and worked-example-supported retrievals remain visible in that denominator as failures.
 
 The lane reports:
 

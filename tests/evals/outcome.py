@@ -317,6 +317,7 @@ def scenario_metrics(
                     _answer_is_retrieval(turns, index + 1)
                     and bool(cli.event_retrieval_source(event))
                 ),
+                "ts": event.get("ts"),
             }
             answers.append(answer)
             if qualifying_outcome_evidence(answer, "criterion"):
@@ -356,7 +357,7 @@ def scenario_metrics(
     ]
     redundant_probes = len(probes) - len(set(probes))
     excessive_probes = max(0, len(probes) - maximum_probes)
-    delayed = cli.delayed_retrieval_metric(events)
+    delayed = _delayed_retrieval_outcome_metric(events, answers)
     covered = {str(answer["concept"]) for answer in answers if answer["concept"]}
     diagnostics = {
         "false_mastery": false_mastery_list,
@@ -426,7 +427,7 @@ def qualifying_outcome_evidence(
         return True
     if semantic == "novel_transfer":
         return answer.get("transfer") is True
-    if semantic == "deferred_recovery":
+    if semantic in {"deferred_recovery", "delayed_retrieval"}:
         return answer.get("retrieval") is True
     raise ValueError(f"unknown outcome semantic: {semantic}")
 
@@ -445,7 +446,7 @@ def _eligible_outcome_attempt(
         return True
     if semantic == "novel_transfer":
         return answer.get("transfer") is True
-    if semantic == "deferred_recovery":
+    if semantic in {"deferred_recovery", "delayed_retrieval"}:
         return answer.get("retrieval") is True
     raise ValueError(f"unknown outcome semantic: {semantic}")
 
@@ -457,6 +458,59 @@ def _valid_production_evidence(answer: dict[str, object]) -> bool:
         and answer.get("gaming_suspected") is not True
         and answer.get("support") in SUPPORT_MOVES
     )
+
+
+def _delayed_retrieval_outcome_metric(
+    events: list[dict[str, object]],
+    answers: list[dict[str, object]],
+    *,
+    min_spacing_days: int = 1,
+) -> dict[str, object]:
+    first_seen: dict[str, datetime] = {}
+    for event in sorted(events, key=lambda item: str(item.get("ts") or "")):
+        concept = cli.event_concept_id(event)
+        timestamp = cli.parse_event_ts(event.get("ts"))
+        if concept and timestamp is not None:
+            first_seen.setdefault(concept, timestamp)
+
+    attempts = 0
+    passed = 0
+    by_concept: dict[str, dict[str, int]] = {}
+    for answer in answers:
+        concept = answer.get("concept")
+        timestamp = cli.parse_event_ts(answer.get("ts"))
+        if (
+            not isinstance(concept, str)
+            or not concept
+            or timestamp is None
+            or answer.get("retrieval") is not True
+        ):
+            continue
+        seen_at = first_seen.get(concept)
+        if seen_at is None:
+            continue
+        elapsed_days = (timestamp - seen_at).total_seconds() / 86400
+        if elapsed_days < max(0, min_spacing_days):
+            continue
+        attempts += 1
+        qualified = qualifying_outcome_evidence(
+            answer,
+            "delayed_retrieval",
+        )
+        concept_counts = by_concept.setdefault(
+            concept,
+            {"attempts": 0, "passed": 0},
+        )
+        concept_counts["attempts"] += 1
+        if qualified:
+            passed += 1
+            concept_counts["passed"] += 1
+    return {
+        "attempts": attempts,
+        "passed": passed,
+        "pass_rate": passed / attempts if attempts else None,
+        "by_concept": by_concept,
+    }
 
 
 def aggregate_metrics(records: list[dict[str, object]]) -> dict[str, object]:
