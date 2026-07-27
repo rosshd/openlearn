@@ -14,8 +14,9 @@ import inspect
 import json
 import os
 import re
+import stat
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from importlib.resources.abc import Traversable
@@ -23,7 +24,11 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Literal, cast
 
-from openlearn.interview_skills import InterviewSkillGraph, load_default_graph
+from openlearn.interview_skills import (
+    InterviewSkillGraph,
+    SkillGraphError,
+    load_default_graph,
+)
 
 PROBLEM_ID_PATTERN = re.compile(
     r"(?:problem|external)(?:\.[a-z0-9]+(?:-[a-z0-9]+)*)+"
@@ -101,8 +106,11 @@ class FollowUp:
 class CatalogProblem:
     problem_id: str
     revision: int
+    introduced_catalog_revision: int
     title: str
     delivery: str
+    evidence_eligible: bool
+    transfer_family: str | None
     statement: str | None
     source: ProblemSource
     languages: Mapping[str, LanguageDefinition]
@@ -132,15 +140,19 @@ class ProblemCatalog:
     catalog_revision: int
     graph_id: str
     graph_version: str
+    mastery_policy_version: str
     problems: tuple[CatalogProblem, ...]
     checksum: str
 
     def problem(self, problem_id: str, revision: int | None = None) -> CatalogProblem:
-        for problem in self.problems:
-            if problem.problem_id == problem_id and (
-                revision is None or problem.revision == revision
-            ):
-                return problem
+        matches = [
+            problem
+            for problem in self.problems
+            if problem.problem_id == problem_id
+            and (revision is None or problem.revision == revision)
+        ]
+        if matches:
+            return max(matches, key=lambda problem: problem.revision)
         suffix = "" if revision is None else f" at revision {revision}"
         raise CatalogValidationError(f"unknown catalog problem: {problem_id}{suffix}")
 
@@ -192,6 +204,26 @@ def _canonical(value: object) -> bytes:
         ).encode("utf-8")
     except (TypeError, ValueError) as exc:
         raise CatalogValidationError("catalog values must be finite JSON data") from exc
+
+
+def _deep_freeze(value: object) -> object:
+    if isinstance(value, dict):
+        if not all(isinstance(key, str) for key in value):
+            raise CatalogValidationError("catalog JSON object keys must be text")
+        return MappingProxyType(
+            {key: _deep_freeze(item) for key, item in value.items()}
+        )
+    if isinstance(value, list):
+        return tuple(_deep_freeze(item) for item in value)
+    return value
+
+
+def _deep_thaw(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {key: _deep_thaw(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_deep_thaw(item) for item in value]
+    return value
 
 
 def problem_checksum(raw: Mapping[str, object]) -> str:
@@ -279,7 +311,11 @@ def _validate_test(raw: object, label: str) -> ProblemTest:
     if not isinstance(args, list) or not isinstance(kwargs, dict):
         raise CatalogValidationError(f"{label} args and kwargs are invalid")
     _canonical(raw)
-    return ProblemTest(tuple(args), MappingProxyType(dict(kwargs)), raw.get("expected"))
+    return ProblemTest(
+        cast(tuple[object, ...], _deep_freeze(args)),
+        cast(Mapping[str, object], _deep_freeze(kwargs)),
+        _deep_freeze(raw.get("expected")),
+    )
 
 
 def _validate_language(raw: object, label: str, delivery: str) -> LanguageDefinition:
@@ -308,21 +344,21 @@ def _validate_language(raw: object, label: str, delivery: str) -> LanguageDefini
         parsed_starter = ast.parse(starter_code)
     except SyntaxError as exc:
         raise CatalogValidationError(f"{label} starter code is invalid") from exc
-    functions = [
-        node
-        for node in parsed_starter.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    ]
+    functions = [node for node in parsed_starter.body if isinstance(node, ast.FunctionDef)]
     if (
-        len(functions) != 1
+        len(parsed_starter.body) != 1
+        or len(functions) != 1
         or functions[0].name != function
         or tuple(argument.arg for argument in functions[0].args.args) != parameters
         or functions[0].args.vararg is not None
         or functions[0].args.kwarg is not None
+        or functions[0].args.defaults
+        or functions[0].args.kw_defaults
+        or functions[0].decorator_list
+        or len(functions[0].body) != 1
+        or not isinstance(functions[0].body[0], ast.Pass)
     ):
-        raise CatalogValidationError(
-            f"{label} starter code does not match its interface"
-        )
+        raise CatalogValidationError(f"{label} starter code must be an inert interface")
     reference = raw.get("reference")
     tests = raw.get("tests")
     if not isinstance(tests, dict) or set(tests) != set(TEST_VISIBILITIES):
@@ -361,6 +397,65 @@ def _test_list(value: object, label: str) -> list[object]:
     return value
 
 
+def _validate_pair_sum_contract(problem: CatalogProblem) -> None:
+    if problem.problem_id != "problem.pair-sum-sorted":
+        return
+    definition = problem.languages["python"]
+    for case in (*definition.public_tests, *definition.hidden_tests):
+        if len(case.arguments) != 2 or case.keyword_arguments:
+            raise CatalogValidationError("pair-sum tests must pass values and target")
+        values, target = case.arguments
+        if not isinstance(values, tuple) or not isinstance(target, int):
+            raise CatalogValidationError("pair-sum test inputs are invalid")
+        pairs = [
+            (left, right)
+            for left in range(len(values))
+            for right in range(left + 1, len(values))
+            if isinstance(values[left], int)
+            and isinstance(values[right], int)
+            and values[left] + values[right] == target
+        ]
+        expected = tuple(pairs[0]) if len(pairs) == 1 else (-1, -1)
+        if len(pairs) > 1:
+            raise CatalogValidationError(
+                "pair-sum exact-output tests require a unique pair"
+            )
+        if case.expected != expected:
+            raise CatalogValidationError("pair-sum expected output is invalid")
+    for example in problem.examples:
+        example_input = example.get("input")
+        if not isinstance(example_input, Mapping):
+            raise CatalogValidationError("pair-sum example input is invalid")
+        values = example_input.get("values")
+        target = example_input.get("target")
+        if not isinstance(values, tuple) or not isinstance(target, int):
+            raise CatalogValidationError("pair-sum example input is invalid")
+        matches = sum(
+            1
+            for left in range(len(values))
+            for right in range(left + 1, len(values))
+            if isinstance(values[left], int)
+            and isinstance(values[right], int)
+            and values[left] + values[right] == target
+        )
+        if matches != 1:
+            raise CatalogValidationError("pair-sum examples require a unique pair")
+        expected_output = example.get("output")
+        actual_pair = next(
+            (
+                (left, right)
+                for left in range(len(values))
+                for right in range(left + 1, len(values))
+                if isinstance(values[left], int)
+                and isinstance(values[right], int)
+                and values[left] + values[right] == target
+            ),
+            None,
+        )
+        if expected_output != actual_pair:
+            raise CatalogValidationError("pair-sum example output is invalid")
+
+
 def validate_catalog(
     raw: Mapping[str, object],
     *,
@@ -373,6 +468,7 @@ def validate_catalog(
         "catalog_revision",
         "graph_id",
         "graph_version",
+        "mastery_policy_version",
         "problems",
         "catalog_checksum",
     }
@@ -381,19 +477,30 @@ def validate_catalog(
     graph = graph or load_default_graph()
     graph_id = _text(raw.get("graph_id"), "graph_id")
     graph_version = _text(raw.get("graph_version"), "graph_version")
-    if (graph_id, graph_version) != (graph.graph_id, graph.graph_version):
+    mastery_policy_version = _text(
+        raw.get("mastery_policy_version"), "mastery_policy_version"
+    )
+    if (graph_id, graph_version, mastery_policy_version) != (
+        graph.graph_id,
+        graph.graph_version,
+        graph.mastery_policy_version,
+    ):
         raise CatalogValidationError("catalog references an unavailable skill graph")
     values = raw.get("problems")
     if not isinstance(values, list) or not values:
         raise CatalogValidationError("catalog problems must be a non-empty list")
     problems: list[CatalogProblem] = []
     ids: set[str] = set()
-    raw_by_id: dict[str, dict[str, object]] = {}
+    revisions: set[tuple[str, int]] = set()
+    raw_by_revision: dict[tuple[str, int], dict[str, object]] = {}
     problem_fields = {
         "id",
         "revision",
+        "introduced_catalog_revision",
         "title",
         "delivery",
+        "evidence_eligible",
+        "transfer_family",
         "statement",
         "source",
         "languages",
@@ -419,13 +526,48 @@ def validate_catalog(
         problem_id = _text(value.get("id"), "problem id")
         if not PROBLEM_ID_PATTERN.fullmatch(problem_id):
             raise CatalogValidationError(f"invalid problem id: {problem_id}")
-        if problem_id in ids:
-            raise CatalogValidationError(f"duplicate problem id: {problem_id}")
+        revision = _positive_int(value.get("revision"), f"{problem_id} revision")
+        introduced_catalog_revision = _positive_int(
+            value.get("introduced_catalog_revision"),
+            f"{problem_id} introduced_catalog_revision",
+        )
+        raw_catalog_revision = raw.get("catalog_revision")
+        if (
+            isinstance(raw_catalog_revision, bool)
+            or not isinstance(raw_catalog_revision, int)
+            or introduced_catalog_revision > raw_catalog_revision
+        ):
+            raise CatalogValidationError(
+                f"{problem_id} introduced catalog revision is unavailable"
+            )
+        revision_key = (problem_id, revision)
+        if revision_key in revisions:
+            raise CatalogValidationError(
+                f"duplicate problem revision: {problem_id}@{revision}"
+            )
+        revisions.add(revision_key)
         ids.add(problem_id)
-        raw_by_id[problem_id] = value
+        raw_by_revision[revision_key] = value
         delivery = value.get("delivery")
         if delivery not in SOURCE_TYPES:
             raise CatalogValidationError(f"{problem_id} delivery is invalid")
+        evidence_eligible = value.get("evidence_eligible")
+        if not isinstance(evidence_eligible, bool):
+            raise CatalogValidationError(f"{problem_id} evidence_eligible must be boolean")
+        if evidence_eligible != (delivery == "packaged"):
+            raise CatalogValidationError(
+                f"{problem_id} evidence eligibility conflicts with delivery"
+            )
+        transfer_family_value = value.get("transfer_family")
+        transfer_family = (
+            _text(transfer_family_value, f"{problem_id} transfer_family")
+            if evidence_eligible
+            else None
+        )
+        if not evidence_eligible and transfer_family_value is not None:
+            raise CatalogValidationError(
+                "official link transfer_family must be null and evidence-ineligible"
+            )
         source = _validate_source(value.get("source"), delivery)
         statement = value.get("statement")
         if delivery == "packaged":
@@ -457,6 +599,24 @@ def validate_catalog(
             skills.append(ProblemSkill(skill_id, role))
         if not any(ref.role == "primary" for ref in skills):
             raise CatalogValidationError(f"{problem_id} requires a primary skill")
+        if evidence_eligible:
+            try:
+                graph_problem = graph.problem(problem_id)
+            except SkillGraphError as exc:
+                raise CatalogValidationError(
+                    f"{problem_id} is absent from the pinned graph"
+                ) from exc
+            expected_skills = tuple(
+                (ref.skill_id, ref.role) for ref in graph_problem.skills
+            )
+            actual_skills = tuple((ref.skill_id, ref.role) for ref in skills)
+            if (
+                transfer_family != graph_problem.transfer_family
+                or actual_skills != expected_skills
+            ):
+                raise CatalogValidationError(
+                    f"{problem_id} does not match pinned graph evidence contract"
+                )
         examples_value = value.get("examples")
         if not isinstance(examples_value, list):
             raise CatalogValidationError(f"{problem_id} examples must be a list")
@@ -469,23 +629,32 @@ def validate_catalog(
             }:
                 raise CatalogValidationError(f"{problem_id} example fields are invalid")
             _canonical(example)
-            examples.append(MappingProxyType(dict(example)))
+            examples.append(cast(Mapping[str, object], _deep_freeze(example)))
         if delivery == "packaged" and not examples:
             raise CatalogValidationError(f"{problem_id} requires an original example")
         if delivery == "official_link" and examples:
             raise CatalogValidationError("official link entries cannot package examples")
         complexity = value.get("complexity")
-        if not isinstance(complexity, dict) or set(complexity) != {"time", "space"}:
-            raise CatalogValidationError(f"{problem_id} complexity fields are invalid")
-        normalized_complexity = {
-            name: _text(expression, f"{problem_id} {name} complexity")
-            for name, expression in complexity.items()
-        }
-        if delivery == "packaged" and not all(
-            expression.startswith("O(") and expression.endswith(")")
-            for expression in normalized_complexity.values()
-        ):
-            raise CatalogValidationError(f"{problem_id} complexity must use O(...) notation")
+        if delivery == "official_link":
+            if complexity != {}:
+                raise CatalogValidationError(
+                    "official link entries cannot package complexity guidance"
+                )
+            normalized_complexity: dict[str, str] = {}
+        else:
+            if not isinstance(complexity, dict) or set(complexity) != {"time", "space"}:
+                raise CatalogValidationError(f"{problem_id} complexity fields are invalid")
+            normalized_complexity = {
+                name: _text(expression, f"{problem_id} {name} complexity")
+                for name, expression in complexity.items()
+            }
+            if not all(
+                expression.startswith("O(") and expression.endswith(")")
+                for expression in normalized_complexity.values()
+            ):
+                raise CatalogValidationError(
+                    f"{problem_id} complexity must use O(...) notation"
+                )
         follow_ups_value = value.get("follow_ups")
         if not isinstance(follow_ups_value, list):
             raise CatalogValidationError(f"{problem_id} follow_ups must be a list")
@@ -515,12 +684,51 @@ def validate_catalog(
         difficulty = value.get("difficulty")
         if difficulty not in DIFFICULTIES:
             raise CatalogValidationError(f"{problem_id} difficulty is invalid")
+        constraints = _text_tuple(
+            value.get("constraints"),
+            f"{problem_id} constraints",
+            nonempty=delivery == "packaged",
+        )
+        references = _text_tuple(
+            value.get("references"),
+            f"{problem_id} references",
+            nonempty=delivery == "packaged",
+        )
+        misconceptions = _text_tuple(
+            value.get("misconceptions"),
+            f"{problem_id} misconceptions",
+            nonempty=delivery == "packaged",
+        )
+        hints = _text_tuple(
+            value.get("hints"),
+            f"{problem_id} hints",
+            nonempty=delivery == "packaged",
+        )
+        if delivery == "packaged" and not follow_ups:
+            raise CatalogValidationError(f"{problem_id} follow_ups must not be empty")
+        if delivery == "official_link" and any(
+            (
+                constraints,
+                examples,
+                value.get("edge_families"),
+                references,
+                misconceptions,
+                hints,
+                follow_ups,
+            )
+        ):
+            raise CatalogValidationError(
+                "official link entries cannot package protected content fields"
+            )
         problems.append(
             CatalogProblem(
                 problem_id=problem_id,
-                revision=_positive_int(value.get("revision"), f"{problem_id} revision"),
+                revision=revision,
+                introduced_catalog_revision=introduced_catalog_revision,
                 title=_text(value.get("title"), f"{problem_id} title"),
                 delivery=delivery,
+                evidence_eligible=evidence_eligible,
+                transfer_family=transfer_family,
                 statement=statement,
                 source=source,
                 languages=MappingProxyType(languages),
@@ -536,28 +744,23 @@ def validate_catalog(
                     value.get("near_duplicate_exclusions"),
                     f"{problem_id} near_duplicate_exclusions",
                 ),
-                constraints=_text_tuple(
-                    value.get("constraints"), f"{problem_id} constraints"
-                ),
+                constraints=constraints,
                 examples=tuple(examples),
                 edge_families=_text_tuple(
                     value.get("edge_families"),
                     f"{problem_id} edge_families",
                     nonempty=delivery == "packaged",
                 ),
-                references=_text_tuple(
-                    value.get("references"), f"{problem_id} references"
-                ),
+                references=references,
                 complexity=MappingProxyType(normalized_complexity),
-                misconceptions=_text_tuple(
-                    value.get("misconceptions"), f"{problem_id} misconceptions"
-                ),
-                hints=_text_tuple(value.get("hints"), f"{problem_id} hints"),
+                misconceptions=misconceptions,
+                hints=hints,
                 follow_ups=tuple(follow_ups),
                 checksum=checksum,
             )
         )
     for problem in problems:
+        _validate_pair_sum_contract(problem)
         for target in (*problem.prerequisites, *problem.near_duplicate_exclusions):
             if target not in ids or target == problem.problem_id:
                 raise CatalogValidationError(
@@ -568,7 +771,9 @@ def validate_catalog(
                 raise CatalogValidationError(
                     f"{problem.problem_id} has an invalid follow-up link"
                 )
-        if problem.checksum != problem_checksum(raw_by_id[problem.problem_id]):
+        if problem.checksum != problem_checksum(
+            raw_by_revision[(problem.problem_id, problem.revision)]
+        ):
             raise CatalogValidationError(
                 f"{problem.problem_id} checksum does not match content"
             )
@@ -580,6 +785,7 @@ def validate_catalog(
         catalog_revision=_positive_int(raw.get("catalog_revision"), "catalog_revision"),
         graph_id=graph_id,
         graph_version=graph_version,
+        mastery_policy_version=mastery_policy_version,
         problems=tuple(problems),
         checksum=checksum,
     )
@@ -620,14 +826,15 @@ def validate_reference_implementations(
                 for index, case in enumerate(cases):
                     try:
                         actual = function(
-                            *case.arguments, **dict(case.keyword_arguments)
+                            *cast(tuple[object, ...], _deep_thaw(case.arguments)),
+                            **cast(dict[str, object], _deep_thaw(case.keyword_arguments)),
                         )
                     except Exception as exc:
                         raise CatalogValidationError(
                             f"{problem.problem_id} reference raised in "
                             f"{visibility} test {index}"
                         ) from exc
-                    if actual != case.expected:
+                    if _deep_freeze(actual) != case.expected:
                         raise CatalogValidationError(
                             f"{problem.problem_id} reference failed "
                             f"{visibility} test {index}"
@@ -659,6 +866,63 @@ def attempt_problem_reference(
     }
 
 
+def resolve_attempt_problem(
+    catalog: ProblemCatalog, reference: Mapping[str, object]
+) -> CatalogProblem:
+    required = {
+        "catalog_id",
+        "catalog_revision",
+        "problem_id",
+        "problem_revision",
+        "problem_checksum",
+    }
+    if set(reference) != required or reference.get("catalog_id") != catalog.catalog_id:
+        raise CatalogValidationError("attempt catalog reference is invalid")
+    recorded_catalog_revision = reference.get("catalog_revision")
+    if (
+        isinstance(recorded_catalog_revision, bool)
+        or not isinstance(recorded_catalog_revision, int)
+        or not 1 <= recorded_catalog_revision <= catalog.catalog_revision
+    ):
+        raise CatalogValidationError("attempt catalog revision is unavailable")
+    problem_id = reference.get("problem_id")
+    revision = reference.get("problem_revision")
+    if not isinstance(problem_id, str) or isinstance(revision, bool) or not isinstance(
+        revision, int
+    ):
+        raise CatalogValidationError("attempt problem revision is invalid")
+    problem = catalog.problem(problem_id, revision)
+    if recorded_catalog_revision < problem.introduced_catalog_revision:
+        raise CatalogValidationError(
+            "attempt predates the problem revision in this catalog"
+        )
+    if reference.get("problem_checksum") != problem.checksum:
+        raise CatalogValidationError("attempt problem checksum does not match")
+    return problem
+
+
+def evidence_problem_reference(
+    catalog: ProblemCatalog, problem: CatalogProblem
+) -> dict[str, object]:
+    if not problem.evidence_eligible or problem.transfer_family is None:
+        raise CatalogValidationError("problem is ineligible for mastery evidence")
+    exact = catalog.problem(problem.problem_id, problem.revision)
+    if exact is not problem:
+        raise CatalogValidationError("evidence problem is not from this catalog")
+    return {
+        "graph_id": catalog.graph_id,
+        "graph_version": catalog.graph_version,
+        "mastery_policy_version": catalog.mastery_policy_version,
+        "problem_id": problem.problem_id,
+        "problem_revision": problem.revision,
+        "problem_checksum": problem.checksum,
+        "transfer_family": problem.transfer_family,
+        "skills": tuple(
+            {"skill_id": ref.skill_id, "role": ref.role} for ref in problem.skills
+        ),
+    }
+
+
 def similarity_review_flags(
     catalog: ProblemCatalog, *, threshold: float = 0.86
 ) -> tuple[SimilarityReviewFlag, ...]:
@@ -672,6 +936,8 @@ def similarity_review_flags(
     ]
     for index, left in enumerate(packaged):
         for right in packaged[index + 1 :]:
+            if left.problem_id == right.problem_id:
+                continue
             if (
                 right.problem_id in left.near_duplicate_exclusions
                 or left.problem_id in right.near_duplicate_exclusions
@@ -740,6 +1006,51 @@ def create_official_link_workspace(
     return destination
 
 
+def read_private_entry(
+    path: Path,
+    *,
+    opener: Callable[[Path, int], int] | None = None,
+) -> dict[str, object]:
+    path = Path(path)
+    open_file = opener or (lambda candidate, flags: os.open(candidate, flags))
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = -1
+    try:
+        descriptor = open_file(path, flags)
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise CatalogValidationError("private entry must be a regular file")
+        if metadata.st_size > MAX_PRIVATE_ENTRY_BYTES:
+            raise CatalogValidationError("private catalog entry is too large")
+        chunks: list[bytes] = []
+        remaining = MAX_PRIVATE_ENTRY_BYTES + 1
+        while remaining:
+            chunk = os.read(descriptor, min(64 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        payload = b"".join(chunks)
+        if len(payload) > MAX_PRIVATE_ENTRY_BYTES:
+            raise CatalogValidationError("private catalog entry is too large")
+    except CatalogValidationError:
+        raise
+    except OSError as exc:
+        raise CatalogValidationError("private catalog entry is unsafe") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    try:
+        value = json.loads(payload.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise CatalogValidationError(f"private entry is unreadable: {path.name}") from exc
+    if not isinstance(value, dict):
+        raise CatalogValidationError(f"private entry must be an object: {path.name}")
+    return value
+
+
 def load_private_entries(directory: Path) -> tuple[dict[str, object], ...]:
     directory = Path(directory)
     if not directory.exists():
@@ -748,15 +1059,7 @@ def load_private_entries(directory: Path) -> tuple[dict[str, object], ...]:
         raise CatalogValidationError("private catalog path must be a real directory")
     entries: list[dict[str, object]] = []
     for path in sorted(directory.glob("*.json")):
-        if path.is_symlink() or path.stat().st_size > MAX_PRIVATE_ENTRY_BYTES:
-            raise CatalogValidationError("private catalog entry is unsafe or too large")
-        try:
-            value = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-            raise CatalogValidationError(f"private entry is unreadable: {path.name}") from exc
-        if not isinstance(value, dict):
-            raise CatalogValidationError(f"private entry must be an object: {path.name}")
-        entries.append(value)
+        entries.append(read_private_entry(path))
     return tuple(entries)
 
 

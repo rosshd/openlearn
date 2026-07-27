@@ -93,10 +93,15 @@ Blocking is a selection constraint rather than an instruction to drill indefinit
 
 `openlearn.interview_catalog` owns the immutable, rights-aware interview problem catalog and its deterministic validation pipeline.
 The catalog pins the exact interview skill graph version and gives every problem a stable ID, integer revision, and content checksum.
+Evidence-eligible records must exactly match the pinned graph and mastery-policy versions, problem identity, transfer family, skill IDs, and primary or supporting roles.
+Official link-outs are explicitly evidence-ineligible.
 Attempt references include the catalog revision, problem revision, and problem checksum so later catalog updates cannot change what an earlier learner saw.
+The catalog retains immutable problem revisions keyed by `(problem_id, revision)` and resolves an attempt only when its exact checksum remains available.
 Packaged problems contain only redistributable material, while official-link entries store no external statement, examples, tests, editorial, or reference implementation.
+Official-link teaching and feedback fields are empty, and their local scaffold is an inert function that cannot execute on import.
 Trusted package reference implementations run directly during catalog validation and remain separate from the untrusted learner-code runner.
-Private entries load only from an explicit learner-owned directory and never enter package data.
+Validated tests and examples are recursively immutable after parsing.
+Private entries use bounded descriptor-based reads from an explicit learner-owned directory and never enter package data.
 See [Interview Problem Catalog](INTERVIEW_PROBLEM_CATALOG.md) for the full rights policy and contributor workflow.
 
 ## Practice Activities

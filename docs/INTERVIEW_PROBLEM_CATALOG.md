@@ -17,6 +17,7 @@ The schema also represents `owned_or_licensed` and `open_license` rights bases f
 Do not use either rights basis without retaining the applicable permission or license evidence and required attribution.
 
 An official-link entry must not contain a copied statement, example, test, editorial, or reference implementation.
+It must also leave constraints, complexity guidance, solution references, misconceptions, hints, edge families, and follow-ups empty.
 Its learner workspace contains only the official URL, stable problem reference, and an empty local scaffold.
 External content remains on the provider's page.
 
@@ -26,11 +27,14 @@ If redistribution rights are uncertain, stop the contribution and request a righ
 Private learner entries belong under the user's openlearn home, not in the Python package.
 When a repository-local development copy is necessary, use `interview-problems/private/`, which Git ignores.
 The private loader reads that directory separately and never merges its contents into the bundled catalog.
+It opens each entry once without following its final symlink where the platform supports that flag, validates the opened descriptor, and performs a bounded read.
 
 ## Version And Checksum Contract
 
 The catalog has a stable `catalog_id` and monotonically increasing `catalog_revision`.
 Each problem has a stable ID, an integer revision, and a SHA-256 checksum of its canonical JSON content.
+The catalog retains multiple immutable revisions under the `(problem_id, revision)` key.
+Each record declares the catalog revision that first introduced it.
 The catalog also has a SHA-256 checksum covering the complete catalog.
 
 Any durable attempt reference must record:
@@ -41,6 +45,7 @@ Any durable attempt reference must record:
 
 Changing learner-visible content, interface, tests, skills, or teaching metadata requires a new problem revision and catalog revision.
 Existing revisions must remain available while durable attempts still reference them.
+Resolution checks the recorded problem checksum and accepts an older catalog revision only while that exact problem revision remains present.
 Do not silently replace the meaning of a stable revision.
 
 ## Schema Coverage
@@ -51,6 +56,7 @@ A packaged problem declares:
 - supported language interfaces, starter code, and trusted reference symbol;
 - difficulty and expected completion time;
 - primary and supporting skill IDs from the exact interview graph version;
+- the exact graph and mastery-policy versions, canonical transfer family, and an explicit mastery-evidence eligibility flag;
 - prerequisite problem links and deliberate near-duplicate exclusions;
 - constraints, original examples, and edge-case families;
 - public and hidden deterministic JSON test cases;
@@ -59,6 +65,8 @@ A packaged problem declares:
 - immutable problem and catalog checksums.
 
 Official-link entries retain selection metadata and a local interface scaffold but package no protected execution or feedback content.
+They are explicitly ineligible for mastery evidence.
+Starter scaffolds contain exactly one inert function with a single `pass` body and cannot execute code on import.
 
 ## Contributor Workflow
 

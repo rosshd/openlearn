@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import stat
 from pathlib import Path
 
@@ -38,6 +39,28 @@ def test_packaged_catalog_is_valid_and_covers_sources_patterns_and_difficulty() 
     assert all(problem.checksum.startswith("sha256:") for problem in catalog.problems)
 
 
+def test_evidence_eligible_records_exactly_match_pinned_graph_contract() -> None:
+    catalog = interview_catalog.load_default_catalog()
+    graph = interview_catalog.load_default_graph()
+
+    for problem in catalog.problems:
+        if problem.evidence_eligible:
+            reference = interview_catalog.evidence_problem_reference(catalog, problem)
+            canonical = graph.problem(problem.problem_id)
+            assert (
+                reference["mastery_policy_version"]
+                == graph.mastery_policy_version
+            )
+            assert reference["transfer_family"] == canonical.transfer_family
+            assert reference["skills"] == tuple(
+                {"skill_id": skill.skill_id, "role": skill.role}
+                for skill in canonical.skills
+            )
+        else:
+            with pytest.raises(interview_catalog.CatalogValidationError, match="ineligible"):
+                interview_catalog.evidence_problem_reference(catalog, problem)
+
+
 def test_reference_implementations_pass_public_and_hidden_tests() -> None:
     catalog = interview_catalog.load_default_catalog()
 
@@ -50,12 +73,27 @@ def test_reference_implementations_pass_public_and_hidden_tests() -> None:
 
 def test_normal_validation_rejects_wrong_expected_output() -> None:
     raw = _catalog()
-    problem = _problem(raw)
+    problem = _problem(raw, "problem.merge-intervals")
     problem["languages"]["python"]["tests"]["hidden"][0]["expected"] = [7, 8]
     problem["checksum"] = interview_catalog.problem_checksum(problem)
     raw["catalog_checksum"] = interview_catalog.catalog_checksum(raw)
 
     with pytest.raises(interview_catalog.CatalogValidationError, match="reference failed"):
+        interview_catalog.validate_catalog(raw)
+
+
+def test_pair_sum_contract_rejects_ambiguous_exact_output_cases() -> None:
+    raw = _catalog()
+    problem = _problem(raw)
+    problem["languages"]["python"]["tests"]["public"][0] = {
+        "args": [[1, 4, 6, 9], 10],
+        "kwargs": {},
+        "expected": [0, 3],
+    }
+    problem["checksum"] = interview_catalog.problem_checksum(problem)
+    raw["catalog_checksum"] = interview_catalog.catalog_checksum(raw)
+
+    with pytest.raises(interview_catalog.CatalogValidationError, match="unique pair"):
         interview_catalog.validate_catalog(raw)
 
 
@@ -105,7 +143,7 @@ def test_validator_rejects_invalid_cross_references_and_execution_contracts(
 def test_validator_rejects_duplicate_ids_and_bad_licenses() -> None:
     duplicate = _catalog()
     duplicate["problems"].append(copy.deepcopy(duplicate["problems"][0]))
-    with pytest.raises(interview_catalog.CatalogValidationError, match="duplicate problem"):
+    with pytest.raises(interview_catalog.CatalogValidationError, match="duplicate problem revision"):
         interview_catalog.validate_catalog(duplicate)
 
     bad_license = _catalog()
@@ -134,37 +172,98 @@ def test_schema_supports_documented_owned_and_open_license_metadata(
 
     catalog = interview_catalog.validate_catalog(raw)
 
-    assert catalog.problem(problem["id"]).source.rights_basis == rights_basis
+    assert (
+        catalog.problem(problem["id"], revision=problem["revision"]).source.rights_basis
+        == rights_basis
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("constraints", []),
+        ("references", []),
+        ("misconceptions", []),
+        ("hints", []),
+        ("follow_ups", []),
+    ],
+)
+def test_packaged_feedback_and_transfer_fields_are_required(
+    field: str, value: object
+) -> None:
+    raw = _catalog()
+    problem = _problem(raw)
+    problem[field] = value
+    problem["checksum"] = interview_catalog.problem_checksum(problem)
+    raw["catalog_checksum"] = interview_catalog.catalog_checksum(raw)
+
+    with pytest.raises(interview_catalog.CatalogValidationError, match=field):
+        interview_catalog.validate_catalog(raw)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("constraints", ["Copied constraint"]),
+        ("references", ["Copied editorial"]),
+        ("misconceptions", ["Copied misconception"]),
+        ("hints", ["Copied hint"]),
+        ("complexity", {"time": "O(n)", "space": "O(n)"}),
+        (
+            "follow_ups",
+            [{"id": "copied", "prompt": "Copied prompt", "problem_id": "problem.merge-intervals"}],
+        ),
+    ],
+)
+def test_official_links_reject_protected_content_fields(
+    field: str, value: object
+) -> None:
+    raw = _catalog()
+    external = _problem(raw, "external.leetcode.two-sum")
+    external[field] = value
+    external["checksum"] = interview_catalog.problem_checksum(external)
+    raw["catalog_checksum"] = interview_catalog.catalog_checksum(raw)
+    with pytest.raises(interview_catalog.CatalogValidationError, match="official link"):
+        interview_catalog.validate_catalog(raw)
+
+
+def test_starter_scaffold_rejects_top_level_execution() -> None:
+    raw = _catalog()
+    external = _problem(raw, "external.leetcode.two-sum")
+    external["languages"]["python"]["starter_code"] = "print('runs on import')\ndef solve():\n    pass\n"
+    external["checksum"] = interview_catalog.problem_checksum(external)
+    raw["catalog_checksum"] = interview_catalog.catalog_checksum(raw)
+    with pytest.raises(interview_catalog.CatalogValidationError, match="inert"):
+        interview_catalog.validate_catalog(raw)
 
 
 def test_similarity_flags_are_advisory_and_honor_declared_exclusions() -> None:
     raw = _catalog()
-    clone = copy.deepcopy(_problem(raw))
-    clone["id"] = "problem.pair-sum-sorted-review-copy"
-    clone["revision"] = 1
-    clone["near_duplicate_exclusions"] = ["problem.pair-sum-sorted"]
-    clone["checksum"] = interview_catalog.problem_checksum(clone)
-    raw["problems"].append(clone)
+    original = _problem(raw)
+    comparison = _problem(raw, "problem.merge-intervals")
+    comparison["statement"] = original["statement"]
+    comparison["near_duplicate_exclusions"] = ["problem.pair-sum-sorted"]
+    comparison["checksum"] = interview_catalog.problem_checksum(comparison)
     raw["catalog_checksum"] = interview_catalog.catalog_checksum(raw)
 
     catalog = interview_catalog.validate_catalog(raw)
 
     assert interview_catalog.similarity_review_flags(catalog) == ()
 
-    clone["near_duplicate_exclusions"] = []
-    clone["checksum"] = interview_catalog.problem_checksum(clone)
+    comparison["near_duplicate_exclusions"] = []
+    comparison["checksum"] = interview_catalog.problem_checksum(comparison)
     raw["catalog_checksum"] = interview_catalog.catalog_checksum(raw)
     catalog = interview_catalog.validate_catalog(raw)
     flags = interview_catalog.similarity_review_flags(catalog, threshold=0.8)
     assert flags[0].problem_ids == (
+        "problem.merge-intervals",
         "problem.pair-sum-sorted",
-        "problem.pair-sum-sorted-review-copy",
     )
 
 
 def test_revision_reference_is_exact_and_survives_catalog_updates() -> None:
     first = interview_catalog.load_default_catalog()
-    problem = first.problem("problem.pair-sum-sorted")
+    problem = first.problem("problem.pair-sum-sorted", revision=1)
     reference = interview_catalog.attempt_problem_reference(first, problem)
     raw = _catalog()
     raw["catalog_revision"] = 2
@@ -173,12 +272,75 @@ def test_revision_reference_is_exact_and_survives_catalog_updates() -> None:
 
     assert reference == {
         "catalog_id": "openlearn-interview",
-        "catalog_revision": 1,
+        "catalog_revision": 2,
         "problem_id": problem.problem_id,
         "problem_revision": problem.revision,
         "problem_checksum": problem.checksum,
     }
-    assert reference["catalog_revision"] != second.catalog_revision
+    assert interview_catalog.resolve_attempt_problem(second, reference).revision == 1
+    older_reference = dict(reference)
+    older_reference["catalog_revision"] = 1
+    assert interview_catalog.resolve_attempt_problem(second, older_reference).revision == 1
+
+
+def test_catalog_retains_and_resolves_multiple_immutable_problem_revisions() -> None:
+    catalog = interview_catalog.load_default_catalog()
+
+    revision_one = catalog.problem("problem.pair-sum-sorted", revision=1)
+    revision_two = catalog.problem("problem.pair-sum-sorted", revision=2)
+
+    assert revision_one.checksum != revision_two.checksum
+    assert catalog.problem("problem.pair-sum-sorted") is revision_two
+    assert interview_catalog.resolve_attempt_problem(
+        catalog, interview_catalog.attempt_problem_reference(catalog, revision_one)
+    ) is revision_one
+    impossible_reference = interview_catalog.attempt_problem_reference(
+        catalog, revision_two
+    )
+    impossible_reference["catalog_revision"] = 1
+    with pytest.raises(interview_catalog.CatalogValidationError, match="predates"):
+        interview_catalog.resolve_attempt_problem(catalog, impossible_reference)
+
+
+def test_validated_nested_values_are_deeply_immutable_and_detached() -> None:
+    raw = _catalog()
+    catalog = interview_catalog.validate_catalog(raw)
+    problem = catalog.problem("problem.pair-sum-sorted", revision=1)
+    case = problem.languages["python"].public_tests[0]
+    raw["problems"][0]["languages"]["python"]["tests"]["public"][0]["args"][0][0] = 999
+    raw["problems"][0]["languages"]["python"]["tests"]["public"][0]["expected"][0] = 999
+
+    assert case.arguments[0][0] == 1
+    assert case.expected[0] == 0
+    with pytest.raises(TypeError):
+        case.expected[0] = 999
+    with pytest.raises(TypeError):
+        case.keyword_arguments["new"] = True
+    with pytest.raises(TypeError):
+        problem.examples[0]["input"]["values"] = []
+
+
+def test_nested_keyword_arguments_are_deeply_frozen() -> None:
+    raw = _catalog()
+    problem = _problem(raw, "problem.merge-intervals")
+    case = problem["languages"]["python"]["tests"]["public"][0]
+    case["args"] = []
+    case["kwargs"] = {"intervals": [[1, 2]]}
+    case["expected"] = [[1, 2]]
+    problem["checksum"] = interview_catalog.problem_checksum(problem)
+    raw["catalog_checksum"] = interview_catalog.catalog_checksum(raw)
+
+    catalog = interview_catalog.validate_catalog(raw)
+    frozen = catalog.problem("problem.merge-intervals", revision=1).languages[
+        "python"
+    ].public_tests[0]
+    case["kwargs"]["intervals"][0][0] = 999
+
+    assert frozen.keyword_arguments["intervals"][0][0] == 1
+    with pytest.raises(TypeError):
+        frozen.keyword_arguments["intervals"][0][0] = 999
+
+
 
 
 def test_official_link_workspace_contains_only_link_metadata_and_scaffold(
@@ -228,3 +390,58 @@ def test_private_entries_load_separately_and_never_change_packaged_catalog(
 
     assert loaded == (entry,)
     assert all(problem.problem_id != entry["id"] for problem in packaged.problems)
+
+
+def test_private_loader_rejects_symlinks_directories_and_oversize(
+    tmp_path: Path,
+) -> None:
+    private = tmp_path / "private"
+    private.mkdir()
+    target = private / "target"
+    target.write_text("{}", encoding="utf-8")
+    (private / "linked.json").symlink_to(target)
+    with pytest.raises(interview_catalog.CatalogValidationError, match="unsafe"):
+        interview_catalog.load_private_entries(private)
+
+    (private / "linked.json").unlink()
+    real_directory = private / "real-directory"
+    real_directory.mkdir()
+    try:
+        (private / "linked-directory.json").symlink_to(
+            real_directory, target_is_directory=True
+        )
+    except OSError:
+        pytest.skip("directory symlinks are unavailable")
+    with pytest.raises(interview_catalog.CatalogValidationError, match="unsafe"):
+        interview_catalog.load_private_entries(private)
+
+    (private / "linked-directory.json").unlink()
+    (private / "directory.json").mkdir()
+    with pytest.raises(interview_catalog.CatalogValidationError, match="regular file"):
+        interview_catalog.load_private_entries(private)
+
+    (private / "directory.json").rmdir()
+    (private / "large.json").write_bytes(
+        b" " * (interview_catalog.MAX_PRIVATE_ENTRY_BYTES + 1)
+    )
+    with pytest.raises(interview_catalog.CatalogValidationError, match="too large"):
+        interview_catalog.load_private_entries(private)
+
+
+def test_private_entry_read_uses_opened_descriptor_when_path_is_replaced(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "entry.json"
+    replacement = tmp_path / "replacement.json"
+    path.write_text('{"id": "original"}', encoding="utf-8")
+    replacement.write_text('{"id": "replacement"}', encoding="utf-8")
+
+    def replacing_opener(candidate: Path, flags: int) -> int:
+        descriptor = os.open(candidate, flags)
+        candidate.unlink()
+        replacement.rename(candidate)
+        return descriptor
+
+    assert interview_catalog.read_private_entry(path, opener=replacing_opener) == {
+        "id": "original"
+    }
