@@ -14,6 +14,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
+from . import windows_attempt_io
+
 ATTEMPT_SCHEMA_VERSION = 1
 ATTEMPT_ID_PATTERN = re.compile(r"^attempt_[a-f0-9]{32}$")
 TOPIC_GENERATION_PATTERN = re.compile(r"^topic_[a-f0-9]{32}$")
@@ -30,6 +32,7 @@ DISPOSITIONS = {
 }
 LEARNER_OUTCOMES = {
     "passed",
+    "artifact_saved",
     "test_failure",
     "compile_error",
     "runtime_error",
@@ -47,6 +50,13 @@ MAX_EVIDENCE_REFS = 256
 EVENT_SCHEMA_VERSION = 1
 JOURNAL_SCHEMA_VERSION = 1
 MAX_EVENT_LINE_BYTES = 64_000
+FEEDBACK_STEPS = {
+    "session_appended",
+    "assistance_recorded",
+    "activity_completed",
+    "attempt_completed",
+    "reflection_registered",
+}
 RUN_ID_PATTERN = re.compile(r"^run_[a-f0-9]{32}$")
 SNAPSHOT_ID_PATTERN = re.compile(r"^snapshot_[a-f0-9]{32}$")
 EVENT_ID_PATTERN = re.compile(r"^(?:event_[a-f0-9]{32}|attempt_[a-f0-9]{32}:[^\s]{1,200})$")
@@ -239,7 +249,7 @@ def _validate_test_run(value: object) -> dict[str, object]:
     outcome = value["outcome"]
     if outcome not in LEARNER_OUTCOMES | INFRASTRUCTURE_OUTCOMES | {"pending"}:
         raise AttemptError("attempt test outcome is invalid")
-    expected_failure = outcome in LEARNER_OUTCOMES - {"passed"}
+    expected_failure = outcome in LEARNER_OUTCOMES - {"passed", "artifact_saved"}
     if (
         type(value["learner_failure"]) is not bool
         or value["learner_failure"] is not expected_failure
@@ -411,6 +421,9 @@ def _validate_feedback(value: object) -> dict[str, object]:
             "prompt",
             "created_at",
             "failures",
+            "answer",
+            "answer_saved_at",
+            "completed_steps",
         }
         if not isinstance(pending, Mapping) or set(pending) != required:
             raise AttemptError("pending feedback fields are invalid")
@@ -437,6 +450,26 @@ def _validate_feedback(value: object) -> dict[str, object]:
             raise AttemptError("pending feedback failures are invalid")
         for failure in failures:
             _validate_timed_entry(failure, "feedback failure")
+        answer = pending["answer"]
+        if answer is not None:
+            _bounded_text(answer, "pending feedback answer", allow_empty=False)
+        answer_saved_at = _validate_timestamp(
+            pending["answer_saved_at"],
+            "pending feedback answer_saved_at",
+            optional=True,
+        )
+        if (answer is None) != (answer_saved_at is None):
+            raise AttemptError("pending feedback answer fields are inconsistent")
+        completed_steps = pending["completed_steps"]
+        if (
+            not isinstance(completed_steps, list)
+            or len(completed_steps) != len(set(completed_steps))
+            or any(step not in FEEDBACK_STEPS for step in completed_steps)
+            or completed_steps != sorted(completed_steps)
+        ):
+            raise AttemptError("pending feedback completed steps are invalid")
+        if completed_steps and answer is None:
+            raise AttemptError("feedback steps require a persisted answer")
     deliveries = value["deliveries"]
     if not isinstance(deliveries, list) or len(deliveries) > MAX_TEST_RUNS:
         raise AttemptError("feedback deliveries are invalid")
@@ -448,6 +481,7 @@ def _validate_feedback(value: object) -> dict[str, object]:
             "hint_index",
             "delivered_at",
             "response_hash",
+            "acknowledged_at",
         }
         if not isinstance(delivery, Mapping) or set(delivery) != required:
             raise AttemptError("feedback delivery fields are invalid")
@@ -472,6 +506,11 @@ def _validate_feedback(value: object) -> dict[str, object]:
             r"[a-f0-9]{64}", str(delivery["response_hash"])
         ):
             raise AttemptError("feedback response hash is invalid")
+        _validate_timestamp(
+            delivery["acknowledged_at"],
+            "feedback acknowledged_at",
+            optional=True,
+        )
     return copy.deepcopy(dict(value))
 
 
@@ -1075,13 +1114,20 @@ class AttemptStore:
         )
 
     def start_test(
-        self, topic: str, attempt_id: str, *, visibility: str = "public"
+        self,
+        topic: str,
+        attempt_id: str,
+        *,
+        visibility: str = "public",
+        run_id: str | None = None,
     ) -> tuple[dict[str, object], str]:
         if visibility not in {"public", "hidden"}:
             raise AttemptError("test visibility is invalid")
-        run_id = f"run_{uuid4().hex}"
+        identifier = run_id or f"run_{uuid4().hex}"
+        if not RUN_ID_PATTERN.fullmatch(identifier):
+            raise AttemptError("test run id is invalid")
         run = {
-            "run_id": run_id,
+            "run_id": identifier,
             "visibility": visibility,
             "started_at": _timestamp(self.now),
             "finished_at": None,
@@ -1099,6 +1145,11 @@ class AttemptStore:
         def update(value: dict[str, object]) -> None:
             runs = value["test_runs"]
             assert isinstance(runs, list)
+            existing = [item for item in runs if item.get("run_id") == identifier]
+            if existing:
+                if existing[0].get("visibility") != visibility:
+                    raise AttemptError("test run id has conflicting visibility")
+                return
             if len(runs) >= MAX_TEST_RUNS:
                 raise AttemptError("attempt has too many test runs")
             runs.append(run)
@@ -1107,11 +1158,11 @@ class AttemptStore:
             topic,
             attempt_id,
             "attempt_test_started",
-            {"run_id": run_id, "visibility": visibility},
+            {"run_id": identifier, "visibility": visibility},
             update,
-            event_id=f"{attempt_id}:{run_id}:started",
+            event_id=f"{attempt_id}:{identifier}:started",
         )
-        return record, run_id
+        return record, identifier
 
     def finish_test(
         self,
@@ -1141,12 +1192,13 @@ class AttemptStore:
                 {
                     "finished_at": _timestamp(self.now),
                     "outcome": outcome,
-                    "learner_failure": outcome in LEARNER_OUTCOMES - {"passed"},
+                    "learner_failure": outcome
+                    in LEARNER_OUTCOMES - {"passed", "artifact_saved"},
                     "passed": outcome == "passed",
                     "timeout": outcome == "timeout",
                     "failure_class": (
                         outcome
-                        if outcome in LEARNER_OUTCOMES - {"passed"}
+                        if outcome in LEARNER_OUTCOMES - {"passed", "artifact_saved"}
                         else "infrastructure"
                         if outcome in INFRASTRUCTURE_OUTCOMES
                         else None
@@ -1209,6 +1261,9 @@ class AttemptStore:
                 "prompt": _bounded_text(prompt, "feedback prompt", allow_empty=False),
                 "created_at": _timestamp(self.now),
                 "failures": [],
+                "answer": None,
+                "answer_saved_at": None,
+                "completed_steps": [],
             }
 
         return self.mutate(
@@ -1241,11 +1296,87 @@ class AttemptStore:
             update,
         )
 
-    def deliver_feedback(
-        self, topic: str, attempt_id: str, feedback_id: str, response: str
+    def save_feedback_answer(
+        self,
+        topic: str,
+        attempt_id: str,
+        feedback_id: str,
+        response: str,
     ) -> dict[str, object]:
-        response_hash = hashlib.sha256(response.encode("utf-8")).hexdigest()
+        answer = _bounded_text(
+            response, "pending feedback answer", allow_empty=False
+        )
 
+        def update(value: dict[str, object]) -> None:
+            feedback = value["feedback"]
+            assert isinstance(feedback, dict)
+            pending = feedback.get("pending")
+            if not isinstance(pending, dict) or pending.get("feedback_id") != feedback_id:
+                deliveries = feedback["deliveries"]
+                assert isinstance(deliveries, list)
+                if any(item.get("feedback_id") == feedback_id for item in deliveries):
+                    return
+                raise AttemptError("feedback is not pending")
+            existing = pending.get("answer")
+            if existing is not None and existing != answer:
+                raise AttemptError("feedback answer conflicts with persisted content")
+            if existing is None:
+                pending["answer"] = answer
+                pending["answer_saved_at"] = _timestamp(self.now)
+
+        return self.mutate(
+            topic,
+            attempt_id,
+            "attempt_feedback_answer_saved",
+            {
+                "feedback_id": feedback_id,
+                "response_hash": hashlib.sha256(answer.encode("utf-8")).hexdigest(),
+            },
+            update,
+            event_id=f"{attempt_id}:feedback:{feedback_id}:answer",
+        )
+
+    def mark_feedback_step(
+        self,
+        topic: str,
+        attempt_id: str,
+        feedback_id: str,
+        step: str,
+    ) -> dict[str, object]:
+        if step not in FEEDBACK_STEPS:
+            raise AttemptError("feedback recovery step is invalid")
+
+        def update(value: dict[str, object]) -> None:
+            feedback = value["feedback"]
+            assert isinstance(feedback, dict)
+            pending = feedback.get("pending")
+            if not isinstance(pending, dict) or pending.get("feedback_id") != feedback_id:
+                deliveries = feedback["deliveries"]
+                assert isinstance(deliveries, list)
+                if any(item.get("feedback_id") == feedback_id for item in deliveries):
+                    return
+                raise AttemptError("feedback is not pending")
+            if pending.get("answer") is None:
+                raise AttemptError("feedback answer must be saved before recovery steps")
+            steps = pending["completed_steps"]
+            assert isinstance(steps, list)
+            if step not in steps:
+                steps.append(step)
+                steps.sort()
+
+        return self.mutate(
+            topic,
+            attempt_id,
+            "attempt_feedback_step_completed",
+            {"feedback_id": feedback_id, "step": step},
+            update,
+            event_id=f"{attempt_id}:feedback:{feedback_id}:step:{step}",
+            allow_completed_evidence=True,
+        )
+
+    def deliver_feedback(
+        self, topic: str, attempt_id: str, feedback_id: str
+    ) -> dict[str, object]:
         def update(value: dict[str, object]) -> None:
             feedback = value["feedback"]
             assert isinstance(feedback, dict)
@@ -1255,12 +1386,16 @@ class AttemptStore:
                 item for item in deliveries if item.get("feedback_id") == feedback_id
             ]
             if existing:
-                if existing[0].get("response_hash") != response_hash:
-                    raise AttemptError("feedback was delivered with different content")
                 return
             pending = feedback.get("pending")
             if not isinstance(pending, dict) or pending.get("feedback_id") != feedback_id:
                 raise AttemptError("feedback is not pending")
+            answer = pending.get("answer")
+            if not isinstance(answer, str) or not answer:
+                raise AttemptError("feedback answer was not persisted")
+            if set(pending["completed_steps"]) != FEEDBACK_STEPS:
+                raise AttemptError("feedback recovery steps are incomplete")
+            response_hash = hashlib.sha256(answer.encode("utf-8")).hexdigest()
             deliveries.append(
                 {
                     "feedback_id": feedback_id,
@@ -1269,6 +1404,7 @@ class AttemptStore:
                     "hint_index": pending["hint_index"],
                     "delivered_at": _timestamp(self.now),
                     "response_hash": response_hash,
+                    "acknowledged_at": None,
                 }
             )
             feedback["pending"] = None
@@ -1277,9 +1413,36 @@ class AttemptStore:
             topic,
             attempt_id,
             "attempt_feedback_delivered",
-            {"feedback_id": feedback_id, "response_hash": response_hash},
+            {"feedback_id": feedback_id},
             update,
             event_id=f"{attempt_id}:feedback:{feedback_id}:delivered",
+            allow_completed_evidence=True,
+        )
+
+    def acknowledge_feedback(
+        self, topic: str, attempt_id: str, feedback_id: str
+    ) -> dict[str, object]:
+        def update(value: dict[str, object]) -> None:
+            feedback = value["feedback"]
+            assert isinstance(feedback, dict)
+            deliveries = feedback["deliveries"]
+            assert isinstance(deliveries, list)
+            matching = [
+                item for item in deliveries if item.get("feedback_id") == feedback_id
+            ]
+            if len(matching) != 1:
+                raise AttemptError("feedback delivery is missing")
+            if matching[0].get("acknowledged_at") is None:
+                matching[0]["acknowledged_at"] = _timestamp(self.now)
+
+        return self.mutate(
+            topic,
+            attempt_id,
+            "attempt_feedback_acknowledged",
+            {"feedback_id": feedback_id},
+            update,
+            event_id=f"{attempt_id}:feedback:{feedback_id}:acknowledged",
+            allow_completed_evidence=True,
         )
 
     def complete(
@@ -1290,6 +1453,8 @@ class AttemptStore:
         disposition: str | None = None,
     ) -> dict[str, object]:
         def update(value: dict[str, object]) -> None:
+            if value["status"] == "completed":
+                return
             if value["status"] != "active":
                 raise AttemptError("only an active attempt can be completed")
             assistance = value["assistance"]
@@ -1311,7 +1476,14 @@ class AttemptStore:
             value["disposition"] = selected
             value["completed_at"] = _timestamp(self.now)
 
-        return self.mutate(topic, attempt_id, "attempt_completed", {}, update)
+        return self.mutate(
+            topic,
+            attempt_id,
+            "attempt_completed",
+            {},
+            update,
+            allow_completed_evidence=True,
+        )
 
     def add_evidence(
         self,
@@ -1356,6 +1528,7 @@ class AttemptStore:
         full_solution_exposed: bool = False,
         run_id: str | None = None,
         evidence_id: str | None = None,
+        operation_id: str | None = None,
     ) -> dict[str, object]:
         additions = {
             "hint": _bounded_text(hint, "hint"),
@@ -1377,10 +1550,25 @@ class AttemptStore:
                 values = assistance[target]
                 assert isinstance(values, list)
                 if item:
+                    deterministic_id = (
+                        "entry_"
+                        + hashlib.sha256(
+                            f"{operation_id}:{target}".encode("utf-8")
+                        ).hexdigest()[:32]
+                        if operation_id
+                        else None
+                    )
+                    if deterministic_id and any(
+                        entry.get("entry_id") == deterministic_id for entry in values
+                    ):
+                        continue
                     values.append(
-                        self._timed_entry(
-                            str(item), run_id=run_id, evidence_id=evidence_id
-                        )
+                        {
+                            **self._timed_entry(
+                                str(item), run_id=run_id, evidence_id=evidence_id
+                            ),
+                            **({"entry_id": deterministic_id} if deterministic_id else {}),
+                        }
                     )
             if additions["editorial_exposed"]:
                 assistance["editorial_exposures"].append(
@@ -1402,6 +1590,11 @@ class AttemptStore:
             "attempt_assistance_recorded",
             additions,
             update,
+            event_id=(
+                f"{attempt_id}:assistance:{operation_id}"
+                if operation_id
+                else None
+            ),
             allow_completed_evidence=True,
         )
 
@@ -1415,6 +1608,7 @@ class AttemptStore:
         reflection: str = "",
         run_id: str | None = None,
         evidence_id: str | None = None,
+        operation_id: str | None = None,
     ) -> dict[str, object]:
         additions = {
             "complexity": _bounded_text(complexity, "complexity"),
@@ -1429,12 +1623,25 @@ class AttemptStore:
             assert isinstance(entries, list)
             for field, text in additions.items():
                 if text:
+                    deterministic_id = (
+                        "entry_"
+                        + hashlib.sha256(
+                            f"{operation_id}:{field}".encode("utf-8")
+                        ).hexdigest()[:32]
+                        if operation_id
+                        else None
+                    )
+                    if deterministic_id and any(
+                        entry.get("entry_id") == deterministic_id for entry in entries
+                    ):
+                        continue
                     entries.append(
                         {
                             **self._timed_entry(
                                 str(text), run_id=run_id, evidence_id=evidence_id
                             ),
                             "kind": field,
+                            **({"entry_id": deterministic_id} if deterministic_id else {}),
                         }
                     )
 
@@ -1444,6 +1651,11 @@ class AttemptStore:
             "attempt_reasoning_recorded",
             {key: value for key, value in additions.items() if value},
             update,
+            event_id=(
+                f"{attempt_id}:reasoning:{operation_id}"
+                if operation_id
+                else None
+            ),
             allow_completed_evidence=True,
         )
 
@@ -1457,17 +1669,61 @@ class AttemptStore:
         problem: Mapping[str, object],
     ) -> dict[str, object]:
         transfer = self.load(topic, transfer_attempt_id)
+        source_execution = transfer.get("execution")
+        source_bundle = (
+            source_execution.get("activity_bundle")
+            if isinstance(source_execution, Mapping)
+            else None
+        )
+        source_skills = (
+            source_bundle.get("concept_ids")
+            if isinstance(source_bundle, Mapping)
+            else None
+        )
+        target = self.load(topic, attempt_id)
+        target_execution = target.get("execution")
+        target_bundle = (
+            target_execution.get("activity_bundle")
+            if isinstance(target_execution, Mapping)
+            else None
+        )
+        target_skills = (
+            target_bundle.get("concept_ids")
+            if isinstance(target_bundle, Mapping)
+            else None
+        )
+        evidence = next(
+            (
+                item
+                for item in transfer.get("evidence_refs", [])  # type: ignore[union-attr]
+                if isinstance(item, Mapping) and item.get("evidence_id") == evidence_id
+            ),
+            None,
+        )
+        passed_run = next(
+            (
+                run
+                for run in transfer.get("test_runs", [])  # type: ignore[union-attr]
+                if isinstance(run, Mapping)
+                and run.get("evidence_id") == evidence_id
+                and run.get("outcome") == "passed"
+                and run.get("passed") is True
+            ),
+            None,
+        )
         if (
             transfer.get("status") != "completed"
             or transfer.get("disposition") != "solved_independently"
             or transfer.get("problem") != dict(problem)
-            or not any(
-                isinstance(item, Mapping) and item.get("evidence_id") == evidence_id
-                for item in transfer.get("evidence_refs", [])  # type: ignore[union-attr]
-            )
+            or not isinstance(evidence, Mapping)
+            or evidence.get("kind") != "pytest_result"
+            or not isinstance(passed_run, Mapping)
+            or not isinstance(source_skills, list)
+            or not isinstance(target_skills, list)
+            or not set(source_skills) & set(target_skills)
         ):
             raise AttemptError(
-                "independent transfer evidence must come from a completed unaided attempt"
+                "independent transfer requires a passed novel problem for the same skill"
             )
         reference = {
             "evidence_id": _bounded_text(evidence_id, "transfer evidence", allow_empty=False),
@@ -1561,30 +1817,15 @@ class AttemptStore:
                 raise AttemptError("attempt workspace is too large to snapshot")
             return data
 
-        parent_before = safe.parent.stat()
         try:
-            before = safe.stat()
-            if before.st_size > MAX_SNAPSHOT_BYTES * 4:
-                raise AttemptError("attempt workspace is too large to snapshot")
-            descriptor = os.open(safe, os.O_RDONLY)
-            try:
-                data = os.read(descriptor, MAX_SNAPSHOT_BYTES * 4 + 1)
-                after = os.fstat(descriptor)
-            finally:
-                os.close(descriptor)
-            parent_after = safe.parent.stat()
-        except OSError as exc:
+            return windows_attempt_io.read_workspace_file(
+                self.topics_root,
+                topic,
+                safe.name,
+                max_bytes=MAX_SNAPSHOT_BYTES * 4,
+            )
+        except windows_attempt_io.WindowsSecureIOError as exc:
             raise AttemptError("attempt workspace could not be read safely") from exc
-        if len(data) > MAX_SNAPSHOT_BYTES * 4:
-            raise AttemptError("attempt workspace is too large to snapshot")
-        if (
-            (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
-            or (parent_before.st_dev, parent_before.st_ino)
-            != (parent_after.st_dev, parent_after.st_ino)
-            or safe.resolve().parent != safe.parent.resolve()
-        ):
-            raise AttemptError("attempt workspace changed during snapshot")
-        return data
 
     def _open_workspace_directory(self, topic: str) -> int:
         flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -1609,9 +1850,15 @@ class AttemptStore:
         if path.absolute().parent.resolve() != safe_parent.resolve():
             raise AttemptError("retry workspace is outside its owned directory")
         if os.name == "nt":
-            raise AttemptError(
-                "secure retry workspace creation is unavailable on this Windows runtime"
-            )
+            try:
+                windows_attempt_io.create_workspace_file_exclusive(
+                    self.topics_root, topic, path.name, data
+                )
+            except windows_attempt_io.WindowsSecureIOError as exc:
+                raise AttemptError(
+                    f"retry workspace could not be created safely: {exc}"
+                ) from exc
+            return
         directory_fd = self._open_workspace_directory(topic)
         descriptor = -1
         try:
@@ -1656,6 +1903,19 @@ class AttemptStore:
             "event_type": event_type,
             "data": copy.deepcopy(dict(event_data)),
         }
+        validated_record = validate_attempt(record)
+        validated_event = _validate_event(event, attempt_id)
+        encoded_event = (
+            json.dumps(
+                validated_event,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            + "\n"
+        ).encode("utf-8")
+        if len(encoded_event) > MAX_EVENT_LINE_BYTES:
+            raise AttemptError("attempt event is too large")
         journal = {
             "schema_version": JOURNAL_SCHEMA_VERSION,
             "attempt_id": attempt_id,
@@ -1664,11 +1924,16 @@ class AttemptStore:
             "previous_revision": previous_revision,
             "next_revision": record["revision"],
             "created_at": _timestamp(self.now),
-            "record": record,
-            "event": event,
+            "record": validated_record,
+            "event": validated_event,
         }
+        encoded_journal = (
+            json.dumps(journal, indent=2, sort_keys=True, allow_nan=False) + "\n"
+        ).encode("utf-8")
+        if len(encoded_journal) > MAX_RECORD_BYTES + MAX_EVENT_LINE_BYTES:
+            raise AttemptError("attempt journal is too large")
         journal_path = self.journal_path(topic, attempt_id)
-        self.write_atomic(journal_path, json.dumps(journal, indent=2, sort_keys=True) + "\n")
+        self.write_atomic(journal_path, encoded_journal.decode("utf-8"))
         self._recover(topic, attempt_id)
 
     def _recover(self, topic: str, attempt_id: str) -> None:

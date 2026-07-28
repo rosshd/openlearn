@@ -54,17 +54,23 @@ class AttemptStoreTests(unittest.TestCase):
         )
 
     def create(self, **overrides):
+        activity_id = str(overrides.get("activity_id") or "act_" + "2" * 32)
         values = {
             "topic": "algorithms",
             "topic_generation": self.generation,
             "problem": self.problem,
             "workspace": self.workspace,
             "language": "python",
-            "activity_id": "act_" + "2" * 32,
+            "activity_id": activity_id,
             "purpose": "practice",
             "profile_ref": "algorithms.interview.json",
             "clarification": "Can values repeat?",
             "plan": "Track the first index for each complement.",
+            "activity_bundle": {
+                "activity_id": activity_id,
+                "revision": 1,
+                "concept_ids": ["hash-maps"],
+            },
         }
         values.update(overrides)
         return self.store.create(**values)
@@ -213,20 +219,23 @@ class AttemptStoreTests(unittest.TestCase):
             self.workspace.read_text(encoding="utf-8"),
         )
 
-    def test_concurrent_mutations_have_no_lost_or_duplicate_test_runs(self) -> None:
+    def test_concurrent_deterministic_start_has_one_pending_run(self) -> None:
         created = self.create()
         attempt_id = str(created["attempt_id"])
+        run_id = "run_" + "4" * 32
 
         def start(_index: int) -> str:
-            _record, run_id = self.store.start_test("algorithms", attempt_id)
-            return run_id
+            _record, identifier = self.store.start_test(
+                "algorithms", attempt_id, run_id=run_id
+            )
+            return identifier
 
         with ThreadPoolExecutor(max_workers=8) as executor:
             run_ids = list(executor.map(start, range(24)))
 
         loaded = self.store.load("algorithms", attempt_id)
-        self.assertEqual(len(loaded["test_runs"]), 24)
-        self.assertEqual(len(set(run_ids)), 24)
+        self.assertEqual(len(loaded["test_runs"]), 1)
+        self.assertEqual(set(run_ids), {run_id})
 
     def test_journal_recovers_after_interrupted_state_write(self) -> None:
         failed = False
@@ -587,6 +596,31 @@ class AttemptStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(interview_attempts.AttemptError, "too large"):
             list(interview_attempts.iter_events(events_path))
 
+    def test_oversized_reasoning_event_never_publishes_a_journal(self) -> None:
+        created = self.create()
+        attempt_id = str(created["attempt_id"])
+        state_path = self.store.state_path("algorithms", attempt_id)
+        state_before = state_path.read_text(encoding="utf-8")
+        events_before = self.store.events_path(
+            "algorithms", attempt_id
+        ).read_text(encoding="utf-8")
+
+        with self.assertRaisesRegex(interview_attempts.AttemptError, "event data"):
+            self.store.record_reasoning(
+                "algorithms",
+                attempt_id,
+                complexity="a" * interview_attempts.MAX_TEXT,
+                edge_cases="b" * interview_attempts.MAX_TEXT,
+            )
+
+        self.assertFalse(self.store.journal_path("algorithms", attempt_id).exists())
+        self.assertEqual(state_path.read_text(encoding="utf-8"), state_before)
+        self.assertEqual(
+            self.store.events_path("algorithms", attempt_id).read_text(encoding="utf-8"),
+            events_before,
+        )
+        self.assertEqual(self.store.load("algorithms", attempt_id), created)
+
     def test_verified_independent_transfer_clears_effective_scaffolding(self) -> None:
         assisted = self.create()
         assisted_id = str(assisted["attempt_id"])
@@ -599,9 +633,30 @@ class AttemptStoreTests(unittest.TestCase):
         transfer_workspace.write_text("def transfer():\n    return True\n", encoding="utf-8")
         transfer = self.create(problem=transfer_problem, workspace=transfer_workspace)
         transfer_id = str(transfer["attempt_id"])
-        transfer = self.store.add_evidence(
-            "algorithms", transfer_id, "evidence_transfer_pass", kind="evaluation"
+        _transfer, run_id = self.store.start_test("algorithms", transfer_id)
+        self.store.finish_test(
+            "algorithms", transfer_id, run_id, outcome="passed"
         )
+        transfer = self.store.add_evidence(
+            "algorithms", transfer_id, "evidence_transfer_pass", kind="pytest_result"
+        )
+        transfer = self.store.queue_feedback(
+            "algorithms",
+            transfer_id,
+            run_id,
+            "evidence_transfer_pass",
+            hint_index=0,
+            prompt="Explain the transfer.",
+        )
+        feedback_id = str(transfer["feedback"]["pending"]["feedback_id"])
+        self.store.save_feedback_answer(
+            "algorithms", transfer_id, feedback_id, "Independent solution."
+        )
+        for step in sorted(interview_attempts.FEEDBACK_STEPS):
+            self.store.mark_feedback_step(
+                "algorithms", transfer_id, feedback_id, step
+            )
+        self.store.deliver_feedback("algorithms", transfer_id, feedback_id)
         self.store.complete("algorithms", transfer_id)
 
         cleared = self.store.record_independent_transfer(
@@ -620,6 +675,48 @@ class AttemptStoreTests(unittest.TestCase):
         self.assertEqual(
             len(cleared["follow_up"]["independent_transfer_evidence"]), 1
         )
+
+    def test_transfer_rejects_arbitrary_or_wrong_skill_evidence(self) -> None:
+        assisted = self.create()
+        assisted_id = str(assisted["attempt_id"])
+        self.store.record_assistance(
+            "algorithms", assisted_id, full_solution_exposed=True
+        )
+        self.store.complete("algorithms", assisted_id)
+        transfer_problem = {
+            **self.problem,
+            "problem_id": "unrelated-transfer",
+            "problem_checksum": "c" * 64,
+        }
+        transfer_workspace = self.workspace.with_name("unrelated.py")
+        transfer_workspace.write_text("def unrelated():\n    return True\n", encoding="utf-8")
+        transfer_activity = {
+            "activity_id": "act_" + "9" * 32,
+            "revision": 1,
+            "concept_ids": ["graphs"],
+        }
+        transfer = self.create(
+            problem=transfer_problem,
+            workspace=transfer_workspace,
+            activity_id=transfer_activity["activity_id"],
+            activity_bundle=transfer_activity,
+        )
+        transfer_id = str(transfer["attempt_id"])
+        transfer = self.store.add_evidence(
+            "algorithms", transfer_id, "evidence_arbitrary", kind="review"
+        )
+        self.store.complete("algorithms", transfer_id)
+
+        with self.assertRaisesRegex(
+            interview_attempts.AttemptError, "passed novel problem"
+        ):
+            self.store.record_independent_transfer(
+                "algorithms",
+                assisted_id,
+                evidence_id="evidence_arbitrary",
+                transfer_attempt_id=transfer_id,
+                problem=transfer_problem,
+            )
 
 
 if __name__ == "__main__":
