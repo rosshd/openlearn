@@ -1,0 +1,101 @@
+{
+  "name": "contingent_tutoring_novel_transfer",
+  "family": "novel_transfer",
+  "persona": "A learner who needs contingent support before independently transferring a concept.",
+  "description": "A misconception triggers bounded scaffolding, followed by a novel transfer and delayed independent recovery.",
+  "topic": "loop invariants",
+  "goal": "Construct and transfer loop invariants",
+  "state": {
+    "review_session_active": true,
+    "pending_question": {
+      "kind": "free_response",
+      "question": "What does a loop invariant need to establish before the first iteration?",
+      "created": "2026-01-01",
+      "focus": "loop invariants",
+      "concept_id": "loop-invariants"
+    },
+    "review_due": [
+      {
+        "concept": "loop invariants",
+        "due": "2026-01-01",
+        "difficulty": "hard"
+      }
+    ]
+  },
+  "turns": [
+    {
+      "role": "assistant",
+      "content": "What must a loop invariant establish before the first iteration?"
+    },
+    {
+      "role": "user",
+      "content": "It only needs to become true after the loop has run once."
+    },
+    {
+      "role": "assistant",
+      "content": null
+    },
+    {
+      "role": "user",
+      "content": "For a sum loop, total equals the sum of the items already processed, including when zero items have been processed."
+    },
+    {
+      "role": "assistant",
+      "content": null
+    },
+    {
+      "role": "user",
+      "content": "In a new partitioning loop, every element before boundary is less than the pivot and every element from boundary to the scan index has not been classified yet."
+    },
+    {
+      "role": "assistant",
+      "content": null
+    },
+    {
+      "role": "user",
+      "content": "Three days later, for a maximum scan, best is the maximum of exactly the elements processed before the current index."
+    },
+    {
+      "role": "assistant",
+      "content": null
+    }
+  ],
+  "rubric": [
+    "support is contingent on the misconception and fades after a successful attempt",
+    "the partitioning answer is evaluated as a novel transfer rather than familiar recall",
+    "the delayed maximum-scan answer receives no unnecessary reteaching"
+  ],
+  "turn_rubrics": [
+    [
+      "give one targeted scaffold for the initialization misconception"
+    ],
+    [
+      "fade support and ask for one analogous production"
+    ],
+    [
+      "recognize successful novel transfer without claiming durable mastery"
+    ],
+    [
+      "treat the delayed independent production as retrieval evidence"
+    ]
+  ],
+  "outcome_schedule": [
+    {
+      "gap_days_before": 0,
+      "probe": "practice"
+    },
+    {
+      "gap_days_before": 0,
+      "probe": "practice"
+    },
+    {
+      "gap_days_before": 0,
+      "probe": "transfer"
+    },
+    {
+      "gap_days_before": 3,
+      "probe": "retrieval"
+    }
+  ],
+  "maximum_probes": 4
+}

@@ -158,3 +158,9 @@ The judge receives authoritative state from both before and after the turn plus 
 Reviewable good, borderline, and adversarial examples live in `tests/evals/fixtures/tutor_judge_calibration_v2.json`.
 The provider-backed calibration test stays in the opt-in slow lane and requires `OPENLEARN_EVAL_JUDGE_MODEL` to differ from the tutor model.
 Use this lane before tutor-policy changes and as an intentional release check for releases that change tutor behavior.
+
+## Run the Learning Outcome Eval
+
+The outcome lane extends the multi-turn tutor-behavior evidence with deterministic scheduled gaps, delayed retrieval, novel transfer, teaching-efficiency metrics, and visible learning failures.
+It remains opt-in and outside `make check`.
+See [Learning outcome evaluation](OUTCOME_EVAL.md) for the command, evidence schema, contract baseline, proposed non-blocking thresholds, and calibration gate.

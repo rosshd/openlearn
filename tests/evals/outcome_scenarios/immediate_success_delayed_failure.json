@@ -1,0 +1,71 @@
+{
+  "name": "immediate_success_delayed_failure",
+  "family": "delayed_retrieval",
+  "persona": "A learner who performs well in-session but forgets after a scheduled delay.",
+  "description": "Immediate production succeeds, then the same concept fails a seven-day retrieval.",
+  "topic": "binary search invariant",
+  "goal": "Apply the binary search loop invariant",
+  "state": {
+    "review_session_active": true,
+    "pending_question": {
+      "kind": "free_response",
+      "question": "What invariant keeps binary search correct?",
+      "created": "2026-01-01",
+      "focus": "binary search invariant",
+      "concept_id": "binary-search-invariant"
+    },
+    "review_due": [
+      {
+        "concept": "binary search invariant",
+        "due": "2026-01-01",
+        "difficulty": "hard"
+      }
+    ]
+  },
+  "turns": [
+    {
+      "role": "assistant",
+      "content": "What invariant keeps the target, if present, inside binary search's active interval?"
+    },
+    {
+      "role": "user",
+      "content": "Before every iteration, if the target exists it remains inside the current low-to-high interval."
+    },
+    {
+      "role": "assistant",
+      "content": null
+    },
+    {
+      "role": "user",
+      "content": "A week later I only remember that binary search halves something. I cannot state the invariant."
+    },
+    {
+      "role": "assistant",
+      "content": null
+    }
+  ],
+  "rubric": [
+    "the first correct production receives concise feedback without overstating mastery",
+    "the delayed failure is treated as evidence that retrieval is not durable",
+    "the tutor gives one bounded next action after the delayed failure"
+  ],
+  "turn_rubrics": [
+    [
+      "acknowledge the correct invariant and ask at most one useful transfer or retrieval check"
+    ],
+    [
+      "respond to the delayed retrieval failure with one bounded scaffold and no mastery claim"
+    ]
+  ],
+  "outcome_schedule": [
+    {
+      "gap_days_before": 0,
+      "probe": "practice"
+    },
+    {
+      "gap_days_before": 7,
+      "probe": "retrieval"
+    }
+  ],
+  "maximum_probes": 2
+}

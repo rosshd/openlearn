@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "contract_version": "learning-outcomes-v1",
+  "recorded_at": "2026-07-27",
+  "kind": "deterministic_contract_baseline",
+  "release_blocking": false,
+  "results": {
+    "delayed_retrieval": {
+      "attempts": 2,
+      "passed": 0,
+      "pass_rate": 0.0
+    },
+    "novel_transfer": {
+      "attempts": 0,
+      "passed": 0,
+      "pass_rate": null
+    },
+    "turns_to_criterion": {
+      "observations": 1,
+      "median": 1.0
+    },
+    "probes": {
+      "total": 4,
+      "redundant": 1,
+      "excessive": 2
+    },
+    "hint_worked_example_dependency": {
+      "supported_correct_concepts": 1,
+      "resolved_concepts": 0,
+      "unresolved_concepts": 1,
+      "unresolved_rate": 1.0
+    },
+    "concepts_covered_without_false_mastery": 1,
+    "false_mastery": 1,
+    "deferred_recovery": {
+      "deferred": 1,
+      "recovered": 0,
+      "rate": 0.0
+    }
+  },
+  "notes": [
+    "This baseline proves the deterministic metric contract and failure visibility.",
+    "It is not a tutor-model quality baseline.",
+    "Provider-backed thresholds remain uncalibrated until three complete runs are recorded."
+  ]
+}

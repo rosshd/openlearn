@@ -3,7 +3,7 @@ OPENLEARN ?= .venv/bin/openlearn
 REVIEW_DIR ?= .artifacts/review
 TYPE ?= feat
 
-.PHONY: test unit pytest lint typecheck smoke e2e oci-live codex-dogfood tutor-behavior-eval diff validate check review repo-status worktree finish
+.PHONY: test unit pytest lint typecheck smoke e2e oci-live codex-dogfood tutor-behavior-eval outcome-eval diff validate check review repo-status worktree finish
 
 # --- Individual lanes ---------------------------------------------------------
 
@@ -43,6 +43,11 @@ codex-dogfood:
 tutor-behavior-eval:
 	@test -n "$(RUN_ROOT)" || { echo "usage: make tutor-behavior-eval RUN_ROOT=<new-private-path> JUDGE_MODEL=<model-distinct-from-tutor> [SUITE=multi-turn] [SCENARIO=<name>]" >&2; exit 2; }
 	PYTHON=$(PYTHON) ./scripts/run-tutor-behavior-eval "$(RUN_ROOT)" $(if $(JUDGE_MODEL),--judge-model "$(JUDGE_MODEL)",) $(if $(SUITE),--suite "$(SUITE)",) $(if $(SCENARIO),--scenario "$(SCENARIO)",)
+
+# Opt-in, live, diagnostic until calibrated, and intentionally absent from `check`.
+outcome-eval:
+	@test -n "$(RUN_ROOT)" || { echo "usage: make outcome-eval RUN_ROOT=<new-private-path> JUDGE_MODEL=<model-distinct-from-tutor> [SCENARIO=<name>]" >&2; exit 2; }
+	PYTHON=$(PYTHON) ./scripts/run-outcome-eval "$(RUN_ROOT)" $(if $(JUDGE_MODEL),--judge-model "$(JUDGE_MODEL)",) $(if $(SCENARIO),--scenario "$(SCENARIO)",)
 
 diff:
 	git diff --stat
