@@ -1932,6 +1932,7 @@ class AttemptStore:
         encoded_event = _serialize_event(validated_event)
         if len(encoded_event) > MAX_EVENT_LINE_BYTES:
             raise AttemptError("attempt event is too large")
+        self._event_log_projection(topic, attempt_id, validated_event)
         journal = {
             "schema_version": JOURNAL_SCHEMA_VERSION,
             "attempt_id": attempt_id,
@@ -1996,14 +1997,7 @@ class AttemptStore:
             or validated_event["attempt_revision"] != raw["next_revision"]
         ):
             raise AttemptError("attempt journal identity is invalid")
-        events_path = self.events_path(topic, attempt_id)
-        for current_event in iter_events(events_path, attempt_id=attempt_id):
-            if current_event["event_id"] == validated_event["event_id"]:
-                if current_event != validated_event:
-                    raise AttemptError("attempt event id has conflicting content")
-                continue
-            if current_event["attempt_revision"] == validated_event["attempt_revision"]:
-                raise AttemptError("attempt revision already has a different event")
+        self._event_log_projection(topic, attempt_id, validated_event)
         state_path = self.state_path(topic, attempt_id)
         if state_path.exists():
             current = self._read_state(state_path)
@@ -2038,6 +2032,15 @@ class AttemptStore:
         self, topic: str, attempt_id: str, event: dict[str, object]
     ) -> None:
         path = self.events_path(topic, attempt_id)
+        projected = self._event_log_projection(topic, attempt_id, event)
+        if projected is None:
+            return
+        self.write_atomic(path, projected)
+
+    def _event_log_projection(
+        self, topic: str, attempt_id: str, event: Mapping[str, object]
+    ) -> str | None:
+        path = self.events_path(topic, attempt_id)
         if path.is_symlink():
             raise AttemptError("attempt event log is unsafe")
         validated_event = _validate_event(event, attempt_id)
@@ -2047,7 +2050,7 @@ class AttemptStore:
             if current["event_id"] == event_id:
                 if current != validated_event:
                     raise AttemptError("attempt event id has conflicting content")
-                return
+                return None
             if current["attempt_revision"] == validated_event["attempt_revision"]:
                 raise AttemptError("attempt revision already has a different event")
         text = (
@@ -2060,7 +2063,7 @@ class AttemptStore:
         text += _serialize_event(validated_event).decode("utf-8")
         if len(text.encode("utf-8")) > MAX_EVENTS_BYTES:
             raise AttemptError("attempt event log is too large")
-        self.write_atomic(path, text)
+        return text
 
     def _read_state(self, path: Path) -> dict[str, object]:
         raw = self._read_json(path, MAX_STATE_BYTES)

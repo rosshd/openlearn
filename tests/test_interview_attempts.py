@@ -7,6 +7,7 @@ import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
@@ -110,6 +111,71 @@ class AttemptStoreTests(unittest.TestCase):
                 entries.append(entry)
             break
         return interview_attempts.validate_attempt(record)
+
+    def valid_event_log(
+        self,
+        attempt_id: str,
+        timestamp: str,
+        target_bytes: int,
+        *,
+        start_index: int = 10_000,
+    ) -> bytes:
+        maximum_padding = 15_900
+
+        def event_line(index: int, padding: int) -> bytes:
+            return interview_attempts._serialize_event(
+                {
+                    "schema_version": interview_attempts.EVENT_SCHEMA_VERSION,
+                    "event_id": f"event_{index:032x}",
+                    "attempt_id": attempt_id,
+                    "attempt_revision": index,
+                    "ts": timestamp,
+                    "event_type": "attempt_filler",
+                    "data": {"padding": "x" * padding},
+                }
+            )
+
+        lines: list[bytes] = []
+        total = 0
+        index = start_index
+        while total < target_bytes:
+            maximum = event_line(index, maximum_padding)
+            if total + len(maximum) <= target_bytes:
+                lines.append(maximum)
+                total += len(maximum)
+                index += 1
+                continue
+            remaining = target_bytes - total
+            minimum = event_line(index, 0)
+            if remaining >= len(minimum):
+                lines.append(event_line(index, remaining - len(minimum)))
+                total = target_bytes
+                break
+            previous = lines.pop()
+            total -= len(previous)
+            first_minimum = event_line(index - 1, 0)
+            second_minimum = event_line(index, 0)
+            padding = (
+                target_bytes
+                - total
+                - len(first_minimum)
+                - len(second_minimum)
+            )
+            self.assertGreaterEqual(padding, 0)
+            self.assertLessEqual(padding, maximum_padding * 2)
+            first_padding = min(padding, maximum_padding)
+            second_padding = padding - first_padding
+            lines.extend(
+                (
+                    event_line(index - 1, first_padding),
+                    event_line(index, second_padding),
+                )
+            )
+            total = target_bytes
+            break
+        result = b"".join(lines)
+        self.assertEqual(len(result), target_bytes)
+        return result
 
     def test_attempt_survives_restart_with_exact_revision_and_relative_workspace(self) -> None:
         created = self.create()
@@ -751,6 +817,146 @@ class AttemptStoreTests(unittest.TestCase):
         self.assertEqual(state_path.read_bytes(), state_before)
         self.assertEqual(events_path.read_bytes(), events_before)
         self.assertEqual(self.store.load("algorithms", attempt_id), record)
+
+    def test_near_full_event_log_rejects_before_journal_or_state_write(self) -> None:
+        created = self.create()
+        attempt_id = str(created["attempt_id"])
+        events_path = self.store.events_path("algorithms", attempt_id)
+        events_path.write_bytes(
+            self.valid_event_log(
+                attempt_id,
+                str(created["last_active_at"]),
+                1_999_990,
+            )
+        )
+        state_path = self.store.state_path("algorithms", attempt_id)
+        state_before = state_path.read_bytes()
+        events_before = events_path.read_bytes()
+        updated = copy.deepcopy(created)
+        updated["revision"] = 2
+        updated["clarification"] = "This must be rejected atomically."
+
+        with self.assertRaisesRegex(
+            interview_attempts.AttemptError, "event log is too large"
+        ):
+            self.store._commit(
+                updated,
+                "attempt_event_limit",
+                {},
+                event_id="event_" + "e" * 32,
+                previous_revision=1,
+            )
+
+        self.assertFalse(self.store.journal_path("algorithms", attempt_id).exists())
+        self.assertEqual(state_path.read_bytes(), state_before)
+        self.assertEqual(events_path.read_bytes(), events_before)
+        self.assertEqual(self.store.load("algorithms", attempt_id), created)
+
+    def test_event_log_exact_under_at_and_over_boundaries_are_atomic(self) -> None:
+        for delta in (-1, 0, 1):
+            with self.subTest(delta=delta):
+                created = self.create()
+                attempt_id = str(created["attempt_id"])
+                updated = copy.deepcopy(created)
+                updated["revision"] = 2
+                updated["clarification"] = f"boundary {delta}"
+                event_id = f"event_{delta + 2:032x}"
+                preview = interview_attempts._serialize_event(
+                    {
+                        "schema_version": interview_attempts.EVENT_SCHEMA_VERSION,
+                        "event_id": event_id,
+                        "attempt_id": attempt_id,
+                        "attempt_revision": 2,
+                        "ts": created["last_active_at"],
+                        "event_type": "attempt_event_boundary",
+                        "data": {},
+                    }
+                )
+                target = interview_attempts.MAX_EVENTS_BYTES - len(preview) + delta
+                events_path = self.store.events_path("algorithms", attempt_id)
+                events_path.write_bytes(
+                    self.valid_event_log(
+                        attempt_id,
+                        str(created["last_active_at"]),
+                        target,
+                    )
+                )
+                state_path = self.store.state_path("algorithms", attempt_id)
+                state_before = state_path.read_bytes()
+                events_before = events_path.read_bytes()
+                self.store.now = lambda: datetime.fromisoformat(
+                    str(created["last_active_at"])
+                )
+
+                if delta <= 0:
+                    self.store._commit(
+                        updated,
+                        "attempt_event_boundary",
+                        {},
+                        event_id=event_id,
+                        previous_revision=1,
+                    )
+                    self.assertEqual(
+                        events_path.stat().st_size,
+                        interview_attempts.MAX_EVENTS_BYTES + delta,
+                    )
+                    self.assertEqual(self.store.load("algorithms", attempt_id), updated)
+                else:
+                    with self.assertRaisesRegex(
+                        interview_attempts.AttemptError, "event log is too large"
+                    ):
+                        self.store._commit(
+                            updated,
+                            "attempt_event_boundary",
+                            {},
+                            event_id=event_id,
+                            previous_revision=1,
+                        )
+                    self.assertFalse(
+                        self.store.journal_path("algorithms", attempt_id).exists()
+                    )
+                    self.assertEqual(state_path.read_bytes(), state_before)
+                    self.assertEqual(events_path.read_bytes(), events_before)
+                    self.assertEqual(self.store.load("algorithms", attempt_id), created)
+
+    def test_duplicate_event_at_capacity_is_not_double_counted(self) -> None:
+        created = self.create()
+        attempt_id = str(created["attempt_id"])
+        updated = copy.deepcopy(created)
+        updated["revision"] = 2
+        updated["clarification"] = "duplicate event replay"
+        self.store.now = lambda: datetime.fromisoformat(
+            str(created["last_active_at"])
+        )
+        duplicate = {
+            "schema_version": interview_attempts.EVENT_SCHEMA_VERSION,
+            "event_id": "event_" + "f" * 32,
+            "attempt_id": attempt_id,
+            "attempt_revision": 2,
+            "ts": created["last_active_at"],
+            "event_type": "attempt_duplicate_boundary",
+            "data": {},
+        }
+        duplicate_line = interview_attempts._serialize_event(duplicate)
+        events_path = self.store.events_path("algorithms", attempt_id)
+        filler = self.valid_event_log(
+            attempt_id,
+            str(created["last_active_at"]),
+            interview_attempts.MAX_EVENTS_BYTES - len(duplicate_line),
+        )
+        events_before = filler + duplicate_line
+        events_path.write_bytes(events_before)
+
+        self.store._commit(
+            updated,
+            "attempt_duplicate_boundary",
+            {},
+            event_id=str(duplicate["event_id"]),
+            previous_revision=1,
+        )
+
+        self.assertEqual(events_path.read_bytes(), events_before)
+        self.assertEqual(self.store.load("algorithms", attempt_id), updated)
 
     def test_verified_independent_transfer_clears_effective_scaffolding(self) -> None:
         assisted = self.create()
