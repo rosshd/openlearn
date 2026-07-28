@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 from openlearn import interview_attempts
 
@@ -144,8 +146,16 @@ class AttemptStoreTests(unittest.TestCase):
         attempt_id = str(created["attempt_id"])
         completed = self.store.complete("algorithms", attempt_id)
 
-        with self.assertRaisesRegex(interview_attempts.AttemptError, "immutable"):
-            self.store.record_assistance("algorithms", attempt_id, hint="Use a map.")
+        assisted = self.store.record_assistance(
+            "algorithms", attempt_id, hint="Use a map."
+        )
+        reasoned = self.store.record_reasoning(
+            "algorithms",
+            attempt_id,
+            complexity="O(n)",
+            edge_cases="duplicate values",
+            reflection="Track complements.",
+        )
         evidenced = self.store.add_evidence(
             "algorithms", attempt_id, "evidence_review_1", kind="review"
         )
@@ -154,6 +164,9 @@ class AttemptStoreTests(unittest.TestCase):
         )
 
         self.assertEqual(completed["disposition"], "solved_independently")
+        self.assertEqual(assisted["status"], "completed")
+        self.assertEqual(len(assisted["assistance"]["hints"]), 1)
+        self.assertEqual(len(reasoned["reasoning"]["entries"]), 3)
         self.assertEqual(len(evidenced["evidence_refs"]), 1)
         self.assertEqual(replayed["revision"], evidenced["revision"])
 
@@ -283,7 +296,19 @@ class AttemptStoreTests(unittest.TestCase):
         )
         state = self.store.load("algorithms", attempt_id)
         journal_path.write_text(
-            json.dumps({"record": state, "event": events[0]}),
+            json.dumps(
+                {
+                    "schema_version": interview_attempts.JOURNAL_SCHEMA_VERSION,
+                    "attempt_id": attempt_id,
+                    "topic": "algorithms",
+                    "topic_generation": self.generation,
+                    "previous_revision": 0,
+                    "next_revision": 1,
+                    "created_at": events[0]["ts"],
+                    "record": state,
+                    "event": events[0],
+                }
+            ),
             encoding="utf-8",
         )
 
@@ -294,6 +319,307 @@ class AttemptStoreTests(unittest.TestCase):
             )
         )
         self.assertEqual(len(replayed), 1)
+
+    def test_topic_lock_precedes_attempt_lock_and_generation_rechecks_inside(self) -> None:
+        acquisitions: list[str] = []
+        locks: dict[str, threading.RLock] = {}
+        generation = self.generation
+
+        @contextmanager
+        def lock(path: Path):
+            nonlocal generation
+            acquisitions.append(path.name)
+            value = locks.setdefault(str(path), threading.RLock())
+            with value:
+                if path.name.startswith("attempt_"):
+                    generation = "topic_" + "9" * 32
+                yield
+
+        def writer(path: Path, text: str) -> None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+
+        store = interview_attempts.AttemptStore(
+            self.root, lock, writer, lambda _topic: generation
+        )
+        with self.assertRaisesRegex(interview_attempts.AttemptError, "topic changed"):
+            store.create(
+                topic="algorithms",
+                topic_generation=self.generation,
+                problem=self.problem,
+                workspace=self.workspace,
+                language="python",
+                activity_id="",
+                purpose="practice",
+            )
+        self.assertEqual(acquisitions[:2], ["algorithms.md", mock.ANY])
+        self.assertTrue(acquisitions[1].startswith("attempt_"))
+        self.assertFalse(list(store.topic_dir("algorithms").glob("attempt_*.json")))
+
+    def test_mutation_rechecks_generation_after_topic_and_attempt_locks(self) -> None:
+        created = self.create()
+        attempt_id = str(created["attempt_id"])
+        original_events = list(
+            interview_attempts.iter_events(
+                self.store.events_path("algorithms", attempt_id)
+            )
+        )
+        acquisitions: list[str] = []
+        generation = self.generation
+
+        @contextmanager
+        def lock(path: Path):
+            nonlocal generation
+            acquisitions.append(path.name)
+            value = self.locks.setdefault(str(path), threading.RLock())
+            with value:
+                if path.name == f"{attempt_id}.json":
+                    generation = "topic_" + "8" * 32
+                yield
+
+        racing_store = interview_attempts.AttemptStore(
+            self.root,
+            lock,
+            self.store.write_atomic,
+            lambda _topic: generation,
+        )
+        with self.assertRaisesRegex(interview_attempts.AttemptError, "topic changed"):
+            racing_store.record_assistance(
+                "algorithms", attempt_id, hint="This must not be persisted."
+            )
+
+        self.assertEqual(acquisitions[:2], ["algorithms.md", f"{attempt_id}.json"])
+        self.assertEqual(self.store.load("algorithms", attempt_id), created)
+        self.assertEqual(
+            list(
+                interview_attempts.iter_events(
+                    self.store.events_path("algorithms", attempt_id)
+                )
+            ),
+            original_events,
+        )
+
+    def test_stale_journal_cannot_roll_back_or_append(self) -> None:
+        created = self.create()
+        attempt_id = str(created["attempt_id"])
+        current = self.store.snapshot("algorithms", attempt_id)
+        original_events = list(
+            interview_attempts.iter_events(
+                self.store.events_path("algorithms", attempt_id)
+            )
+        )
+        stale_event = original_events[0]
+        stale_envelope = {
+            "schema_version": interview_attempts.JOURNAL_SCHEMA_VERSION,
+            "attempt_id": attempt_id,
+            "topic": "algorithms",
+            "topic_generation": self.generation,
+            "previous_revision": 0,
+            "next_revision": 1,
+            "created_at": stale_event["ts"],
+            "record": created,
+            "event": stale_event,
+        }
+        self.store.journal_path("algorithms", attempt_id).write_text(
+            json.dumps(stale_envelope), encoding="utf-8"
+        )
+
+        with self.assertRaisesRegex(interview_attempts.AttemptError, "stale"):
+            self.store.load("algorithms", attempt_id)
+
+        self.store.journal_path("algorithms", attempt_id).unlink()
+        self.assertEqual(self.store.load("algorithms", attempt_id), current)
+        self.assertEqual(
+            list(
+                interview_attempts.iter_events(
+                    self.store.events_path("algorithms", attempt_id)
+                )
+            ),
+            original_events,
+        )
+
+    def test_cross_attempt_and_conflicting_revision_journals_do_not_write_state(self) -> None:
+        created = self.create()
+        attempt_id = str(created["attempt_id"])
+        state_path = self.store.state_path("algorithms", attempt_id)
+        journal_path = self.store.journal_path("algorithms", attempt_id)
+        original_state = state_path.read_text(encoding="utf-8")
+        original_events = list(
+            interview_attempts.iter_events(
+                self.store.events_path("algorithms", attempt_id)
+            )
+        )
+        cross_attempt = "attempt_" + "7" * 32
+        journal_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": interview_attempts.JOURNAL_SCHEMA_VERSION,
+                    "attempt_id": cross_attempt,
+                    "topic": "algorithms",
+                    "topic_generation": self.generation,
+                    "previous_revision": 1,
+                    "next_revision": 2,
+                    "created_at": created["last_active_at"],
+                    "record": created,
+                    "event": original_events[0],
+                }
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(interview_attempts.AttemptError, "invalid"):
+            self.store.load("algorithms", attempt_id)
+        self.assertEqual(state_path.read_text(encoding="utf-8"), original_state)
+        journal_path.unlink()
+
+        next_record = json.loads(original_state)
+        next_record["revision"] = 2
+        next_record["clarification"] = "A journal update."
+        conflicting_event = {
+            "schema_version": interview_attempts.EVENT_SCHEMA_VERSION,
+            "event_id": "event_" + "5" * 32,
+            "attempt_id": attempt_id,
+            "attempt_revision": 2,
+            "ts": created["last_active_at"],
+            "event_type": "attempt_conflict",
+            "data": {},
+        }
+        events_path = self.store.events_path("algorithms", attempt_id)
+        with events_path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(conflicting_event) + "\n")
+        journal_event = {
+            **conflicting_event,
+            "event_id": "event_" + "6" * 32,
+            "event_type": "attempt_update",
+        }
+        journal_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": interview_attempts.JOURNAL_SCHEMA_VERSION,
+                    "attempt_id": attempt_id,
+                    "topic": "algorithms",
+                    "topic_generation": self.generation,
+                    "previous_revision": 1,
+                    "next_revision": 2,
+                    "created_at": created["last_active_at"],
+                    "record": next_record,
+                    "event": journal_event,
+                }
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(
+            interview_attempts.AttemptError, "revision already"
+        ):
+            self.store.load("algorithms", attempt_id)
+        self.assertEqual(state_path.read_text(encoding="utf-8"), original_state)
+
+    @unittest.skipIf(os.name == "nt", "POSIX no-follow descriptor race")
+    def test_final_workspace_symlink_swap_fails_closed(self) -> None:
+        created = self.create()
+        attempt_id = str(created["attempt_id"])
+        outside = self.root.parent / "outside.py"
+        outside.write_text("secret\n", encoding="utf-8")
+        original_open = os.open
+        swapped = False
+
+        def racing_open(path, flags, *args, **kwargs):
+            nonlocal swapped
+            if path == self.workspace.name and kwargs.get("dir_fd") is not None and not swapped:
+                swapped = True
+                self.workspace.unlink()
+                self.workspace.symlink_to(outside)
+            return original_open(path, flags, *args, **kwargs)
+
+        with mock.patch.object(interview_attempts.os, "open", side_effect=racing_open):
+            with self.assertRaisesRegex(
+                interview_attempts.AttemptError, "read safely"
+            ):
+                self.store.snapshot("algorithms", attempt_id)
+
+    @unittest.skipIf(os.name == "nt", "POSIX no-follow descriptor race")
+    def test_workspace_parent_symlink_swap_fails_closed(self) -> None:
+        created = self.create()
+        attempt_id = str(created["attempt_id"])
+        topic_directory = self.workspace.parent
+        saved_directory = topic_directory.with_name("algorithms-saved")
+        outside_directory = self.root.parent / "outside"
+        outside_directory.mkdir()
+        (outside_directory / self.workspace.name).write_text(
+            "secret\n", encoding="utf-8"
+        )
+        original_open = os.open
+        swapped = False
+
+        def racing_open(path, flags, *args, **kwargs):
+            nonlocal swapped
+            if path == "algorithms" and kwargs.get("dir_fd") is not None and not swapped:
+                swapped = True
+                topic_directory.rename(saved_directory)
+                topic_directory.symlink_to(outside_directory, target_is_directory=True)
+            return original_open(path, flags, *args, **kwargs)
+
+        try:
+            with mock.patch.object(
+                interview_attempts.os, "open", side_effect=racing_open
+            ):
+                with self.assertRaisesRegex(
+                    interview_attempts.AttemptError, "parent could not be opened safely"
+                ):
+                    self.store.snapshot("algorithms", attempt_id)
+        finally:
+            if topic_directory.is_symlink():
+                topic_directory.unlink()
+            if saved_directory.exists():
+                saved_directory.rename(topic_directory)
+
+    def test_nested_corruption_and_oversized_events_fail_closed(self) -> None:
+        created = self.create()
+        attempt_id = str(created["attempt_id"])
+        state_path = self.store.state_path("algorithms", attempt_id)
+        corrupted = dict(created)
+        corrupted["snapshots"] = [{"snapshot_id": "wrong"}]
+        state_path.write_text(json.dumps(corrupted), encoding="utf-8")
+        with self.assertRaisesRegex(interview_attempts.AttemptError, "snapshot"):
+            self.store.load("algorithms", attempt_id)
+
+        events_path = self.store.events_path("algorithms", attempt_id)
+        events_path.write_text("x" * (interview_attempts.MAX_EVENTS_BYTES + 1), encoding="utf-8")
+        with self.assertRaisesRegex(interview_attempts.AttemptError, "too large"):
+            list(interview_attempts.iter_events(events_path))
+
+    def test_verified_independent_transfer_clears_effective_scaffolding(self) -> None:
+        assisted = self.create()
+        assisted_id = str(assisted["attempt_id"])
+        self.store.record_assistance(
+            "algorithms", assisted_id, full_solution_exposed=True
+        )
+        assisted = self.store.complete("algorithms", assisted_id)
+        transfer_problem = {**self.problem, "problem_id": "two-sum-transfer", "problem_checksum": "b" * 64}
+        transfer_workspace = self.workspace.with_name("transfer.py")
+        transfer_workspace.write_text("def transfer():\n    return True\n", encoding="utf-8")
+        transfer = self.create(problem=transfer_problem, workspace=transfer_workspace)
+        transfer_id = str(transfer["attempt_id"])
+        transfer = self.store.add_evidence(
+            "algorithms", transfer_id, "evidence_transfer_pass", kind="evaluation"
+        )
+        self.store.complete("algorithms", transfer_id)
+
+        cleared = self.store.record_independent_transfer(
+            "algorithms",
+            assisted_id,
+            evidence_id="evidence_transfer_pass",
+            transfer_attempt_id=transfer_id,
+            problem=transfer_problem,
+        )
+
+        self.assertEqual(assisted["disposition"], "solved_with_help")
+        self.assertEqual(
+            interview_attempts.effective_disposition(cleared),
+            "solved_independently",
+        )
+        self.assertEqual(
+            len(cleared["follow_up"]["independent_transfer_evidence"]), 1
+        )
 
 
 if __name__ == "__main__":

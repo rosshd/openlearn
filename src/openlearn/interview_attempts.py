@@ -7,8 +7,9 @@ import hashlib
 import json
 import os
 import re
+import stat
 from collections.abc import Callable, Iterator, Mapping
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -43,6 +44,12 @@ MAX_SNAPSHOT_BYTES = 64_000
 MAX_TEXT = 16_000
 MAX_TEST_RUNS = 256
 MAX_EVIDENCE_REFS = 256
+EVENT_SCHEMA_VERSION = 1
+JOURNAL_SCHEMA_VERSION = 1
+MAX_EVENT_LINE_BYTES = 64_000
+RUN_ID_PATTERN = re.compile(r"^run_[a-f0-9]{32}$")
+SNAPSHOT_ID_PATTERN = re.compile(r"^snapshot_[a-f0-9]{32}$")
+EVENT_ID_PATTERN = re.compile(r"^(?:event_[a-f0-9]{32}|attempt_[a-f0-9]{32}:[^\s]{1,200})$")
 
 
 class AttemptError(ValueError):
@@ -61,6 +68,20 @@ def _utcnow() -> datetime:
 
 def _timestamp(now: Clock) -> str:
     return now().astimezone(timezone.utc).isoformat()
+
+
+def _validate_timestamp(value: object, field: str, *, optional: bool = False) -> str | None:
+    if value is None and optional:
+        return None
+    if not isinstance(value, str) or not value:
+        raise AttemptError(f"{field} is invalid")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise AttemptError(f"{field} is invalid") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise AttemptError(f"{field} must include a timezone")
+    return parsed.astimezone(timezone.utc).isoformat()
 
 
 def _bounded_text(value: object, field: str, *, allow_empty: bool = True) -> str:
@@ -83,6 +104,40 @@ def _json_size(value: object) -> int:
         )
     except (TypeError, ValueError) as exc:
         raise AttemptError("attempt data must be finite JSON") from exc
+
+
+def _read_bounded_text(path: Path, limit: int, field: str) -> str:
+    if path.is_symlink() or not path.is_file():
+        raise AttemptError(f"{field} is unsafe")
+    try:
+        before = path.stat()
+        if before.st_size > limit:
+            raise AttemptError(f"{field} is too large")
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        try:
+            chunks: list[bytes] = []
+            remaining = limit + 1
+            while remaining:
+                chunk = os.read(descriptor, min(64 * 1024, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            data = b"".join(chunks)
+            after = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+    except OSError as exc:
+        raise AttemptError(f"{field} could not be read") from exc
+    if len(data) > limit:
+        raise AttemptError(f"{field} is too large")
+    if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+        raise AttemptError(f"{field} changed while being read")
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise AttemptError(f"{field} is not UTF-8") from exc
 
 
 def _safe_component(value: str, field: str) -> str:
@@ -131,6 +186,324 @@ def validate_problem_reference(value: Mapping[str, object]) -> dict[str, object]
     return _validate_problem_reference(value)
 
 
+def _validate_snapshot(value: object) -> dict[str, object]:
+    required = {"snapshot_id", "captured_at", "sha256", "size_bytes", "content"}
+    if not isinstance(value, Mapping) or set(value) != required:
+        raise AttemptError("attempt snapshot fields are invalid")
+    identifier = value["snapshot_id"]
+    checksum = value["sha256"]
+    size = value["size_bytes"]
+    content = value["content"]
+    if not isinstance(identifier, str) or not SNAPSHOT_ID_PATTERN.fullmatch(identifier):
+        raise AttemptError("attempt snapshot id is invalid")
+    if not isinstance(checksum, str) or not re.fullmatch(r"[a-f0-9]{64}", checksum):
+        raise AttemptError("attempt snapshot checksum is invalid")
+    if isinstance(size, bool) or not isinstance(size, int) or not 0 <= size <= MAX_SNAPSHOT_BYTES * 4:
+        raise AttemptError("attempt snapshot size is invalid")
+    if content is not None:
+        if not isinstance(content, str) or len(content.encode("utf-8")) != size:
+            raise AttemptError("attempt snapshot content size is invalid")
+        if hashlib.sha256(content.encode("utf-8")).hexdigest() != checksum:
+            raise AttemptError("attempt snapshot content checksum is invalid")
+        if size > MAX_SNAPSHOT_BYTES:
+            raise AttemptError("attempt snapshot content exceeds the inline limit")
+    _validate_timestamp(value["captured_at"], "snapshot captured_at")
+    return copy.deepcopy(dict(value))
+
+
+def _validate_test_run(value: object) -> dict[str, object]:
+    required = {
+        "run_id",
+        "visibility",
+        "started_at",
+        "finished_at",
+        "outcome",
+        "learner_failure",
+        "passed",
+        "timeout",
+        "failure_class",
+        "limits",
+        "output",
+        "evidence_id",
+        "feedback_id",
+    }
+    if not isinstance(value, Mapping) or set(value) != required:
+        raise AttemptError("attempt test run fields are invalid")
+    run_id = value["run_id"]
+    if not isinstance(run_id, str) or not RUN_ID_PATTERN.fullmatch(run_id):
+        raise AttemptError("attempt test run id is invalid")
+    if value["visibility"] not in {"public", "hidden"}:
+        raise AttemptError("attempt test visibility is invalid")
+    _validate_timestamp(value["started_at"], "test started_at")
+    _validate_timestamp(value["finished_at"], "test finished_at", optional=True)
+    outcome = value["outcome"]
+    if outcome not in LEARNER_OUTCOMES | INFRASTRUCTURE_OUTCOMES | {"pending"}:
+        raise AttemptError("attempt test outcome is invalid")
+    expected_failure = outcome in LEARNER_OUTCOMES - {"passed"}
+    if (
+        type(value["learner_failure"]) is not bool
+        or value["learner_failure"] is not expected_failure
+        or type(value["passed"]) is not bool
+        or value["passed"] is not (outcome == "passed")
+        or type(value["timeout"]) is not bool
+        or value["timeout"] is not (outcome == "timeout")
+    ):
+        raise AttemptError("attempt runner classification is inconsistent")
+    failure_class = value["failure_class"]
+    expected_class = (
+        outcome
+        if expected_failure
+        else "infrastructure"
+        if outcome in INFRASTRUCTURE_OUTCOMES
+        else None
+    )
+    if failure_class != expected_class:
+        raise AttemptError("attempt failure class is inconsistent")
+    if outcome == "pending" and value["finished_at"] is not None:
+        raise AttemptError("pending test run cannot be finished")
+    if outcome != "pending" and value["finished_at"] is None:
+        raise AttemptError("finished test run needs finished_at")
+    limits = value["limits"]
+    if not isinstance(limits, Mapping) or _json_size(limits) > 8_192:
+        raise AttemptError("attempt test limits are invalid")
+    _bounded_text(value["output"], "test output")
+    for field in ("evidence_id", "feedback_id"):
+        item = value[field]
+        if item is not None and (not isinstance(item, str) or not item.strip()):
+            raise AttemptError(f"attempt test {field} is invalid")
+    return copy.deepcopy(dict(value))
+
+
+def _validate_timed_entry(value: object, field: str) -> dict[str, object]:
+    required = {"entry_id", "at", "content", "run_id", "evidence_id"}
+    if not isinstance(value, Mapping) or set(value) != required:
+        raise AttemptError(f"attempt {field} entry fields are invalid")
+    if not isinstance(value["entry_id"], str) or not re.fullmatch(
+        r"entry_[a-f0-9]{32}", str(value["entry_id"])
+    ):
+        raise AttemptError(f"attempt {field} entry id is invalid")
+    _validate_timestamp(value["at"], f"{field} at")
+    _bounded_text(value["content"], field, allow_empty=False)
+    for reference in ("run_id", "evidence_id"):
+        item = value[reference]
+        if item is not None and (not isinstance(item, str) or not item.strip()):
+            raise AttemptError(f"attempt {field} {reference} is invalid")
+    return copy.deepcopy(dict(value))
+
+
+def _validate_assistance(value: object) -> dict[str, object]:
+    required = {
+        "hints",
+        "scaffolding",
+        "tutor_interventions",
+        "editorial_exposures",
+        "full_solution_exposures",
+        "independent_transfer_cleared_at",
+    }
+    if not isinstance(value, Mapping) or set(value) != required:
+        raise AttemptError("attempt assistance fields are invalid")
+    result: dict[str, object] = {}
+    for field in (
+        "hints",
+        "scaffolding",
+        "tutor_interventions",
+        "editorial_exposures",
+        "full_solution_exposures",
+    ):
+        entries = value[field]
+        if not isinstance(entries, list) or len(entries) > MAX_EVIDENCE_REFS:
+            raise AttemptError(f"attempt {field} are invalid")
+        result[field] = [_validate_timed_entry(entry, field) for entry in entries]
+    result["independent_transfer_cleared_at"] = _validate_timestamp(
+        value["independent_transfer_cleared_at"],
+        "independent transfer cleared_at",
+        optional=True,
+    )
+    return result
+
+
+def _validate_reasoning(value: object) -> dict[str, object]:
+    if not isinstance(value, Mapping) or set(value) != {"entries"}:
+        raise AttemptError("attempt reasoning fields are invalid")
+    entries = value["entries"]
+    if not isinstance(entries, list) or len(entries) > MAX_EVIDENCE_REFS:
+        raise AttemptError("attempt reasoning entries are invalid")
+    result = []
+    for entry in entries:
+        if not isinstance(entry, Mapping) or set(entry) != {
+            "entry_id",
+            "at",
+            "content",
+            "run_id",
+            "evidence_id",
+            "kind",
+        }:
+            raise AttemptError("attempt reasoning entry fields are invalid")
+        if entry["kind"] not in {"complexity", "edge_cases", "reflection", "evaluation"}:
+            raise AttemptError("attempt reasoning kind is invalid")
+        normalized = _validate_timed_entry(
+            {key: entry[key] for key in ("entry_id", "at", "content", "run_id", "evidence_id")},
+            "reasoning",
+        )
+        normalized["kind"] = entry["kind"]
+        result.append(normalized)
+    return {"entries": result}
+
+
+def _validate_execution(value: object, activity_id: str) -> dict[str, object]:
+    required = {
+        "activity_revision",
+        "activity_checksum",
+        "activity_bundle",
+        "function_name",
+        "test_cases",
+        "test_bundle_checksum",
+    }
+    if not isinstance(value, Mapping) or set(value) != required:
+        raise AttemptError("attempt execution fields are invalid")
+    revision = value["activity_revision"]
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+        raise AttemptError("attempt activity revision is invalid")
+    bundle = value["activity_bundle"]
+    if not isinstance(bundle, Mapping) or _json_size(bundle) > 64_000:
+        raise AttemptError("attempt activity bundle is invalid")
+    if bundle.get("activity_id") != activity_id or bundle.get("revision") != revision:
+        raise AttemptError("attempt activity bundle identity is invalid")
+    activity_checksum = value["activity_checksum"]
+    canonical_bundle = json.dumps(
+        bundle, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
+    if (
+        not isinstance(activity_checksum, str)
+        or activity_checksum != hashlib.sha256(canonical_bundle).hexdigest()
+    ):
+        raise AttemptError("attempt activity checksum is invalid")
+    function_name = value["function_name"]
+    if not isinstance(function_name, str) or (
+        function_name and not function_name.isidentifier()
+    ):
+        raise AttemptError("attempt function name is invalid")
+    test_cases = value["test_cases"]
+    if not isinstance(test_cases, list) or len(test_cases) > 256:
+        raise AttemptError("attempt test bundle is invalid")
+    test_checksum = value["test_bundle_checksum"]
+    canonical_tests = json.dumps(
+        test_cases, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
+    if (
+        not isinstance(test_checksum, str)
+        or test_checksum != hashlib.sha256(canonical_tests).hexdigest()
+    ):
+        raise AttemptError("attempt test bundle checksum is invalid")
+    return copy.deepcopy(dict(value))
+
+
+def _validate_feedback(value: object) -> dict[str, object]:
+    if not isinstance(value, Mapping) or set(value) != {"pending", "deliveries"}:
+        raise AttemptError("attempt feedback fields are invalid")
+    pending = value["pending"]
+    if pending is not None:
+        required = {
+            "feedback_id",
+            "run_id",
+            "evidence_id",
+            "hint_index",
+            "prompt",
+            "created_at",
+            "failures",
+        }
+        if not isinstance(pending, Mapping) or set(pending) != required:
+            raise AttemptError("pending feedback fields are invalid")
+        if not isinstance(pending["feedback_id"], str) or not re.fullmatch(
+            r"feedback_[a-f0-9]{64}", str(pending["feedback_id"])
+        ):
+            raise AttemptError("pending feedback id is invalid")
+        if not isinstance(pending["run_id"], str) or not RUN_ID_PATTERN.fullmatch(
+            str(pending["run_id"])
+        ):
+            raise AttemptError("pending feedback run id is invalid")
+        if not isinstance(pending["evidence_id"], str) or not pending["evidence_id"]:
+            raise AttemptError("pending feedback evidence id is invalid")
+        if (
+            isinstance(pending["hint_index"], bool)
+            or not isinstance(pending["hint_index"], int)
+            or pending["hint_index"] < 0
+        ):
+            raise AttemptError("pending feedback hint index is invalid")
+        _bounded_text(pending["prompt"], "pending feedback prompt", allow_empty=False)
+        _validate_timestamp(pending["created_at"], "pending feedback created_at")
+        failures = pending["failures"]
+        if not isinstance(failures, list) or len(failures) > 64:
+            raise AttemptError("pending feedback failures are invalid")
+        for failure in failures:
+            _validate_timed_entry(failure, "feedback failure")
+    deliveries = value["deliveries"]
+    if not isinstance(deliveries, list) or len(deliveries) > MAX_TEST_RUNS:
+        raise AttemptError("feedback deliveries are invalid")
+    for delivery in deliveries:
+        required = {
+            "feedback_id",
+            "run_id",
+            "evidence_id",
+            "hint_index",
+            "delivered_at",
+            "response_hash",
+        }
+        if not isinstance(delivery, Mapping) or set(delivery) != required:
+            raise AttemptError("feedback delivery fields are invalid")
+        if not isinstance(delivery["feedback_id"], str) or not re.fullmatch(
+            r"feedback_[a-f0-9]{64}", str(delivery["feedback_id"])
+        ):
+            raise AttemptError("feedback delivery id is invalid")
+        if not isinstance(delivery["run_id"], str) or not RUN_ID_PATTERN.fullmatch(
+            str(delivery["run_id"])
+        ):
+            raise AttemptError("feedback delivery run id is invalid")
+        if not isinstance(delivery["evidence_id"], str) or not delivery["evidence_id"]:
+            raise AttemptError("feedback delivery evidence id is invalid")
+        if (
+            isinstance(delivery["hint_index"], bool)
+            or not isinstance(delivery["hint_index"], int)
+            or delivery["hint_index"] < 0
+        ):
+            raise AttemptError("feedback delivery hint index is invalid")
+        _validate_timestamp(delivery["delivered_at"], "feedback delivered_at")
+        if not isinstance(delivery["response_hash"], str) or not re.fullmatch(
+            r"[a-f0-9]{64}", str(delivery["response_hash"])
+        ):
+            raise AttemptError("feedback response hash is invalid")
+    return copy.deepcopy(dict(value))
+
+
+def _validate_event(value: object, attempt_id: str) -> dict[str, object]:
+    required = {
+        "schema_version",
+        "event_id",
+        "attempt_id",
+        "attempt_revision",
+        "ts",
+        "event_type",
+        "data",
+    }
+    if not isinstance(value, Mapping) or set(value) != required:
+        raise AttemptError("attempt event fields are invalid")
+    if value["schema_version"] != EVENT_SCHEMA_VERSION:
+        raise AttemptError("attempt event schema is invalid")
+    if value["attempt_id"] != attempt_id:
+        raise AttemptError("attempt event identity is invalid")
+    event_id = value["event_id"]
+    if not isinstance(event_id, str) or not EVENT_ID_PATTERN.fullmatch(event_id):
+        raise AttemptError("attempt event id is invalid")
+    revision = value["attempt_revision"]
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+        raise AttemptError("attempt event revision is invalid")
+    _validate_timestamp(value["ts"], "attempt event timestamp")
+    _bounded_text(value["event_type"], "attempt event type", allow_empty=False)
+    if not isinstance(value["data"], Mapping) or _json_size(value["data"]) > MAX_TEXT:
+        raise AttemptError("attempt event data is invalid")
+    return copy.deepcopy(dict(value))
+
+
 def validate_attempt(value: Mapping[str, object]) -> dict[str, object]:
     required = {
         "schema_version",
@@ -141,6 +514,7 @@ def validate_attempt(value: Mapping[str, object]) -> dict[str, object]:
         "profile_ref",
         "language",
         "activity_id",
+        "execution",
         "problem",
         "purpose",
         "status",
@@ -160,6 +534,7 @@ def validate_attempt(value: Mapping[str, object]) -> dict[str, object]:
         "reasoning",
         "evidence_refs",
         "follow_up",
+        "feedback",
     }
     if set(value) != required:
         raise AttemptError("attempt record fields are invalid")
@@ -180,6 +555,8 @@ def validate_attempt(value: Mapping[str, object]) -> dict[str, object]:
         raise AttemptError("attempt topic generation is invalid")
     for field in ("profile_ref", "language", "activity_id"):
         _bounded_text(value[field], field)
+    activity_id = str(value["activity_id"])
+    _validate_execution(value["execution"], activity_id)
     problem = value["problem"]
     if not isinstance(problem, Mapping):
         raise AttemptError("attempt problem reference must be an object")
@@ -195,6 +572,7 @@ def validate_attempt(value: Mapping[str, object]) -> dict[str, object]:
     workspace_path = Path(workspace_ref)
     if workspace_path.is_absolute() or ".." in workspace_path.parts:
         raise AttemptError("attempt workspace reference must be safe and relative")
+    normalized_timestamps: dict[str, str | None] = {}
     for field in (
         "started_at",
         "last_active_at",
@@ -203,9 +581,33 @@ def validate_attempt(value: Mapping[str, object]) -> dict[str, object]:
         "cancelled_at",
         "resumed_at",
     ):
-        timestamp = value[field]
-        if timestamp is not None and not isinstance(timestamp, str):
-            raise AttemptError(f"{field} is invalid")
+        normalized_timestamps[field] = _validate_timestamp(
+            value[field], field, optional=field not in {"started_at", "last_active_at"}
+        )
+    started = datetime.fromisoformat(str(normalized_timestamps["started_at"]))
+    last_active = datetime.fromisoformat(str(normalized_timestamps["last_active_at"]))
+    if last_active < started:
+        raise AttemptError("attempt last_active_at precedes started_at")
+    for field in ("completed_at", "abandoned_at", "cancelled_at", "resumed_at"):
+        timestamp = normalized_timestamps[field]
+        if timestamp is not None and datetime.fromisoformat(timestamp) < started:
+            raise AttemptError(f"attempt {field} precedes started_at")
+    status = value["status"]
+    required_lifecycle = {
+        "completed": ("completed_at", {"solved_independently", "solved_with_help", "partial"}),
+        "abandoned": ("abandoned_at", {"abandoned"}),
+        "cancelled": ("cancelled_at", {"cancelled"}),
+        "invalid": ("completed_at", {"invalid"}),
+    }
+    if status in required_lifecycle:
+        timestamp_field, allowed_dispositions = required_lifecycle[str(status)]
+        if (
+            normalized_timestamps[timestamp_field] is None
+            or value["disposition"] not in allowed_dispositions
+        ):
+            raise AttemptError("attempt terminal lifecycle fields are inconsistent")
+    elif status == "active" and value["disposition"] is not None:
+        raise AttemptError("active attempt cannot have a final disposition")
     for field in ("clarification", "plan"):
         _bounded_text(value[field], field)
     snapshots = value["snapshots"]
@@ -217,29 +619,109 @@ def validate_attempt(value: Mapping[str, object]) -> dict[str, object]:
         raise AttemptError("attempt test runs are invalid")
     if not isinstance(evidence_refs, list) or len(evidence_refs) > MAX_EVIDENCE_REFS:
         raise AttemptError("attempt evidence references are invalid")
+    for reference in evidence_refs:
+        if not isinstance(reference, Mapping) or set(reference) != {
+            "evidence_id",
+            "kind",
+            "added_at",
+        }:
+            raise AttemptError("attempt evidence reference fields are invalid")
+        _bounded_text(reference["evidence_id"], "evidence id", allow_empty=False)
+        _bounded_text(reference["kind"], "evidence kind", allow_empty=False)
+        _validate_timestamp(reference["added_at"], "evidence added_at")
+    snapshot_values = [_validate_snapshot(snapshot) for snapshot in snapshots]
     identifiers: set[str] = set()
+    run_values = []
     for run in test_runs:
-        if not isinstance(run, Mapping) or not isinstance(run.get("run_id"), str):
-            raise AttemptError("attempt test run is invalid")
-        run_id = str(run["run_id"])
+        normalized_run = _validate_test_run(run)
+        run_id = str(normalized_run["run_id"])
         if run_id in identifiers:
             raise AttemptError("attempt contains duplicate test runs")
         identifiers.add(run_id)
-        outcome = run.get("outcome")
-        if outcome not in LEARNER_OUTCOMES | INFRASTRUCTURE_OUTCOMES | {"pending"}:
-            raise AttemptError("attempt test outcome is invalid")
-        if run.get("learner_failure") is not (outcome in LEARNER_OUTCOMES - {"passed"}):
-            raise AttemptError("attempt runner classification is inconsistent")
+        run_values.append(normalized_run)
     assistance = value["assistance"]
     reasoning = value["reasoning"]
     follow_up = value["follow_up"]
-    if not isinstance(assistance, Mapping) or not isinstance(reasoning, Mapping):
-        raise AttemptError("attempt assistance or reasoning is invalid")
-    if not isinstance(follow_up, Mapping):
+    assistance_value = _validate_assistance(assistance)
+    reasoning_value = _validate_reasoning(reasoning)
+    if not isinstance(follow_up, Mapping) or set(follow_up) != {
+        "scheduled_at",
+        "transfer_activity_id",
+        "independent_transfer_evidence",
+    }:
         raise AttemptError("attempt follow-up is invalid")
+    _validate_timestamp(follow_up["scheduled_at"], "follow_up scheduled_at", optional=True)
+    transfer_id = follow_up["transfer_activity_id"]
+    if transfer_id is not None and (not isinstance(transfer_id, str) or not transfer_id):
+        raise AttemptError("attempt transfer activity id is invalid")
+    transfer_evidence = follow_up["independent_transfer_evidence"]
+    if not isinstance(transfer_evidence, list) or len(transfer_evidence) > MAX_EVIDENCE_REFS:
+        raise AttemptError("independent transfer evidence is invalid")
+    for reference in transfer_evidence:
+        if not isinstance(reference, Mapping) or set(reference) != {
+            "evidence_id",
+            "attempt_id",
+            "problem",
+            "verified_at",
+        }:
+            raise AttemptError("independent transfer evidence fields are invalid")
+        _validate_problem_reference(reference["problem"])  # type: ignore[arg-type]
+        _validate_timestamp(reference["verified_at"], "transfer verified_at")
+    feedback_value = _validate_feedback(value["feedback"])
+    evidence_ids = {
+        str(reference["evidence_id"])
+        for reference in evidence_refs
+        if isinstance(reference, Mapping)
+    }
+    feedback_ids = {
+        str(delivery["feedback_id"])
+        for delivery in feedback_value["deliveries"]  # type: ignore[union-attr]
+        if isinstance(delivery, Mapping)
+    }
+    pending_feedback = feedback_value["pending"]
+    if isinstance(pending_feedback, Mapping):
+        feedback_ids.add(str(pending_feedback["feedback_id"]))
+    for run in run_values:
+        if run["evidence_id"] is not None and run["evidence_id"] not in evidence_ids:
+            raise AttemptError("test run references missing evidence")
+        if run["feedback_id"] is not None and run["feedback_id"] not in feedback_ids:
+            raise AttemptError("test run references missing feedback")
+    for container in (
+        assistance_value["hints"],
+        assistance_value["scaffolding"],
+        assistance_value["tutor_interventions"],
+        assistance_value["editorial_exposures"],
+        assistance_value["full_solution_exposures"],
+        reasoning_value["entries"],
+    ):
+        assert isinstance(container, list)
+        for entry in container:
+            if entry["run_id"] is not None and entry["run_id"] not in identifiers:
+                raise AttemptError("attempt provenance references an unknown run")
+            if entry["evidence_id"] is not None and entry["evidence_id"] not in evidence_ids:
+                raise AttemptError("attempt provenance references unknown evidence")
+    normalized = copy.deepcopy(dict(value))
+    normalized["snapshots"] = snapshot_values
+    normalized["test_runs"] = run_values
+    normalized["assistance"] = assistance_value
+    normalized["reasoning"] = reasoning_value
+    normalized["feedback"] = feedback_value
+    normalized.update(normalized_timestamps)
     if _json_size(value) > MAX_RECORD_BYTES:
         raise AttemptError("attempt record is too large")
-    return copy.deepcopy(dict(value))
+    return normalized
+
+
+def effective_disposition(value: Mapping[str, object]) -> str | None:
+    """Derive current independence without rewriting immutable completion history."""
+    attempt = validate_attempt(value)
+    if (
+        attempt["disposition"] == "solved_with_help"
+        and attempt["assistance"]["independent_transfer_cleared_at"] is not None  # type: ignore[index]
+    ):
+        return "solved_independently"
+    disposition = attempt["disposition"]
+    return str(disposition) if disposition is not None else None
 
 
 class AttemptStore:
@@ -283,6 +765,16 @@ class AttemptStore:
         self._validate_id(attempt_id)
         return self.topic_dir(topic) / f".{attempt_id}.journal.json"
 
+    def topic_path(self, topic: str) -> Path:
+        return self.topics_root / f"{_safe_component(topic, 'attempt topic')}.md"
+
+    @contextmanager
+    def _locked_attempt(self, topic: str, state_path: Path):
+        """Acquire the canonical topic-generation lock before the attempt lock."""
+        with self.lock(self.topic_path(topic)):
+            with self.lock(state_path):
+                yield
+
     def create(
         self,
         *,
@@ -297,23 +789,58 @@ class AttemptStore:
         clarification: str = "",
         plan: str = "",
         assistance: Mapping[str, object] | None = None,
+        activity_bundle: Mapping[str, object] | None = None,
         attempt_id: str | None = None,
     ) -> dict[str, object]:
-        if self.current_generation(topic) != topic_generation:
-            raise AttemptError("topic changed or was deleted before attempt creation")
         identifier = attempt_id or f"attempt_{uuid4().hex}"
         self._validate_id(identifier)
         workspace_ref = self.workspace_reference(topic, workspace)
         timestamp = _timestamp(self.now)
+        bundle = copy.deepcopy(
+            dict(activity_bundle or {"activity_id": activity_id, "revision": 1})
+        )
+        if bundle.get("activity_id") != activity_id:
+            raise AttemptError("activity bundle does not match attempt activity_id")
+        payload = bundle.get("domain_payload")
+        coding = payload.get("coding") if isinstance(payload, Mapping) else {}
+        if not isinstance(coding, Mapping):
+            coding = {}
+        raw_tests = coding.get("test_cases", [])
+        test_cases = copy.deepcopy(raw_tests) if isinstance(raw_tests, list) else []
+        canonical_bundle = json.dumps(
+            bundle, sort_keys=True, separators=(",", ":"), allow_nan=False
+        ).encode("utf-8")
+        canonical_tests = json.dumps(
+            test_cases, sort_keys=True, separators=(",", ":"), allow_nan=False
+        ).encode("utf-8")
         assistance_value = {
             "hints": [],
             "scaffolding": [],
-            "editorial_exposed": False,
-            "full_solution_exposed": False,
             "tutor_interventions": [],
+            "editorial_exposures": [],
+            "full_solution_exposures": [],
+            "independent_transfer_cleared_at": None,
         }
         if assistance:
-            assistance_value.update(copy.deepcopy(dict(assistance)))
+            if set(assistance) == set(assistance_value):
+                assistance_value = _validate_assistance(assistance)
+            else:
+                for field in ("hints", "scaffolding", "tutor_interventions"):
+                    items = assistance.get(field, [])
+                    if isinstance(items, list):
+                        assistance_value[field] = [
+                            self._timed_entry(str(item))
+                            for item in items
+                            if str(item).strip()
+                        ]
+                if assistance.get("editorial_exposed"):
+                    assistance_value["editorial_exposures"] = [
+                        self._timed_entry("editorial exposed")
+                    ]
+                if assistance.get("full_solution_exposed"):
+                    assistance_value["full_solution_exposures"] = [
+                        self._timed_entry("full solution exposed")
+                    ]
         record = validate_attempt(
             {
                 "schema_version": ATTEMPT_SCHEMA_VERSION,
@@ -324,6 +851,14 @@ class AttemptStore:
                 "profile_ref": _bounded_text(profile_ref, "profile_ref"),
                 "language": _bounded_text(language, "language", allow_empty=False),
                 "activity_id": _bounded_text(activity_id, "activity_id"),
+                "execution": {
+                    "activity_revision": bundle.get("revision", 1),
+                    "activity_checksum": hashlib.sha256(canonical_bundle).hexdigest(),
+                    "activity_bundle": bundle,
+                    "function_name": str(coding.get("function_name") or ""),
+                    "test_cases": test_cases,
+                    "test_bundle_checksum": hashlib.sha256(canonical_tests).hexdigest(),
+                },
                 "problem": _validate_problem_reference(problem),
                 "purpose": purpose,
                 "status": "active",
@@ -340,25 +875,28 @@ class AttemptStore:
                 "snapshots": [],
                 "test_runs": [],
                 "assistance": assistance_value,
-                "reasoning": {
-                    "complexity": "",
-                    "edge_cases": "",
-                    "reflection": "",
-                },
+                "reasoning": {"entries": []},
                 "evidence_refs": [],
-                "follow_up": {"scheduled_at": None, "transfer_activity_id": None},
+                "follow_up": {
+                    "scheduled_at": None,
+                    "transfer_activity_id": None,
+                    "independent_transfer_evidence": [],
+                },
+                "feedback": {"pending": None, "deliveries": []},
             }
         )
         state_path = self.state_path(topic, identifier)
-        with self.lock(state_path):
+        with self._locked_attempt(topic, state_path):
+            if self.current_generation(topic) != topic_generation:
+                raise AttemptError("topic changed or was deleted before attempt creation")
             if state_path.exists():
                 raise AttemptError("attempt already exists")
-            self._commit(record, "attempt_created", {})
+            self._commit(record, "attempt_created", {}, previous_revision=0)
         return record
 
     def load(self, topic: str, attempt_id: str) -> dict[str, object]:
         state_path = self.state_path(topic, attempt_id)
-        with self.lock(state_path):
+        with self._locked_attempt(topic, state_path):
             self._recover(topic, attempt_id)
             return self._read_state(state_path)
 
@@ -398,7 +936,7 @@ class AttemptStore:
         allow_completed_evidence: bool = False,
     ) -> dict[str, object]:
         state_path = self.state_path(topic, attempt_id)
-        with self.lock(state_path):
+        with self._locked_attempt(topic, state_path):
             self._recover(topic, attempt_id)
             current = self._read_state(state_path)
             if self.current_generation(topic) != current["topic_generation"]:
@@ -412,13 +950,37 @@ class AttemptStore:
             updated["revision"] = int(current["revision"]) + 1
             updated["last_active_at"] = _timestamp(self.now)
             validated = validate_attempt(updated)
-            self._commit(validated, event_type, event_data, event_id=event_id)
+            self._commit(
+                validated,
+                event_type,
+                event_data,
+                event_id=event_id,
+                previous_revision=int(current["revision"]),
+            )
             return validated
+
+    def _timed_entry(
+        self,
+        content: str,
+        *,
+        run_id: str | None = None,
+        evidence_id: str | None = None,
+    ) -> dict[str, object]:
+        return {
+            "entry_id": f"entry_{uuid4().hex}",
+            "at": _timestamp(self.now),
+            "content": _bounded_text(content, "entry content", allow_empty=False),
+            "run_id": run_id,
+            "evidence_id": evidence_id,
+        }
 
     def resume(self, topic: str, attempt_id: str) -> dict[str, object]:
         def update(value: dict[str, object]) -> None:
-            if value["status"] != "active":
-                raise AttemptError("only unfinished active attempts can be resumed")
+            if value["status"] not in {"active", "abandoned"}:
+                raise AttemptError("only unfinished or abandoned attempts can be resumed")
+            if value["status"] == "abandoned":
+                value["status"] = "active"
+                value["disposition"] = None
             value["resumed_at"] = _timestamp(self.now)
 
         return self.mutate(topic, attempt_id, "attempt_resumed", {}, update)
@@ -468,7 +1030,7 @@ class AttemptStore:
             source_text = self._read_workspace(workspace).decode("utf-8")
         except UnicodeDecodeError as exc:
             raise AttemptError("attempt workspace is not UTF-8 text") from exc
-        self.write_atomic(retry_workspace, source_text)
+        self._write_workspace_exclusive(topic, retry_workspace, source_text.encode("utf-8"))
         return self.create(
             topic=topic,
             topic_generation=str(source["topic_generation"]),
@@ -481,6 +1043,7 @@ class AttemptStore:
             clarification=str(source["clarification"]),
             plan=str(source["plan"]),
             assistance=source["assistance"],  # type: ignore[arg-type]
+            activity_bundle=source["execution"]["activity_bundle"],  # type: ignore[index]
             attempt_id=retry_id,
         )
 
@@ -529,6 +1092,8 @@ class AttemptStore:
             "failure_class": None,
             "limits": {},
             "output": "",
+            "evidence_id": None,
+            "feedback_id": None,
         }
 
         def update(value: dict[str, object]) -> None:
@@ -600,6 +1165,123 @@ class AttemptStore:
             event_id=f"{attempt_id}:{run_id}:finished",
         )
 
+    def queue_feedback(
+        self,
+        topic: str,
+        attempt_id: str,
+        run_id: str,
+        evidence_id: str,
+        *,
+        hint_index: int,
+        prompt: str,
+    ) -> dict[str, object]:
+        feedback_id = "feedback_" + hashlib.sha256(
+            f"{attempt_id}:{run_id}:{evidence_id}".encode("utf-8")
+        ).hexdigest()
+
+        def update(value: dict[str, object]) -> None:
+            runs = value["test_runs"]
+            assert isinstance(runs, list)
+            matching = [run for run in runs if run.get("run_id") == run_id]
+            if len(matching) != 1 or matching[0].get("outcome") == "pending":
+                raise AttemptError("feedback requires one completed test run")
+            run = matching[0]
+            if run.get("feedback_id") not in {None, feedback_id}:
+                raise AttemptError("test run is bound to different feedback")
+            feedback = value["feedback"]
+            assert isinstance(feedback, dict)
+            delivered = feedback["deliveries"]
+            assert isinstance(delivered, list)
+            if any(item.get("feedback_id") == feedback_id for item in delivered):
+                return
+            pending = feedback.get("pending")
+            if pending is not None:
+                if pending.get("feedback_id") == feedback_id:
+                    return
+                raise AttemptError("another feedback delivery is pending")
+            run["evidence_id"] = evidence_id
+            run["feedback_id"] = feedback_id
+            feedback["pending"] = {
+                "feedback_id": feedback_id,
+                "run_id": run_id,
+                "evidence_id": evidence_id,
+                "hint_index": hint_index,
+                "prompt": _bounded_text(prompt, "feedback prompt", allow_empty=False),
+                "created_at": _timestamp(self.now),
+                "failures": [],
+            }
+
+        return self.mutate(
+            topic,
+            attempt_id,
+            "attempt_feedback_queued",
+            {"feedback_id": feedback_id, "run_id": run_id, "evidence_id": evidence_id},
+            update,
+            event_id=f"{attempt_id}:feedback:{feedback_id}:queued",
+        )
+
+    def record_feedback_failure(
+        self, topic: str, attempt_id: str, feedback_id: str, error: str
+    ) -> dict[str, object]:
+        def update(value: dict[str, object]) -> None:
+            feedback = value["feedback"]
+            assert isinstance(feedback, dict)
+            pending = feedback.get("pending")
+            if not isinstance(pending, dict) or pending.get("feedback_id") != feedback_id:
+                raise AttemptError("feedback is not pending")
+            failures = pending["failures"]
+            assert isinstance(failures, list)
+            failures.append(self._timed_entry(error))
+
+        return self.mutate(
+            topic,
+            attempt_id,
+            "attempt_feedback_failed",
+            {"feedback_id": feedback_id},
+            update,
+        )
+
+    def deliver_feedback(
+        self, topic: str, attempt_id: str, feedback_id: str, response: str
+    ) -> dict[str, object]:
+        response_hash = hashlib.sha256(response.encode("utf-8")).hexdigest()
+
+        def update(value: dict[str, object]) -> None:
+            feedback = value["feedback"]
+            assert isinstance(feedback, dict)
+            deliveries = feedback["deliveries"]
+            assert isinstance(deliveries, list)
+            existing = [
+                item for item in deliveries if item.get("feedback_id") == feedback_id
+            ]
+            if existing:
+                if existing[0].get("response_hash") != response_hash:
+                    raise AttemptError("feedback was delivered with different content")
+                return
+            pending = feedback.get("pending")
+            if not isinstance(pending, dict) or pending.get("feedback_id") != feedback_id:
+                raise AttemptError("feedback is not pending")
+            deliveries.append(
+                {
+                    "feedback_id": feedback_id,
+                    "run_id": pending["run_id"],
+                    "evidence_id": pending["evidence_id"],
+                    "hint_index": pending["hint_index"],
+                    "delivered_at": _timestamp(self.now),
+                    "response_hash": response_hash,
+                }
+            )
+            feedback["pending"] = None
+
+        return self.mutate(
+            topic,
+            attempt_id,
+            "attempt_feedback_delivered",
+            {"feedback_id": feedback_id, "response_hash": response_hash},
+            update,
+            event_id=f"{attempt_id}:feedback:{feedback_id}:delivered",
+        )
+
     def complete(
         self,
         topic: str,
@@ -615,15 +1297,15 @@ class AttemptStore:
             assisted = bool(
                 assistance.get("hints")
                 or assistance.get("scaffolding")
-                or assistance.get("editorial_exposed")
-                or assistance.get("full_solution_exposed")
+                or assistance.get("editorial_exposures")
+                or assistance.get("full_solution_exposures")
             )
             selected = disposition or (
                 "solved_with_help" if assisted else "solved_independently"
             )
             if selected not in {"solved_independently", "solved_with_help", "partial"}:
                 raise AttemptError("completed attempt disposition is invalid")
-            if assistance.get("full_solution_exposed") and selected == "solved_independently":
+            if assistance.get("full_solution_exposures") and selected == "solved_independently":
                 selected = "solved_with_help"
             value["status"] = "completed"
             value["disposition"] = selected
@@ -672,6 +1354,8 @@ class AttemptStore:
         intervention: str = "",
         editorial_exposed: bool = False,
         full_solution_exposed: bool = False,
+        run_id: str | None = None,
+        evidence_id: str | None = None,
     ) -> dict[str, object]:
         additions = {
             "hint": _bounded_text(hint, "hint"),
@@ -692,23 +1376,33 @@ class AttemptStore:
                 item = additions[source]
                 values = assistance[target]
                 assert isinstance(values, list)
-                if item and item not in values:
-                    values.append(item)
+                if item:
+                    values.append(
+                        self._timed_entry(
+                            str(item), run_id=run_id, evidence_id=evidence_id
+                        )
+                    )
             if additions["editorial_exposed"]:
-                assistance["editorial_exposed"] = True
+                assistance["editorial_exposures"].append(
+                    self._timed_entry(
+                        "editorial exposed", run_id=run_id, evidence_id=evidence_id
+                    )
+                )
             if additions["full_solution_exposed"]:
-                assistance["full_solution_exposed"] = True
-
-        event_id = hashlib.sha256(
-            json.dumps(additions, sort_keys=True).encode("utf-8")
-        ).hexdigest()[:32]
+                assistance["full_solution_exposures"].append(
+                    self._timed_entry(
+                        "full solution exposed",
+                        run_id=run_id,
+                        evidence_id=evidence_id,
+                    )
+                )
         return self.mutate(
             topic,
             attempt_id,
             "attempt_assistance_recorded",
             additions,
             update,
-            event_id=f"{attempt_id}:assistance:{event_id}",
+            allow_completed_evidence=True,
         )
 
     def record_reasoning(
@@ -719,6 +1413,8 @@ class AttemptStore:
         complexity: str = "",
         edge_cases: str = "",
         reflection: str = "",
+        run_id: str | None = None,
+        evidence_id: str | None = None,
     ) -> dict[str, object]:
         additions = {
             "complexity": _bounded_text(complexity, "complexity"),
@@ -729,9 +1425,18 @@ class AttemptStore:
         def update(value: dict[str, object]) -> None:
             reasoning = value["reasoning"]
             assert isinstance(reasoning, dict)
+            entries = reasoning["entries"]
+            assert isinstance(entries, list)
             for field, text in additions.items():
                 if text:
-                    reasoning[field] = text
+                    entries.append(
+                        {
+                            **self._timed_entry(
+                                str(text), run_id=run_id, evidence_id=evidence_id
+                            ),
+                            "kind": field,
+                        }
+                    )
 
         return self.mutate(
             topic,
@@ -739,6 +1444,61 @@ class AttemptStore:
             "attempt_reasoning_recorded",
             {key: value for key, value in additions.items() if value},
             update,
+            allow_completed_evidence=True,
+        )
+
+    def record_independent_transfer(
+        self,
+        topic: str,
+        attempt_id: str,
+        *,
+        evidence_id: str,
+        transfer_attempt_id: str,
+        problem: Mapping[str, object],
+    ) -> dict[str, object]:
+        transfer = self.load(topic, transfer_attempt_id)
+        if (
+            transfer.get("status") != "completed"
+            or transfer.get("disposition") != "solved_independently"
+            or transfer.get("problem") != dict(problem)
+            or not any(
+                isinstance(item, Mapping) and item.get("evidence_id") == evidence_id
+                for item in transfer.get("evidence_refs", [])  # type: ignore[union-attr]
+            )
+        ):
+            raise AttemptError(
+                "independent transfer evidence must come from a completed unaided attempt"
+            )
+        reference = {
+            "evidence_id": _bounded_text(evidence_id, "transfer evidence", allow_empty=False),
+            "attempt_id": _bounded_text(
+                transfer_attempt_id, "transfer attempt", allow_empty=False
+            ),
+            "problem": _validate_problem_reference(problem),
+            "verified_at": _timestamp(self.now),
+        }
+
+        def update(value: dict[str, object]) -> None:
+            if transfer_attempt_id == attempt_id or reference["problem"] == value["problem"]:
+                raise AttemptError("independent transfer must use a different attempt and problem")
+            follow_up = value["follow_up"]
+            assistance = value["assistance"]
+            assert isinstance(follow_up, dict) and isinstance(assistance, dict)
+            refs = follow_up["independent_transfer_evidence"]
+            assert isinstance(refs, list)
+            if any(item.get("evidence_id") == evidence_id for item in refs):
+                return
+            refs.append(reference)
+            assistance["independent_transfer_cleared_at"] = reference["verified_at"]
+
+        return self.mutate(
+            topic,
+            attempt_id,
+            "attempt_independent_transfer_verified",
+            reference,
+            update,
+            event_id=f"{attempt_id}:transfer:{evidence_id}",
+            allow_completed_evidence=True,
         )
 
     def resolve_workspace(self, record: Mapping[str, object]) -> Path:
@@ -748,45 +1508,132 @@ class AttemptStore:
 
     def workspace_reference(self, topic: str, workspace: Path) -> str:
         safe = self._safe_workspace(workspace, topic)
-        try:
-            return safe.relative_to(self.topics_root.resolve()).as_posix()
-        except ValueError as exc:
-            raise AttemptError("attempt workspace is outside local topic storage") from exc
+        return Path("drills", topic, safe.name).as_posix()
 
     def _safe_workspace(self, workspace: Path, topic: str) -> Path:
         raw_owned = self.topics_root / "drills" / topic
         for candidate_parent in (self.topics_root, self.topics_root / "drills", raw_owned):
             if candidate_parent.exists() and candidate_parent.is_symlink():
                 raise AttemptError("attempt workspace parent is unsafe")
-        owned = (self.topics_root / "drills" / topic).resolve()
+        owned = raw_owned.resolve()
         if workspace.is_symlink():
             raise AttemptError("attempt workspace is missing or unsafe")
-        candidate = workspace.expanduser().resolve()
-        if not candidate.is_relative_to(owned):
+        candidate = workspace.expanduser().absolute()
+        resolved = candidate.resolve()
+        if (
+            candidate.parent.resolve() != owned
+            or resolved.parent != owned
+            or candidate.name in {"", ".", ".."}
+        ):
             raise AttemptError("attempt workspace is outside its owned directory")
-        if not candidate.exists() or not candidate.is_file() or candidate.is_symlink():
+        if not candidate.exists() or not candidate.is_file():
             raise AttemptError("attempt workspace is missing or unsafe")
-        return candidate
+        return resolved
 
     def _read_workspace(self, workspace: Path) -> bytes:
+        topic = workspace.parent.name
+        safe = self._safe_workspace(workspace, topic)
+        if os.name != "nt":
+            directory_fd = self._open_workspace_directory(topic)
+            try:
+                flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                descriptor = os.open(safe.name, flags, dir_fd=directory_fd)
+                try:
+                    opened = os.fstat(descriptor)
+                    if not stat.S_ISREG(opened.st_mode) or opened.st_size > MAX_SNAPSHOT_BYTES * 4:
+                        raise AttemptError("attempt workspace is too large or unsafe")
+                    chunks: list[bytes] = []
+                    remaining = MAX_SNAPSHOT_BYTES * 4 + 1
+                    while remaining:
+                        chunk = os.read(descriptor, min(64 * 1024, remaining))
+                        if not chunk:
+                            break
+                        chunks.append(chunk)
+                        remaining -= len(chunk)
+                finally:
+                    os.close(descriptor)
+            except OSError as exc:
+                raise AttemptError("attempt workspace could not be read safely") from exc
+            finally:
+                os.close(directory_fd)
+            data = b"".join(chunks)
+            if len(data) > MAX_SNAPSHOT_BYTES * 4:
+                raise AttemptError("attempt workspace is too large to snapshot")
+            return data
+
+        parent_before = safe.parent.stat()
         try:
-            before = workspace.stat()
+            before = safe.stat()
             if before.st_size > MAX_SNAPSHOT_BYTES * 4:
                 raise AttemptError("attempt workspace is too large to snapshot")
-            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-            descriptor = os.open(workspace, flags)
+            descriptor = os.open(safe, os.O_RDONLY)
             try:
                 data = os.read(descriptor, MAX_SNAPSHOT_BYTES * 4 + 1)
                 after = os.fstat(descriptor)
             finally:
                 os.close(descriptor)
+            parent_after = safe.parent.stat()
         except OSError as exc:
             raise AttemptError("attempt workspace could not be read safely") from exc
         if len(data) > MAX_SNAPSHOT_BYTES * 4:
             raise AttemptError("attempt workspace is too large to snapshot")
-        if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+        if (
+            (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
+            or (parent_before.st_dev, parent_before.st_ino)
+            != (parent_after.st_dev, parent_after.st_ino)
+            or safe.resolve().parent != safe.parent.resolve()
+        ):
             raise AttemptError("attempt workspace changed during snapshot")
         return data
+
+    def _open_workspace_directory(self, topic: str) -> int:
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptors: list[int] = []
+        try:
+            root_fd = os.open(self.topics_root, flags)
+            descriptors.append(root_fd)
+            drills_fd = os.open("drills", flags, dir_fd=root_fd)
+            descriptors.append(drills_fd)
+            topic_fd = os.open(topic, flags, dir_fd=drills_fd)
+            descriptors.append(topic_fd)
+            descriptors.pop()
+            return topic_fd
+        except OSError as exc:
+            raise AttemptError("attempt workspace parent could not be opened safely") from exc
+        finally:
+            for descriptor in reversed(descriptors):
+                os.close(descriptor)
+
+    def _write_workspace_exclusive(self, topic: str, path: Path, data: bytes) -> None:
+        safe_parent = self.topics_root / "drills" / topic
+        if path.absolute().parent.resolve() != safe_parent.resolve():
+            raise AttemptError("retry workspace is outside its owned directory")
+        if os.name == "nt":
+            raise AttemptError(
+                "secure retry workspace creation is unavailable on this Windows runtime"
+            )
+        directory_fd = self._open_workspace_directory(topic)
+        descriptor = -1
+        try:
+            flags = (
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_NOFOLLOW", 0)
+            )
+            descriptor = os.open(path.name, flags, 0o600, dir_fd=directory_fd)
+            view = memoryview(data)
+            while view:
+                written = os.write(descriptor, view)
+                view = view[written:]
+            os.fsync(descriptor)
+            os.fsync(directory_fd)
+        except OSError as exc:
+            raise AttemptError("retry workspace could not be created safely") from exc
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            os.close(directory_fd)
 
     def _commit(
         self,
@@ -795,12 +1642,13 @@ class AttemptStore:
         event_data: Mapping[str, object],
         *,
         event_id: str | None = None,
+        previous_revision: int,
     ) -> None:
         topic = str(record["topic"])
         attempt_id = str(record["attempt_id"])
         identifier = event_id or f"event_{uuid4().hex}"
         event = {
-            "schema_version": 1,
+            "schema_version": EVENT_SCHEMA_VERSION,
             "event_id": identifier,
             "attempt_id": attempt_id,
             "attempt_revision": record["revision"],
@@ -808,7 +1656,17 @@ class AttemptStore:
             "event_type": event_type,
             "data": copy.deepcopy(dict(event_data)),
         }
-        journal = {"record": record, "event": event}
+        journal = {
+            "schema_version": JOURNAL_SCHEMA_VERSION,
+            "attempt_id": attempt_id,
+            "topic": topic,
+            "topic_generation": record["topic_generation"],
+            "previous_revision": previous_revision,
+            "next_revision": record["revision"],
+            "created_at": _timestamp(self.now),
+            "record": record,
+            "event": event,
+        }
         journal_path = self.journal_path(topic, attempt_id)
         self.write_atomic(journal_path, json.dumps(journal, indent=2, sort_keys=True) + "\n")
         self._recover(topic, attempt_id)
@@ -818,20 +1676,77 @@ class AttemptStore:
         if not journal_path.exists():
             return
         raw = self._read_json(journal_path, MAX_RECORD_BYTES + MAX_TEXT)
-        if not isinstance(raw, Mapping):
-            raise AttemptError("attempt journal is malformed")
+        required = {
+            "schema_version",
+            "attempt_id",
+            "topic",
+            "topic_generation",
+            "previous_revision",
+            "next_revision",
+            "created_at",
+            "record",
+            "event",
+        }
+        if not isinstance(raw, Mapping) or set(raw) != required:
+            raise AttemptError("attempt journal envelope is malformed")
+        if (
+            raw["schema_version"] != JOURNAL_SCHEMA_VERSION
+            or raw["attempt_id"] != attempt_id
+            or raw["topic"] != topic
+            or not isinstance(raw["previous_revision"], int)
+            or isinstance(raw["previous_revision"], bool)
+            or not isinstance(raw["next_revision"], int)
+            or isinstance(raw["next_revision"], bool)
+            or raw["next_revision"] != raw["previous_revision"] + 1
+        ):
+            raise AttemptError("attempt journal envelope is invalid")
+        _validate_timestamp(raw["created_at"], "attempt journal created_at")
+        if self.current_generation(topic) != raw["topic_generation"]:
+            raise AttemptError("attempt journal belongs to a deleted or recreated topic")
         record = raw.get("record")
         event = raw.get("event")
         if not isinstance(record, Mapping) or not isinstance(event, Mapping):
             raise AttemptError("attempt journal is malformed")
         validated = validate_attempt(record)
-        if validated["attempt_id"] != attempt_id or validated["topic"] != topic:
+        validated_event = _validate_event(event, attempt_id)
+        if (
+            validated["attempt_id"] != attempt_id
+            or validated["topic"] != topic
+            or validated["topic_generation"] != raw["topic_generation"]
+            or validated["revision"] != raw["next_revision"]
+            or validated_event["attempt_revision"] != raw["next_revision"]
+        ):
             raise AttemptError("attempt journal identity is invalid")
-        self.write_atomic(
-            self.state_path(topic, attempt_id),
-            json.dumps(validated, indent=2, sort_keys=True) + "\n",
-        )
-        self._append_event_once(topic, attempt_id, dict(event))
+        events_path = self.events_path(topic, attempt_id)
+        for current_event in iter_events(events_path, attempt_id=attempt_id):
+            if current_event["event_id"] == validated_event["event_id"]:
+                if current_event != validated_event:
+                    raise AttemptError("attempt event id has conflicting content")
+                continue
+            if current_event["attempt_revision"] == validated_event["attempt_revision"]:
+                raise AttemptError("attempt revision already has a different event")
+        state_path = self.state_path(topic, attempt_id)
+        if state_path.exists():
+            current = self._read_state(state_path)
+            current_revision = current["revision"]
+            if current_revision == raw["next_revision"]:
+                if current != validated:
+                    raise AttemptError("attempt journal conflicts with current revision")
+            elif current_revision == raw["previous_revision"]:
+                self.write_atomic(
+                    state_path,
+                    json.dumps(validated, indent=2, sort_keys=True) + "\n",
+                )
+            else:
+                raise AttemptError("attempt journal is stale and cannot be replayed")
+        elif raw["previous_revision"] == 0:
+            self.write_atomic(
+                state_path,
+                json.dumps(validated, indent=2, sort_keys=True) + "\n",
+            )
+        else:
+            raise AttemptError("attempt journal cannot skip a missing prior revision")
+        self._append_event_once(topic, attempt_id, validated_event)
         journal_path.unlink()
 
     def _append_event_once(
@@ -840,20 +1755,24 @@ class AttemptStore:
         path = self.events_path(topic, attempt_id)
         if path.is_symlink():
             raise AttemptError("attempt event log is unsafe")
-        text = path.read_text(encoding="utf-8") if path.exists() else ""
-        if len(text.encode("utf-8")) > MAX_EVENTS_BYTES:
-            raise AttemptError("attempt event log is too large")
-        event_id = event.get("event_id")
-        for line in text.splitlines():
-            try:
-                current = json.loads(line)
-            except json.JSONDecodeError:
-                raise AttemptError("attempt event log is corrupted")
-            if isinstance(current, Mapping) and current.get("event_id") == event_id:
+        validated_event = _validate_event(event, attempt_id)
+        existing_events = list(iter_events(path, attempt_id=attempt_id))
+        event_id = validated_event["event_id"]
+        for current in existing_events:
+            if current["event_id"] == event_id:
+                if current != validated_event:
+                    raise AttemptError("attempt event id has conflicting content")
                 return
+            if current["attempt_revision"] == validated_event["attempt_revision"]:
+                raise AttemptError("attempt revision already has a different event")
+        text = (
+            _read_bounded_text(path, MAX_EVENTS_BYTES, "attempt event log")
+            if path.exists()
+            else ""
+        )
         if text and not text.endswith("\n"):
             text += "\n"
-        text += json.dumps(event, sort_keys=True) + "\n"
+        text += json.dumps(validated_event, sort_keys=True) + "\n"
         if len(text.encode("utf-8")) > MAX_EVENTS_BYTES:
             raise AttemptError("attempt event log is too large")
         self.write_atomic(path, text)
@@ -868,13 +1787,9 @@ class AttemptStore:
     def _read_json(path: Path, limit: int) -> object:
         if not path.exists():
             raise AttemptError("attempt not found")
-        if path.is_symlink() or not path.is_file():
-            raise AttemptError("attempt storage is unsafe")
-        if path.stat().st_size > limit:
-            raise AttemptError("attempt storage is too large")
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+            return json.loads(_read_bounded_text(path, limit, "attempt storage"))
+        except json.JSONDecodeError as exc:
             raise AttemptError("attempt storage is corrupted") from exc
 
     @staticmethod
@@ -883,19 +1798,43 @@ class AttemptStore:
             raise AttemptError("invalid attempt_id")
 
 
-def iter_events(path: Path) -> Iterator[dict[str, object]]:
+def iter_events(
+    path: Path, *, attempt_id: str | None = None
+) -> Iterator[dict[str, object]]:
     """Yield a strict event replay stream for diagnostics and tests."""
     if not path.exists():
         return
+    if path.is_symlink() or not path.is_file():
+        raise AttemptError("attempt event log is unsafe")
     seen: set[str] = set()
-    for line in path.read_text(encoding="utf-8").splitlines():
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError as exc:
-            raise AttemptError("attempt event log is corrupted") from exc
-        if not isinstance(event, dict) or not isinstance(event.get("event_id"), str):
-            raise AttemptError("attempt event is malformed")
-        if event["event_id"] in seen:
-            continue
-        seen.add(str(event["event_id"]))
-        yield event
+    inferred_id = attempt_id
+    suffix = ".events.jsonl"
+    if inferred_id is None and path.name.endswith(suffix):
+        inferred_id = path.name[: -len(suffix)]
+    if inferred_id is None or not ATTEMPT_ID_PATTERN.fullmatch(inferred_id):
+        raise AttemptError("attempt event log identity is invalid")
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or opened.st_size > MAX_EVENTS_BYTES:
+            os.close(descriptor)
+            raise AttemptError("attempt event log is too large or unsafe")
+        with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+            total = 0
+            for line in handle:
+                total += len(line.encode("utf-8"))
+                if total > MAX_EVENTS_BYTES or len(line.encode("utf-8")) > MAX_EVENT_LINE_BYTES:
+                    raise AttemptError("attempt event log is too large")
+                try:
+                    raw = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise AttemptError("attempt event log is corrupted") from exc
+                event = _validate_event(raw, inferred_id)
+                if event["event_id"] in seen:
+                    continue
+                seen.add(str(event["event_id"]))
+                yield event
+    except OSError as exc:
+        raise AttemptError("attempt event log could not be read") from exc
+    except UnicodeDecodeError as exc:
+        raise AttemptError("attempt event log is not UTF-8") from exc

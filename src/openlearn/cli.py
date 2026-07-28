@@ -622,6 +622,23 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("attempt_id")
         command.add_argument("--topic", default=None, help="Topic slug")
         command.set_defaults(func=handler)
+    attempt_reflect = attempt_sub.add_parser(
+        "reflect", help="Add complexity, edge-case, or reflection evidence"
+    )
+    attempt_reflect.add_argument("attempt_id")
+    attempt_reflect.add_argument("--topic", default=None, help="Topic slug")
+    attempt_reflect.add_argument("--complexity", default="")
+    attempt_reflect.add_argument("--edge-cases", default="")
+    attempt_reflect.add_argument("--reflection", default="")
+    attempt_reflect.set_defaults(func=cmd_attempt_reflect)
+    attempt_transfer = attempt_sub.add_parser(
+        "verify-transfer", help="Verify independent transfer evidence"
+    )
+    attempt_transfer.add_argument("attempt_id", help="Previously scaffolded attempt")
+    attempt_transfer.add_argument("transfer_attempt_id")
+    attempt_transfer.add_argument("evidence_id")
+    attempt_transfer.add_argument("--topic", default=None, help="Topic slug")
+    attempt_transfer.set_defaults(func=cmd_attempt_verify_transfer)
 
     delete_parser = sub.add_parser("delete", help="Delete a local learning topic")
     delete_parser.add_argument("topic", nargs="?", help="Topic slug")
@@ -8255,19 +8272,21 @@ def record_topic_activity_evidence(
     activity: dict[str, object],
     evidence_kind: str,
     domain_payload: dict[str, object],
+    *,
+    evidence_id: str | None = None,
 ) -> dict[str, object]:
     """Persist domain evidence in an event and only its opaque reference in state."""
     try:
         current = validate_activity(activity, built_in_activity_registry())
         adapter = built_in_activity_registry().adapter_for(str(current["domain"]))
         evidence = adapter.validate_evidence(evidence_kind, domain_payload)
-        evidence_id = f"evidence_{uuid4().hex}"
-        updated, changed = attach_evidence_reference(current, evidence_id)
+        identifier = evidence_id or f"evidence_{uuid4().hex}"
+        updated, changed = attach_evidence_reference(current, identifier)
     except ActivityContractError as exc:
         raise OpenLearnError(str(exc)) from exc
     event_data = {
         **activity_event_data(updated),
-        "evidence_id": evidence_id,
+        "evidence_id": identifier,
         "evidence_kind": evidence_kind,
         "domain_evidence": {str(current["domain"]): evidence},
         "mastery_update_applied": False,
@@ -8428,6 +8447,7 @@ def orchestrate_tutor_coding_drill(
         topic.slug, tutor_drill_activity_request(topic, action)
     )
     activity = accept_topic_activity(topic.slug, activity, learner_confirmed=True)
+    activity = transition_topic_activity(topic.slug, activity, "active")
     try:
         path = write_tutor_drill_file(topic.slug, action)
         save_active_drill(topic.slug, path)
@@ -8435,7 +8455,6 @@ def orchestrate_tutor_coding_drill(
     except (OSError, OpenLearnError) as exc:
         transition_topic_activity(topic.slug, activity, "failed", reason=str(exc))
         raise OpenLearnError(f"could not create drill workspace: {exc}") from exc
-    activity = transition_topic_activity(topic.slug, activity, "active")
     output_func(f"Drill saved: {path}")
     try:
         editor = open_drill_in_editor(path)
@@ -8649,6 +8668,7 @@ def cmd_drill(args: argparse.Namespace, output_func=print) -> int:
     # Entering /drill is the learner's explicit consent. Proposal APIs remain
     # side-effect free for future tutor-selected activities.
     activity = accept_topic_activity(topic.slug, activity, learner_confirmed=True)
+    activity = transition_topic_activity(topic.slug, activity, "active")
     try:
         path = write_drill_file(topic.slug, drill)
         save_active_drill(topic.slug, path)
@@ -8656,7 +8676,6 @@ def cmd_drill(args: argparse.Namespace, output_func=print) -> int:
     except (OSError, OpenLearnError) as exc:
         transition_topic_activity(topic.slug, activity, "failed", reason=str(exc))
         raise OpenLearnError(f"could not create drill workspace: {exc}") from exc
-    activity = transition_topic_activity(topic.slug, activity, "active")
     output_func(f"Drill saved: {path}")
     try:
         editor = open_drill_in_editor(path)
@@ -8676,11 +8695,268 @@ def cmd_drill(args: argparse.Namespace, output_func=print) -> int:
     return 0
 
 
+def attempt_run_return_code(run: dict[str, object]) -> int:
+    outcome = str(run.get("outcome") or "")
+    synthetic = {
+        "passed": 0,
+        "test_failure": 10,
+        "compile_error": 20,
+        "runtime_error": 21,
+        "timeout": 124,
+        "output_limit": 125,
+        "resource_limit": 126,
+    }
+    limits = run.get("limits")
+    exit_code = limits.get("exit_code") if isinstance(limits, dict) else None
+    return exit_code if isinstance(exit_code, int) else synthetic.get(outcome, 1)
+
+
+def prepare_unqueued_attempt_feedback(
+    topic: Topic,
+    activity: dict[str, object],
+    attempt: dict[str, object],
+    coding_payload: dict[str, object],
+) -> tuple[dict[str, object], dict[str, object]]:
+    runs = attempt.get("test_runs")
+    if not isinstance(runs, list):
+        return activity, attempt
+    run = next(
+        (
+            item
+            for item in reversed(runs)
+            if isinstance(item, dict)
+            and item.get("outcome") in interview_attempts.LEARNER_OUTCOMES
+            and item.get("feedback_id") is None
+        ),
+        None,
+    )
+    if not isinstance(run, dict):
+        return activity, attempt
+    run_id = str(run["run_id"])
+    attempt_id = str(attempt["attempt_id"])
+    evidence_identifier = "evidence_" + hashlib.sha256(
+        f"{attempt_id}:{run_id}:pytest_result".encode("utf-8")
+    ).hexdigest()[:32]
+    snapshots = attempt.get("snapshots")
+    latest_snapshot = snapshots[-1] if isinstance(snapshots, list) and snapshots else {}
+    artifact_excerpt = (
+        str(latest_snapshot.get("content") or "")[:8_000]
+        if isinstance(latest_snapshot, dict)
+        else ""
+    )
+    run_index = next(
+        index for index, item in enumerate(runs, start=1) if item is run
+    )
+    hints = coding_payload.get("hints")
+    hint_values = (
+        [item for item in hints if isinstance(item, str) and item.strip()]
+        if isinstance(hints, list)
+        else []
+    )
+    feedback = attempt.get("feedback")
+    deliveries = feedback.get("deliveries") if isinstance(feedback, dict) else []
+    delivered_failures = 0
+    if isinstance(deliveries, list):
+        failed_run_ids = {
+            str(item["run_id"])
+            for item in runs
+            if isinstance(item, dict)
+            and item.get("learner_failure") is True
+            and item.get("feedback_id") is not None
+        }
+        delivered_failures = sum(
+            isinstance(item, dict) and str(item.get("run_id")) in failed_run_ids
+            for item in deliveries
+        )
+    passed = run.get("outcome") == "passed"
+    hint_stage = (
+        min(delivered_failures + 1, len(hint_values)) if not passed else 0
+    )
+    output = str(run.get("output") or "")
+    activity = record_topic_activity_evidence(
+        topic.slug,
+        activity,
+        "pytest_result",
+        {
+            "return_code": attempt_run_return_code(run),
+            "summary": output[:4_000],
+            "artifact_excerpt": artifact_excerpt,
+            "attempt_number": run_index,
+            "hint_stage": hint_stage,
+            "tests_passed": passed,
+        },
+        evidence_id=evidence_identifier,
+    )
+    store = attempt_store()
+    try:
+        attempt = store.add_evidence(
+            topic.slug, attempt_id, evidence_identifier, kind="pytest_result"
+        )
+    except interview_attempts.AttemptError as exc:
+        raise OpenLearnError(f"could not link attempt evidence: {exc}") from exc
+    purpose = str(activity.get("purpose"))
+    reflection = str(
+        coding_payload.get("reflection_prompt")
+        or "Explain one edge case and why the implementation handles it."
+    )
+    transfer = str(coding_payload.get("transfer_prompt") or "")
+    selected_hint = hint_values[hint_stage - 1] if hint_stage else ""
+    feedback_contract = (
+        "Tests passed, but this is a mastery check and tests alone are not mastery "
+        "evidence. Use one **Check:** with the reflection prompt below so explanation "
+        "quality is judged separately. Mention the later transfer task when supplied."
+        if passed and purpose == "mastery_check"
+        else "Tests passed on a practice attempt. Use one **Feedback:** move, reinforce "
+        "the key idea briefly, and invite the reflection without grading it or claiming mastery."
+        if passed
+        else "Tests failed. Use one **Feedback:** move with targeted feedback tied to the "
+        "artifact and test output, reveal only the selected progressive hint, and ask for "
+        "one retry with /check. Do not reveal a complete solution."
+    )
+    limits = run.get("limits")
+    user = textwrap.dedent(
+        f"""
+        The learner completed coding-drill attempt {run_index}.
+        Drill purpose: {purpose}.
+        Activity completion and test output are candidate evidence only; do not claim mastery
+        or advance solely because tests passed.
+        {feedback_contract}
+
+        Runner outcome: {run.get("outcome")}
+        Runner exit code: {limits.get("exit_code") if isinstance(limits, dict) else None}
+        Execution isolation: {limits.get("isolation") if isinstance(limits, dict) else "unknown"}
+        Test output:
+        {output or "(no output)"}
+
+        Saved learner artifact:
+        {artifact_excerpt or "(snapshot stored by hash only)"}
+
+        Selected hint stage {hint_stage}: {selected_hint or "(none)"}
+        Reflection prompt: {reflection}
+        Related transfer task: {transfer or "(none)"}
+        """
+    ).strip()
+    try:
+        attempt = store.queue_feedback(
+            topic.slug,
+            attempt_id,
+            run_id,
+            evidence_identifier,
+            hint_index=hint_stage,
+            prompt=user,
+        )
+    except interview_attempts.AttemptError as exc:
+        raise OpenLearnError(f"could not save pending tutor feedback: {exc}") from exc
+    return activity, attempt
+
+
+def deliver_pending_attempt_feedback(
+    topic: Topic,
+    activity: dict[str, object],
+    attempt: dict[str, object],
+    coding_payload: dict[str, object],
+    *,
+    model_override: str | None,
+    output_func=print,
+) -> int | None:
+    feedback = attempt.get("feedback")
+    pending = feedback.get("pending") if isinstance(feedback, dict) else None
+    if not isinstance(pending, dict):
+        return None
+    store = attempt_store()
+    attempt_id = str(attempt["attempt_id"])
+    feedback_id = str(pending["feedback_id"])
+    model = model_override or str(topic.metadata.get("model") or configured_model())
+    try:
+        answer = call_openai_streaming(
+            model=model,
+            system=system_prompt(topic),
+            user=str(pending["prompt"]),
+            output_func=output_func,
+        )
+    except OpenLearnError as exc:
+        try:
+            store.record_feedback_failure(
+                topic.slug, attempt_id, feedback_id, str(exc)
+            )
+        except interview_attempts.AttemptError as persistence_exc:
+            raise OpenLearnError(
+                f"feedback failed and its retry state could not be saved: {persistence_exc}"
+            ) from exc
+        raise
+    print_and_append_model_answer(
+        topic, "check", str(pending["prompt"]), answer, output_func=output_func
+    )
+    try:
+        attempt = store.deliver_feedback(
+            topic.slug, attempt_id, feedback_id, answer
+        )
+    except interview_attempts.AttemptError as exc:
+        raise OpenLearnError(f"could not finalize tutor feedback: {exc}") from exc
+    hint_index = int(pending["hint_index"])
+    hints = coding_payload.get("hints")
+    hint_values = (
+        [item for item in hints if isinstance(item, str) and item.strip()]
+        if isinstance(hints, list)
+        else []
+    )
+    selected_hint = (
+        hint_values[hint_index - 1]
+        if 0 < hint_index <= len(hint_values)
+        else ""
+    )
+    if selected_hint:
+        try:
+            store.record_assistance(
+                topic.slug,
+                attempt_id,
+                hint=selected_hint,
+                intervention=answer[: interview_attempts.MAX_TEXT],
+                run_id=str(pending["run_id"]),
+                evidence_id=str(pending["evidence_id"]),
+            )
+        except interview_attempts.AttemptError as exc:
+            raise OpenLearnError(f"could not save tutor intervention: {exc}") from exc
+    runs = attempt.get("test_runs")
+    run = next(
+        (
+            item
+            for item in runs
+            if isinstance(item, dict) and item.get("run_id") == pending["run_id"]
+        ),
+        None,
+    ) if isinstance(runs, list) else None
+    if not isinstance(run, dict):
+        raise OpenLearnError("pending feedback lost its exact test run")
+    passed = run.get("outcome") == "passed"
+    if passed:
+        if activity.get("status") == "active":
+            activity = transition_topic_activity(topic.slug, activity, "completed")
+        try:
+            attempt = store.complete(topic.slug, attempt_id)
+        except interview_attempts.AttemptError as exc:
+            raise OpenLearnError(f"could not complete coding attempt: {exc}") from exc
+        reflection = str(
+            coding_payload.get("reflection_prompt")
+            or "Explain one edge case and why the implementation handles it."
+        )
+        register_mastery_drill_reflection(
+            topic,
+            activity,
+            answer,
+            fallback_question=reflection,
+            output_func=output_func,
+        )
+    return 0 if passed else 1
+
+
 def cmd_check(args: argparse.Namespace, output_func=print) -> int:
     topic = read_topic(resolve_topic_slug(args.topic))
     drill_path = active_drill_path(topic)
     activity = ensure_coding_drill_activity(topic, drill_path)
-    attempt = ensure_attempt_for_drill(topic, activity, drill_path, snapshot=True)
+    attempt = ensure_attempt_for_drill(
+        topic, activity, drill_path, snapshot=True, prefer_existing=True
+    )
     store = attempt_store()
     attempt_id = str(attempt["attempt_id"])
     payload_namespace = activity.get("domain_payload")
@@ -8691,6 +8967,33 @@ def cmd_check(args: argparse.Namespace, output_func=print) -> int:
     )
     if not isinstance(coding_payload, dict):
         coding_payload = {}
+    delivered = deliver_pending_attempt_feedback(
+        topic,
+        activity,
+        attempt,
+        coding_payload,
+        model_override=args.model,
+        output_func=output_func,
+    )
+    if delivered is not None:
+        return delivered
+    activity, attempt = prepare_unqueued_attempt_feedback(
+        topic, activity, attempt, coding_payload
+    )
+    delivered = deliver_pending_attempt_feedback(
+        topic,
+        activity,
+        attempt,
+        coding_payload,
+        model_override=args.model,
+        output_func=output_func,
+    )
+    if delivered is not None:
+        return delivered
+    if attempt.get("status") == "completed":
+        raise OpenLearnError(
+            "this attempt is complete; use 'openlearn attempt retry' for a new attempt"
+        )
     tool_requests = coding_payload.get("tool_requests")
     tool_actions = {
         item.get("action")
@@ -8826,121 +9129,20 @@ def cmd_check(args: argparse.Namespace, output_func=print) -> int:
         )
     except interview_attempts.AttemptError as exc:
         raise OpenLearnError(f"could not save test outcome: {exc}") from exc
-    refs = activity.get("evidence_refs")
-    attempt_number = len(refs) + 1 if isinstance(refs, list) else 1
-    hints = coding_payload.get("hints")
-    hint_values = (
-        [item for item in hints if isinstance(item, str) and item.strip()]
-        if isinstance(hints, list)
-        else []
+    activity, attempt = prepare_unqueued_attempt_feedback(
+        topic, activity, attempt, coding_payload
     )
-    hint_stage = (
-        min(attempt_number, len(hint_values)) if not run_result.passed else 0
-    )
-    try:
-        artifact_excerpt = drill_path.read_text(encoding="utf-8")[:8_000]
-    except OSError as exc:
-        transition_topic_activity(topic.slug, activity, "failed", reason=str(exc))
-        raise OpenLearnError(f"could not read the saved drill attempt: {exc}") from exc
-    activity = record_topic_activity_evidence(
-        topic.slug,
+    delivered = deliver_pending_attempt_feedback(
+        topic,
         activity,
-        "pytest_result",
-        {
-            "return_code": runner_evidence_return_code(run_result),
-            "summary": output[:4_000],
-            "artifact_excerpt": artifact_excerpt,
-            "attempt_number": attempt_number,
-            "hint_stage": hint_stage,
-            "tests_passed": run_result.passed,
-        },
+        attempt,
+        coding_payload,
+        model_override=args.model,
+        output_func=output_func,
     )
-    attempt_evidence_refs = activity.get("evidence_refs")
-    if isinstance(attempt_evidence_refs, list) and attempt_evidence_refs:
-        latest_evidence = attempt_evidence_refs[-1]
-        if isinstance(latest_evidence, dict) and isinstance(
-            latest_evidence.get("evidence_id"), str
-        ):
-            try:
-                store.add_evidence(
-                    topic.slug,
-                    attempt_id,
-                    str(latest_evidence["evidence_id"]),
-                    kind="pytest_result",
-                )
-            except interview_attempts.AttemptError as exc:
-                raise OpenLearnError(f"could not link attempt evidence: {exc}") from exc
-    if run_result.passed:
-        activity = transition_topic_activity(topic.slug, activity, "completed")
-        try:
-            attempt = store.complete(topic.slug, attempt_id)
-        except interview_attempts.AttemptError as exc:
-            raise OpenLearnError(f"could not complete coding attempt: {exc}") from exc
-    purpose = str(activity.get("purpose"))
-    reflection = str(
-        coding_payload.get("reflection_prompt")
-        or "Explain one edge case and why the implementation handles it."
-    )
-    transfer = str(coding_payload.get("transfer_prompt") or "")
-    selected_hint = hint_values[hint_stage - 1] if hint_stage else ""
-    feedback_contract = (
-        "Tests passed, but this is a mastery check and tests alone are not mastery "
-        "evidence. Use one **Check:** with the reflection prompt below so explanation "
-        "quality is judged separately. Mention the later transfer task when supplied."
-        if run_result.passed and purpose == "mastery_check"
-        else "Tests passed on a practice attempt. Use one **Feedback:** move, reinforce "
-        "the key idea briefly, and invite the reflection without grading it or claiming mastery."
-        if run_result.passed
-        else "Tests failed. Use one **Feedback:** move with targeted feedback tied to the "
-        "artifact and test output, reveal only the selected progressive hint, and ask for "
-        "one retry with /check. Do not reveal a complete solution."
-    )
-    user = textwrap.dedent(
-        f"""
-        The learner completed coding-drill attempt {attempt_number}.
-        Drill purpose: {purpose}.
-        Activity completion and test output are candidate evidence only; do not claim mastery
-        or advance solely because tests passed.
-        {feedback_contract}
-
-        Runner outcome: {run_result.kind}
-        Runner exit code: {run_result.exit_code}
-        Execution isolation: {run_result.isolation}
-        Test output:
-        {output or "(no output)"}
-
-        Saved learner artifact:
-        {artifact_excerpt}
-
-        Selected hint stage {hint_stage}: {selected_hint or "(none)"}
-        Reflection prompt: {reflection}
-        Related transfer task: {transfer or "(none)"}
-        """
-    ).strip()
-    model = args.model or str(topic.metadata.get("model") or configured_model())
-    answer = call_openai_streaming(
-        model=model, system=system_prompt(topic), user=user, output_func=output_func
-    )
-    print_and_append_model_answer(topic, "check", user, answer, output_func=output_func)
-    if selected_hint:
-        try:
-            store.record_assistance(
-                topic.slug,
-                attempt_id,
-                hint=selected_hint,
-                intervention=answer[: interview_attempts.MAX_TEXT],
-            )
-        except interview_attempts.AttemptError as exc:
-            raise OpenLearnError(f"could not save tutor intervention: {exc}") from exc
-    if run_result.passed:
-        register_mastery_drill_reflection(
-            topic,
-            activity,
-            answer,
-            fallback_question=reflection,
-            output_func=output_func,
-        )
-    return 0 if run_result.passed else 1
+    if delivered is None:
+        raise OpenLearnError("tutor feedback was not queued")
+    return delivered
 
 
 def runner_evidence_return_code(result: code_runner.RunnerResult) -> int:
@@ -9288,10 +9490,13 @@ def ensure_attempt_for_drill(
     workspace: Path,
     *,
     snapshot: bool = False,
+    prefer_existing: bool = False,
 ) -> dict[str, object]:
     store = attempt_store()
     try:
-        record = store.find_for_workspace(topic.slug, workspace, unfinished_only=True)
+        record = store.find_for_workspace(
+            topic.slug, workspace, unfinished_only=not prefer_existing
+        )
         if record is None:
             generation = current_topic_generation(topic.slug)
             if generation is None:
@@ -9332,8 +9537,36 @@ def ensure_attempt_for_drill(
                     else ""
                 ),
                 assistance={"hints": exposed_hints, "scaffolding": scaffolding},
+                activity_bundle=activity,
             )
-        if snapshot:
+        if record.get("activity_id") != activity.get("activity_id"):
+            raise OpenLearnError(
+                "active activity does not match the durable attempt; resume it explicitly"
+            )
+        execution = record.get("execution")
+        bound_tests = execution.get("test_cases") if isinstance(execution, dict) else None
+        bound_bundle = (
+            execution.get("activity_bundle") if isinstance(execution, dict) else None
+        )
+        bound_payload = (
+            bound_bundle.get("domain_payload")
+            if isinstance(bound_bundle, dict)
+            else None
+        )
+        bound_coding = (
+            bound_payload.get("coding") if isinstance(bound_payload, dict) else None
+        )
+        payload = activity.get("domain_payload")
+        coding = payload.get("coding") if isinstance(payload, dict) else {}
+        current_tests = coding.get("test_cases") if isinstance(coding, dict) else None
+        if (
+            bound_tests != (current_tests if isinstance(current_tests, list) else [])
+            or bound_coding != coding
+        ):
+            raise OpenLearnError(
+                "active activity execution bundle does not match the durable attempt"
+            )
+        if snapshot and record.get("status") != "completed":
             record = store.snapshot(topic.slug, str(record["attempt_id"]))
         return record
     except interview_attempts.AttemptError as exc:
@@ -9546,9 +9779,97 @@ def _load_cli_attempt(args: argparse.Namespace) -> tuple[str, dict[str, object]]
         raise OpenLearnError(str(exc)) from exc
 
 
+def restore_attempt_activity(slug: str, record: dict[str, object]) -> dict[str, object]:
+    execution = record.get("execution")
+    bundle = execution.get("activity_bundle") if isinstance(execution, dict) else None
+    if not isinstance(bundle, dict):
+        raise OpenLearnError("attempt has no restorable activity bundle")
+    try:
+        restored = validate_activity(bundle, built_in_activity_registry())
+    except ActivityContractError as exc:
+        raise OpenLearnError(f"attempt activity bundle is invalid: {exc}") from exc
+    if restored["activity_id"] != record.get("activity_id"):
+        raise OpenLearnError("attempt activity identity does not match its bundle")
+    current = active_topic_activity(slug)
+    if current is not None and current.get("activity_id") != restored["activity_id"]:
+        current_topic = read_topic(slug)
+        abandon_active_drill_attempt(
+            current_topic, "replaced by an explicitly restored coding attempt"
+        )
+        transition_topic_activity(
+            slug,
+            current,
+            "abandoned",
+            reason="replaced by an explicitly restored coding attempt",
+        )
+    with file_lock(topic_path(slug)), file_lock(topic_state_path(slug)):
+        if current_topic_generation(slug) != record.get("topic_generation"):
+            raise OpenLearnError("topic changed before the attempt activity could be restored")
+        _recover_activity_update_locked(slug)
+        state = _load_state_unlocked(slug)
+        existing = state.get("active_activity")
+        if isinstance(existing, dict) and existing.get("activity_id") == restored["activity_id"]:
+            if existing == restored:
+                return restored
+            if existing.get("status") not in {"abandoned", "cancelled", "failed"}:
+                raise OpenLearnError("current activity conflicts with the attempt bundle")
+        state["active_activity"] = restored
+        _persist_activity_update_locked(
+            slug,
+            state,
+            "activity_restored",
+            activity_event_data(restored),
+        )
+    return restored
+
+
 def cmd_attempt_inspect(args: argparse.Namespace, output_func=print) -> int:
     _slug, record = _load_cli_attempt(args)
     output_func(json.dumps(record, indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_attempt_reflect(args: argparse.Namespace, output_func=print) -> int:
+    slug, record = _load_cli_attempt(args)
+    values = {
+        "complexity": str(getattr(args, "complexity", "") or "").strip(),
+        "edge_cases": str(getattr(args, "edge_cases", "") or "").strip(),
+        "reflection": str(getattr(args, "reflection", "") or "").strip(),
+    }
+    if not any(values.values()):
+        raise OpenLearnError(
+            "provide --complexity, --edge-cases, or --reflection"
+        )
+    try:
+        updated = attempt_store().record_reasoning(
+            slug, str(record["attempt_id"]), **values
+        )
+    except interview_attempts.AttemptError as exc:
+        raise OpenLearnError(str(exc)) from exc
+    output_func(
+        f"Saved reflection evidence for {updated['attempt_id']} "
+        f"(revision {updated['revision']})."
+    )
+    return 0
+
+
+def cmd_attempt_verify_transfer(args: argparse.Namespace, output_func=print) -> int:
+    slug, record = _load_cli_attempt(args)
+    try:
+        transfer = attempt_store().load(slug, str(args.transfer_attempt_id))
+        updated = attempt_store().record_independent_transfer(
+            slug,
+            str(record["attempt_id"]),
+            evidence_id=str(args.evidence_id),
+            transfer_attempt_id=str(args.transfer_attempt_id),
+            problem=transfer["problem"],  # type: ignore[arg-type]
+        )
+    except interview_attempts.AttemptError as exc:
+        raise OpenLearnError(str(exc)) from exc
+    output_func(
+        f"Verified independent transfer for {updated['attempt_id']}; "
+        f"effective disposition: {interview_attempts.effective_disposition(updated)}."
+    )
     return 0
 
 
@@ -9561,6 +9882,7 @@ def cmd_attempt_resume(args: argparse.Namespace, output_func=print) -> int:
         store.snapshot(slug, str(record["attempt_id"]))
     except interview_attempts.AttemptError as exc:
         raise OpenLearnError(str(exc)) from exc
+    restore_attempt_activity(slug, record)
     save_active_drill(slug, workspace)
     output_func(f"Resuming {record['attempt_id']}: {workspace}")
     try:
@@ -9580,6 +9902,24 @@ def cmd_attempt_abandon(args: argparse.Namespace, output_func=print) -> int:
         )
     except interview_attempts.AttemptError as exc:
         raise OpenLearnError(str(exc)) from exc
+    current = active_topic_activity(slug)
+    if current is not None and current.get("activity_id") == record.get("activity_id"):
+        transition_topic_activity(
+            slug, current, "abandoned", reason="learner requested abandonment"
+        )
+    topic_file = topic_path(slug)
+    with file_lock(topic_file):
+        metadata, body = parse_topic(topic_file.read_text(encoding="utf-8"))
+        active_path = metadata.get("active_drill")
+        if isinstance(active_path, str) and active_path:
+            try:
+                owned = attempt_store().resolve_workspace(record)
+            except interview_attempts.AttemptError as exc:
+                raise OpenLearnError(str(exc)) from exc
+            if Path(active_path).expanduser().resolve() == owned:
+                metadata = dict(metadata)
+                metadata.pop("active_drill", None)
+                write_text_atomic(topic_file, format_topic(metadata, body))
     output_func(f"Abandoned {updated['attempt_id']}. The workspace was preserved.")
     return 0
 
@@ -9591,6 +9931,7 @@ def cmd_attempt_retry(args: argparse.Namespace, output_func=print) -> int:
         workspace = attempt_store().resolve_workspace(retried)
     except interview_attempts.AttemptError as exc:
         raise OpenLearnError(str(exc)) from exc
+    restore_attempt_activity(slug, retried)
     save_active_drill(slug, workspace)
     output_func(
         f"Created retry {retried['attempt_id']} from {record['attempt_id']}: {workspace}"
