@@ -376,6 +376,8 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
         if args.func is cmd_review:
             return cmd_review(args, input_func=input if sys.stdin.isatty() else None)
+        if args.func is cmd_new:
+            return cmd_new(args, input_func=input if sys.stdin.isatty() else None)
         return args.func(args)
     except DryRunPrompt as request:
         print_dry_run_prompt(request)
@@ -2526,6 +2528,113 @@ def default_interview_profile_values() -> dict[str, object]:
     }
 
 
+INTERVIEW_PROFILE_SETUP_FIELDS = (
+    ("role_family", "Target role family"),
+    ("target_level", "Target level"),
+    ("interview_date", "Interview date (YYYY-MM-DD, optional)"),
+    ("coding_language", "Coding language"),
+    ("data_structures_experience", "Data structures experience"),
+    ("algorithms_experience", "Algorithms experience"),
+    ("interview_experience", "Interview experience"),
+    ("weekly_minutes", "Weekly practice minutes"),
+    ("session_minutes", "Session minutes"),
+    ("target_notes", "Target notes (optional)"),
+    ("accessibility_preferences", "Accessibility preferences (optional)"),
+)
+
+
+def _profile_setup_display(value: object) -> str:
+    return str(value) if value not in {"", None} else "Not provided"
+
+
+def collect_interview_profile(
+    input_func, output_func=print
+) -> dict[str, object] | None:
+    """Collect and canonically validate a profile before any learner files exist."""
+    defaults = default_interview_profile_values()
+    while True:
+        values: dict[str, object] = {}
+        try:
+            for field, label in INTERVIEW_PROFILE_SETUP_FIELDS:
+                default = defaults[field]
+                while True:
+                    answer = input_func(
+                        f"{label} [{_profile_setup_display(default)}]: "
+                    ).strip()
+                    candidate: object = answer if answer else default
+                    if field == "interview_date" and candidate:
+                        try:
+                            date.fromisoformat(str(candidate))
+                        except ValueError:
+                            output_func("Enter a date as YYYY-MM-DD, or leave it blank.")
+                            continue
+                    if field in {"weekly_minutes", "session_minutes"}:
+                        try:
+                            candidate = int(candidate)
+                        except (TypeError, ValueError):
+                            output_func(f"{label} must be a positive integer.")
+                            continue
+                        if candidate < 1 or candidate > 10_080:
+                            output_func(
+                                f"{label} must be a positive integer between 1 and 10080."
+                            )
+                            continue
+                        if (
+                            field == "session_minutes"
+                            and isinstance(values.get("weekly_minutes"), int)
+                            and candidate > values["weekly_minutes"]
+                        ):
+                            output_func(
+                                "Session minutes cannot exceed weekly practice minutes."
+                            )
+                            continue
+                    values[field] = candidate
+                    break
+        except (EOFError, KeyboardInterrupt):
+            output_func("\nInterview-prep course creation cancelled. Nothing was saved.")
+            return None
+
+        try:
+            values = interview_prep.normalize_profile_update(defaults, values)
+        except ValueError as exc:
+            output_func(f"Profile needs another edit: {exc}")
+            continue
+
+        output_func("Interview-prep profile:")
+        for field, label in INTERVIEW_PROFILE_SETUP_FIELDS:
+            output_func(f"- {label}: {_profile_setup_display(values[field])}")
+        try:
+            confirmation = input_func("Create this interview-prep course? [Y/n]: ")
+        except (EOFError, KeyboardInterrupt):
+            output_func("\nInterview-prep course creation cancelled. Nothing was saved.")
+            return None
+        if confirmation.strip().lower() in {"", "y", "yes"}:
+            return values
+        try:
+            choice = input_func("Edit profile or cancel? [e/c]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            output_func("\nInterview-prep course creation cancelled. Nothing was saved.")
+            return None
+        if choice in {"e", "edit"}:
+            defaults = values
+            continue
+        output_func("Interview-prep course creation cancelled. Nothing was saved.")
+        return None
+
+
+def _print_interview_capability_notice(output_func=print) -> None:
+    output_func(
+        "Profile setup and bounded placement works offline without a model provider."
+    )
+    if _openlearn_mock_enabled() or provider_is_configured():
+        output_func("Model-backed teaching is ready when you continue to course planning.")
+    else:
+        output_func(
+            "Model-backed teaching still needs a provider. "
+            "Run 'openlearn config set-key' before starting the course."
+        )
+
+
 def interview_profile_values(args: argparse.Namespace) -> dict[str, object]:
     return {
         field: getattr(args, field)
@@ -2876,7 +2985,8 @@ INTERVIEW_PLACEMENT_PROMPTS = {
     ),
     "plan": "Explain your initial approach and the data structures you would use.",
     "implementation": (
-        "Write your implementation now. The placement will not reveal a full solution."
+        "Enter code below; finish with a line containing only /done. "
+        "Use /editor first to open your configured editor, or /skip, /baseline, /stop."
     ),
     "tests": "List or run representative tests, including edge cases, and report what happened.",
     "complexity": "Analyze the time and space complexity of your implementation.",
@@ -2896,6 +3006,106 @@ def _print_placement_status(value: dict[str, object], output_func=print) -> None
     )
     if placement.get("next_stage"):
         output_func(f"Next evidence: {placement['next_stage']}")
+
+
+def _print_placement_saved(
+    slug: str, stage: str, value: dict[str, object], output_func=print
+) -> None:
+    placement = value["placement"]
+    assert isinstance(placement, dict)
+    evidence_count = len(placement.get("evidence_refs", []))
+    output_func(
+        f"Placement saved at {stage} "
+        f"({evidence_count}/{len(interview_prep.PLACEMENT_STAGES)}). "
+        "Run openlearn resume to continue."
+    )
+    output_func(
+        "Troubleshooting: "
+        f"openlearn interview placement {slug} resume"
+    )
+
+
+def _placement_editor_response(output_func=print) -> str | None:
+    editor = configured_editor_argv()
+    instructions = (
+        "# openLearn: enter your implementation below.\n"
+        "# openLearn: save and close the editor when finished.\n\n"
+    )
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            prefix="openlearn-placement-",
+            suffix=".py",
+            delete=False,
+        ) as temp_file:
+            temp_path = Path(temp_file.name)
+            temp_file.write(instructions)
+        temp_path.chmod(0o600)
+        result = subprocess.run([*editor, str(temp_path)], check=False)
+        if result.returncode != 0:
+            output_func(
+                "Editor closed without saving an implementation. "
+                "You can enter code in the terminal instead."
+            )
+            return None
+        lines = temp_path.read_text(encoding="utf-8").splitlines()
+        response = "\n".join(
+            line for line in lines if not line.startswith("# openLearn:")
+        ).strip("\n")
+        if not response.strip():
+            output_func(
+                "The editor did not contain an implementation. "
+                "You can enter code in the terminal instead."
+            )
+            return None
+        return response
+    except (OSError, OpenLearnError) as exc:
+        output_func(
+            f"Could not open the configured editor: {exc}. "
+            "You can enter code in the terminal instead."
+        )
+        return None
+    finally:
+        if temp_path is not None:
+            with contextlib.suppress(OSError):
+                temp_path.unlink()
+
+
+def _read_placement_implementation(input_func, output_func=print) -> str | None:
+    first_line = input_func("implementation> ")
+    if not first_line.strip():
+        output_func(
+            "Enter code below; finish with a line containing only /done. "
+            "Use /editor first to open your configured editor, or /skip, /baseline, /stop."
+        )
+        return None
+    if first_line.strip().lower() == "/editor":
+        return _placement_editor_response(output_func)
+    if first_line.strip().lower() in {
+        "/stop",
+        "stop",
+        "/discard",
+        "discard",
+        "/skip",
+        "skip",
+        "/baseline",
+        "baseline",
+    }:
+        return first_line
+    if first_line.strip().lower() == "/done":
+        output_func(
+            "No implementation was entered. Paste code, use /editor, "
+            "/skip, /baseline, or /stop."
+        )
+        return None
+    lines = [first_line]
+    while True:
+        line = input_func("... ")
+        if line.strip().lower() == "/done":
+            return "\n".join(lines)
+        lines.append(line)
 
 
 def interview_placement_activity_request() -> dict[str, object]:
@@ -3121,13 +3331,22 @@ def cmd_interview_placement(
                 )
             output_func(f"\n{stage_prompt}")
             try:
-                response = input_func(f"{stage}> ")
+                if stage == "implementation":
+                    response = _read_placement_implementation(input_func, output_func)
+                    if response is None:
+                        continue
+                else:
+                    response = input_func(f"{stage}> ")
             except (EOFError, KeyboardInterrupt):
-                output_func("\nPlacement interrupted and saved. Resume with the same command.")
+                output_func("")
+                _print_placement_saved(slug, stage, value, output_func)
                 return 0
+            if not response.strip():
+                output_func("Enter a response, /skip, /baseline, or /stop.")
+                continue
             command = response.strip().lower()
             if command in {"/stop", "stop"}:
-                output_func("Placement saved. Resume when ready.")
+                _print_placement_saved(slug, stage, value, output_func)
                 return 0
             if command in {"/discard", "discard"}:
                 activity = _current_interview_activity(slug)
@@ -3178,13 +3397,15 @@ def cmd_interview_placement(
                 {"stage": stage, "response": response},
             )
             value = sync_interview_placement(slug)
+            if stage == "clarification" and command not in {"/skip", "skip"}:
+                output_func(interview_prep.PLACEMENT_ASSUMPTION_CARD)
         output_func("Placement complete. Results are provisional and grant no mastery.")
         return cmd_interview_profile(argparse.Namespace(topic=slug), output_func=output_func)
     except ValueError as exc:
         raise OpenLearnError(str(exc)) from exc
 
 
-def cmd_new(args: argparse.Namespace, output_func=print) -> int:
+def cmd_new(args: argparse.Namespace, output_func=print, input_func=None) -> int:
     template_slug = getattr(args, "template", None)
     template = None
     if template_slug:
@@ -3197,11 +3418,18 @@ def cmd_new(args: argparse.Namespace, output_func=print) -> int:
             output_func(f"Could not load template '{template_slug}': {exc}")
             return 1
 
-    topics_dir().mkdir(parents=True, exist_ok=True)
     slug = slugify(args.topic)
     path = topic_path(slug)
     if path.exists():
         raise OpenLearnError(f"topic already exists: {slug}")
+    profile_values = default_interview_profile_values()
+    if getattr(args, "interview_prep", False) and input_func is not None:
+        collected = collect_interview_profile(input_func, output_func)
+        if collected is None:
+            return 0
+        profile_values = collected
+
+    topics_dir().mkdir(parents=True, exist_ok=True)
 
     title = args.topic.strip() or slug.replace("-", " ").title()
     goal = args.goal or (template.goal if template is not None else "")
@@ -3275,7 +3503,7 @@ def cmd_new(args: argparse.Namespace, output_func=print) -> int:
         with interview_profile_write_lock(slug):
             interview_prep.create_profile(
                 interview_profile_path(slug),
-                default_interview_profile_values(),
+                profile_values,
             )
         log_event(
             slug,
@@ -3283,10 +3511,34 @@ def cmd_new(args: argparse.Namespace, output_func=print) -> int:
             {"profile_revision": 1, "placement_status": "not_started"},
         )
         output_func("Interview-prep mode enabled with a local editable profile.")
-        output_func(
-            f"Review it with 'openlearn interview profile {slug}', then run placement "
-            f"or defer it with 'openlearn interview placement {slug} defer'."
-        )
+        _print_interview_capability_notice(output_func)
+        if input_func is None:
+            output_func(
+                f"Review it with 'openlearn interview profile {slug}', then run placement "
+                f"or defer it with 'openlearn interview placement {slug} defer'."
+            )
+            return 0
+        try:
+            placement_choice = input_func(
+                "Start offline placement now? [Y/n/d/q]: "
+            ).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            output_func(
+                f"\nCourse saved. Run openlearn resume to continue {slug}."
+            )
+            return 0
+        if placement_choice in {"", "y", "yes"}:
+            return cmd_interview_placement(
+                argparse.Namespace(topic=slug, action="start"),
+                input_func=input_func,
+                output_func=output_func,
+            )
+        if placement_choice in {"d", "defer"}:
+            return cmd_interview_placement(
+                argparse.Namespace(topic=slug, action="defer"),
+                output_func=output_func,
+            )
+        output_func(f"Course saved. Run openlearn resume to continue {slug}.")
     return 0
 
 

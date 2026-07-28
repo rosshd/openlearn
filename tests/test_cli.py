@@ -325,6 +325,130 @@ class CliStorageTests(unittest.TestCase):
         )
         self.assertTrue(any("defer" in line for line in output))
 
+    def test_interview_prep_new_collects_profile_and_defers_after_creation(self) -> None:
+        answers = iter(
+            [
+                "backend",
+                "mid-level",
+                "2026-10-15",
+                "python",
+                "comfortable",
+                "rusty",
+                "limited",
+                "180",
+                "45",
+                "distributed systems",
+                "",
+                "y",
+                "d",
+            ]
+        )
+        output: list[str] = []
+
+        result = cli.cmd_new(
+            Namespace(
+                topic="Backend Interviews",
+                goal="Prepare for interviews",
+                interview_prep=True,
+                mastery_profile=None,
+                template=None,
+            ),
+            input_func=lambda _prompt: next(answers),
+            output_func=output.append,
+        )
+
+        self.assertEqual(result, 0)
+        profile = cli.interview_prep.load_profile(
+            cli.interview_profile_path("backend-interviews")
+        )
+        self.assertEqual(
+            profile["profile"],
+            {
+                "role_family": "backend",
+                "target_level": "mid-level",
+                "interview_date": "2026-10-15",
+                "coding_language": "python",
+                "weekly_minutes": 180,
+                "session_minutes": 45,
+                "data_structures_experience": "comfortable",
+                "algorithms_experience": "rusty",
+                "interview_experience": "limited",
+                "target_notes": "distributed systems",
+                "accessibility_preferences": "",
+            },
+        )
+        self.assertEqual(profile["placement"]["status"], "deferred")
+        self.assertTrue(any("works offline" in line.lower() for line in output))
+        self.assertTrue(any("model-backed teaching" in line.lower() for line in output))
+
+    def test_interview_prep_new_reprompts_invalid_date_and_minutes_before_publish(
+        self,
+    ) -> None:
+        answers = iter(
+            [
+                "",
+                "",
+                "next week",
+                "2026-10-15",
+                "",
+                "",
+                "",
+                "",
+                "zero",
+                "120",
+                "200",
+                "45",
+                "",
+                "",
+                "y",
+                "q",
+            ]
+        )
+        output: list[str] = []
+
+        cli.cmd_new(
+            Namespace(
+                topic="Algorithms",
+                goal="Practice algorithms",
+                interview_prep=True,
+                mastery_profile=None,
+                template=None,
+            ),
+            input_func=lambda _prompt: next(answers),
+            output_func=output.append,
+        )
+
+        profile = cli.interview_prep.load_profile(
+            cli.interview_profile_path("algorithms")
+        )
+        self.assertEqual(profile["profile"]["interview_date"], "2026-10-15")
+        self.assertEqual(profile["profile"]["weekly_minutes"], 120)
+        self.assertEqual(profile["profile"]["session_minutes"], 45)
+        self.assertTrue(any("YYYY-MM-DD" in line for line in output))
+        self.assertTrue(any("positive integer" in line for line in output))
+        self.assertTrue(any("cannot exceed" in line for line in output))
+
+    def test_interview_prep_new_cancel_before_confirmation_publishes_nothing(
+        self,
+    ) -> None:
+        answers = iter([""] * 11 + ["n", "q"])
+
+        result = cli.cmd_new(
+            Namespace(
+                topic="Algorithms",
+                goal="Practice algorithms",
+                interview_prep=True,
+                mastery_profile=None,
+                template=None,
+            ),
+            input_func=lambda _prompt: next(answers),
+            output_func=lambda _line: None,
+        )
+
+        self.assertEqual(result, 0)
+        self.assertFalse(cli.topic_path("algorithms").exists())
+        self.assertFalse(cli.interview_profile_path("algorithms").exists())
+
     def test_interview_profile_commands_create_edit_inspect_defer_and_clear(self) -> None:
         call_silent(
             cli.cmd_new,
@@ -398,12 +522,26 @@ class CliStorageTests(unittest.TestCase):
         self.assertEqual(interrupted["placement"]["status"], "in_progress")
         self.assertEqual(interrupted["placement"]["next_stage"], "clarification")
         self.assertTrue(any("saved" in line.lower() for line in first_output))
+        self.assertTrue(
+            any(
+                "saved at clarification (1/7)" in line.lower()
+                and "openlearn resume" in line
+                for line in first_output
+            )
+        )
+        self.assertTrue(
+            any(
+                "openlearn interview placement algorithms resume" in line
+                for line in first_output
+            )
+        )
 
         remaining = iter(
             [
                 "Can width exceed the text length?",
                 "Scan each window with a set.",
                 "def first_unique_window(text, width): return -1",
+                "/done",
                 "Empty, duplicates, and a matching window.",
                 "O(n * width) time and O(width) space.",
                 "Use last-seen positions.",
@@ -439,6 +577,147 @@ class CliStorageTests(unittest.TestCase):
                 for event in evidence_events
             )
         )
+
+    def test_interview_placement_answers_clarification_and_reprompts_blank_code(
+        self,
+    ) -> None:
+        call_silent(
+            cli.cmd_new,
+            Namespace(
+                topic="Algorithms",
+                goal="Practice algorithms",
+                interview_prep=True,
+                mastery_profile=None,
+                template=None,
+            ),
+        )
+        answers = iter(
+            [
+                "Completed a data structures course and practice LeetCode.",
+                "How is input given, and what should I return?",
+                "Use a sliding window and a character-count hashmap.",
+                "",
+                "def first_unique_window(text, width):",
+                "    return -1",
+                "/done",
+                "/stop",
+            ]
+        )
+        output: list[str] = []
+
+        cli.cmd_interview_placement(
+            Namespace(topic="algorithms", action="start"),
+            input_func=lambda _prompt: next(answers),
+            output_func=output.append,
+        )
+
+        profile = cli.interview_prep.load_profile(
+            cli.interview_profile_path("algorithms")
+        )
+        self.assertEqual(profile["placement"]["next_stage"], "tests")
+        self.assertEqual(len(profile["placement"]["evidence_refs"]), 4)
+        transcript = "\n".join(output)
+        self.assertIn("Python string", transcript)
+        self.assertIn("zero-based start index", transcript)
+        self.assertIn("-1", transcript)
+        self.assertIn("finish with a line containing only /done", transcript)
+        self.assertNotIn("must be non-empty", transcript)
+        evidence = cli._interview_activity_evidence(
+            "algorithms", cli._current_interview_activity("algorithms")
+        )
+        self.assertEqual(
+            evidence[3][2],
+            "def first_unique_window(text, width):\n    return -1",
+        )
+
+    def test_interview_placement_blank_text_stages_never_record_evidence(self) -> None:
+        call_silent(
+            cli.cmd_new,
+            Namespace(
+                topic="Algorithms",
+                goal="Practice algorithms",
+                interview_prep=True,
+                mastery_profile=None,
+                template=None,
+            ),
+        )
+        answers = iter(
+            [
+                "",
+                "Some Python practice.",
+                "",
+                "What are the input and return contracts?",
+                "",
+                "Use a sliding window.",
+                "def first_unique_window(text, width):",
+                "    return -1",
+                "/done",
+                "",
+                "Test empty, duplicate, and matching inputs.",
+                "",
+                "O(n) time and O(width) space.",
+                "",
+                "Keep counts while reading chunks.",
+            ]
+        )
+        output: list[str] = []
+
+        cli.cmd_interview_placement(
+            Namespace(topic="algorithms", action="start"),
+            input_func=lambda _prompt: next(answers),
+            output_func=output.append,
+        )
+
+        profile = cli.interview_prep.load_profile(
+            cli.interview_profile_path("algorithms")
+        )
+        self.assertEqual(profile["placement"]["status"], "provisional")
+        self.assertEqual(len(profile["placement"]["evidence_refs"]), 7)
+        self.assertGreaterEqual(
+            sum("Enter a response" in line for line in output),
+            6,
+        )
+
+    def test_interview_placement_editor_failure_keeps_implementation_stage(
+        self,
+    ) -> None:
+        call_silent(
+            cli.cmd_new,
+            Namespace(
+                topic="Algorithms",
+                goal="Practice algorithms",
+                interview_prep=True,
+                mastery_profile=None,
+                template=None,
+            ),
+        )
+        answers = iter(
+            [
+                "Some Python practice.",
+                "What should I return?",
+                "Use a sliding window.",
+                "/editor",
+                "/stop",
+            ]
+        )
+        output: list[str] = []
+
+        with mock.patch.object(
+            cli.subprocess, "run", side_effect=OSError("editor unavailable")
+        ):
+            cli.cmd_interview_placement(
+                Namespace(topic="algorithms", action="start"),
+                input_func=lambda _prompt: next(answers),
+                output_func=output.append,
+            )
+
+        profile = cli.interview_prep.load_profile(
+            cli.interview_profile_path("algorithms")
+        )
+        self.assertEqual(profile["placement"]["next_stage"], "implementation")
+        self.assertEqual(len(profile["placement"]["evidence_refs"]), 3)
+        self.assertTrue(any("terminal instead" in line for line in output))
+
 
     def test_interview_placement_recovers_activity_evidence_after_fault(self) -> None:
         call_silent(
@@ -704,6 +983,7 @@ class CliStorageTests(unittest.TestCase):
                 "Can width exceed the input length?",
                 "Use a set over each window.",
                 "function firstUniqueWindow(text, width) { return -1; }",
+                "/done",
                 "Empty, duplicate, and no-match edge cases.",
                 "O(n * width) time and O(width) space.",
                 "Track last-seen positions for a streaming variant.",

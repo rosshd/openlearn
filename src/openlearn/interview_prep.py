@@ -48,6 +48,15 @@ PLACEMENT_PROBLEM = {
     "license": "AGPL-3.0-or-later",
 }
 
+PLACEMENT_ASSUMPTION_CARD = (
+    "Interviewer assumptions:\n"
+    "- `text` is a Python string and `width` is an integer.\n"
+    "- Return the zero-based start index of the first qualifying window.\n"
+    "- Return -1 when no qualifying window exists, including nonpositive widths "
+    "and widths larger than the text.\n"
+    "- Character comparison uses Python string characters exactly as provided."
+)
+
 Clock = Callable[[], datetime]
 EventAppender = Callable[[str, dict[str, object]], None]
 
