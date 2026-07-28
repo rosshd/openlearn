@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
 import threading
@@ -74,6 +75,41 @@ class AttemptStoreTests(unittest.TestCase):
         }
         values.update(overrides)
         return self.store.create(**values)
+
+    def near_limit_record(
+        self, created: dict[str, object], target_bytes: int
+    ) -> dict[str, object]:
+        record = copy.deepcopy(created)
+        record["revision"] = int(record["revision"]) + 1
+        entries = record["reasoning"]["entries"]
+        self.assertIsInstance(entries, list)
+        for index in range(interview_attempts.MAX_EVIDENCE_REFS):
+            entry = {
+                "entry_id": f"entry_{index + 1:032x}",
+                "at": record["started_at"],
+                "content": "x" * interview_attempts.MAX_TEXT,
+                "run_id": None,
+                "evidence_id": None,
+                "kind": "reflection",
+            }
+            candidate = copy.deepcopy(record)
+            candidate["reasoning"]["entries"].append(entry)
+            full_size = len(interview_attempts._serialize_state(candidate))
+            if full_size <= target_bytes:
+                entries.append(entry)
+                continue
+            entry["content"] = "x"
+            candidate = copy.deepcopy(record)
+            candidate["reasoning"]["entries"].append(entry)
+            minimum_size = len(interview_attempts._serialize_state(candidate))
+            if minimum_size <= target_bytes:
+                entry["content"] = "x" * min(
+                    interview_attempts.MAX_TEXT,
+                    target_bytes - minimum_size + 1,
+                )
+                entries.append(entry)
+            break
+        return interview_attempts.validate_attempt(record)
 
     def test_attempt_survives_restart_with_exact_revision_and_relative_workspace(self) -> None:
         created = self.create()
@@ -620,6 +656,101 @@ class AttemptStoreTests(unittest.TestCase):
             events_before,
         )
         self.assertEqual(self.store.load("algorithms", attempt_id), created)
+
+    def test_compact_state_crossing_old_pretty_limit_commits_and_reloads(self) -> None:
+        created = self.create()
+        attempt_id = str(created["attempt_id"])
+        record = self.near_limit_record(
+            created, interview_attempts.MAX_STATE_BYTES - 64
+        )
+        compact = interview_attempts._serialize_state(record)
+        pretty = (
+            json.dumps(record, indent=2, sort_keys=True) + "\n"
+        ).encode("utf-8")
+        self.assertLessEqual(len(compact), interview_attempts.MAX_STATE_BYTES)
+        self.assertGreater(len(pretty), interview_attempts.MAX_STATE_BYTES)
+
+        self.store._commit(
+            record,
+            "attempt_near_state_limit",
+            {},
+            previous_revision=int(created["revision"]),
+        )
+
+        state_path = self.store.state_path("algorithms", attempt_id)
+        self.assertEqual(state_path.read_bytes(), compact)
+        self.assertEqual(self.store.load("algorithms", attempt_id), record)
+
+    def test_large_journal_uses_same_write_and_read_cap(self) -> None:
+        created = self.create()
+        attempt_id = str(created["attempt_id"])
+        record = self.near_limit_record(
+            created, interview_attempts.MAX_STATE_BYTES - 64
+        )
+        event = {
+            "schema_version": interview_attempts.EVENT_SCHEMA_VERSION,
+            "event_id": "event_" + "d" * 32,
+            "attempt_id": attempt_id,
+            "attempt_revision": record["revision"],
+            "ts": record["last_active_at"],
+            "event_type": "attempt_large_journal",
+            "data": {"padding": "z" * 15_900},
+        }
+        journal = {
+            "schema_version": interview_attempts.JOURNAL_SCHEMA_VERSION,
+            "attempt_id": attempt_id,
+            "topic": "algorithms",
+            "topic_generation": self.generation,
+            "previous_revision": created["revision"],
+            "next_revision": record["revision"],
+            "created_at": record["last_active_at"],
+            "record": record,
+            "event": event,
+        }
+        encoded = interview_attempts._serialize_journal(journal)
+        self.assertGreater(len(encoded), 528_000)
+        self.assertLess(len(encoded), 576_000)
+        self.assertLessEqual(len(encoded), interview_attempts.MAX_JOURNAL_BYTES)
+
+        self.store._commit(
+            record,
+            "attempt_large_journal",
+            event["data"],
+            event_id=str(event["event_id"]),
+            previous_revision=int(created["revision"]),
+        )
+
+        self.assertEqual(self.store.load("algorithms", attempt_id), record)
+        self.assertFalse(self.store.journal_path("algorithms", attempt_id).exists())
+
+    def test_rejected_near_limit_mutation_is_atomic_and_remains_loadable(self) -> None:
+        created = self.create()
+        attempt_id = str(created["attempt_id"])
+        record = self.near_limit_record(
+            created, interview_attempts.MAX_STATE_BYTES - 64
+        )
+        self.store._commit(
+            record,
+            "attempt_near_state_limit",
+            {},
+            previous_revision=int(created["revision"]),
+        )
+        state_path = self.store.state_path("algorithms", attempt_id)
+        events_path = self.store.events_path("algorithms", attempt_id)
+        state_before = state_path.read_bytes()
+        events_before = events_path.read_bytes()
+
+        with self.assertRaisesRegex(interview_attempts.AttemptError, "too large"):
+            self.store.record_reasoning(
+                "algorithms",
+                attempt_id,
+                reflection="y" * 1_000,
+            )
+
+        self.assertFalse(self.store.journal_path("algorithms", attempt_id).exists())
+        self.assertEqual(state_path.read_bytes(), state_before)
+        self.assertEqual(events_path.read_bytes(), events_before)
+        self.assertEqual(self.store.load("algorithms", attempt_id), record)
 
     def test_verified_independent_transfer_clears_effective_scaffolding(self) -> None:
         assisted = self.create()

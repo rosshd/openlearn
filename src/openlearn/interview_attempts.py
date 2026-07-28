@@ -41,7 +41,8 @@ LEARNER_OUTCOMES = {
     "output_limit",
 }
 INFRASTRUCTURE_OUTCOMES = {"runner_error", "runner_unavailable", "interrupted", "cancelled"}
-MAX_RECORD_BYTES = 512_000
+MAX_STATE_BYTES = 512_000
+MAX_RECORD_BYTES = MAX_STATE_BYTES
 MAX_EVENTS_BYTES = 2_000_000
 MAX_SNAPSHOT_BYTES = 64_000
 MAX_TEXT = 16_000
@@ -50,6 +51,7 @@ MAX_EVIDENCE_REFS = 256
 EVENT_SCHEMA_VERSION = 1
 JOURNAL_SCHEMA_VERSION = 1
 MAX_EVENT_LINE_BYTES = 64_000
+MAX_JOURNAL_BYTES = MAX_STATE_BYTES + MAX_EVENT_LINE_BYTES + 8_192
 FEEDBACK_STEPS = {
     "session_appended",
     "assistance_recorded",
@@ -105,15 +107,34 @@ def _bounded_text(value: object, field: str, *, allow_empty: bool = True) -> str
     return normalized
 
 
-def _json_size(value: object) -> int:
+def _canonical_json_bytes(value: object) -> bytes:
     try:
-        return len(
-            json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode(
-                "utf-8"
-            )
+        return json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode(
+            "utf-8"
         )
     except (TypeError, ValueError) as exc:
         raise AttemptError("attempt data must be finite JSON") from exc
+
+
+def _json_size(value: object) -> int:
+    return len(_canonical_json_bytes(value))
+
+
+def _serialize_state(value: Mapping[str, object]) -> bytes:
+    return _canonical_json_bytes(value) + b"\n"
+
+
+def _serialize_event(value: Mapping[str, object]) -> bytes:
+    return _canonical_json_bytes(value) + b"\n"
+
+
+def _serialize_journal(value: Mapping[str, object]) -> bytes:
+    return _canonical_json_bytes(value) + b"\n"
 
 
 def _read_bounded_text(path: Path, limit: int, field: str) -> str:
@@ -1904,16 +1925,11 @@ class AttemptStore:
             "data": copy.deepcopy(dict(event_data)),
         }
         validated_record = validate_attempt(record)
+        encoded_state = _serialize_state(validated_record)
+        if len(encoded_state) > MAX_STATE_BYTES:
+            raise AttemptError("attempt state is too large")
         validated_event = _validate_event(event, attempt_id)
-        encoded_event = (
-            json.dumps(
-                validated_event,
-                sort_keys=True,
-                separators=(",", ":"),
-                allow_nan=False,
-            )
-            + "\n"
-        ).encode("utf-8")
+        encoded_event = _serialize_event(validated_event)
         if len(encoded_event) > MAX_EVENT_LINE_BYTES:
             raise AttemptError("attempt event is too large")
         journal = {
@@ -1927,10 +1943,8 @@ class AttemptStore:
             "record": validated_record,
             "event": validated_event,
         }
-        encoded_journal = (
-            json.dumps(journal, indent=2, sort_keys=True, allow_nan=False) + "\n"
-        ).encode("utf-8")
-        if len(encoded_journal) > MAX_RECORD_BYTES + MAX_EVENT_LINE_BYTES:
+        encoded_journal = _serialize_journal(journal)
+        if len(encoded_journal) > MAX_JOURNAL_BYTES:
             raise AttemptError("attempt journal is too large")
         journal_path = self.journal_path(topic, attempt_id)
         self.write_atomic(journal_path, encoded_journal.decode("utf-8"))
@@ -1940,7 +1954,7 @@ class AttemptStore:
         journal_path = self.journal_path(topic, attempt_id)
         if not journal_path.exists():
             return
-        raw = self._read_json(journal_path, MAX_RECORD_BYTES + MAX_TEXT)
+        raw = self._read_json(journal_path, MAX_JOURNAL_BYTES)
         required = {
             "schema_version",
             "attempt_id",
@@ -1998,16 +2012,22 @@ class AttemptStore:
                 if current != validated:
                     raise AttemptError("attempt journal conflicts with current revision")
             elif current_revision == raw["previous_revision"]:
+                encoded_state = _serialize_state(validated)
+                if len(encoded_state) > MAX_STATE_BYTES:
+                    raise AttemptError("attempt state is too large")
                 self.write_atomic(
                     state_path,
-                    json.dumps(validated, indent=2, sort_keys=True) + "\n",
+                    encoded_state.decode("utf-8"),
                 )
             else:
                 raise AttemptError("attempt journal is stale and cannot be replayed")
         elif raw["previous_revision"] == 0:
+            encoded_state = _serialize_state(validated)
+            if len(encoded_state) > MAX_STATE_BYTES:
+                raise AttemptError("attempt state is too large")
             self.write_atomic(
                 state_path,
-                json.dumps(validated, indent=2, sort_keys=True) + "\n",
+                encoded_state.decode("utf-8"),
             )
         else:
             raise AttemptError("attempt journal cannot skip a missing prior revision")
@@ -2037,13 +2057,13 @@ class AttemptStore:
         )
         if text and not text.endswith("\n"):
             text += "\n"
-        text += json.dumps(validated_event, sort_keys=True) + "\n"
+        text += _serialize_event(validated_event).decode("utf-8")
         if len(text.encode("utf-8")) > MAX_EVENTS_BYTES:
             raise AttemptError("attempt event log is too large")
         self.write_atomic(path, text)
 
     def _read_state(self, path: Path) -> dict[str, object]:
-        raw = self._read_json(path, MAX_RECORD_BYTES)
+        raw = self._read_json(path, MAX_STATE_BYTES)
         if not isinstance(raw, Mapping):
             raise AttemptError("attempt record is malformed")
         return validate_attempt(raw)
