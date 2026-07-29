@@ -154,6 +154,50 @@ class CliStorageTests(unittest.TestCase):
         cli._CONFIG_CACHE = None
         self.home.cleanup()
 
+    def create_interview_topic(self, name: str = "Algorithms") -> str:
+        slug = cli.slugify(name)
+        call_silent(
+            cli.cmd_new,
+            Namespace(
+                topic=name,
+                goal="Practice algorithms",
+                interview_prep=True,
+                mastery_profile=None,
+                template=None,
+            ),
+        )
+        return slug
+
+    def pause_interview_at_implementation(self, slug: str = "algorithms") -> None:
+        cli.cmd_interview_placement(
+            Namespace(topic=slug, action="start"),
+            input_func=iter_input(
+                [
+                    "Some Python practice.",
+                    "What should I return?",
+                    "Use a sliding window.",
+                    "/stop",
+                ]
+            ),
+            output_func=lambda _line: None,
+        )
+
+    def materialize_placement_attempt(
+        self, slug: str = "algorithms"
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        activity = cli._current_interview_activity(slug)
+        assert activity is not None
+        topic = cli.read_topic(slug)
+        workspace = cli._placement_workspace(topic, activity)
+        attempt = cli.ensure_attempt_for_drill(
+            topic,
+            activity,
+            workspace,
+            snapshot=True,
+            prefer_existing=True,
+        )
+        return activity, attempt
+
     def test_slugify_rejects_empty_slugs(self) -> None:
         self.assertEqual(cli.slugify("Python Basics!"), "python-basics")
         with self.assertRaises(cli.OpenLearnError):
@@ -1761,6 +1805,9 @@ class CliStorageTests(unittest.TestCase):
         self.assertIsNotNone(attempt)
         assert attempt is not None
         self.assertEqual(attempt["purpose"], "placement")
+        self.assertEqual(attempt["status"], "completed")
+        self.assertEqual(attempt["disposition"], "solved_independently")
+        self.assertIsNone(cli.active_attempt_binding("algorithms"))
         self.assertTrue(attempt["snapshots"])
         self.assertEqual(attempt["test_runs"][-1]["outcome"], "passed")
         coding_bundle = attempt["execution"]["activity_bundle"]["domain_payload"]["coding"]
@@ -1909,6 +1956,127 @@ class CliStorageTests(unittest.TestCase):
         self.assertIn(str(workspace), transcript)
         self.assertIn("openlearn doctor", transcript)
 
+    def test_hidden_placement_runner_diagnostics_never_persist(self) -> None:
+        self.create_interview_topic()
+        secret_values = (
+            "SECRET_HIDDEN_INPUT",
+            "SECRET_HIDDEN_EXPECTED",
+            "SECRET_HIDDEN_ACTUAL",
+        )
+        hidden_output = " ".join(secret_values)
+        with (
+            mock.patch.object(cli, "open_drill_in_editor", return_value="nvim"),
+            mock.patch.object(
+                cli.code_runner,
+                "run_python_tests",
+                return_value=code_result(1, hidden_output, hidden_output),
+            ),
+        ):
+            cli.cmd_interview_placement(
+                Namespace(topic="algorithms", action="start"),
+                input_func=iter_input(
+                    [
+                        "Some Python practice.",
+                        "What should I return?",
+                        "Use a sliding window.",
+                        "",
+                        "O(n) time.",
+                        "Use last-seen positions.",
+                    ]
+                ),
+                output_func=lambda _line: None,
+            )
+
+        workspace = cli.active_drill_path(cli.read_topic("algorithms"))
+        attempt = cli.attempt_store().find_for_workspace(
+            "algorithms", workspace, unfinished_only=False
+        )
+        assert attempt is not None
+        run = attempt["test_runs"][-1]
+        self.assertEqual(
+            run["output"],
+            "Hidden placement tests completed with learner outcome: test_failure.",
+        )
+        durable_text = json.dumps(attempt) + cli.attempt_store().events_path(
+            "algorithms", str(attempt["attempt_id"])
+        ).read_text(encoding="utf-8")
+        for secret in secret_values:
+            self.assertNotIn(secret, durable_text)
+
+    def test_placement_runner_infrastructure_outcomes_remain_resumable(self) -> None:
+        for kind in ("runner_error", "cancelled"):
+            with self.subTest(kind=kind):
+                slug = self.create_interview_topic(kind)
+                result = code_result(
+                    1,
+                    "SECRET_HIDDEN_INPUT",
+                    "SECRET_HIDDEN_EXPECTED",
+                    kind=kind,
+                    limit_reason=kind,
+                )
+                result = cli.code_runner.RunnerResult(
+                    **{**result.__dict__, "exit_code": None}
+                )
+                output: list[str] = []
+                with (
+                    mock.patch.object(
+                        cli, "open_drill_in_editor", return_value="nvim"
+                    ),
+                    mock.patch.object(
+                        cli.code_runner,
+                        "run_python_tests",
+                        return_value=result,
+                    ),
+                ):
+                    cli.cmd_interview_placement(
+                        Namespace(topic=slug, action="start"),
+                        input_func=iter_input(
+                            [
+                                "Some Python practice.",
+                                "What should I return?",
+                                "Use a sliding window.",
+                                "",
+                                "/stop",
+                            ]
+                        ),
+                        output_func=output.append,
+                    )
+
+                profile = cli.interview_prep.load_profile(
+                    cli.interview_profile_path(slug)
+                )
+                activity = cli._current_interview_activity(slug)
+                assert activity is not None
+                workspace = cli.active_drill_path(cli.read_topic(slug))
+                attempt = cli.attempt_store().find_for_workspace(
+                    slug, workspace, unfinished_only=False
+                )
+                assert attempt is not None
+                run = attempt["test_runs"][-1]
+                self.assertEqual(profile["placement"]["next_stage"], "implementation")
+                self.assertEqual(activity["status"], "active")
+                self.assertEqual(len(activity["evidence_refs"]), 3)
+                evidence_stages = [
+                    stage
+                    for _evidence_id, stage, _response in cli._interview_activity_evidence(
+                        slug, activity
+                    )
+                ]
+                self.assertEqual(
+                    evidence_stages,
+                    ["calibration", "clarification", "plan"],
+                )
+                self.assertEqual(run["outcome"], kind)
+                self.assertEqual(
+                    run["output"],
+                    f"Hidden placement run ended with infrastructure outcome: {kind}.",
+                )
+                self.assertNotIn("SECRET_HIDDEN", json.dumps(attempt))
+                transcript = "\n".join(output)
+                self.assertIn(str(workspace), transcript)
+                self.assertIn("openlearn doctor", transcript)
+                self.assertIn("resume", transcript)
+
     def test_interview_placement_failed_execution_advances_with_not_observed_evidence(
         self,
     ) -> None:
@@ -1975,6 +2143,9 @@ class CliStorageTests(unittest.TestCase):
         self.assertIsNotNone(attempt)
         assert attempt is not None
         self.assertEqual(attempt["test_runs"][-1]["outcome"], "test_failure")
+        self.assertEqual(attempt["status"], "completed")
+        self.assertEqual(attempt["disposition"], "partial")
+        self.assertIsNone(cli.active_attempt_binding("algorithms"))
 
     def test_interview_placement_implementation_skip_finishes_dependent_stages_uncertain(
         self,
@@ -2076,6 +2247,222 @@ class CliStorageTests(unittest.TestCase):
             if event.get("event_type") == "activity_evidence_recorded"
         ]
         self.assertEqual(len(evidence_events), 1)
+
+    def test_execution_pair_recovers_each_activity_publication_boundary(self) -> None:
+        for boundary in ("after_journal", "after_state", "after_event"):
+            with self.subTest(boundary=boundary):
+                slug = self.create_interview_topic(f"Execution {boundary}")
+                self.pause_interview_at_implementation(slug)
+                activity = cli._current_interview_activity(slug)
+                assert activity is not None
+                response = cli.interview_prep.placement_execution_evidence(
+                    "def first_unique_window(text, width):\n    return -1\n",
+                    outcome="test_failure",
+                    tests_passed=False,
+                    return_code=1,
+                )
+
+                def fail_at_boundary(stage: str) -> None:
+                    if stage == boundary:
+                        raise RuntimeError(f"crash at {boundary}")
+
+                with mock.patch.object(
+                    cli,
+                    "_activity_update_checkpoint",
+                    side_effect=fail_at_boundary,
+                ):
+                    with self.assertRaisesRegex(RuntimeError, f"crash at {boundary}"):
+                        cli._record_placement_execution(slug, activity, response)
+
+                prompts: list[str] = []
+                answers = iter(["O(n) time.", "Use last-seen positions."])
+                cli.cmd_interview_placement(
+                    Namespace(topic=slug, action="resume"),
+                    input_func=lambda prompt: prompts.append(prompt) or next(answers),
+                    output_func=lambda _line: None,
+                )
+
+                profile = cli.interview_prep.load_profile(
+                    cli.interview_profile_path(slug)
+                )
+                activity = cli._current_interview_activity(slug)
+                assert activity is not None
+                self.assertEqual(profile["placement"]["status"], "provisional")
+                self.assertEqual(len(profile["placement"]["evidence_refs"]), 7)
+                self.assertEqual(len(activity["evidence_refs"]), 7)
+                self.assertEqual(
+                    len(
+                        {
+                            ref["evidence_id"]
+                            for ref in activity["evidence_refs"]
+                        }
+                    ),
+                    7,
+                )
+                self.assertFalse(any(prompt.startswith("tests>") for prompt in prompts))
+                self.assertFalse(profile["placement"]["result"]["mastery_update_applied"])
+
+    def test_implementation_skip_recovers_each_activity_publication_boundary(
+        self,
+    ) -> None:
+        for boundary in ("after_journal", "after_state", "after_event"):
+            with self.subTest(boundary=boundary):
+                slug = self.create_interview_topic(f"Skip {boundary}")
+                self.pause_interview_at_implementation(slug)
+                activity = cli._current_interview_activity(slug)
+                assert activity is not None
+
+                def fail_at_boundary(stage: str) -> None:
+                    if stage == boundary:
+                        raise RuntimeError(f"crash at {boundary}")
+
+                with mock.patch.object(
+                    cli,
+                    "_activity_update_checkpoint",
+                    side_effect=fail_at_boundary,
+                ):
+                    with self.assertRaisesRegex(RuntimeError, f"crash at {boundary}"):
+                        cli._skip_placement_implementation_and_dependents(
+                            slug, activity
+                        )
+
+                prompts: list[str] = []
+                cli.cmd_interview_placement(
+                    Namespace(topic=slug, action="resume"),
+                    input_func=lambda prompt: prompts.append(prompt) or "/stop",
+                    output_func=lambda _line: None,
+                )
+
+                profile = cli.interview_prep.load_profile(
+                    cli.interview_profile_path(slug)
+                )
+                activity = cli._current_interview_activity(slug)
+                assert activity is not None
+                self.assertEqual(profile["placement"]["status"], "provisional")
+                self.assertEqual(len(profile["placement"]["evidence_refs"]), 7)
+                self.assertEqual(len(activity["evidence_refs"]), 7)
+                self.assertEqual(
+                    len(
+                        {
+                            ref["evidence_id"]
+                            for ref in activity["evidence_refs"]
+                        }
+                    ),
+                    7,
+                )
+                self.assertFalse(
+                    any(
+                        prompt.startswith(prefix)
+                        for prompt in prompts
+                        for prefix in ("tests>", "complexity>", "follow_up>")
+                    )
+                )
+                self.assertFalse(profile["placement"]["result"]["mastery_update_applied"])
+
+    def test_terminal_placement_routes_abandon_attempt_and_interrupt_pending_run(
+        self,
+    ) -> None:
+        cases = (
+            ("skip", "/skip", "resume"),
+            ("baseline", "/baseline", "resume"),
+            ("interactive-discard", "/discard", "resume"),
+            ("cli-discard", None, "discard"),
+        )
+        for name, response, action in cases:
+            with self.subTest(route=name):
+                slug = self.create_interview_topic(name)
+                self.pause_interview_at_implementation(slug)
+                activity, attempt = self.materialize_placement_attempt(slug)
+                attempt, run_id = cli.attempt_store().start_test(
+                    slug, str(attempt["attempt_id"]), visibility="hidden"
+                )
+                if response is None:
+                    cli.cmd_interview_placement(
+                        Namespace(topic=slug, action=action),
+                        output_func=lambda _line: None,
+                    )
+                else:
+                    cli.cmd_interview_placement(
+                        Namespace(topic=slug, action=action),
+                        input_func=lambda _prompt, value=response: value,
+                        output_func=lambda _line: None,
+                    )
+
+                attempt = cli.attempt_store().load(
+                    slug, str(attempt["attempt_id"])
+                )
+                activity = cli._current_interview_activity(slug)
+                assert activity is not None
+                run = next(
+                    item
+                    for item in attempt["test_runs"]
+                    if item["run_id"] == run_id
+                )
+                self.assertEqual(run["outcome"], "interrupted")
+                self.assertEqual(attempt["status"], "abandoned")
+                self.assertEqual(attempt["disposition"], "abandoned")
+                self.assertIsNone(cli.active_attempt_binding(slug))
+                self.assertEqual(activity["status"], "abandoned" if "discard" in name or name == "baseline" else "completed")
+                events = cli.attempt_store().events_path(
+                    slug, str(attempt["attempt_id"])
+                ).read_text(encoding="utf-8")
+                self.assertEqual(
+                    sum(
+                        json.loads(line).get("event_id")
+                        == f"{attempt['attempt_id']}:{run_id}:finished"
+                        for line in events.splitlines()
+                    ),
+                    1,
+                )
+                profile = cli.interview_prep.load_profile(
+                    cli.interview_profile_path(slug)
+                )
+                expected_status = (
+                    "not_started" if "discard" in name else "provisional"
+                )
+                self.assertEqual(profile["placement"]["status"], expected_status)
+
+    def test_terminal_attempt_reconciles_after_activity_terminalization_crash(
+        self,
+    ) -> None:
+        slug = self.create_interview_topic("Restart Reconcile")
+        self.pause_interview_at_implementation(slug)
+        _activity, attempt = self.materialize_placement_attempt(slug)
+        reconcile = cli._reconcile_terminal_placement_attempt
+
+        def crash_after_terminalization(
+            topic_slug: str,
+            activity: dict[str, object],
+            profile: dict[str, object],
+        ) -> None:
+            if activity.get("status") in {"completed", "abandoned", "cancelled"}:
+                raise RuntimeError("crash before attempt finalization")
+            reconcile(topic_slug, activity, profile)
+
+        with mock.patch.object(
+            cli,
+            "_reconcile_terminal_placement_attempt",
+            side_effect=crash_after_terminalization,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "attempt finalization"):
+                cli.cmd_interview_placement(
+                    Namespace(topic=slug, action="resume"),
+                    input_func=lambda _prompt: "/skip",
+                    output_func=lambda _line: None,
+                )
+
+        before = cli.attempt_store().load(slug, str(attempt["attempt_id"]))
+        self.assertEqual(before["status"], "active")
+        self.assertEqual(
+            cli._current_interview_activity(slug)["status"], "completed"
+        )
+
+        cli.sync_interview_placement(slug)
+
+        after = cli.attempt_store().load(slug, str(attempt["attempt_id"]))
+        self.assertEqual(after["status"], "abandoned")
+        self.assertEqual(after["disposition"], "abandoned")
+        self.assertIsNone(cli.active_attempt_binding(slug))
 
     def test_noop_interview_edit_preserves_active_resumable_placement(self) -> None:
         call_silent(
@@ -5545,6 +5932,35 @@ class InteractiveTests(unittest.TestCase):
         )
         self.assertEqual(args.topic, "Coding Interview Prep")
         self.assertIn("LeetCode-style", args.goal)
+        self.assertEqual(args.template, "algorithms")
+        self.assertTrue(args.interview_prep)
+        self.assertIn("input_func", kwargs)
+
+    def test_menu_interview_prep_numbers_a_second_course(self) -> None:
+        call_silent(
+            cli.cmd_new,
+            Namespace(
+                topic="Coding Interview Prep",
+                goal="Prepare for interviews",
+                mastery_profile=None,
+                template="algorithms",
+                interview_prep=True,
+            ),
+        )
+        calls = []
+
+        with mock.patch.object(
+            cli,
+            "cmd_new",
+            side_effect=lambda args, **kwargs: calls.append((args, kwargs)) or 0,
+        ):
+            cli.menu_interview_prep(
+                iter_input([""]),
+                lambda _text: None,
+            )
+
+        args, kwargs = calls[0]
+        self.assertEqual(args.topic, "Coding Interview Prep 2")
         self.assertEqual(args.template, "algorithms")
         self.assertTrue(args.interview_prep)
         self.assertIn("input_func", kwargs)

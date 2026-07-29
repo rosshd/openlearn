@@ -49,7 +49,7 @@ PLACEMENT_PROBLEM = {
     "license": "AGPL-3.0-or-later",
     "function_name": "first_unique_window",
     "function_stub": (
-        "def first_unique_window(text: str, width: int) -> int:\n"
+        "def first_unique_window(text, width):\n"
         '    """Return the first all-distinct window index, or -1."""\n'
         "    raise NotImplementedError\n"
     ),

@@ -1097,6 +1097,11 @@ def menu_starter_courses(input_func, output_func) -> None:
 
 def menu_interview_prep(input_func, output_func) -> None:
     default_name = "Coding Interview Prep"
+    course_name = default_name
+    suffix = 2
+    while topic_path(slugify(course_name)).exists():
+        course_name = f"{default_name} {suffix}"
+        suffix += 1
     default_goal = (
         "Prepare for LeetCode-style coding interviews with algorithms, "
         "data structures, and timed problem solving"
@@ -1107,7 +1112,7 @@ def menu_interview_prep(input_func, output_func) -> None:
     output_func("")
     cmd_new(
         argparse.Namespace(
-            topic=default_name,
+            topic=course_name,
             goal=goal,
             mastery_profile=None,
             template="algorithms",
@@ -3127,23 +3132,8 @@ def _placement_runner_cases(*, include_hidden: bool = True) -> list[dict[str, ob
 
 def _placement_inert_function_stub() -> str:
     source = str(interview_prep.PLACEMENT_PROBLEM["function_stub"])
-    try:
-        module = ast.parse(source, mode="exec")
-    except SyntaxError as exc:
-        raise OpenLearnError(
-            f"placement function stub is invalid Python: {exc.msg}"
-        ) from exc
-    if len(module.body) != 1 or not isinstance(module.body[0], ast.FunctionDef):
-        raise OpenLearnError("placement function stub must contain one function")
-    function = module.body[0]
-    function.returns = None
-    for argument in (
-        *function.args.posonlyargs,
-        *function.args.args,
-        *function.args.kwonlyargs,
-    ):
-        argument.annotation = None
-    return ast.unparse(module).strip()
+    validate_inert_function_stub(source)
+    return source.rstrip()
 
 
 def _placement_drill() -> dict[str, object]:
@@ -3202,15 +3192,17 @@ def _record_placement_execution(
             activity,
             "interview_observation",
             {"stage": stage, "response": response},
+            evidence_id=_placement_batch_evidence_id(
+                activity, "execution", stage
+            ),
         )
-        sync_interview_placement(slug)
+    sync_interview_placement(slug)
 
 
 def _skip_placement_implementation_and_dependents(
     slug: str,
     activity: dict[str, object],
 ) -> dict[str, object]:
-    value: dict[str, object] = {}
     for stage in ("implementation", "tests", "complexity", "follow_up"):
         activity = record_topic_activity_evidence(
             slug,
@@ -3220,9 +3212,168 @@ def _skip_placement_implementation_and_dependents(
                 "stage": stage,
                 "response": f"Learner skipped {stage}; evidence remains uncertain.",
             },
+            evidence_id=_placement_batch_evidence_id(
+                activity, "implementation-skip", stage
+            ),
         )
-        value = sync_interview_placement(slug)
-    return value
+    return sync_interview_placement(slug)
+
+
+def _placement_batch_evidence_id(
+    activity: dict[str, object], batch: str, stage: str
+) -> str:
+    digest = hashlib.sha256(
+        f"{activity['activity_id']}:{batch}:{stage}".encode("utf-8")
+    ).hexdigest()[:32]
+    return f"evidence_{digest}"
+
+
+def _recover_placement_evidence_batch(
+    slug: str, activity: dict[str, object]
+) -> dict[str, object]:
+    evidence = _interview_activity_evidence(slug, activity)
+    by_stage = {stage: response for _identifier, stage, response in evidence}
+    implementation = by_stage.get("implementation")
+    if implementation is None:
+        return activity
+    if interview_prep._parse_placement_execution_evidence(implementation) is not None:
+        stages = ("implementation", "tests")
+        batch = "execution"
+        responses = {stage: implementation for stage in stages}
+    elif implementation == (
+        "Learner skipped implementation; evidence remains uncertain."
+    ):
+        stages = ("implementation", "tests", "complexity", "follow_up")
+        batch = "implementation-skip"
+        responses = {
+            stage: f"Learner skipped {stage}; evidence remains uncertain."
+            for stage in stages
+        }
+    else:
+        return activity
+    for stage in stages:
+        if stage in by_stage:
+            continue
+        activity = record_topic_activity_evidence(
+            slug,
+            activity,
+            "interview_observation",
+            {"stage": stage, "response": responses[stage]},
+            evidence_id=_placement_batch_evidence_id(activity, batch, stage),
+        )
+    return activity
+
+
+def _placement_attempt_for_activity(
+    slug: str, activity_id: str
+) -> dict[str, object] | None:
+    store = attempt_store()
+    binding = active_attempt_binding(slug)
+    if binding is not None:
+        try:
+            bound = store.load(slug, binding["attempt_id"])
+        except interview_attempts.AttemptError as exc:
+            raise OpenLearnError(f"could not load placement attempt: {exc}") from exc
+        if (
+            bound.get("purpose") == "placement"
+            and bound.get("activity_id") == activity_id
+        ):
+            return bound
+    try:
+        return next(
+            (
+                record
+                for record in store.list(slug)
+                if record.get("purpose") == "placement"
+                and record.get("activity_id") == activity_id
+            ),
+            None,
+        )
+    except interview_attempts.AttemptError as exc:
+        raise OpenLearnError(f"could not load placement attempt: {exc}") from exc
+
+
+def _finish_pending_placement_runs(
+    slug: str, attempt: dict[str, object]
+) -> dict[str, object]:
+    if attempt.get("status") != "active":
+        return attempt
+    store = attempt_store()
+    attempt_id = str(attempt["attempt_id"])
+    runs = attempt.get("test_runs")
+    if not isinstance(runs, list):
+        return attempt
+    for run in runs:
+        if isinstance(run, dict) and run.get("outcome") == "pending":
+            try:
+                attempt = store.finish_test(
+                    slug,
+                    attempt_id,
+                    str(run["run_id"]),
+                    outcome="interrupted",
+                    output="Hidden placement run interrupted before completion.",
+                )
+            except interview_attempts.AttemptError as exc:
+                raise OpenLearnError(
+                    f"could not reconcile pending placement run: {exc}"
+                ) from exc
+    return attempt
+
+
+def _reconcile_pending_placement_runs(
+    slug: str, activity: dict[str, object]
+) -> dict[str, object] | None:
+    attempt = _placement_attempt_for_activity(slug, str(activity["activity_id"]))
+    if attempt is None:
+        return None
+    return _finish_pending_placement_runs(slug, attempt)
+
+
+def _reconcile_terminal_placement_attempt(
+    slug: str,
+    activity: dict[str, object],
+    profile_value: dict[str, object],
+) -> None:
+    placement = profile_value.get("placement")
+    if (
+        not isinstance(placement, dict)
+        or placement.get("status") not in {"not_started", "provisional"}
+        or activity.get("status") not in {"completed", "abandoned", "cancelled"}
+    ):
+        return
+    attempt = _placement_attempt_for_activity(slug, str(activity["activity_id"]))
+    if attempt is None:
+        return
+    attempt = _finish_pending_placement_runs(slug, attempt)
+    attempt_id = str(attempt["attempt_id"])
+    if attempt.get("status") == "active":
+        observations = placement.get("observations")
+        implementation = (
+            observations.get("implementation")
+            if isinstance(observations, dict)
+            else None
+        )
+        signals = (
+            implementation.get("signals")
+            if isinstance(implementation, dict)
+            else None
+        )
+        try:
+            if isinstance(signals, list) and "execution_passed" in signals:
+                attempt_store().complete(
+                    slug, attempt_id, disposition="solved_independently"
+                )
+            elif isinstance(signals, list) and "execution_failed" in signals:
+                attempt_store().complete(slug, attempt_id, disposition="partial")
+            else:
+                attempt_store().abandon(
+                    slug, attempt_id, "placement ended without executed code"
+                )
+        except interview_attempts.AttemptError as exc:
+            raise OpenLearnError(
+                f"could not finalize placement attempt: {exc}"
+            ) from exc
+    clear_active_attempt_if_matches(slug, attempt_id)
 
 
 def _finish_placement_attempt_test(
@@ -3237,8 +3388,8 @@ def _finish_placement_attempt_test(
     limits: dict[str, object] = {}
     if run_result is not None:
         limits = {
-            "isolation": run_result.isolation,
-            "limit_reason": run_result.limit_reason,
+            "isolation": _safe_placement_runner_label(run_result.isolation),
+            "limit_reason": _safe_placement_runner_label(run_result.limit_reason),
             "exit_code": run_result.exit_code,
         }
     try:
@@ -3252,6 +3403,21 @@ def _finish_placement_attempt_test(
         )
     except interview_attempts.AttemptError as exc:
         raise OpenLearnError(f"could not save placement test outcome: {exc}") from exc
+
+
+def _safe_placement_runner_label(value: object) -> str | None:
+    if value is None:
+        return None
+    label = str(value)
+    return label if re.fullmatch(r"[a-z0-9_.-]{1,80}", label) else "unspecified"
+
+
+def _placement_run_summary(outcome: str) -> str:
+    if outcome == "passed":
+        return "Hidden placement tests passed."
+    if outcome in interview_attempts.INFRASTRUCTURE_OUTCOMES:
+        return f"Hidden placement run ended with infrastructure outcome: {outcome}."
+    return f"Hidden placement tests completed with learner outcome: {outcome}."
 
 
 def _placement_snapshot_source(attempt: dict[str, object]) -> str:
@@ -3292,6 +3458,7 @@ def _run_placement_implementation(
             snapshot=True,
             prefer_existing=True,
         )
+        attempt = _finish_pending_placement_runs(slug, attempt)
     except (OSError, OpenLearnError) as exc:
         log_activity_tool_failure(slug, activity, "create_drill_workspace", exc)
         output_func(f"Could not create the placement workspace: {exc}")
@@ -3361,7 +3528,7 @@ def _run_placement_implementation(
             attempt_id,
             run_id,
             outcome="runner_unavailable",
-            output=str(exc),
+            output=_placement_run_summary("runner_unavailable"),
         )
         log_activity_tool_failure(slug, activity, "run_drill_tests", exc)
         output_func(f"Could not run the secure placement tests: {exc}")
@@ -3371,18 +3538,13 @@ def _run_placement_implementation(
             f"'openlearn interview placement {slug} resume'."
         )
         return False
-    result_output = "\n".join(
-        part
-        for part in (run_result.stdout.strip(), run_result.stderr.strip())
-        if part
-    )
     if run_result.kind in {"runner_error", "cancelled"}:
         _finish_placement_attempt_test(
             slug,
             attempt_id,
             run_id,
             outcome=run_result.kind,
-            output=result_output,
+            output=_placement_run_summary(run_result.kind),
             run_result=run_result,
         )
         error = OpenLearnError(
@@ -3402,7 +3564,7 @@ def _run_placement_implementation(
         attempt_id,
         run_id,
         outcome=outcome,
-        output=result_output,
+        output=_placement_run_summary(outcome),
         run_result=run_result,
     )
     response = interview_prep.placement_execution_evidence(
@@ -3522,6 +3684,7 @@ def sync_interview_placement(slug: str) -> dict[str, object]:
         "in_progress",
         "provisional",
     }:
+        activity = _recover_placement_evidence_batch(slug, activity)
         existing_refs = placement.get("evidence_refs")
         assert isinstance(existing_refs, list)
         existing_ids = {
@@ -3565,7 +3728,7 @@ def sync_interview_placement(slug: str) -> dict[str, object]:
         observations = placement.get("observations")
         baseline_selected = isinstance(observations, dict) and "baseline" in observations
         if placement.get("status") == "provisional" and activity.get("status") == "active":
-            transition_topic_activity(
+            activity = transition_topic_activity(
                 slug,
                 activity,
                 "abandoned" if baseline_selected else "completed",
@@ -3579,6 +3742,8 @@ def sync_interview_placement(slug: str) -> dict[str, object]:
             profile_value = interview_prep.refresh_staleness(
                 interview_profile_path(slug)
             )
+    if activity is not None:
+        _reconcile_terminal_placement_attempt(slug, activity, profile_value)
     return profile_value
 
 
@@ -3595,7 +3760,8 @@ def _discard_interview_placement(slug: str, path: Path) -> dict[str, object]:
     sync_interview_placement(slug)
     activity = _current_interview_activity(slug)
     if activity is not None and activity.get("status") == "active":
-        transition_topic_activity(
+        _reconcile_pending_placement_runs(slug, activity)
+        activity = transition_topic_activity(
             slug,
             activity,
             "abandoned",
@@ -3609,6 +3775,8 @@ def _discard_interview_placement(slug: str, path: Path) -> dict[str, object]:
         )
     for event_type, data in queued_events:
         log_event(slug, event_type, data)
+    if activity is not None:
+        _reconcile_terminal_placement_attempt(slug, activity, value)
     return value
 
 
@@ -3641,6 +3809,15 @@ def cmd_interview_placement(
         value = sync_interview_placement(slug)
         placement = value["placement"]
         assert isinstance(placement, dict)
+        if action == "resume" and placement.get("status") == "provisional":
+            output_func("Placement complete. Results are provisional and grant no mastery.")
+            result = cmd_interview_profile(
+                argparse.Namespace(topic=slug), output_func=output_func
+            )
+            output_func(
+                "Placement saved. Continue from the main menu to build your course plan."
+            )
+            return result
         if placement.get("status") != "in_progress":
             activity = _begin_interview_activity(slug)
             with interview_profile_write_lock(slug):
@@ -3713,6 +3890,7 @@ def cmd_interview_placement(
             if activity is None or activity.get("status") != "active":
                 raise OpenLearnError("validated interview placement activity is not active")
             if command == "baseline":
+                _reconcile_pending_placement_runs(slug, activity)
                 record_topic_activity_evidence(
                     slug,
                     activity,
@@ -3732,6 +3910,7 @@ def cmd_interview_placement(
                 break
             if command == "skip":
                 if stage == "implementation":
+                    _reconcile_pending_placement_runs(slug, activity)
                     value = _skip_placement_implementation_and_dependents(
                         slug, activity
                     )
