@@ -20,32 +20,13 @@ CALIBRATION = (
 )
 CLARIFICATION = (
     "How is the input given to us? is it an array or text separated by commas? "
-    "what would you like for me to return when I find a solution?"
+    "what would you like for me to return when I find a solution? "
+    "Can I see example inputs and outputs?"
 )
 PLAN = (
     "I would use a sliding window with a hashmap to keep track of amounts of "
     "charactors. When they are all unique, I would return the result"
 )
-IMPLEMENTATION = [
-    "def first_unique_window(text, width):",
-    "    if width <= 0 or width > len(text):",
-    "        return -1",
-    "    counts = {}",
-    "    left = 0",
-    "    for right, char in enumerate(text):",
-    "        counts[char] = counts.get(char, 0) + 1",
-    "        if right - left + 1 > width:",
-    "            old = text[left]",
-    "            counts[old] -= 1",
-    "            if counts[old] == 0:",
-    "                del counts[old]",
-    "            left += 1",
-    "        if right - left + 1 == width and len(counts) == width:",
-    "            return left",
-    "    return -1",
-]
-
-
 def test_interview_prep_public_cli_journey(spawn_openlearn, monkeypatch) -> None:
     proc = spawn_openlearn.spawn(
         "new",
@@ -60,14 +41,8 @@ def test_interview_prep_public_cli_journey(spawn_openlearn, monkeypatch) -> None
             "Target role family",
             "Target level",
             "Interview date",
-            "Coding language",
-            "Data structures experience",
-            "Algorithms experience",
-            "Interview experience",
             "Weekly practice minutes",
             "Session minutes",
-            "Target notes",
-            "Accessibility preferences",
         ):
             proc.expect(prompt)
             proc.sendline("")
@@ -82,37 +57,33 @@ def test_interview_prep_public_cli_journey(spawn_openlearn, monkeypatch) -> None
         proc.sendline(CLARIFICATION)
         proc.expect("Python string")
         proc.expect("zero-based start index")
+        proc.expect("Examples:")
         proc.expect("plan>")
         proc.sendline(PLAN)
         proc.expect("implementation>")
-        proc.sendline("")
-        proc.expect("finish with a line containing only /done")
-        proc.expect("implementation>")
-        proc.sendline(IMPLEMENTATION[0])
-        for line in IMPLEMENTATION[1:]:
-            proc.expect(r"\.\.\. ")
-            proc.sendline(line)
-        proc.expect(r"\.\.\. ")
-        proc.sendline("/done")
-        proc.expect("tests>")
-        proc.sendline(
-            "I would test empty text, nonpositive width, width larger than text, "
-            "duplicates, and a matching distinct window."
-        )
-        proc.expect("complexity>")
-        proc.sendline("O(n) time and O(width) space.")
-        proc.expect("follow_up>")
-        proc.sendline(
-            "For streaming text I would retain only the current window and counts."
-        )
+        proc.sendline("/skip")
+        proc.expect("Dependent coding evidence remains uncertain")
         proc.expect("Placement complete")
         proc.expect("Placement: provisional")
+        proc.expect("Placement saved. Continue from the main menu to build your course plan.")
         proc.expect(pexpect.EOF)
         proc.child.close()
         assert proc.child.exitstatus == 0
         transcript = proc.clean_output
         assert "must be non-empty" not in transcript
         assert "No previous session yet" not in transcript
+        for removed_prompt in (
+            "Coding language",
+            "Data structures experience",
+            "Algorithms experience",
+            "Interview experience",
+            "Target notes",
+            "Accessibility preferences",
+        ):
+            assert removed_prompt not in transcript
+        assert "tests>" not in transcript
+        assert "complexity>" not in transcript
+        assert "follow_up>" not in transcript
     finally:
         proc.close()
 

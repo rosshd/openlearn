@@ -102,7 +102,8 @@ openlearn resume
 ```
 
 Run `openlearn templates` to list the bundled Vim, Git, Python, SQL, algorithms, and other starter outlines.
-From the main menu, press `s` to browse and create any bundled starter course or `i` to start the guided LeetCode-style interview-prep flow.
+From the main menu, press `s` to browse and create any bundled starter course or `i` for `New interview course`.
+When the active interview course has unfinished placement, the menu shows `Continue interview prep` and hides the new-course shortcut.
 An explicit `--goal` takes precedence over a template's default goal.
 `--interview-prep` is an explicit opt-in that creates a separate learner-owned local profile and offers a bounded coding placement.
 Normal topic creation does not create interview metadata or show placement prompts.
@@ -124,12 +125,15 @@ Its result is provisional, names uncertainty across prerequisite, coding-fluency
 Interruptions are resumable, while explicit discard or profile clearing preserves append-only attempt evidence.
 The normal recovery command is `openlearn resume [topic]`.
 It returns an unfinished placement to its exact next stage before any provider or source work, then carries a deferred or provisional result into course planning without offering the separate legacy placement quiz.
-Course planning receives only a bounded summary of the target, schedule, gap statuses, uncertainty, and recommendations; raw calibration, code, tests, and reasoning stay in local append-only evidence.
+Course planning receives only a bounded summary of the target, schedule, gap statuses, uncertainty, and recommendations.
+Raw calibration and reasoning stay in local append-only evidence, while code and execution outcomes remain in learner-owned workspaces and durable attempt records.
 If model-backed teaching is not configured, resume reports the adjacent placement state, confirms that all work is saved, and gives both the configuration and resume commands before changing course state.
 Dry-run, mock mode, and keyless localhost providers remain available without a hosted API key.
-During placement, `/skip` leaves only the current evidence axis uncertain and continues, while `/baseline` ends the attempt with an explicit reduced-demand provisional baseline.
-Coding placement rubric v1 validates implementation structure only for Python.
-Learners who prefer another language may still complete placement, but their implementation evidence remains uncertain unless they edit the profile to opt into Python and rerun it.
+During placement, pressing Enter at the implementation prompt opens a persistent learner-owned workspace in the configured editor with the problem, examples, and function stub.
+After the learner saves and closes the editor, the secure runner executes hidden tests and records actual passed or failed execution evidence for implementation and testing.
+Placement execution scoring is Python-only; other preferred languages remain available for later practice but cannot produce scored runner evidence in this placement.
+Using `/skip` at implementation marks implementation, testing, complexity, and follow-up evidence uncertain instead of asking dependent questions about code that was not observed.
+Using `/baseline` ends the attempt with an explicit reduced-demand provisional baseline.
 
 For assessment material, Quick Learn creates a separate focused topic and begins teaching without placement or outline approval:
 

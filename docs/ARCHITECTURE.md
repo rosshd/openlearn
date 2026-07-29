@@ -52,8 +52,9 @@ Quick Learn topics also store `learning_mode`, `quick_source_type`, `quick_sourc
 
 Interview prep is explicitly opt-in and stores its learner-owned profile in `<slug>.interview.json`, separate from shareable topic metadata, general learner preferences, and concept mastery.
 The file contains a versioned profile revision, resumable placement status, opaque activity and evidence references, derived tri-state observations, a rubric version, a provisional gap assessment, and target-horizon-aware recommendations.
-Raw calibration, code, tests, and reasoning pass through the validated coding activity adapter and remain in append-only namespaced activity evidence events rather than being copied into topic metadata or the interview profile.
-Coding placement rubric v1 declares Python as its only structurally validated implementation language; other preferred-language implementations remain uncertain rather than being treated as failed evidence.
+Raw calibration and reasoning remain in append-only namespaced activity evidence events rather than being copied into topic metadata or the interview profile.
+Python placement code lives in a persistent learner-owned drill workspace with durable attempt snapshots, while trusted hidden-test outcomes are recorded as append-only execution evidence.
+Coding placement rubric v1 accepts only secure Python runner evidence for scored implementation and testing observations; skipped dependent stages and runner infrastructure failures remain uncertain rather than being treated as failed evidence.
 Interrupted activity transactions recover through the activity journal, and placement resume idempotently projects any recovered evidence into the profile before asking for the next stage.
 Profile publication takes the topic identity lock before the profile lock, so concurrent topic deletion cannot recreate an orphan profile.
 Effective profile edits are validated before mutation and publish a topic-generation-aware edit journal while holding the topic identity lock, allowing an interrupted activity abandonment and profile reset to finish on the next profile read.
