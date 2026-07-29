@@ -18,6 +18,11 @@ Files
 - smoke-non-model.sh
   Runs quick scripted checks that should not call OpenAI.
 
+- smoke-full.sh
+  Runs a strict public-interface journey in an isolated openLearn home.
+  Product actions use only the openlearn application interface; the shell only
+  creates input fixtures and checks learner-visible output.
+
 Fast Workflows
 0. Shortest built-in workflow:
    openlearn test
@@ -46,6 +51,17 @@ Fast Workflows
 4. Non-model smoke check:
    bash manual-tests/smoke-non-model.sh
 
+5. Complete mocked application-interface journey:
+   make e2e
+
+   This checks every top-level and nested command help path, configuration,
+   topic lifecycle, imports, Quick Learn, paste/edit, model-backed and dry-run
+   actions, REPL routing, interview profile management, attempt listing, menu
+   behavior, and deletion without using real learning data or provider calls.
+   The same journey is part of `make check`.
+   Set `OPENLEARN_E2E_KEEP=1` to preserve its temporary output artifacts, or
+   provide an empty `OPENLEARN_HOME` to choose and preserve the test location.
+
 Useful Environment Variables
 - OPENLEARN_HOME
   Override the isolated state directory.
@@ -61,4 +77,5 @@ Recommended Manual Checks
 - Context files screen lists practical-vim-syllabus.txt.
 - Start course summarizes pending context, generates outline, allows rejection feedback, then starts lesson.
 - Resume shows a short Where you left off block before continuing.
-- Delete topic removes the topic, context folder, and .practical-vim-foundations.md.lock if present.
+- Delete topic removes the topic and context folder while preserving the stable
+  .practical-vim-foundations.md.lock synchronization identity.

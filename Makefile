@@ -29,7 +29,7 @@ smoke:
 	echo "smoke: seed + mock chat ok"
 
 e2e:
-	OPENLEARN_MOCK=1 OPENLEARN_HOME="$$(mktemp -d)" ./manual-tests/smoke-full.sh --mock
+	OPENLEARN="$(OPENLEARN)" ./manual-tests/smoke-full.sh --mock
 
 oci-live:
 	OPENLEARN_RUN_OCI_TESTS=1 PYTHONPATH=src $(PYTHON) -m unittest tests.test_code_runner_live -v
@@ -70,8 +70,8 @@ finish:
 validate: check
 
 # --- The one obvious command --------------------------------------------------
-# Fast, fully green gate: lint + tests + mock smoke. Run this before pushing.
-check: lint unit pytest smoke
+# Fully green gate: lint + tests + focused and interface-wide mock smoke.
+check: lint unit pytest smoke e2e
 	@echo "check: all green"
 
 # --- Review-before-PR: run the gate and collect evidence ----------------------

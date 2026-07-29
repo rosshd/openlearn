@@ -30,6 +30,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+from enum import Enum, auto
 from pathlib import Path, PureWindowsPath
 from uuid import uuid4
 from urllib.parse import urlencode, urlparse
@@ -2338,11 +2339,17 @@ def handle_repl_command(
             raise OpenLearnError("usage: /progress [unit slide]")
     elif name == "chapter":
         unit_arg = args[0] if args else None
-        cmd_chapter_select(
-            argparse.Namespace(topic=None, unit=int(unit_arg) if unit_arg else None, model=model),
+        try:
+            unit = int(unit_arg) if unit_arg else None
+        except ValueError as exc:
+            raise OpenLearnError("usage: /chapter [unit number]") from exc
+        result = select_chapter(
+            argparse.Namespace(topic=None, unit=unit, model=model),
             input_func=input_func,
             output_func=output_func,
         )
+        if result is not ChapterSelectionResult.SELECTED:
+            return None
         slug = resolve_topic_slug(None)
         updated = read_topic(slug)
         if not updated.metadata.get("pending_chapter_quiz"):
@@ -5499,17 +5506,23 @@ def set_review_session_active(slug: str, active: bool) -> None:
         write_text_atomic(path, format_topic(metadata, body))
 
 
-def cmd_chapter_select(
+class ChapterSelectionResult(Enum):
+    SELECTED = auto()
+    CANCELED = auto()
+    ERROR = auto()
+
+
+def select_chapter(
     args: argparse.Namespace,
     input_func=input,
     output_func=print,
-) -> int:
+) -> ChapterSelectionResult:
     slug = resolve_topic_slug(getattr(args, "topic", None))
     topic = read_topic(slug)
     units = topic.metadata.get("course_units")
     if not isinstance(units, list) or not units:
         output_func("No course plan found. Generate a course with /next first.")
-        return 1
+        return ChapterSelectionResult.ERROR
 
     unit_arg = getattr(args, "unit", None)
     if unit_arg is not None:
@@ -5521,16 +5534,16 @@ def cmd_chapter_select(
             output_func(f"(currently on Unit {current_unit})")
         raw = input_func("Jump to unit number (or Enter to cancel): ").strip()
         if not raw:
-            return 0
+            return ChapterSelectionResult.CANCELED
         try:
             unit_num = int(raw)
         except ValueError:
             output_func("Please enter a valid unit number.")
-            return 1
+            return ChapterSelectionResult.ERROR
 
     if not course_unit_at(topic.metadata, unit_num):
         output_func(f"Unit {unit_num} not found. Course has {len(units)} unit(s).")
-        return 1
+        return ChapterSelectionResult.ERROR
 
     set_course_progress(slug, str(unit_num), "1")
     updated = read_topic(slug)
@@ -5539,7 +5552,16 @@ def cmd_chapter_select(
         or topic_progress_line(updated)
         or f"Jumped to Unit {unit_num}."
     )
-    return 0
+    return ChapterSelectionResult.SELECTED
+
+
+def cmd_chapter_select(
+    args: argparse.Namespace,
+    input_func=input,
+    output_func=print,
+) -> int:
+    result = select_chapter(args, input_func=input_func, output_func=output_func)
+    return 1 if result is ChapterSelectionResult.ERROR else 0
 
 
 def print_course_plan(topic: Topic, output_func=print) -> None:

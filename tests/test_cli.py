@@ -13075,6 +13075,54 @@ class InteractiveTests(unittest.TestCase):
         self.assertTrue(any("Course plan" in line for line in clean))
         self.assertIn("1. 1.1 Modes (2 slide(s))", output)
 
+    def test_repl_chapter_does_not_teach_when_selection_fails(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
+        output = []
+
+        with mock.patch.object(cli, "cmd_next") as next_command:
+            cli.handle_repl_command("chapter 1", output_func=output.append)
+
+        self.assertTrue(any("No course plan" in line for line in output))
+        next_command.assert_not_called()
+
+    def test_repl_chapter_does_not_teach_when_selection_is_canceled(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
+        path = cli.topic_path("vim")
+        metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+        metadata["course_units"] = [
+            {"unit": 1, "chapter": "1.1", "title": "Modes", "slide_count": 2},
+        ]
+        path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
+
+        with mock.patch.object(cli, "cmd_next") as next_command:
+            cli.handle_repl_command(
+                "chapter",
+                input_func=lambda _="": "",
+                output_func=lambda _: None,
+            )
+
+        next_command.assert_not_called()
+
+    def test_repl_chapter_teaches_after_successful_selection(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
+        path = cli.topic_path("vim")
+        metadata, body = cli.parse_topic(path.read_text(encoding="utf-8"))
+        metadata["course_units"] = [
+            {"unit": 1, "chapter": "1.1", "title": "Modes", "slide_count": 2},
+        ]
+        path.write_text(cli.format_topic(metadata, body), encoding="utf-8")
+        output = []
+
+        with mock.patch.object(cli, "cmd_next") as next_command:
+            cli.handle_repl_command("chapter 1", output_func=output.append)
+
+        self.assertIn("Loading next slide...", output)
+        next_command.assert_called_once()
+
+    def test_repl_chapter_rejects_non_numeric_unit(self) -> None:
+        with self.assertRaisesRegex(cli.OpenLearnError, r"usage: /chapter"):
+            cli.handle_repl_command("chapter banana")
+
     def test_summary_command_prints_learning_state(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
         path = cli.topic_path("vim")
