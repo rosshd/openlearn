@@ -233,7 +233,15 @@ class ActivityContractTests(unittest.TestCase):
                     "title": "First unique window",
                     "language": "python",
                     "problem_id": "first_unique_window_v1",
-                    "tool_requests": [],
+                    "function_name": "first_unique_window",
+                    "test_cases": [
+                        {"input": [["a", "b", "a"], 2], "expected": 1},
+                    ],
+                    "tool_requests": [
+                        {"action": "create_drill_workspace", "payload": {}},
+                        {"action": "open_configured_editor", "payload": {}},
+                        {"action": "run_drill_tests", "payload": {}},
+                    ],
                 },
                 "resources": [
                     {
@@ -256,24 +264,94 @@ class ActivityContractTests(unittest.TestCase):
         activity, _ = transition_activity(activity, "completed")
 
         self.assertEqual(activity["purpose"], "placement")
+        coding = activity["domain_payload"]["coding"]
+        self.assertEqual(coding["problem_id"], "first_unique_window_v1")
+        self.assertEqual(coding["function_name"], "first_unique_window")
+        self.assertEqual(
+            coding["test_cases"],
+            [{"input": [["a", "b", "a"], 2], "expected": 1}],
+        )
+        self.assertEqual(
+            coding["tool_requests"],
+            [
+                {"action": "create_drill_workspace", "payload": {}},
+                {"action": "open_configured_editor", "payload": {}},
+                {"action": "run_drill_tests", "payload": {}},
+            ],
+        )
         self.assertEqual(evidence["stage"], "implementation")
         self.assertEqual(activity["status"], "completed")
         self.assertNotIn("mastery", activity)
 
-    def test_interview_activity_rejects_tools_and_malformed_evidence(self) -> None:
+    def test_interview_activity_rejects_unsafe_tools_and_malformed_evidence(self) -> None:
         adapter = self.registry.adapter_for("coding")
-        with self.assertRaisesRegex(ActivityContractError, "does not permit tool"):
+        base = {
+            "title": "Executable placement",
+            "language": "python",
+            "problem_id": "first_unique_window_v1",
+            "function_name": "first_unique_window",
+            "test_cases": [{"input": [["a"], 1], "expected": 1}],
+        }
+        unsafe_tools = [
+            [{"action": "run_arbitrary_shell", "payload": {}}],
+            [
+                {"action": "run_drill_tests", "payload": {}},
+                {"action": "run_drill_tests", "payload": {}},
+            ],
+            [{"action": "run_drill_tests", "payload": {"command": "rm -rf /"}}],
+            [{"action": "run_drill_tests"}],
+            [{"action": "run_drill_tests", "payload": {}, "path": "/tmp/owned"}],
+            [{"action": ["run_drill_tests"], "payload": {}}],
+        ]
+        for tool_requests in unsafe_tools:
+            with self.subTest(tool_requests=tool_requests), self.assertRaises(
+                ActivityContractError
+            ):
+                adapter.validate_request(
+                    "interview_problem",
+                    {**base, "tool_requests": tool_requests},
+                )
+        invalid_execution = [
+            {**base, "function_name": "not-valid"},
+            {**base, "test_cases": []},
+            {**base, "test_cases": [{"input": []}]},
+            {**base, "language": "javascript"},
+        ]
+        for payload in invalid_execution:
+            with self.subTest(payload=payload), self.assertRaises(
+                ActivityContractError
+            ):
+                adapter.validate_request(
+                    "interview_problem",
+                    {
+                        **payload,
+                        "tool_requests": [
+                            {"action": "run_drill_tests", "payload": {}},
+                        ],
+                    },
+                )
+        with self.assertRaisesRegex(ActivityContractError, "executable"):
             adapter.validate_request(
                 "interview_problem",
                 {
-                    "title": "Unsafe",
+                    "title": "Incomplete executable placement",
                     "language": "python",
-                    "problem_id": "unsafe",
+                    "problem_id": "first_unique_window_v1",
                     "tool_requests": [
                         {"action": "run_drill_tests", "payload": {}}
                     ],
                 },
             )
+        legacy = adapter.validate_request(
+            "interview_problem",
+            {
+                "title": "Stored placement",
+                "language": "python",
+                "problem_id": "first_unique_window_v1",
+                "tool_requests": [],
+            },
+        )
+        self.assertEqual(legacy["tool_requests"], [])
         with self.assertRaisesRegex(ActivityContractError, "invalid interview"):
             adapter.validate_evidence(
                 "interview_observation",

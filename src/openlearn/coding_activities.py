@@ -271,6 +271,11 @@ class CodingActivityAdapter:
         "open_official_problem_link",
         "run_drill_tests",
     }
+    interview_tool_actions = {
+        "create_drill_workspace",
+        "open_configured_editor",
+        "run_drill_tests",
+    }
 
     def validate_request(self, kind: str, payload: Mapping[str, object]) -> dict[str, object]:
         if kind not in self.activity_kinds:
@@ -283,6 +288,10 @@ class CodingActivityAdapter:
             raise ActivityContractError("coding activity language must be non-empty text")
         if kind == "python_drill" and language != "python":
             raise ActivityContractError("python_drill requires language=python")
+        normalized: dict[str, object] = {
+            "title": title.strip(),
+            "language": "python" if kind == "python_drill" else language.strip(),
+        }
         if kind == "interview_problem":
             if language.strip().lower() != "python":
                 raise ActivityContractError(
@@ -297,64 +306,71 @@ class CodingActivityAdapter:
                 raise ActivityContractError(
                     "interview_problem requires a bounded problem_id"
                 )
-            if payload.get("tool_requests", []) != []:
-                raise ActivityContractError(
-                    "interview_problem does not permit tool requests"
-                )
-            return {
-                "title": title.strip(),
-                "language": language.strip(),
-                "problem_id": problem_id.strip(),
-                "tool_requests": [],
-            }
+            normalized["problem_id"] = problem_id.strip()
         raw_tools = payload.get("tool_requests", [])
         if not isinstance(raw_tools, list) or len(raw_tools) > 3:
             raise ActivityContractError("coding tool_requests must be a bounded list")
         tools: list[dict[str, object]] = []
+        seen_actions: set[str] = set()
         for item in raw_tools:
             if not isinstance(item, Mapping):
                 raise ActivityContractError("coding tool request must be an object")
+            if kind == "interview_problem" and set(item) != {"action", "payload"}:
+                raise ActivityContractError(
+                    "interview_problem tool request fields are malformed"
+                )
             action = item.get("action")
-            if action not in self.tool_actions:
+            allowed_actions = (
+                self.interview_tool_actions
+                if kind == "interview_problem"
+                else self.tool_actions
+            )
+            if not isinstance(action, str) or action not in allowed_actions:
                 raise ActivityContractError(f"unknown coding tool action: {action}")
+            if kind == "interview_problem" and action in seen_actions:
+                raise ActivityContractError(
+                    f"duplicate interview_problem tool action: {action}"
+                )
+            seen_actions.add(action)
             action_payload = item.get("payload", {})
             if not isinstance(action_payload, Mapping) or action_payload:
                 raise ActivityContractError(
                     "built-in coding tool actions do not accept arbitrary payloads"
                 )
             tools.append({"action": action, "payload": {}})
-        normalized: dict[str, object] = {
-            "title": title.strip(),
-            "language": "python",
-            "tool_requests": tools,
-        }
-        optional_text = ("plan_prompt", "reflection_prompt", "transfer_prompt")
-        for field in optional_text:
-            if field in payload:
-                normalized[field] = _optional_text(payload.get(field), f"coding {field}")
-        if "difficulty" in payload:
-            difficulty = payload.get("difficulty")
-            if (
-                not isinstance(difficulty, int)
-                or isinstance(difficulty, bool)
-                or not 1 <= difficulty <= 3
-            ):
-                raise ActivityContractError("coding difficulty must be an integer from 1 to 3")
-            normalized["difficulty"] = difficulty
-        if "hints" in payload:
-            hints = payload.get("hints")
-            if not isinstance(hints, list) or len(hints) > MAX_HINTS:
-                raise ActivityContractError("coding hints must be a bounded list")
-            normalized["hints"] = [_text(item, "coding hint") for item in hints]
-        if "todo_steps" in payload:
-            todo_steps = payload.get("todo_steps")
-            if not isinstance(todo_steps, list) or len(todo_steps) > MAX_TODO_STEPS:
-                raise ActivityContractError("coding TODO steps must be a bounded list")
-            normalized["todo_steps"] = [
-                _line_text(item, "coding TODO step") for item in todo_steps
-            ]
-        if "worked_example" in payload:
-            normalized["worked_example"] = _worked_example(payload.get("worked_example"))
+        normalized["tool_requests"] = tools
+        if kind == "python_drill":
+            optional_text = ("plan_prompt", "reflection_prompt", "transfer_prompt")
+            for field in optional_text:
+                if field in payload:
+                    normalized[field] = _optional_text(payload.get(field), f"coding {field}")
+            if "difficulty" in payload:
+                difficulty = payload.get("difficulty")
+                if (
+                    not isinstance(difficulty, int)
+                    or isinstance(difficulty, bool)
+                    or not 1 <= difficulty <= 3
+                ):
+                    raise ActivityContractError(
+                        "coding difficulty must be an integer from 1 to 3"
+                    )
+                normalized["difficulty"] = difficulty
+            if "hints" in payload:
+                hints = payload.get("hints")
+                if not isinstance(hints, list) or len(hints) > MAX_HINTS:
+                    raise ActivityContractError("coding hints must be a bounded list")
+                normalized["hints"] = [_text(item, "coding hint") for item in hints]
+            if "todo_steps" in payload:
+                todo_steps = payload.get("todo_steps")
+                if not isinstance(todo_steps, list) or len(todo_steps) > MAX_TODO_STEPS:
+                    raise ActivityContractError("coding TODO steps must be a bounded list")
+                normalized["todo_steps"] = [
+                    _line_text(item, "coding TODO step") for item in todo_steps
+                ]
+            if "worked_example" in payload:
+                normalized["worked_example"] = _worked_example(
+                    payload.get("worked_example")
+                )
         if "function_name" in payload:
             function_name = payload.get("function_name")
             if not isinstance(function_name, str) or not function_name.isidentifier():
@@ -386,6 +402,12 @@ class CodingActivityAdapter:
                         "each coding test case requires input and expected"
                     )
             normalized["test_cases"] = [dict(case) for case in test_cases]
+        if kind == "interview_problem" and tools and (
+            "function_name" not in normalized or "test_cases" not in normalized
+        ):
+            raise ActivityContractError(
+                "executable interview_problem requires function_name and test_cases"
+            )
         return normalized
 
     def validate_evidence(self, kind: str, payload: Mapping[str, object]) -> dict[str, object]:
