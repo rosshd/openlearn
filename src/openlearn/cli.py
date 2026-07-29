@@ -2961,7 +2961,7 @@ def cmd_interview_profile(args: argparse.Namespace, output_func=print) -> int:
     if isinstance(recommendations, dict):
         output_func(
             "Study plan: "
-            f"{recommendations.get('sessions_per_week')} x "
+            f"{recommendations.get('sessions_per_week')} sessions, up to "
             f"{recommendations.get('session_minutes')} minutes "
             f"({recommendations.get('weekly_minutes')} minutes/week)"
         )
@@ -3059,8 +3059,8 @@ INTERVIEW_PLACEMENT_PROMPTS = {
     ),
     "plan": "Explain your initial approach and the data structures you would use.",
     "implementation": (
-        "Enter code below; finish with a line containing only /done. "
-        "Use /editor first to open your configured editor, or /skip, /baseline, /stop."
+        "Press Enter to open your configured editor, or type "
+        "/skip, /baseline, or /stop."
     ),
     "tests": "List or run representative tests, including edge cases, and report what happened.",
     "complexity": "Analyze the time and space complexity of your implementation.",
@@ -3099,61 +3099,6 @@ def _print_placement_saved(
     )
 
 
-def _placement_editor_response(output_func=print) -> str | None:
-    instructions = (
-        "# openLearn: enter your implementation below.\n"
-        "# openLearn: save and close the editor when finished.\n\n"
-    )
-    temp_path: Path | None = None
-    try:
-        editor = configured_editor_argv()
-        with tempfile.NamedTemporaryFile(
-            "w",
-            encoding="utf-8",
-            prefix="openlearn-placement-",
-            suffix=".py",
-            delete=False,
-        ) as temp_file:
-            temp_path = Path(temp_file.name)
-            temp_file.write(instructions)
-        temp_path.chmod(0o600)
-        result = subprocess.run([*editor, str(temp_path)], check=False)
-        if result.returncode != 0:
-            output_func(
-                "Editor closed without saving an implementation. "
-                "You can enter code in the terminal instead."
-            )
-            return None
-        lines = temp_path.read_text(encoding="utf-8").splitlines()
-        response = "\n".join(
-            line for line in lines if not line.startswith("# openLearn:")
-        ).strip("\n")
-        if not response.strip():
-            output_func(
-                "The editor did not contain an implementation. "
-                "You can enter code in the terminal instead."
-            )
-            return None
-        return response
-    except (OSError, OpenLearnError) as exc:
-        output_func(
-            f"Could not open the configured editor: {exc}. "
-            "You can enter code in the terminal instead."
-        )
-        return None
-    finally:
-        if temp_path is not None:
-            try:
-                temp_path.unlink()
-            except FileNotFoundError:
-                pass
-            except OSError as exc:
-                output_func(
-                    f"Warning: could not remove private editor file {temp_path}: {exc}. "
-                    f"Remove it manually with: rm -- {shlex.quote(str(temp_path))}"
-                )
-
-
 PLACEMENT_COMMANDS = {
     command: name
     for name in ("stop", "discard", "skip", "baseline")
@@ -3165,33 +3110,288 @@ def _placement_command(response: str) -> str | None:
     return PLACEMENT_COMMANDS.get(response.strip().lower())
 
 
-def _read_placement_implementation(input_func, output_func=print) -> str | None:
-    first_line = input_func("implementation> ")
-    if not first_line.strip():
-        output_func(
-            "Enter code below; finish with a line containing only /done. "
-            "Use /editor first to open your configured editor, or /skip, /baseline, /stop."
+def _placement_runner_cases() -> list[dict[str, object]]:
+    cases = interview_prep.PLACEMENT_PROBLEM["test_cases"]
+    assert isinstance(cases, list)
+    return [
+        {"input": dict(case["inputs"]), "expected": case["expected"]}
+        for case in cases
+        if isinstance(case, dict) and isinstance(case.get("inputs"), dict)
+    ]
+
+
+def _placement_inert_function_stub() -> str:
+    source = str(interview_prep.PLACEMENT_PROBLEM["function_stub"])
+    try:
+        module = ast.parse(source, mode="exec")
+    except SyntaxError as exc:
+        raise OpenLearnError(
+            f"placement function stub is invalid Python: {exc.msg}"
+        ) from exc
+    if len(module.body) != 1 or not isinstance(module.body[0], ast.FunctionDef):
+        raise OpenLearnError("placement function stub must contain one function")
+    function = module.body[0]
+    function.returns = None
+    for argument in (
+        *function.args.posonlyargs,
+        *function.args.args,
+        *function.args.kwonlyargs,
+    ):
+        argument.annotation = None
+    return ast.unparse(module).strip()
+
+
+def _placement_drill() -> dict[str, object]:
+    examples = interview_prep.PLACEMENT_PROBLEM["examples"]
+    assert isinstance(examples, list)
+    example_lines = ["Examples:"]
+    function_name = str(interview_prep.PLACEMENT_PROBLEM["function_name"])
+    for example in examples:
+        assert isinstance(example, dict)
+        inputs = example["inputs"]
+        assert isinstance(inputs, dict)
+        example_lines.append(
+            f"{function_name}({inputs['text']!r}, {inputs['width']}) "
+            f"-> {example['expected']}"
         )
-        return None
-    if first_line.strip().lower() == "/editor":
-        return _placement_editor_response(output_func)
-    if _placement_command(first_line) is not None:
-        return first_line
-    if first_line.strip().lower() == "/done":
-        output_func(
-            "No implementation was entered. Paste code, use /editor, "
-            "/skip, /baseline, or /stop."
+    return {
+        "title": interview_prep.PLACEMENT_PROBLEM["title"],
+        "description": (
+            f"{interview_prep.PLACEMENT_PROBLEM['prompt']}\n\n"
+            + "\n".join(example_lines)
+        ),
+        "function_stub": _placement_inert_function_stub(),
+        "test_cases": _placement_runner_cases(),
+    }
+
+
+def _placement_workspace(
+    topic: Topic,
+    activity: dict[str, object],
+) -> Path:
+    identifier = str(activity["activity_id"]).removeprefix("activity_")[:12]
+    workspace = topic_drill_dir(topic.slug) / (
+        f"{drill_filename(str(interview_prep.PLACEMENT_PROBLEM['title']))[:-3]}"
+        f"-{identifier}.py"
+    )
+    if not workspace.exists():
+        drill = validate_drill_data(_placement_drill())
+        content = render_drill_file(drill).replace(
+            "Run openlearn /check when you are ready to test your solution.",
+            "Save and close the editor when you are ready to run the placement tests.",
+            1,
         )
-        return None
-    lines = [first_line]
-    while True:
-        line = input_func("... ")
-        if line.strip().lower() == "/done":
-            return "\n".join(lines)
-        lines.append(line)
+        write_text_atomic(workspace, content)
+    save_active_drill(topic.slug, workspace)
+    return workspace
+
+
+def _record_placement_execution(
+    slug: str,
+    activity: dict[str, object],
+    response: str,
+) -> dict[str, object]:
+    value: dict[str, object] = {}
+    for stage in ("implementation", "tests"):
+        activity = record_topic_activity_evidence(
+            slug,
+            activity,
+            "interview_observation",
+            {"stage": stage, "response": response},
+        )
+        value = sync_interview_placement(slug)
+    return value
+
+
+def _skip_placement_implementation_and_dependents(
+    slug: str,
+    activity: dict[str, object],
+) -> dict[str, object]:
+    value: dict[str, object] = {}
+    for stage in ("implementation", "tests", "complexity", "follow_up"):
+        activity = record_topic_activity_evidence(
+            slug,
+            activity,
+            "interview_observation",
+            {
+                "stage": stage,
+                "response": f"Learner skipped {stage}; evidence remains uncertain.",
+            },
+        )
+        value = sync_interview_placement(slug)
+    return value
+
+
+def _finish_placement_attempt_test(
+    slug: str,
+    attempt_id: str,
+    run_id: str,
+    *,
+    outcome: str,
+    output: str,
+    run_result: code_runner.RunnerResult | None = None,
+) -> dict[str, object]:
+    limits: dict[str, object] = {}
+    if run_result is not None:
+        limits = {
+            "isolation": run_result.isolation,
+            "limit_reason": run_result.limit_reason,
+            "exit_code": run_result.exit_code,
+        }
+    try:
+        return attempt_store().finish_test(
+            slug,
+            attempt_id,
+            run_id,
+            outcome=outcome,
+            output=output,
+            limits=limits,
+        )
+    except interview_attempts.AttemptError as exc:
+        raise OpenLearnError(f"could not save placement test outcome: {exc}") from exc
+
+
+def _run_placement_implementation(
+    slug: str,
+    activity: dict[str, object],
+    output_func=print,
+) -> bool:
+    topic = read_topic(slug)
+    try:
+        workspace = _placement_workspace(topic, activity)
+        attempt = ensure_attempt_for_drill(
+            topic,
+            activity,
+            workspace,
+            snapshot=True,
+            prefer_existing=True,
+        )
+    except (OSError, OpenLearnError) as exc:
+        log_activity_tool_failure(slug, activity, "create_drill_workspace", exc)
+        output_func(f"Could not create the placement workspace: {exc}")
+        output_func(
+            f"Placement remains at implementation. Run 'openlearn doctor', then "
+            f"'openlearn interview placement {slug} resume'."
+        )
+        return False
+    output_func(f"Placement workspace: {workspace}")
+    try:
+        editor = open_drill_in_editor(workspace)
+    except OpenLearnError as exc:
+        log_activity_tool_failure(slug, activity, "open_configured_editor", exc)
+        output_func(str(exc))
+        output_func(
+            f"Edit the persistent workspace manually at {workspace}. "
+            f"Placement remains at implementation. Run 'openlearn doctor', then "
+            f"'openlearn interview placement {slug} resume'."
+        )
+        return False
+    output_func(f"Opened in {editor}. Running the placement tests now.")
+    store = attempt_store()
+    attempt_id = str(attempt["attempt_id"])
+    try:
+        prior_runs = attempt.get("test_runs")
+        if isinstance(prior_runs, list):
+            for prior_run in prior_runs:
+                if (
+                    isinstance(prior_run, dict)
+                    and prior_run.get("outcome") == "pending"
+                ):
+                    attempt = store.finish_test(
+                        slug,
+                        attempt_id,
+                        str(prior_run["run_id"]),
+                        outcome="interrupted",
+                        output=(
+                            "The previous placement process ended before the "
+                            "secure runner returned."
+                        ),
+                    )
+        attempt = store.snapshot(slug, attempt_id)
+        attempt, run_id = store.start_test(slug, attempt_id, visibility="hidden")
+    except interview_attempts.AttemptError as exc:
+        raise OpenLearnError(f"could not save placement coding evidence: {exc}") from exc
+    try:
+        run_result = code_runner.run_python_tests(
+            workspace,
+            function_name=str(interview_prep.PLACEMENT_PROBLEM["function_name"]),
+            test_cases=_placement_runner_cases(),
+            reduced_isolation=False,
+        )
+    except (OSError, ValueError, code_runner.RunnerUnavailableError) as exc:
+        _finish_placement_attempt_test(
+            slug,
+            attempt_id,
+            run_id,
+            outcome="runner_unavailable",
+            output=str(exc),
+        )
+        log_activity_tool_failure(slug, activity, "run_drill_tests", exc)
+        output_func(f"Could not run the secure placement tests: {exc}")
+        output_func(
+            f"Your work is preserved at {workspace}. Placement remains at "
+            f"implementation. Run 'openlearn doctor', then "
+            f"'openlearn interview placement {slug} resume'."
+        )
+        return False
+    result_output = "\n".join(
+        part
+        for part in (run_result.stdout.strip(), run_result.stderr.strip())
+        if part
+    )
+    if run_result.kind in {"runner_error", "cancelled"}:
+        _finish_placement_attempt_test(
+            slug,
+            attempt_id,
+            run_id,
+            outcome=run_result.kind,
+            output=result_output,
+            run_result=run_result,
+        )
+        error = OpenLearnError(
+            f"secure placement runner returned {run_result.kind}"
+            f"{': ' + run_result.limit_reason if run_result.limit_reason else ''}"
+        )
+        log_activity_tool_failure(slug, activity, "run_drill_tests", error)
+        output_func(str(error))
+        output_func(
+            f"Your work is preserved at {workspace}. Placement remains at "
+            f"implementation. Run 'openlearn doctor', then resume."
+        )
+        return False
+    outcome = "passed" if run_result.passed else run_result.kind
+    _finish_placement_attempt_test(
+        slug,
+        attempt_id,
+        run_id,
+        outcome=outcome,
+        output=result_output,
+        run_result=run_result,
+    )
+    try:
+        source = workspace.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise OpenLearnError(f"could not read placement implementation: {exc}") from exc
+    response = interview_prep.placement_execution_evidence(
+        source,
+        outcome=outcome,
+        tests_passed=run_result.passed,
+        return_code=run_result.exit_code,
+    )
+    _record_placement_execution(slug, activity, response)
+    total = len(_placement_runner_cases())
+    if run_result.passed:
+        output_func(f"{total}/{total} tests passed. Coding evidence saved.")
+    else:
+        output_func(
+            f"Tests did not pass ({run_result.kind}). "
+            "The observed attempt was saved for placement."
+        )
+    return True
 
 
 def interview_placement_activity_request() -> dict[str, object]:
+    runner_cases = _placement_runner_cases()
     return {
         "domain": "coding",
         "kind": "interview_problem",
@@ -3204,7 +3404,13 @@ def interview_placement_activity_request() -> dict[str, object]:
             "title": interview_prep.PLACEMENT_PROBLEM["title"],
             "language": "python",
             "problem_id": interview_prep.PLACEMENT_PROBLEM["problem_id"],
-            "tool_requests": [],
+            "function_name": interview_prep.PLACEMENT_PROBLEM["function_name"],
+            "test_cases": runner_cases,
+            "tool_requests": [
+                {"action": "create_drill_workspace", "payload": {}},
+                {"action": "open_configured_editor", "payload": {}},
+                {"action": "run_drill_tests", "payload": {}},
+            ],
         },
         "resources": [
             {
@@ -3428,8 +3634,17 @@ def cmd_interview_placement(
             output_func(f"\n{stage_prompt}")
             try:
                 if stage == "implementation":
-                    response = _read_placement_implementation(input_func, output_func)
-                    if response is None:
+                    response = input_func("implementation> ")
+                    if not response.strip():
+                        activity = _current_interview_activity(slug)
+                        if activity is None or activity.get("status") != "active":
+                            raise OpenLearnError(
+                                "validated interview placement activity is not active"
+                            )
+                        if _run_placement_implementation(
+                            slug, activity, output_func=output_func
+                        ):
+                            value = sync_interview_placement(slug)
                         continue
                 else:
                     response = input_func(f"{stage}> ")
@@ -3441,6 +3656,12 @@ def cmd_interview_placement(
                 output_func("Enter a response, /skip, /baseline, or /stop.")
                 continue
             command = _placement_command(response)
+            if stage == "implementation" and command is None:
+                output_func(
+                    "Press Enter to open your configured editor, or type "
+                    "/skip, /baseline, or /stop."
+                )
+                continue
             if command == "stop":
                 _print_placement_saved(slug, stage, value, output_func)
                 return 0
@@ -3485,6 +3706,15 @@ def cmd_interview_placement(
                 )
                 break
             if command == "skip":
+                if stage == "implementation":
+                    value = _skip_placement_implementation_and_dependents(
+                        slug, activity
+                    )
+                    output_func(
+                        "Implementation skipped. Dependent coding evidence remains "
+                        "uncertain, and placement is complete."
+                    )
+                    break
                 response = f"Learner skipped {stage}; evidence remains uncertain."
             record_topic_activity_evidence(
                 slug,
@@ -3494,9 +3724,17 @@ def cmd_interview_placement(
             )
             value = sync_interview_placement(slug)
             if stage == "clarification" and command != "skip":
-                output_func(interview_prep.PLACEMENT_ASSUMPTION_CARD)
+                output_func(
+                    interview_prep.placement_clarification_response(response)
+                )
         output_func("Placement complete. Results are provisional and grant no mastery.")
-        return cmd_interview_profile(argparse.Namespace(topic=slug), output_func=output_func)
+        result = cmd_interview_profile(
+            argparse.Namespace(topic=slug), output_func=output_func
+        )
+        output_func(
+            "Placement saved. Continue from the main menu to build your course plan."
+        )
+        return result
     except ValueError as exc:
         raise OpenLearnError(str(exc)) from exc
 
@@ -3734,7 +3972,7 @@ def interview_planning_context(
                 f"Target: {recommendations.get('target')}",
                 (
                     "Schedule: "
-                    f"{recommendations.get('sessions_per_week')} x "
+                    f"{recommendations.get('sessions_per_week')} sessions, up to "
                     f"{recommendations.get('session_minutes')} minutes "
                     f"({recommendations.get('weekly_minutes')} minutes/week)"
                 ),
@@ -3750,7 +3988,7 @@ def interview_planning_context(
     else:
         scheduled, session, sessions = interview_prep.practice_schedule(profile)
         lines.append(
-            f"Schedule: {sessions} x {session} minutes "
+            f"Schedule: {sessions} sessions, up to {session} minutes "
             f"({scheduled} minutes/week)"
         )
 

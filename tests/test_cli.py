@@ -785,18 +785,24 @@ class CliStorageTests(unittest.TestCase):
             [
                 "Can width exceed the text length?",
                 "Scan each window with a set.",
-                "def first_unique_window(text, width): return -1",
-                "/done",
-                "Empty, duplicates, and a matching window.",
+                "",
                 "O(n * width) time and O(width) space.",
                 "Use last-seen positions.",
             ]
         )
-        cli.cmd_interview_placement(
-            Namespace(topic="algorithms", action="resume"),
-            input_func=lambda _prompt: next(remaining),
-            output_func=lambda _line: None,
-        )
+        with (
+            mock.patch.object(cli, "open_drill_in_editor", return_value="nvim"),
+            mock.patch.object(
+                cli.code_runner,
+                "run_python_tests",
+                return_value=code_result(10, "1 failed"),
+            ),
+        ):
+            cli.cmd_interview_placement(
+                Namespace(topic="algorithms", action="resume"),
+                input_func=lambda _prompt: next(remaining),
+                output_func=lambda _line: None,
+            )
 
         completed = cli.interview_prep.load_profile(
             cli.interview_profile_path("algorithms")
@@ -839,41 +845,46 @@ class CliStorageTests(unittest.TestCase):
         answers = iter(
             [
                 "Completed a data structures course and practice LeetCode.",
-                "How is input given, and what should I return?",
+                "How is input given, what should I return, and can I see examples?",
                 "Use a sliding window and a character-count hashmap.",
                 "",
-                "def first_unique_window(text, width):",
-                "    return -1",
-                "/done",
                 "/stop",
             ]
         )
         output: list[str] = []
 
-        cli.cmd_interview_placement(
-            Namespace(topic="algorithms", action="start"),
-            input_func=lambda _prompt: next(answers),
-            output_func=output.append,
-        )
+        with (
+            mock.patch.object(cli, "open_drill_in_editor", return_value="nvim"),
+            mock.patch.object(
+                cli.code_runner,
+                "run_python_tests",
+                return_value=code_result(10, "1 failed"),
+            ),
+        ):
+            cli.cmd_interview_placement(
+                Namespace(topic="algorithms", action="start"),
+                input_func=lambda _prompt: next(answers),
+                output_func=output.append,
+            )
 
         profile = cli.interview_prep.load_profile(
             cli.interview_profile_path("algorithms")
         )
-        self.assertEqual(profile["placement"]["next_stage"], "tests")
-        self.assertEqual(len(profile["placement"]["evidence_refs"]), 4)
+        self.assertEqual(profile["placement"]["next_stage"], "complexity")
+        self.assertEqual(len(profile["placement"]["evidence_refs"]), 5)
         transcript = "\n".join(output)
         self.assertIn("Python string", transcript)
         self.assertIn("zero-based start index", transcript)
         self.assertIn("-1", transcript)
-        self.assertIn("finish with a line containing only /done", transcript)
+        self.assertIn("Examples:", transcript)
+        self.assertIn("Opened in nvim", transcript)
         self.assertNotIn("must be non-empty", transcript)
         evidence = cli._interview_activity_evidence(
             "algorithms", cli._current_interview_activity("algorithms")
         )
-        self.assertEqual(
-            evidence[3][2],
-            "def first_unique_window(text, width):\n    return -1",
-        )
+        self.assertEqual(evidence[3][1], "implementation")
+        self.assertEqual(evidence[4][1], "tests")
+        self.assertEqual(evidence[3][2], evidence[4][2])
 
     def test_generic_resume_routes_active_interview_placement_before_provider_work(
         self,
@@ -913,17 +924,16 @@ class CliStorageTests(unittest.TestCase):
                 "call_openai_streaming",
                 side_effect=AssertionError("provider must not run"),
             ),
+            mock.patch.object(cli, "open_drill_in_editor", return_value="nvim"),
+            mock.patch.object(
+                cli.code_runner,
+                "run_python_tests",
+                return_value=code_result(10, "1 failed"),
+            ),
         ):
             result = cli.cmd_resume(
                 Namespace(topic="algorithms", model=None),
-                input_func=iter_input(
-                    [
-                        "def first_unique_window(text, width):",
-                        "    return -1",
-                        "/done",
-                        "/stop",
-                    ]
-                ),
+                input_func=iter_input(["", "/stop"]),
                 output_func=output.append,
             )
 
@@ -931,9 +941,9 @@ class CliStorageTests(unittest.TestCase):
             cli.interview_profile_path("algorithms")
         )
         self.assertEqual(result, 0)
-        self.assertEqual(profile["placement"]["next_stage"], "tests")
-        self.assertEqual(len(profile["placement"]["evidence_refs"]), 4)
-        self.assertIn("Enter code below", "\n".join(output))
+        self.assertEqual(profile["placement"]["next_stage"], "complexity")
+        self.assertEqual(len(profile["placement"]["evidence_refs"]), 5)
+        self.assertIn("Opened in nvim", "\n".join(output))
 
     def test_interview_course_context_is_derived_and_excludes_raw_evidence(self) -> None:
         call_silent(
@@ -946,28 +956,47 @@ class CliStorageTests(unittest.TestCase):
                 template=None,
             ),
         )
-        raw_answers = [
-            "PRIVATE CALIBRATION RESPONSE",
-            "PRIVATE CLARIFICATION RESPONSE?",
-            "PRIVATE PLAN RESPONSE using a hashmap",
-            "def first_unique_window(text, width):",
-            "    return -1  # PRIVATE IMPLEMENTATION",
-            "/done",
-            "PRIVATE TEST RESPONSE",
-            "PRIVATE COMPLEXITY RESPONSE",
-            "PRIVATE FOLLOW UP RESPONSE",
-        ]
-        cli.cmd_interview_placement(
-            Namespace(topic="algorithms", action="start"),
-            input_func=iter_input(raw_answers),
-            output_func=lambda _line: None,
-        )
+        def write_private_implementation(path: Path) -> str:
+            path.write_text(
+                "def first_unique_window(text, width):\n"
+                "    return -1  # PRIVATE IMPLEMENTATION\n",
+                encoding="utf-8",
+            )
+            return "nvim"
+
+        with (
+            mock.patch.object(
+                cli, "open_drill_in_editor", side_effect=write_private_implementation
+            ),
+            mock.patch.object(
+                cli.code_runner,
+                "run_python_tests",
+                return_value=code_result(10, "PRIVATE TEST RESPONSE"),
+            ),
+        ):
+            cli.cmd_interview_placement(
+                Namespace(topic="algorithms", action="start"),
+                input_func=iter_input(
+                    [
+                        "PRIVATE CALIBRATION RESPONSE",
+                        "PRIVATE CLARIFICATION RESPONSE?",
+                        "PRIVATE PLAN RESPONSE using a hashmap",
+                        "",
+                        "PRIVATE COMPLEXITY RESPONSE",
+                        "PRIVATE FOLLOW UP RESPONSE",
+                    ]
+                ),
+                output_func=lambda _line: None,
+            )
 
         prompt = cli.course_outline_prompt(cli.read_topic("algorithms"))
 
         self.assertIn("Interview placement: provisional", prompt)
         self.assertIn("Target: general SWE at unspecified bar", prompt)
-        self.assertIn("Schedule: 2 x 45 minutes", prompt)
+        self.assertIn(
+            "Schedule: 3 sessions, up to 40 minutes (120 minutes/week)",
+            prompt,
+        )
         self.assertIn("Gap statuses:", prompt)
         self.assertIn("Uncertainty:", prompt)
         for private_text in (
@@ -1437,23 +1466,28 @@ class CliStorageTests(unittest.TestCase):
                 template=None,
             ),
         )
-        cli.cmd_interview_placement(
-            Namespace(topic="algorithms", action="start"),
-            input_func=iter_input(
-                [
-                    "Recent coding practice.",
-                    "What should I return?",
-                    "Use a sliding window.",
-                    "def first_unique_window(text, width):",
-                    "    return -1",
-                    "/done",
-                    "Test edge cases.",
-                    "O(n) time and O(width) space.",
-                    "/stop",
-                ]
+        with (
+            mock.patch.object(cli, "open_drill_in_editor", return_value="nvim"),
+            mock.patch.object(
+                cli.code_runner,
+                "run_python_tests",
+                return_value=code_result(10, "1 failed"),
             ),
-            output_func=lambda _line: None,
-        )
+        ):
+            cli.cmd_interview_placement(
+                Namespace(topic="algorithms", action="start"),
+                input_func=iter_input(
+                    [
+                        "Recent coding practice.",
+                        "What should I return?",
+                        "Use a sliding window.",
+                        "",
+                        "O(n) time and O(width) space.",
+                        "/stop",
+                    ]
+                ),
+                output_func=lambda _line: None,
+            )
 
         with mock.patch.object(
             cli,
@@ -1564,11 +1598,6 @@ class CliStorageTests(unittest.TestCase):
                 "What are the input and return contracts?",
                 "",
                 "Use a sliding window.",
-                "def first_unique_window(text, width):",
-                "    return -1",
-                "/done",
-                "",
-                "Test empty, duplicate, and matching inputs.",
                 "",
                 "O(n) time and O(width) space.",
                 "",
@@ -1577,21 +1606,26 @@ class CliStorageTests(unittest.TestCase):
         )
         output: list[str] = []
 
-        cli.cmd_interview_placement(
-            Namespace(topic="algorithms", action="start"),
-            input_func=lambda _prompt: next(answers),
-            output_func=output.append,
-        )
+        with (
+            mock.patch.object(cli, "open_drill_in_editor", return_value="nvim"),
+            mock.patch.object(
+                cli.code_runner,
+                "run_python_tests",
+                return_value=code_result(10, "1 failed"),
+            ),
+        ):
+            cli.cmd_interview_placement(
+                Namespace(topic="algorithms", action="start"),
+                input_func=lambda _prompt: next(answers),
+                output_func=output.append,
+            )
 
         profile = cli.interview_prep.load_profile(
             cli.interview_profile_path("algorithms")
         )
         self.assertEqual(profile["placement"]["status"], "provisional")
         self.assertEqual(len(profile["placement"]["evidence_refs"]), 7)
-        self.assertGreaterEqual(
-            sum("Enter a response" in line for line in output),
-            6,
-        )
+        self.assertGreaterEqual(sum("Enter a response" in line for line in output), 4)
 
     def test_interview_placement_editor_failure_keeps_implementation_stage(
         self,
@@ -1609,16 +1643,16 @@ class CliStorageTests(unittest.TestCase):
         answers = iter(
             [
                 "Some Python practice.",
-                "What should I return?",
+                "What should I return, and can I see example inputs and outputs?",
                 "Use a sliding window.",
-                "/editor",
+                "",
                 "/stop",
             ]
         )
         output: list[str] = []
 
         with mock.patch.object(
-            cli.subprocess, "run", side_effect=OSError("editor unavailable")
+            cli, "open_drill_in_editor", side_effect=cli.OpenLearnError("editor unavailable")
         ):
             cli.cmd_interview_placement(
                 Namespace(topic="algorithms", action="start"),
@@ -1631,83 +1665,283 @@ class CliStorageTests(unittest.TestCase):
         )
         self.assertEqual(profile["placement"]["next_stage"], "implementation")
         self.assertEqual(len(profile["placement"]["evidence_refs"]), 3)
-        self.assertTrue(any("terminal instead" in line for line in output))
+        workspace = cli.active_drill_path(cli.read_topic("algorithms"))
+        self.assertTrue(workspace.exists())
+        self.assertTrue(workspace.is_relative_to(cli.topics_dir() / "drills" / "algorithms"))
+        transcript = "\n".join(output)
+        self.assertIn(str(workspace), transcript)
+        self.assertIn("openlearn doctor", transcript)
+        self.assertIn("Examples:", transcript)
 
-    def test_placement_editor_handles_malformed_env_and_saved_config(self) -> None:
-        for config, editor in (
-            ({}, "'unterminated"),
-            ({"editor": "'unterminated"}, None),
-        ):
-            with self.subTest(config=config, editor=editor):
-                output: list[str] = []
-                env = {"EDITOR": editor} if editor is not None else {}
-                with (
-                    mock.patch.object(cli, "read_config", return_value=config),
-                    mock.patch.dict(os.environ, env, clear=False),
-                ):
-                    if editor is None:
-                        os.environ.pop("EDITOR", None)
-                        os.environ.pop("VISUAL", None)
-                    response = cli._placement_editor_response(output.append)
-
-                self.assertIsNone(response)
-                self.assertIn("Could not open the configured editor", "\n".join(output))
-
-    def test_placement_editor_uses_private_file_and_returns_filtered_multiline_code(
+    def test_interview_placement_automatically_opens_persistent_workspace_and_runs_tests(
         self,
     ) -> None:
-        seen: dict[str, object] = {}
+        call_silent(
+            cli.cmd_new,
+            Namespace(
+                topic="Algorithms",
+                goal="Practice algorithms",
+                interview_prep=True,
+                mastery_profile=None,
+                template=None,
+            ),
+        )
+        seen: dict[str, Path] = {}
 
-        def edit_file(argv, check=False):
-            path = Path(argv[-1])
-            seen["argv"] = argv
-            seen["check"] = check
+        def edit_file(path: Path) -> str:
             seen["path"] = path
-            seen["mode"] = stat.S_IMODE(path.stat().st_mode)
+            initial = path.read_text(encoding="utf-8")
+            self.assertIn("First unique window", initial)
+            self.assertIn("first_unique_window('aabcde', 3) -> 1", initial)
+            self.assertNotIn("abccdef", initial)
             path.write_text(
-                "# openLearn: instruction\n"
-                "# learner comment\n"
-                "def solve():\n"
-                "    return 1\n",
+                "def first_unique_window(text, width):\n"
+                "    if width <= 0:\n"
+                "        return -1\n"
+                "    for index in range(len(text) - width + 1):\n"
+                "        if len(set(text[index:index + width])) == width:\n"
+                "            return index\n"
+                "    return -1\n",
                 encoding="utf-8",
             )
-            return subprocess.CompletedProcess(argv, 0)
+            return "nvim"
 
-        with (
-            mock.patch.object(cli, "configured_editor_argv", return_value=["code", "--wait"]),
-            mock.patch.object(cli.subprocess, "run", side_effect=edit_file),
-        ):
-            response = cli._placement_editor_response()
-
-        self.assertEqual(seen["argv"][:-1], ["code", "--wait"])
-        self.assertIs(seen["check"], False)
-        self.assertEqual(seen["mode"], 0o600)
-        self.assertEqual(
-            response,
-            "# learner comment\ndef solve():\n    return 1",
-        )
-        self.assertFalse(Path(seen["path"]).exists())
-
-    def test_placement_editor_warns_when_private_file_cleanup_fails(self) -> None:
         output: list[str] = []
-        created_path: list[Path] = []
+        with (
+            mock.patch.object(cli, "open_drill_in_editor", side_effect=edit_file),
+            mock.patch.object(
+                cli.code_runner,
+                "run_python_tests",
+                return_value=code_result(0, "7 passed"),
+            ) as runner,
+            mock.patch.object(
+                cli,
+                "call_openai_streaming",
+                side_effect=AssertionError("placement must not call a model"),
+            ),
+        ):
+            cli.cmd_interview_placement(
+                Namespace(topic="algorithms", action="start"),
+                input_func=iter_input(
+                    [
+                        "Some Python practice.",
+                        "What are the inputs and outputs? Please include examples.",
+                        "Use a sliding window.",
+                        "",
+                        "O(n * width) time and O(width) space.",
+                        "Use last-seen positions for streaming input.",
+                    ]
+                ),
+                output_func=output.append,
+            )
 
-        def close_editor(argv, check=False):
-            created_path.append(Path(argv[-1]))
-            return subprocess.CompletedProcess(argv, 1)
+        workspace = seen["path"]
+        self.assertTrue(workspace.exists())
+        self.assertTrue(workspace.is_relative_to(cli.topics_dir() / "drills" / "algorithms"))
+        runner.assert_called_once()
+        self.assertEqual(
+            runner.call_args.kwargs["function_name"],
+            "first_unique_window",
+        )
+        self.assertEqual(len(runner.call_args.kwargs["test_cases"]), 7)
+        attempt = cli.attempt_store().find_for_workspace(
+            "algorithms", workspace, unfinished_only=False
+        )
+        self.assertIsNotNone(attempt)
+        assert attempt is not None
+        self.assertEqual(attempt["purpose"], "placement")
+        self.assertTrue(attempt["snapshots"])
+        self.assertEqual(attempt["test_runs"][-1]["outcome"], "passed")
+        profile = cli.interview_prep.load_profile(
+            cli.interview_profile_path("algorithms")
+        )
+        self.assertEqual(profile["placement"]["status"], "provisional")
+        self.assertEqual(
+            profile["placement"]["observations"]["implementation"]["status"],
+            "observed",
+        )
+        self.assertEqual(
+            profile["placement"]["observations"]["tests"]["status"],
+            "observed",
+        )
+        transcript = "\n".join(output)
+        self.assertIn("Examples:", transcript)
+        self.assertIn("Opened in nvim", transcript)
+        self.assertIn("7/7 tests passed", transcript)
+        self.assertIn(
+            "Placement saved. Continue from the main menu to build your course plan.",
+            transcript,
+        )
+
+    def test_interview_placement_runner_unavailable_preserves_resumable_workspace(
+        self,
+    ) -> None:
+        call_silent(
+            cli.cmd_new,
+            Namespace(
+                topic="Algorithms",
+                goal="Practice algorithms",
+                interview_prep=True,
+                mastery_profile=None,
+                template=None,
+            ),
+        )
+        output: list[str] = []
+        answers = iter_input(
+            [
+                "Some Python practice.",
+                "What should I return?",
+                "Use a sliding window.",
+                "",
+                "/stop",
+            ]
+        )
+        with (
+            mock.patch.object(cli, "open_drill_in_editor", return_value="nvim"),
+            mock.patch.object(
+                cli.code_runner,
+                "run_python_tests",
+                side_effect=cli.code_runner.RunnerUnavailableError("Docker unavailable"),
+            ),
+        ):
+            cli.cmd_interview_placement(
+                Namespace(topic="algorithms", action="start"),
+                input_func=answers,
+                output_func=output.append,
+            )
+
+        profile = cli.interview_prep.load_profile(
+            cli.interview_profile_path("algorithms")
+        )
+        self.assertEqual(profile["placement"]["next_stage"], "implementation")
+        workspace = cli.active_drill_path(cli.read_topic("algorithms"))
+        attempt = cli.attempt_store().find_for_workspace(
+            "algorithms", workspace, unfinished_only=False
+        )
+        self.assertIsNotNone(attempt)
+        assert attempt is not None
+        self.assertEqual(attempt["test_runs"][-1]["outcome"], "runner_unavailable")
+        transcript = "\n".join(output)
+        self.assertIn(str(workspace), transcript)
+        self.assertIn("openlearn doctor", transcript)
+
+    def test_interview_placement_failed_execution_advances_with_not_observed_evidence(
+        self,
+    ) -> None:
+        call_silent(
+            cli.cmd_new,
+            Namespace(
+                topic="Algorithms",
+                goal="Practice algorithms",
+                interview_prep=True,
+                mastery_profile=None,
+                template=None,
+            ),
+        )
+
+        def write_incorrect_solution(path: Path) -> str:
+            path.write_text(
+                "def first_unique_window(text, width):\n"
+                "    return -1\n",
+                encoding="utf-8",
+            )
+            return "nvim"
 
         with (
-            mock.patch.object(cli, "configured_editor_argv", return_value=["nvim"]),
-            mock.patch.object(cli.subprocess, "run", side_effect=close_editor),
-            mock.patch.object(Path, "unlink", side_effect=OSError("permission denied")),
+            mock.patch.object(
+                cli, "open_drill_in_editor", side_effect=write_incorrect_solution
+            ),
+            mock.patch.object(
+                cli.code_runner,
+                "run_python_tests",
+                return_value=code_result(10, "5 failed, 2 passed"),
+            ),
         ):
-            response = cli._placement_editor_response(output.append)
+            cli.cmd_interview_placement(
+                Namespace(topic="algorithms", action="start"),
+                input_func=iter_input(
+                    [
+                        "Some Python practice.",
+                        "What should I return?",
+                        "Use a sliding window.",
+                        "",
+                        "O(1) time.",
+                        "No change.",
+                    ]
+                ),
+                output_func=lambda _line: None,
+            )
 
-        self.assertIsNone(response)
-        transcript = "\n".join(output)
-        self.assertIn(str(created_path[0]), transcript)
-        self.assertIn("Remove it manually", transcript)
-        created_path[0].unlink()
+        profile = cli.interview_prep.load_profile(
+            cli.interview_profile_path("algorithms")
+        )
+        self.assertEqual(profile["placement"]["status"], "provisional")
+        self.assertEqual(
+            profile["placement"]["observations"]["implementation"]["status"],
+            "not_observed",
+        )
+        self.assertEqual(
+            profile["placement"]["observations"]["tests"]["status"],
+            "not_observed",
+        )
+        workspace = cli.active_drill_path(cli.read_topic("algorithms"))
+        attempt = cli.attempt_store().find_for_workspace(
+            "algorithms", workspace, unfinished_only=False
+        )
+        self.assertIsNotNone(attempt)
+        assert attempt is not None
+        self.assertEqual(attempt["test_runs"][-1]["outcome"], "test_failure")
+
+    def test_interview_placement_implementation_skip_finishes_dependent_stages_uncertain(
+        self,
+    ) -> None:
+        call_silent(
+            cli.cmd_new,
+            Namespace(
+                topic="Algorithms",
+                goal="Practice algorithms",
+                interview_prep=True,
+                mastery_profile=None,
+                template=None,
+            ),
+        )
+        prompts: list[str] = []
+        answers = iter(
+            [
+                "Some Python practice.",
+                "What should I return?",
+                "Use a sliding window.",
+                "/skip",
+            ]
+        )
+
+        def input_func(prompt: str) -> str:
+            prompts.append(prompt)
+            return next(answers)
+
+        with mock.patch.object(
+            cli,
+            "open_drill_in_editor",
+            side_effect=AssertionError("skip must not open the editor"),
+        ):
+            cli.cmd_interview_placement(
+                Namespace(topic="algorithms", action="start"),
+                input_func=input_func,
+                output_func=lambda _line: None,
+            )
+
+        profile = cli.interview_prep.load_profile(
+            cli.interview_profile_path("algorithms")
+        )
+        self.assertEqual(profile["placement"]["status"], "provisional")
+        for stage in ("implementation", "tests", "complexity", "follow_up"):
+            self.assertEqual(
+                profile["placement"]["observations"][stage]["status"],
+                "uncertain",
+            )
+        self.assertFalse(any(prompt.startswith("tests>") for prompt in prompts))
+        self.assertFalse(any(prompt.startswith("complexity>") for prompt in prompts))
+        self.assertFalse(any(prompt.startswith("follow_up>") for prompt in prompts))
 
     def test_interview_placement_recovers_activity_evidence_after_fault(self) -> None:
         call_silent(
@@ -1972,11 +2206,7 @@ class CliStorageTests(unittest.TestCase):
                 "I write JavaScript weekly.",
                 "Can width exceed the input length?",
                 "Use a set over each window.",
-                "function firstUniqueWindow(text, width) { return -1; }",
-                "/done",
-                "Empty, duplicate, and no-match edge cases.",
-                "O(n * width) time and O(width) space.",
-                "Track last-seen positions for a streaming variant.",
+                "/skip",
             ]
         )
         output: list[str] = []
