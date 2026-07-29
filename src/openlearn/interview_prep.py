@@ -815,17 +815,22 @@ def _provisional_result(observations: Mapping[str, object]) -> dict[str, object]
     }
 
 
-def _recommendations(
-    value: Mapping[str, object], *, current_date: date
-) -> dict[str, object]:
-    profile = value["profile"]
-    assert isinstance(profile, dict)
+def practice_schedule(profile: Mapping[str, object]) -> tuple[int, int, int]:
     weekly = profile["weekly_minutes"]
     requested_session = profile["session_minutes"]
     assert isinstance(weekly, int) and isinstance(requested_session, int)
     session = min(requested_session, weekly)
     sessions = max(1, weekly // session)
     scheduled = min(weekly, sessions * session)
+    return scheduled, session, sessions
+
+
+def _recommendations(
+    value: Mapping[str, object], *, current_date: date
+) -> dict[str, object]:
+    profile = value["profile"]
+    assert isinstance(profile, dict)
+    scheduled, session, sessions = practice_schedule(profile)
     role = str(profile.get("role_family") or "general SWE")
     level = str(profile.get("target_level") or "target")
     interview_date = str(profile.get("interview_date") or "")

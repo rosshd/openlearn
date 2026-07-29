@@ -630,6 +630,338 @@ class CliStorageTests(unittest.TestCase):
             "def first_unique_window(text, width):\n    return -1",
         )
 
+    def test_generic_resume_routes_active_interview_placement_before_provider_work(
+        self,
+    ) -> None:
+        call_silent(
+            cli.cmd_new,
+            Namespace(
+                topic="Algorithms",
+                goal="Practice algorithms",
+                interview_prep=True,
+                mastery_profile=None,
+                template=None,
+            ),
+        )
+        cli.cmd_interview_placement(
+            Namespace(topic="algorithms", action="start"),
+            input_func=iter_input(
+                [
+                    "Recent coding practice.",
+                    "How is input given?",
+                    "Use a sliding window.",
+                    "/stop",
+                ]
+            ),
+            output_func=lambda _line: None,
+        )
+        output: list[str] = []
+
+        with (
+            mock.patch.object(
+                cli,
+                "refresh_imported_source_folders",
+                side_effect=AssertionError("source refresh must not run"),
+            ),
+            mock.patch.object(
+                cli,
+                "call_openai_streaming",
+                side_effect=AssertionError("provider must not run"),
+            ),
+        ):
+            result = cli.cmd_resume(
+                Namespace(topic="algorithms", model=None),
+                input_func=iter_input(
+                    [
+                        "def first_unique_window(text, width):",
+                        "    return -1",
+                        "/done",
+                        "/stop",
+                    ]
+                ),
+                output_func=output.append,
+            )
+
+        profile = cli.interview_prep.load_profile(
+            cli.interview_profile_path("algorithms")
+        )
+        self.assertEqual(result, 0)
+        self.assertEqual(profile["placement"]["next_stage"], "tests")
+        self.assertEqual(len(profile["placement"]["evidence_refs"]), 4)
+        self.assertIn("Enter code below", "\n".join(output))
+
+    def test_interview_course_context_is_derived_and_excludes_raw_evidence(self) -> None:
+        call_silent(
+            cli.cmd_new,
+            Namespace(
+                topic="Algorithms",
+                goal="Practice algorithms",
+                interview_prep=True,
+                mastery_profile=None,
+                template=None,
+            ),
+        )
+        raw_answers = [
+            "PRIVATE CALIBRATION RESPONSE",
+            "PRIVATE CLARIFICATION RESPONSE?",
+            "PRIVATE PLAN RESPONSE using a hashmap",
+            "def first_unique_window(text, width):",
+            "    return -1  # PRIVATE IMPLEMENTATION",
+            "/done",
+            "PRIVATE TEST RESPONSE",
+            "PRIVATE COMPLEXITY RESPONSE",
+            "PRIVATE FOLLOW UP RESPONSE",
+        ]
+        cli.cmd_interview_placement(
+            Namespace(topic="algorithms", action="start"),
+            input_func=iter_input(raw_answers),
+            output_func=lambda _line: None,
+        )
+
+        prompt = cli.course_outline_prompt(cli.read_topic("algorithms"))
+
+        self.assertIn("Interview placement: provisional", prompt)
+        self.assertIn("Target: general SWE at unspecified bar", prompt)
+        self.assertIn("Schedule: 2 x 45 minutes", prompt)
+        self.assertIn("Gap statuses:", prompt)
+        self.assertIn("Uncertainty:", prompt)
+        for private_text in (
+            "PRIVATE CALIBRATION RESPONSE",
+            "PRIVATE CLARIFICATION RESPONSE",
+            "PRIVATE PLAN RESPONSE",
+            "PRIVATE IMPLEMENTATION",
+            "PRIVATE TEST RESPONSE",
+            "PRIVATE COMPLEXITY RESPONSE",
+            "PRIVATE FOLLOW UP RESPONSE",
+        ):
+            self.assertNotIn(private_text, prompt)
+
+    def test_interview_course_start_skips_legacy_quiz(self) -> None:
+        call_silent(
+            cli.cmd_new,
+            Namespace(
+                topic="Algorithms",
+                goal="Practice algorithms",
+                interview_prep=True,
+                mastery_profile=None,
+                template=None,
+            ),
+        )
+        call_silent(
+            cli.cmd_interview_placement,
+            Namespace(topic="algorithms", action="defer"),
+        )
+        prompts: list[str] = []
+        answers = iter(["y"])
+
+        def input_func(prompt: str) -> str:
+            prompts.append(prompt)
+            return next(answers)
+
+        with mock.patch.object(cli, "_openlearn_mock_enabled", return_value=True):
+            result = cli.start_course(input_func=input_func, output_func=lambda _line: None)
+
+        self.assertEqual(result, 0)
+        self.assertEqual(prompts, ["Is this an acceptable course outline? [y/N]: "])
+        self.assertTrue(cli.read_topic("algorithms").metadata["course_started"])
+
+    def test_missing_provider_resume_is_contextual_and_non_mutating(self) -> None:
+        call_silent(
+            cli.cmd_new,
+            Namespace(
+                topic="Algorithms",
+                goal="Practice algorithms",
+                interview_prep=True,
+                mastery_profile=None,
+                template=None,
+            ),
+        )
+        call_silent(
+            cli.cmd_interview_placement,
+            Namespace(topic="algorithms", action="defer"),
+        )
+        paths = (
+            cli.topic_path("algorithms"),
+            cli.interview_profile_path("algorithms"),
+            cli.topic_state_path("algorithms"),
+            cli.topic_events_path("algorithms"),
+        )
+        before = {path: path.read_bytes() for path in paths if path.exists()}
+        output: list[str] = []
+
+        with (
+            mock.patch.object(cli, "provider_is_configured", return_value=False),
+            mock.patch.object(
+                cli,
+                "refresh_imported_source_folders",
+                side_effect=AssertionError("source refresh must not run"),
+            ),
+            mock.patch.object(
+                cli,
+                "call_openai_streaming",
+                side_effect=AssertionError("provider must not run"),
+            ),
+            self.assertRaisesRegex(cli.OpenLearnError, "work is saved"),
+        ):
+            cli.cmd_resume(
+                Namespace(topic="algorithms", model=None),
+                input_func=iter_input([]),
+                output_func=output.append,
+            )
+
+        after = {path: path.read_bytes() for path in paths if path.exists()}
+        self.assertEqual(after, before)
+        transcript = "\n".join(output)
+        self.assertIn("Algorithms", transcript)
+        self.assertIn("Placement: deferred (0/7)", transcript)
+        self.assertNotIn("Where you left off", transcript)
+        self.assertNotIn("No previous session yet", transcript)
+
+    def test_not_started_interview_resume_offers_offline_routes(self) -> None:
+        call_silent(
+            cli.cmd_new,
+            Namespace(
+                topic="Algorithms",
+                goal="Practice algorithms",
+                interview_prep=True,
+                mastery_profile=None,
+                template=None,
+            ),
+        )
+        prompts: list[str] = []
+        output: list[str] = []
+
+        result = cli.cmd_resume(
+            Namespace(topic="algorithms", model=None),
+            input_func=lambda prompt: prompts.append(prompt) or "q",
+            output_func=output.append,
+        )
+
+        self.assertEqual(result, 0)
+        self.assertIn("Start offline placement now", prompts[0])
+        self.assertIn("defer and continue", prompts[0])
+        self.assertIn("Placement: not_started (0/7)", output)
+
+    def test_stale_interview_resume_requires_explicit_choice_before_teaching(self) -> None:
+        call_silent(
+            cli.cmd_new,
+            Namespace(
+                topic="Algorithms",
+                goal="Practice algorithms",
+                interview_prep=True,
+                mastery_profile=None,
+                template=None,
+            ),
+        )
+        cli.cmd_interview_placement(
+            Namespace(topic="algorithms", action="start"),
+            input_func=iter_input(["/baseline"]),
+            output_func=lambda _line: None,
+        )
+        cli.cmd_interview_edit(
+            Namespace(topic="algorithms", field="role_family", value="backend"),
+            output_func=lambda _line: None,
+        )
+        output: list[str] = []
+
+        with mock.patch.object(
+            cli,
+            "call_openai_streaming",
+            side_effect=AssertionError("provider must not run"),
+        ):
+            result = cli.cmd_resume(
+                Namespace(topic="algorithms", model=None),
+                input_func=iter_input(["q"]),
+                output_func=output.append,
+            )
+
+        self.assertEqual(result, 0)
+        transcript = "\n".join(output)
+        self.assertIn("Placement: stale", transcript)
+        self.assertIn("invalidated", transcript)
+        self.assertIn("profile-only planning", transcript)
+
+    def test_started_interview_course_uses_normal_tutor_resume(self) -> None:
+        call_silent(
+            cli.cmd_new,
+            Namespace(
+                topic="Algorithms",
+                goal="Practice algorithms",
+                interview_prep=True,
+                mastery_profile=None,
+                template=None,
+            ),
+        )
+        mark_course_started("algorithms")
+        output: list[str] = []
+
+        with (
+            mock.patch.object(cli, "provider_is_configured", return_value=True),
+            mock.patch.object(
+                cli, "refresh_imported_source_folders", return_value=(0, 0, 0)
+            ) as refresh,
+            mock.patch.object(
+                cli,
+                "call_openai_streaming",
+                return_value="**Lesson:** Continue the course.",
+            ) as provider,
+        ):
+            result = cli.cmd_resume(
+                Namespace(topic="algorithms", model=None),
+                output_func=output.append,
+            )
+
+        self.assertEqual(result, 0)
+        refresh.assert_called_once()
+        provider.assert_called_once()
+        self.assertIn("Where you left off", "\n".join(output))
+
+    def test_interview_resume_dry_run_renders_bounded_plan_without_mutation(self) -> None:
+        call_silent(
+            cli.cmd_new,
+            Namespace(
+                topic="Algorithms",
+                goal="Practice algorithms",
+                interview_prep=True,
+                mastery_profile=None,
+                template=None,
+            ),
+        )
+        cli.cmd_interview_placement(
+            Namespace(topic="algorithms", action="start"),
+            input_func=iter_input(["/baseline"]),
+            output_func=lambda _line: None,
+        )
+        root = Path(self.home.name)
+        before = {
+            str(path.relative_to(root)): path.read_bytes()
+            for path in sorted(root.rglob("*"))
+            if path.is_file()
+        }
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = cli.main(["resume", "algorithms", "--dry-run"])
+
+        after = {
+            str(path.relative_to(root)): path.read_bytes()
+            for path in sorted(root.rglob("*"))
+            if path.is_file()
+        }
+        self.assertEqual(result, 0)
+        self.assertEqual(after, before)
+        transcript = output.getvalue()
+        self.assertIn("dry run: request not sent", transcript)
+        self.assertIn("Interview placement: provisional", transcript)
+        self.assertNotIn("Learner selected a less demanding baseline", transcript)
+
+    def test_provider_preflight_accepts_mock_and_keyless_local_modes(self) -> None:
+        with mock.patch.object(cli, "_openlearn_mock_enabled", return_value=True):
+            self.assertTrue(cli.provider_is_configured())
+
+        os.environ["OPENLEARN_BASE_URL"] = "http://localhost:11434/v1"
+        self.assertTrue(cli.provider_is_configured())
+
     def test_interview_placement_blank_text_stages_never_record_evidence(self) -> None:
         call_silent(
             cli.cmd_new,
