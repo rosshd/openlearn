@@ -163,6 +163,7 @@ REMEDIATION_STAGE_BY_MISS = {
     2: "worked_example",
     3: "faded_check",
 }
+PLACEMENT_EVIDENCE_MAX_CHARS = 40_000
 
 
 @dataclass(frozen=True)
@@ -3110,13 +3111,17 @@ def _placement_command(response: str) -> str | None:
     return PLACEMENT_COMMANDS.get(response.strip().lower())
 
 
-def _placement_runner_cases() -> list[dict[str, object]]:
+def _placement_runner_cases(*, include_hidden: bool = True) -> list[dict[str, object]]:
     cases = interview_prep.PLACEMENT_PROBLEM["test_cases"]
     assert isinstance(cases, list)
     return [
         {"input": dict(case["inputs"]), "expected": case["expected"]}
         for case in cases
-        if isinstance(case, dict) and isinstance(case.get("inputs"), dict)
+        if (
+            isinstance(case, dict)
+            and isinstance(case.get("inputs"), dict)
+            and (include_hidden or not case.get("hidden"))
+        )
     ]
 
 
@@ -3190,8 +3195,7 @@ def _record_placement_execution(
     slug: str,
     activity: dict[str, object],
     response: str,
-) -> dict[str, object]:
-    value: dict[str, object] = {}
+) -> None:
     for stage in ("implementation", "tests"):
         activity = record_topic_activity_evidence(
             slug,
@@ -3199,8 +3203,7 @@ def _record_placement_execution(
             "interview_observation",
             {"stage": stage, "response": response},
         )
-        value = sync_interview_placement(slug)
-    return value
+        sync_interview_placement(slug)
 
 
 def _skip_placement_implementation_and_dependents(
@@ -3249,6 +3252,29 @@ def _finish_placement_attempt_test(
         )
     except interview_attempts.AttemptError as exc:
         raise OpenLearnError(f"could not save placement test outcome: {exc}") from exc
+
+
+def _placement_snapshot_source(attempt: dict[str, object]) -> str:
+    snapshots = attempt.get("snapshots")
+    if not isinstance(snapshots, list) or not snapshots:
+        raise OpenLearnError("placement implementation snapshot is missing")
+    latest = snapshots[-1]
+    source = latest.get("content") if isinstance(latest, dict) else None
+    if not isinstance(source, str):
+        raise OpenLearnError(
+            "placement implementation is too large to score; reduce the file and retry"
+        )
+    largest_envelope = interview_prep.placement_execution_evidence(
+        source,
+        outcome="test_failure",
+        tests_passed=False,
+        return_code=-999,
+    )
+    if len(largest_envelope) > PLACEMENT_EVIDENCE_MAX_CHARS:
+        raise OpenLearnError(
+            "placement implementation is too large to score; reduce the file and retry"
+        )
+    return source
 
 
 def _run_placement_implementation(
@@ -3308,16 +3334,27 @@ def _run_placement_implementation(
                         ),
                     )
         attempt = store.snapshot(slug, attempt_id)
+        source = _placement_snapshot_source(attempt)
         attempt, run_id = store.start_test(slug, attempt_id, visibility="hidden")
     except interview_attempts.AttemptError as exc:
         raise OpenLearnError(f"could not save placement coding evidence: {exc}") from exc
-    try:
-        run_result = code_runner.run_python_tests(
-            workspace,
-            function_name=str(interview_prep.PLACEMENT_PROBLEM["function_name"]),
-            test_cases=_placement_runner_cases(),
-            reduced_isolation=False,
+    except OpenLearnError as exc:
+        output_func(str(exc))
+        output_func(
+            f"Your work is preserved at {workspace}. Placement remains at "
+            "implementation."
         )
+        return False
+    try:
+        with tempfile.TemporaryDirectory(prefix="openlearn-placement-") as snapshot_dir:
+            snapshot_path = Path(snapshot_dir) / "solution.py"
+            snapshot_path.write_text(source, encoding="utf-8")
+            run_result = code_runner.run_python_tests(
+                snapshot_path,
+                function_name=str(interview_prep.PLACEMENT_PROBLEM["function_name"]),
+                test_cases=_placement_runner_cases(),
+                reduced_isolation=False,
+            )
     except (OSError, ValueError, code_runner.RunnerUnavailableError) as exc:
         _finish_placement_attempt_test(
             slug,
@@ -3368,10 +3405,6 @@ def _run_placement_implementation(
         output=result_output,
         run_result=run_result,
     )
-    try:
-        source = workspace.read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as exc:
-        raise OpenLearnError(f"could not read placement implementation: {exc}") from exc
     response = interview_prep.placement_execution_evidence(
         source,
         outcome=outcome,
@@ -3391,7 +3424,7 @@ def _run_placement_implementation(
 
 
 def interview_placement_activity_request() -> dict[str, object]:
-    runner_cases = _placement_runner_cases()
+    public_cases = _placement_runner_cases(include_hidden=False)
     return {
         "domain": "coding",
         "kind": "interview_problem",
@@ -3405,7 +3438,7 @@ def interview_placement_activity_request() -> dict[str, object]:
             "language": "python",
             "problem_id": interview_prep.PLACEMENT_PROBLEM["problem_id"],
             "function_name": interview_prep.PLACEMENT_PROBLEM["function_name"],
-            "test_cases": runner_cases,
+            "test_cases": public_cases,
             "tool_requests": [
                 {"action": "create_drill_workspace", "payload": {}},
                 {"action": "open_configured_editor", "payload": {}},
@@ -3558,6 +3591,27 @@ def _begin_interview_activity(slug: str) -> dict[str, object]:
     return transition_topic_activity(slug, activity, "active")
 
 
+def _discard_interview_placement(slug: str, path: Path) -> dict[str, object]:
+    sync_interview_placement(slug)
+    activity = _current_interview_activity(slug)
+    if activity is not None and activity.get("status") == "active":
+        transition_topic_activity(
+            slug,
+            activity,
+            "abandoned",
+            reason="learner_discarded_placement",
+        )
+    queued_events: list[tuple[str, dict[str, object]]] = []
+    with interview_profile_write_lock(slug):
+        value = interview_prep.discard_placement(
+            path,
+            lambda event_type, data: queued_events.append((event_type, data)),
+        )
+    for event_type, data in queued_events:
+        log_event(slug, event_type, data)
+    return value
+
+
 def cmd_interview_placement(
     args: argparse.Namespace, input_func=input, output_func=print
 ) -> int:
@@ -3580,20 +3634,7 @@ def cmd_interview_placement(
             _print_placement_status(value, output_func)
             return 0
         if action == "discard":
-            value = sync_interview_placement(slug)
-            activity = _current_interview_activity(slug)
-            if activity is not None and activity.get("status") == "active":
-                transition_topic_activity(
-                    slug, activity, "abandoned", reason="learner_discarded_placement"
-                )
-            queued_events = []
-            with interview_profile_write_lock(slug):
-                value = interview_prep.discard_placement(
-                    path,
-                    lambda event_type, data: queued_events.append((event_type, data)),
-                )
-            for event_type, data in queued_events:
-                log_event(slug, event_type, data)
+            value = _discard_interview_placement(slug, path)
             output_func("Placement discarded. Append-only attempt evidence was preserved.")
             _print_placement_status(value, output_func)
             return 0
@@ -3641,10 +3682,9 @@ def cmd_interview_placement(
                             raise OpenLearnError(
                                 "validated interview placement activity is not active"
                             )
-                        if _run_placement_implementation(
+                        _run_placement_implementation(
                             slug, activity, output_func=output_func
-                        ):
-                            value = sync_interview_placement(slug)
+                        )
                         continue
                 else:
                     response = input_func(f"{stage}> ")
@@ -3666,22 +3706,7 @@ def cmd_interview_placement(
                 _print_placement_saved(slug, stage, value, output_func)
                 return 0
             if command == "discard":
-                activity = _current_interview_activity(slug)
-                if activity is not None and activity.get("status") == "active":
-                    transition_topic_activity(
-                        slug,
-                        activity,
-                        "abandoned",
-                        reason="learner_discarded_placement",
-                    )
-                queued_events = []
-                with interview_profile_write_lock(slug):
-                    interview_prep.discard_placement(
-                        path,
-                        lambda event_type, data: queued_events.append((event_type, data)),
-                    )
-                for event_type, data in queued_events:
-                    log_event(slug, event_type, data)
+                _discard_interview_placement(slug, path)
                 output_func("Placement discarded. Append-only attempt evidence was preserved.")
                 return 0
             activity = _current_interview_activity(slug)

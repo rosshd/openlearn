@@ -1706,13 +1706,23 @@ class CliStorageTests(unittest.TestCase):
             )
             return "nvim"
 
+        def run_snapshot(path: Path, **_kwargs) -> cli.code_runner.RunnerResult:
+            seen["runner_path"] = path
+            self.assertIn("range(len(text)", path.read_text(encoding="utf-8"))
+            seen["path"].write_text(
+                "def first_unique_window(text, width):\n"
+                "    return 999  # changed after runner snapshot\n",
+                encoding="utf-8",
+            )
+            return code_result(0, "7 passed")
+
         output: list[str] = []
         with (
             mock.patch.object(cli, "open_drill_in_editor", side_effect=edit_file),
             mock.patch.object(
                 cli.code_runner,
                 "run_python_tests",
-                return_value=code_result(0, "7 passed"),
+                side_effect=run_snapshot,
             ) as runner,
             mock.patch.object(
                 cli,
@@ -1739,6 +1749,7 @@ class CliStorageTests(unittest.TestCase):
         self.assertTrue(workspace.exists())
         self.assertTrue(workspace.is_relative_to(cli.topics_dir() / "drills" / "algorithms"))
         runner.assert_called_once()
+        self.assertNotEqual(seen["runner_path"], workspace)
         self.assertEqual(
             runner.call_args.kwargs["function_name"],
             "first_unique_window",
@@ -1752,6 +1763,11 @@ class CliStorageTests(unittest.TestCase):
         self.assertEqual(attempt["purpose"], "placement")
         self.assertTrue(attempt["snapshots"])
         self.assertEqual(attempt["test_runs"][-1]["outcome"], "passed")
+        coding_bundle = attempt["execution"]["activity_bundle"]["domain_payload"]["coding"]
+        self.assertEqual(
+            coding_bundle["test_cases"],
+            cli._placement_runner_cases(include_hidden=False),
+        )
         profile = cli.interview_prep.load_profile(
             cli.interview_profile_path("algorithms")
         )
@@ -1764,6 +1780,12 @@ class CliStorageTests(unittest.TestCase):
             profile["placement"]["observations"]["tests"]["status"],
             "observed",
         )
+        evidence = cli._interview_activity_evidence(
+            "algorithms", cli._current_interview_activity("algorithms")
+        )
+        execution_response = evidence[3][2]
+        self.assertIn("range(len(text)", execution_response)
+        self.assertNotIn("changed after runner snapshot", execution_response)
         transcript = "\n".join(output)
         self.assertIn("Examples:", transcript)
         self.assertIn("Opened in nvim", transcript)
@@ -1772,6 +1794,68 @@ class CliStorageTests(unittest.TestCase):
             "Placement saved. Continue from the main menu to build your course plan.",
             transcript,
         )
+
+    def test_interview_placement_rejects_oversized_source_before_runner(
+        self,
+    ) -> None:
+        call_silent(
+            cli.cmd_new,
+            Namespace(
+                topic="Algorithms",
+                goal="Practice algorithms",
+                interview_prep=True,
+                mastery_profile=None,
+                template=None,
+            ),
+        )
+
+        def write_oversized_solution(path: Path) -> str:
+            path.write_text(
+                "def first_unique_window(text, width):\n"
+                "    return -1\n"
+                f"# {'x' * 45_000}\n",
+                encoding="utf-8",
+            )
+            return "nvim"
+
+        output: list[str] = []
+        with (
+            mock.patch.object(
+                cli,
+                "open_drill_in_editor",
+                side_effect=write_oversized_solution,
+            ),
+            mock.patch.object(cli.code_runner, "run_python_tests") as runner,
+        ):
+            cli.cmd_interview_placement(
+                Namespace(topic="algorithms", action="start"),
+                input_func=iter_input(
+                    [
+                        "Some Python practice.",
+                        "What should I return?",
+                        "Use a sliding window.",
+                        "",
+                        "/stop",
+                    ]
+                ),
+                output_func=output.append,
+            )
+
+        runner.assert_not_called()
+        profile = cli.interview_prep.load_profile(
+            cli.interview_profile_path("algorithms")
+        )
+        self.assertEqual(profile["placement"]["next_stage"], "implementation")
+        workspace = cli.active_drill_path(cli.read_topic("algorithms"))
+        attempt = cli.attempt_store().find_for_workspace(
+            "algorithms", workspace, unfinished_only=False
+        )
+        self.assertIsNotNone(attempt)
+        assert attempt is not None
+        self.assertEqual(attempt["test_runs"], [])
+        transcript = "\n".join(output)
+        self.assertIn("too large to score", transcript)
+        self.assertIn(str(workspace), transcript)
 
     def test_interview_placement_runner_unavailable_preserves_resumable_workspace(
         self,
