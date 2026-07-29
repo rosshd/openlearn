@@ -102,6 +102,7 @@ openlearn resume
 ```
 
 Run `openlearn templates` to list the bundled Vim, Git, Python, SQL, algorithms, and other starter outlines.
+From the main menu, press `s` to browse and create any bundled starter course or `i` to start the guided LeetCode-style interview-prep flow.
 An explicit `--goal` takes precedence over a template's default goal.
 `--interview-prep` is an explicit opt-in that creates a separate learner-owned local profile and offers a bounded coding placement.
 Normal topic creation does not create interview metadata or show placement prompts.

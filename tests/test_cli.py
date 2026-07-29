@@ -4996,6 +4996,8 @@ class InteractiveTests(unittest.TestCase):
         self.assertTrue(any("openlearn" in line for line in clean))
         self.assertIn("1  Quick Learn", clean)
         self.assertIn("2  New course", clean)
+        self.assertIn("s  Starter courses", clean)
+        self.assertIn("i  Interview prep", clean)
         self.assertNotIn("1  Resume", clean)
         self.assertNotIn("  10  REPL", clean)
 
@@ -5011,6 +5013,8 @@ class InteractiveTests(unittest.TestCase):
         self.assertIn("openlearn  ·  none  ·  not started  ·  not set", clean)
         self.assertIn("1  Quick Learn", clean)
         self.assertIn("2  New course", clean)
+        self.assertIn("s  Starter courses", clean)
+        self.assertIn("i  Interview prep", clean)
         self.assertNotIn("1  Resume", clean)
         self.assertNotIn("Next step", output)
 
@@ -5086,6 +5090,8 @@ class InteractiveTests(unittest.TestCase):
         self.assertIn("6  Topics", output)
         self.assertIn("7  Quick Learn", output)
         self.assertIn("8  New course", output)
+        self.assertIn("s  Starter courses", output)
+        self.assertIn("i  Interview prep", output)
         self.assertIn("q  Quit", output)
         self.assertNotIn("-  ", output)
         self.assertFalse(any("Topic status" in line for line in output))
@@ -5137,6 +5143,65 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertTrue(cli.topic_path("menu-topic").exists())
         self.assertEqual(cli.get_active_topic(), "menu-topic")
+
+    def test_menu_can_create_a_bundled_starter_course(self) -> None:
+        output = []
+
+        exit_code = cli.run_menu(
+            input_func=iter_input(["s", "8", "", "", "q"]),
+            output_func=output.append,
+        )
+
+        self.assertEqual(exit_code, 0)
+        topic = cli.read_topic("vim")
+        template = cli.load_course_template("vim")
+        self.assertEqual(topic.metadata["goal"], template.goal)
+        self.assertEqual(topic.metadata["template_units"], list(template.units))
+        self.assertIn("Starter courses", output)
+        self.assertTrue(any("Vim" in line and "8 units" in line for line in output))
+
+    def test_menu_interview_prep_uses_algorithms_template(self) -> None:
+        calls = []
+        original_cmd_new = cli.cmd_new
+
+        def fake_cmd_new(args: Namespace, **kwargs) -> int:
+            calls.append((args, kwargs))
+            return 0
+
+        cli.cmd_new = fake_cmd_new
+        try:
+            cli.menu_interview_prep(
+                iter_input(["", ""]),
+                lambda _text: None,
+            )
+        finally:
+            cli.cmd_new = original_cmd_new
+
+        args, kwargs = calls[0]
+        self.assertEqual(args.topic, "Coding Interview Prep")
+        self.assertIn("LeetCode-style", args.goal)
+        self.assertEqual(args.template, "algorithms")
+        self.assertTrue(args.interview_prep)
+        self.assertIn("input_func", kwargs)
+
+    def test_unstarted_interview_course_continues_setup_from_menu(self) -> None:
+        call_silent(
+            cli.cmd_new,
+            Namespace(
+                topic="Coding Interview Prep",
+                goal="Prepare for interviews",
+                mastery_profile=None,
+                template="algorithms",
+                interview_prep=True,
+            ),
+        )
+        output = []
+
+        exit_code = cli.run_menu(input_func=iter_input(["q"]), output_func=output.append)
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("1  Continue interview prep", output)
+        self.assertNotIn("1  Start course", output)
 
     def test_menu_create_topic_can_continue_to_course_start(self) -> None:
         calls = []

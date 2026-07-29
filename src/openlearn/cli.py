@@ -923,7 +923,13 @@ def run_menu(input_func=input, output_func=print) -> int:
             actions.append((label, action))
 
         if unstarted:
-            add_action("Start course", lambda: menu_start_course(input_func, output_func))
+            if active and interview_profile_path(active).exists():
+                add_action(
+                    "Continue interview prep",
+                    lambda: menu_resume(input_func, output_func),
+                )
+            else:
+                add_action("Start course", lambda: menu_start_course(input_func, output_func))
             add_action("Context files", lambda: menu_context_files(input_func, output_func))
             add_action("Advanced options", lambda: menu_advanced_options(input_func, output_func))
         elif active:
@@ -941,6 +947,14 @@ def run_menu(input_func=input, output_func=print) -> int:
             add_action("Topics", lambda: menu_topics(input_func, output_func))
         add_action("Quick Learn", lambda: menu_quick_learn(input_func, output_func))
         add_action("New course", lambda: menu_new_course(input_func, output_func))
+        quick_actions["s"] = (
+            "Starter courses",
+            lambda: menu_starter_courses(input_func, output_func),
+        )
+        quick_actions["i"] = (
+            "Interview prep",
+            lambda: menu_interview_prep(input_func, output_func),
+        )
 
         rows = [(key, label) for key, (label, _action) in quick_actions.items()]
         rows.extend((str(index), label) for index, (label, _action) in enumerate(actions, start=1))
@@ -1027,6 +1041,76 @@ def menu_quick_learn(input_func, output_func) -> None:
         input_func=input_func,
         output_func=output_func,
         enter_repl=True,
+    )
+
+
+def menu_starter_courses(input_func, output_func) -> None:
+    try:
+        templates = available_course_templates()
+    except CourseTemplateError as exc:
+        output_func(f"Could not load starter courses: {exc}")
+        return
+    if not templates:
+        output_func("No starter courses found.")
+        return
+
+    output_func("Starter courses")
+    rows = [
+        (
+            str(index),
+            f"{template.name} - {len(template.units)} units ({', '.join(template.tags)})",
+        )
+        for index, template in enumerate(templates, start=1)
+    ]
+    rows.append(("b", "Back to menu"))
+    print_menu(rows, output_func)
+    choice = input_func("Choose a starter course: ").strip().lower()
+    output_func("")
+    if choice in {"b", "back", "q", "quit", ""}:
+        return
+    if not choice.isdigit() or not 1 <= int(choice) <= len(templates):
+        output_func("Choose a course number, or b to go back.")
+        return
+
+    template = templates[int(choice) - 1]
+    name = input_func(f"Course name [{template.name}]: ").strip() or template.name
+    output_func("")
+    goal = input_func(f"Goal [{template.goal}]: ").strip() or template.goal
+    output_func("")
+    cmd_new(
+        argparse.Namespace(
+            topic=name,
+            goal=goal,
+            mastery_profile=None,
+            template=template.slug,
+            interview_prep=False,
+        ),
+        output_func=output_func,
+    )
+
+
+def menu_interview_prep(input_func, output_func) -> None:
+    default_name = "Coding Interview Prep"
+    default_goal = (
+        "Prepare for LeetCode-style coding interviews with algorithms, "
+        "data structures, and timed problem solving"
+    )
+    output_func("Interview prep")
+    output_func("Creates a structured algorithms course with an adaptive placement.")
+    name = input_func(f"Course name [{default_name}]: ").strip() or default_name
+    output_func("")
+    goal = input_func(f"Goal [{default_goal}]: ").strip() or default_goal
+    output_func("")
+    cmd_new(
+        argparse.Namespace(
+            topic=name,
+            goal=goal,
+            mastery_profile=None,
+            template="algorithms",
+            interview_prep=True,
+        ),
+        input_func=input_func,
+        output_func=output_func,
     )
 
 
