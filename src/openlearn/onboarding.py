@@ -67,6 +67,7 @@ class ValidationStatus(Enum):
 
 
 class OnboardingDestination(Enum):
+    INTERVIEW_PREP = "interview_prep"
     QUICK_LEARN = "quick_learn"
     VIM_STARTER = "vim_starter"
     MENU = "menu"
@@ -179,6 +180,10 @@ def prompt_for_destination(
     output_func: OutputFunc = print,
 ) -> OnboardingDestination:
     destinations = (
+        (
+            "Start LeetCode-style interview prep (recommended)",
+            OnboardingDestination.INTERVIEW_PREP,
+        ),
         ("Quick Learn a file", OnboardingDestination.QUICK_LEARN),
         ("Start the vim starter course", OnboardingDestination.VIM_STARTER),
         ("Open the menu", OnboardingDestination.MENU),
@@ -201,8 +206,16 @@ def validate_provider(
     opener: UrlOpener = urlopen,
 ) -> ValidationResult:
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    normalized_base_url = base_url.rstrip("/")
+    openrouter_base_url = PROVIDER_PRESETS["openrouter"].base_url
+    endpoint = (
+        "key"
+        if openrouter_base_url
+        and normalized_base_url == openrouter_base_url.rstrip("/")
+        else "models"
+    )
     request = Request(
-        f"{base_url.rstrip('/')}/models",
+        f"{normalized_base_url}/{endpoint}",
         headers=headers,
         method="GET",
     )
@@ -247,7 +260,7 @@ def prompt_for_validated_key(
     for attempt in range(1, 4):
         api_key = key_input(prompt).strip()
         if not api_key and preset.key_required:
-            output_func("API key is required.")
+            output_func("No characters received. Paste the key, then press Enter.")
             continue
 
         output_func("Testing connection...")
@@ -314,6 +327,32 @@ def launch_destination(
 
     from openlearn import cli
 
+    if destination is OnboardingDestination.INTERVIEW_PREP:
+        slug = "coding-interview-prep"
+        cli.cmd_new(
+            Namespace(
+                topic="Coding Interview Prep",
+                goal=(
+                    "Prepare for coding interviews with LeetCode-style algorithms "
+                    "and data structures practice"
+                ),
+                mastery_profile=None,
+                template="algorithms",
+                interview_prep=True,
+            ),
+            input_func=input_func,
+            output_func=output_func,
+        )
+        if cli.get_active_topic() != slug:
+            output_func("No interview-prep course created. Opening the menu.")
+            return
+        cli.cmd_resume(
+            Namespace(topic=slug, model=None),
+            input_func=input_func,
+            output_func=output_func,
+        )
+        return
+
     if destination is OnboardingDestination.QUICK_LEARN:
         source = input_func("File to learn: ").strip()
         if not source:
@@ -340,7 +379,7 @@ def launch_destination(
             context.text,
         )
         cli.summarize_pending_contexts(active_topic, [saved], output_func)
-    else:
+    elif destination is OnboardingDestination.VIM_STARTER:
         cli.cmd_new(
             Namespace(
                 topic="Vim",

@@ -125,7 +125,7 @@ class ProviderPromptTests(unittest.TestCase):
 
 
 class DestinationPromptTests(unittest.TestCase):
-    def test_defaults_to_quick_learn_and_lists_all_destinations(self) -> None:
+    def test_defaults_to_leetcode_style_interview_prep(self) -> None:
         output: list[str] = []
 
         destination = onboarding.prompt_for_destination(
@@ -133,13 +133,14 @@ class DestinationPromptTests(unittest.TestCase):
             output_func=output.append,
         )
 
-        self.assertIs(destination, onboarding.OnboardingDestination.QUICK_LEARN)
-        self.assertIn("  1. Quick Learn a file", output)
-        self.assertIn("  2. Start the vim starter course", output)
-        self.assertIn("  3. Open the menu", output)
+        self.assertIs(destination, onboarding.OnboardingDestination.INTERVIEW_PREP)
+        self.assertIn("  1. Start LeetCode-style interview prep (recommended)", output)
+        self.assertIn("  2. Quick Learn a file", output)
+        self.assertIn("  3. Start the vim starter course", output)
+        self.assertIn("  4. Open the menu", output)
 
     def test_reprompts_invalid_destination_choice(self) -> None:
-        choices = iter(["4", "2"])
+        choices = iter(["5", "3"])
         output: list[str] = []
 
         destination = onboarding.prompt_for_destination(
@@ -148,10 +149,32 @@ class DestinationPromptTests(unittest.TestCase):
         )
 
         self.assertIs(destination, onboarding.OnboardingDestination.VIM_STARTER)
-        self.assertIn("Choose an option from 1 to 3.", output)
+        self.assertIn("Choose an option from 1 to 4.", output)
 
 
 class DestinationLaunchTests(unittest.TestCase):
+    def test_interview_prep_uses_algorithms_template_and_resume_router(self) -> None:
+        with (
+            patch.object(cli, "cmd_new") as cmd_new,
+            patch.object(cli, "get_active_topic", return_value="coding-interview-prep"),
+            patch.object(cli, "cmd_resume") as cmd_resume,
+        ):
+            onboarding.launch_destination(
+                onboarding.OnboardingDestination.INTERVIEW_PREP,
+                input_func=lambda _prompt: "",
+                output_func=lambda _text: None,
+            )
+
+        new_args = cmd_new.call_args.args[0]
+        self.assertEqual(new_args.topic, "Coding Interview Prep")
+        self.assertIn("LeetCode-style", new_args.goal)
+        self.assertEqual(new_args.template, "algorithms")
+        self.assertTrue(new_args.interview_prep)
+        self.assertIsNotNone(cmd_new.call_args.kwargs["input_func"])
+        resume_args = cmd_resume.call_args.args[0]
+        self.assertEqual(resume_args.topic, "coding-interview-prep")
+        self.assertIsNone(resume_args.model)
+
     def test_quick_learn_imports_file_and_starts_lesson(self) -> None:
         context = cli.PendingContext("guide.md", "Guide contents\n")
         saved = Path("/tmp/guide.md")
@@ -209,6 +232,25 @@ class DestinationLaunchTests(unittest.TestCase):
 
 
 class ProviderValidationTests(unittest.TestCase):
+    def test_openrouter_uses_authenticated_key_endpoint(self) -> None:
+        calls: list[tuple[object, int]] = []
+
+        def opener(request: object, timeout: int) -> FakeResponse:
+            calls.append((request, timeout))
+            return FakeResponse(200)
+
+        result = onboarding.validate_provider(
+            "https://openrouter.ai/api/v1",
+            "sk-or-v1-secret",
+            opener=opener,
+        )
+
+        self.assertEqual(result.status, onboarding.ValidationStatus.VALID)
+        request, timeout = calls[0]
+        self.assertEqual(request.full_url, "https://openrouter.ai/api/v1/key")
+        self.assertEqual(request.get_header("Authorization"), "Bearer sk-or-v1-secret")
+        self.assertEqual(timeout, 10)
+
     def test_gets_models_with_bearer_key_and_ten_second_timeout(self) -> None:
         calls: list[tuple[object, int]] = []
 
@@ -282,6 +324,26 @@ class ProviderValidationTests(unittest.TestCase):
 
 
 class ValidatedKeyPromptTests(unittest.TestCase):
+    def test_blank_secure_input_explains_that_no_characters_were_received(self) -> None:
+        keys = iter(["", "sk-or-v1-secret"])
+        output: list[str] = []
+
+        result = onboarding.prompt_for_validated_key(
+            onboarding.PROVIDER_PRESETS["openrouter"],
+            "https://openrouter.ai/api/v1",
+            key_input_func=lambda _prompt: next(keys),
+            output_func=output.append,
+            validator=lambda _base_url, _api_key: onboarding.ValidationResult(
+                onboarding.ValidationStatus.VALID
+            ),
+        )
+
+        self.assertEqual(result, "sk-or-v1-secret")
+        self.assertIn(
+            "No characters received. Paste the key, then press Enter.",
+            output,
+        )
+
     def test_explains_how_to_create_and_enter_an_openrouter_key(self) -> None:
         output: list[str] = []
         prompts: list[str] = []
