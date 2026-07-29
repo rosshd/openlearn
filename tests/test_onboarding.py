@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from argparse import Namespace
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -28,6 +30,17 @@ class FakeResponse:
 class ProviderPresetTests(unittest.TestCase):
     def test_presets_capture_first_run_provider_defaults(self) -> None:
         self.assertEqual(
+            onboarding.PROVIDER_PRESETS["openrouter"],
+            onboarding.ProviderPreset(
+                name="OpenRouter",
+                base_url="https://openrouter.ai/api/v1",
+                default_model="google/gemini-2.5-flash-lite",
+                key_required=True,
+                setup_url="https://openrouter.ai/keys",
+                recommendation="recommended - inexpensive models from many providers",
+            ),
+        )
+        self.assertEqual(
             onboarding.PROVIDER_PRESETS["openai"],
             onboarding.ProviderPreset(
                 name="OpenAI",
@@ -50,26 +63,34 @@ class ProviderPresetTests(unittest.TestCase):
 
 
 class ProviderPromptTests(unittest.TestCase):
-    def test_defaults_to_openai_and_uses_its_declared_settings(self) -> None:
+    def test_defaults_to_openrouter_and_uses_cheap_recommended_model(self) -> None:
         output: list[str] = []
         preset = onboarding.prompt_for_provider(
             input_func=lambda _prompt: "",
             output_func=output.append,
         )
 
-        self.assertIs(preset, onboarding.PROVIDER_PRESETS["openai"])
+        self.assertIs(preset, onboarding.PROVIDER_PRESETS["openrouter"])
+        self.assertIn(
+            "  1. OpenRouter (recommended - inexpensive models from many providers)",
+            output,
+        )
         self.assertTrue(any("Anthropic-compatible" in line for line in output))
         self.assertEqual(
             onboarding.prompt_for_base_url(preset),
-            "https://api.openai.com/v1",
+            "https://openrouter.ai/api/v1",
         )
         self.assertEqual(
-            onboarding.prompt_for_model(preset, input_func=lambda _prompt: ""),
-            "gpt-4.1-mini",
+            onboarding.prompt_for_model(
+                preset,
+                input_func=lambda _prompt: "",
+                output_func=output.append,
+            ),
+            "google/gemini-2.5-flash-lite",
         )
 
     def test_reprompts_invalid_provider_choice(self) -> None:
-        choices = iter(["9", "3"])
+        choices = iter(["9", "4"])
         output: list[str] = []
 
         preset = onboarding.prompt_for_provider(
@@ -78,7 +99,7 @@ class ProviderPromptTests(unittest.TestCase):
         )
 
         self.assertIs(preset, onboarding.PROVIDER_PRESETS["ollama"])
-        self.assertIn("Choose a provider from 1 to 4.", output)
+        self.assertIn("Choose a provider from 1 to 5.", output)
 
     def test_custom_provider_requires_valid_base_url_and_model(self) -> None:
         base_urls = iter(["example.com/v1", " https://api.example.com/v1/ "])
@@ -261,6 +282,32 @@ class ProviderValidationTests(unittest.TestCase):
 
 
 class ValidatedKeyPromptTests(unittest.TestCase):
+    def test_explains_how_to_create_and_enter_an_openrouter_key(self) -> None:
+        output: list[str] = []
+        prompts: list[str] = []
+
+        result = onboarding.prompt_for_validated_key(
+            onboarding.PROVIDER_PRESETS["openrouter"],
+            "https://openrouter.ai/api/v1",
+            key_input_func=lambda prompt: prompts.append(prompt) or "sk-or-v1-secret",
+            output_func=output.append,
+            validator=lambda _base_url, _api_key: onboarding.ValidationResult(
+                onboarding.ValidationStatus.VALID
+            ),
+        )
+
+        self.assertEqual(result, "sk-or-v1-secret")
+        self.assertIn("Create a key at https://openrouter.ai/keys", output)
+        self.assertIn(
+            "Paste it below. Your typing is hidden, so the terminal will look blank.",
+            output,
+        )
+        self.assertIn(
+            "openlearn saves the key only in its local config file.",
+            output,
+        )
+        self.assertEqual(prompts, ["OpenRouter API key: "])
+
     def test_reads_valid_key_with_hidden_getpass_prompt(self) -> None:
         with patch.object(onboarding.getpass, "getpass", return_value="secret-key") as hidden_input:
             result = onboarding.prompt_for_validated_key(
@@ -273,7 +320,7 @@ class ValidatedKeyPromptTests(unittest.TestCase):
             )
 
         self.assertEqual(result, "secret-key")
-        hidden_input.assert_called_once_with("API key (hidden): ")
+        hidden_input.assert_called_once_with("OpenAI API key: ")
 
     def test_retries_rejected_key_three_times_then_exits_cleanly(self) -> None:
         keys = iter(["bad-one", "bad-two", "bad-three"])
@@ -301,7 +348,7 @@ class ValidatedKeyPromptTests(unittest.TestCase):
                 ("https://api.openai.com/v1", "bad-three"),
             ],
         )
-        self.assertEqual(output.count("Key rejected by provider."), 3)
+        self.assertEqual(output.count("Key rejected by OpenAI."), 3)
         self.assertIn("Key rejected after 3 attempts", output[-1])
 
     def test_network_error_can_save_ollama_without_a_key(self) -> None:
@@ -325,7 +372,7 @@ class ValidatedKeyPromptTests(unittest.TestCase):
         )
 
         self.assertEqual(result, "")
-        self.assertEqual(prompts, ["API key (optional, hidden): "])
+        self.assertEqual(prompts, ["Ollama API key (optional): "])
         self.assertTrue(any("connection refused" in line for line in output))
 
 
@@ -425,7 +472,13 @@ class OnboardingFlowTests(unittest.TestCase):
             )
 
         self.assertTrue(ready)
-        self.assertEqual(output, ["Welcome to openlearn."])
+        self.assertEqual(
+            output,
+            [
+                "Welcome to openlearn.",
+                "First, connect a model provider. OpenRouter is the recommended low-cost option.",
+            ],
+        )
         self.assertEqual(
             calls,
             [
@@ -527,6 +580,32 @@ class OnboardingFlowTests(unittest.TestCase):
         persist_configuration.assert_not_called()
         prompt_for_destination.assert_not_called()
         launch_destination.assert_not_called()
+
+
+class InitCommandTests(unittest.TestCase):
+    def test_init_uses_the_same_provider_setup_as_first_launch(self) -> None:
+        output: list[str] = []
+
+        with (
+            tempfile.TemporaryDirectory() as home,
+            patch.dict("os.environ", {"OPENLEARN_HOME": home}, clear=True),
+            patch.object(onboarding, "configure_provider", return_value=True) as configure,
+        ):
+            cli._CONFIG_CACHE = None
+            result = cli.cmd_init(
+                Namespace(force=True),
+                input_func=lambda _prompt: "",
+                output_func=output.append,
+            )
+            cli._CONFIG_CACHE = None
+
+        self.assertEqual(result, 0)
+        configure.assert_called_once_with(
+            input_func=unittest.mock.ANY,
+            output_func=output.append,
+        )
+        self.assertIn("openlearn setup", output)
+        self.assertTrue(any("Done." in line for line in output))
 
 
 class OnboardingTriggerTests(unittest.TestCase):

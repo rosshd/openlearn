@@ -19,9 +19,19 @@ class ProviderPreset:
     base_url: str | None
     default_model: str | None
     key_required: bool
+    setup_url: str | None = None
+    recommendation: str | None = None
 
 
 PROVIDER_PRESETS = {
+    "openrouter": ProviderPreset(
+        name="OpenRouter",
+        base_url="https://openrouter.ai/api/v1",
+        default_model="google/gemini-2.5-flash-lite",
+        key_required=True,
+        setup_url="https://openrouter.ai/keys",
+        recommendation="recommended - inexpensive models from many providers",
+    ),
     "openai": ProviderPreset(
         name="OpenAI",
         base_url="https://api.openai.com/v1",
@@ -97,7 +107,8 @@ def prompt_for_provider(
     presets = list(PROVIDER_PRESETS.values())
     output_func("Provider:")
     for index, preset in enumerate(presets, start=1):
-        output_func(f"  {index}. {preset.name}")
+        suffix = f" ({preset.recommendation})" if preset.recommendation else ""
+        output_func(f"  {index}. {preset.name}{suffix}")
 
     while True:
         choice = input_func("Provider [1]: ").strip() or "1"
@@ -150,6 +161,8 @@ def prompt_for_model(
     input_func: InputFunc = input,
     output_func: OutputFunc = print,
 ) -> str:
+    if preset.recommendation and preset.default_model:
+        output_func(f"Recommended inexpensive model: {preset.default_model}")
     prompt = f"Model [{preset.default_model}]: " if preset.default_model is not None else "Model: "
     while True:
         model = input_func(prompt).strip()
@@ -221,7 +234,15 @@ def prompt_for_validated_key(
     validator: ProviderValidator = validate_provider,
 ) -> str | None:
     key_input = key_input_func or getpass.getpass
-    prompt = "API key (hidden): " if preset.key_required else "API key (optional, hidden): "
+    if preset.setup_url:
+        output_func(f"Create a key at {preset.setup_url}")
+    if preset.key_required:
+        output_func("Paste it below. Your typing is hidden, so the terminal will look blank.")
+        output_func("openlearn saves the key only in its local config file.")
+        prompt = f"{preset.name} API key: "
+    else:
+        output_func("No key is needed for a local provider. Press Enter to continue.")
+        prompt = f"{preset.name} API key (optional): "
 
     for attempt in range(1, 4):
         api_key = key_input(prompt).strip()
@@ -235,7 +256,9 @@ def prompt_for_validated_key(
             output_func("Connection successful.")
             return api_key
         if result.status is ValidationStatus.REJECTED:
-            output_func("Key rejected by provider.")
+            output_func(f"Key rejected by {preset.name}.")
+            if preset.setup_url:
+                output_func(f"Check or create the key at {preset.setup_url}")
             if attempt < 3:
                 output_func("Please try again.")
             continue
@@ -333,11 +356,10 @@ def launch_destination(
         cli.run_repl(input_func=input_func, output_func=output_func, show_intro=False)
 
 
-def run_onboarding(
+def configure_provider(
     input_func: InputFunc = input,
     output_func: OutputFunc = print,
 ) -> bool:
-    output_func("Welcome to openlearn.")
     env_base_url = os.environ.get("OPENLEARN_BASE_URL")
     if env_base_url:
         base_url = _normalize_base_url(env_base_url)
@@ -366,6 +388,20 @@ def run_onboarding(
         output_func=output_func,
     )
     persist_configuration(api_key, model, base_url)
+    return True
+
+
+def run_onboarding(
+    input_func: InputFunc = input,
+    output_func: OutputFunc = print,
+) -> bool:
+    output_func("Welcome to openlearn.")
+    output_func(
+        "First, connect a model provider. OpenRouter is the recommended low-cost option."
+    )
+    if not configure_provider(input_func=input_func, output_func=output_func):
+        return False
+
     destination = prompt_for_destination(
         input_func=input_func,
         output_func=output_func,

@@ -437,7 +437,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.set_defaults(func=cmd_menu)
     sub = parser.add_subparsers()
 
-    init_parser = sub.add_parser("init", help="Set up API key and provider")
+    init_parser = sub.add_parser("init", help="Set up a model provider and API key")
     init_parser.add_argument(
         "--force",
         action="store_true",
@@ -775,8 +775,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def cmd_init(args: argparse.Namespace, output_func=print, input_func=input) -> int:
-    import getpass
-
     maybe_print_migration_notice()
     topics_dir().mkdir(parents=True, exist_ok=True)
     force = getattr(args, "force", None)
@@ -797,69 +795,11 @@ def cmd_init(args: argparse.Namespace, output_func=print, input_func=input) -> i
         output_func("Already configured. Use 'openlearn init --force' to reconfigure.")
         return 0
 
+    from openlearn.onboarding import configure_provider
+
     output_func("openlearn setup")
     output_func("")
-    output_func("Provider:")
-    output_func("  1. OpenRouter  (default - one key, many models)")
-    output_func("  2. Anthropic   (api.anthropic.com)")
-    output_func("  3. OpenAI      (api.openai.com)")
-    output_func("  4. Ollama      (local, no key needed)")
-    output_func("  5. Other       (enter custom base URL)")
-    choice = input_func("Choice [1]: ").strip() or "1"
-
-    presets = {
-        "1": ("https://openrouter.ai/api/v1", "anthropic/claude-sonnet-4-5"),
-        "2": ("https://api.anthropic.com/v1", "claude-sonnet-4-5-20251022"),
-        "3": ("https://api.openai.com/v1", "gpt-4o-mini"),
-        "4": ("http://localhost:11434/v1", "ollama/llama3.2"),
-    }
-
-    if choice in presets:
-        base_url, default_model = presets[choice]
-    else:
-        base_url = input_func("Base URL: ").strip()
-        if not base_url:
-            output_func("No base URL entered. Aborting.")
-            return 1
-        default_model = "gpt-4o-mini"
-
-    api_key = ""
-    if choice != "4":
-        api_key = getpass.getpass("API key (hidden): ").strip()
-        if not api_key:
-            output_func("No API key entered. Aborting.")
-            return 1
-
-    model_input = input_func(f"Model [{default_model}]: ").strip()
-    model = model_input or default_model
-
-    new_config = dict(config)
-    if api_key:
-        new_config["api_key"] = api_key
-        new_config["openai_api_key"] = api_key
-    new_config["base_url"] = base_url
-    new_config["model"] = model
-    path = config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    write_text_atomic(path, json.dumps(new_config, indent=2))
-    global _CONFIG_CACHE
-    _CONFIG_CACHE = None
-    output_func("")
-    output_func("Testing connection...")
-    try:
-        result = call_openai_with_status(
-            model,
-            "You are a test assistant.",
-            "Reply with exactly: ok",
-            retry_status=output_func,
-        )
-        if "ok" in result.lower():
-            output_func("Connection successful.")
-        else:
-            output_func(f"Connected (response: {result[:80].strip()})")
-    except Exception as exc:
-        output_func(f"Connection failed: {exc}")
-        output_func("Config saved - check key and URL with 'openlearn config show'.")
+    if not configure_provider(input_func=input_func, output_func=output_func):
         return 1
     output_func("")
     output_func("Done. Run 'openlearn new <topic>' to start learning.")
