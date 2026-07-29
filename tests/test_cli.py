@@ -331,19 +331,18 @@ class CliStorageTests(unittest.TestCase):
                 "backend",
                 "mid-level",
                 "2026-10-15",
-                "python",
-                "comfortable",
-                "rusty",
-                "limited",
                 "180",
                 "45",
-                "distributed systems",
-                "",
                 "y",
                 "d",
             ]
         )
         output: list[str] = []
+        prompts: list[str] = []
+
+        def input_func(prompt: str) -> str:
+            prompts.append(prompt)
+            return next(answers)
 
         result = cli.cmd_new(
             Namespace(
@@ -353,11 +352,22 @@ class CliStorageTests(unittest.TestCase):
                 mastery_profile=None,
                 template=None,
             ),
-            input_func=lambda _prompt: next(answers),
+            input_func=input_func,
             output_func=output.append,
         )
 
         self.assertEqual(result, 0)
+        self.assertEqual(
+            prompts[:5],
+            [
+                "Target role family [general SWE]: ",
+                "Target level [unspecified]: ",
+                "Interview date (YYYY-MM-DD, optional) [Not provided]: ",
+                "Weekly practice minutes [120]: ",
+                "Session minutes [45]: ",
+            ],
+        )
+        self.assertEqual(prompts[5], "Create this interview-prep course? [Y/n]: ")
         profile = cli.interview_prep.load_profile(
             cli.interview_profile_path("backend-interviews")
         )
@@ -365,19 +375,22 @@ class CliStorageTests(unittest.TestCase):
             profile["profile"],
             {
                 "role_family": "backend",
-                "target_level": "mid-level",
+                "target_level": "mid",
                 "interview_date": "2026-10-15",
                 "coding_language": "python",
                 "weekly_minutes": 180,
                 "session_minutes": 45,
-                "data_structures_experience": "comfortable",
-                "algorithms_experience": "rusty",
-                "interview_experience": "limited",
-                "target_notes": "distributed systems",
+                "data_structures_experience": "unknown",
+                "algorithms_experience": "unknown",
+                "interview_experience": "unknown",
+                "target_notes": "",
                 "accessibility_preferences": "",
             },
         )
         self.assertEqual(profile["placement"]["status"], "deferred")
+        self.assertFalse(any("Coding language:" in line for line in output))
+        self.assertFalse(any("Data structures experience:" in line for line in output))
+        self.assertTrue(any("advanced profile details" in line.lower() for line in output))
         self.assertTrue(any("works offline" in line.lower() for line in output))
         self.assertTrue(any("model-backed teaching" in line.lower() for line in output))
 
@@ -498,16 +511,10 @@ class CliStorageTests(unittest.TestCase):
                 "",
                 "next week",
                 "2026-10-15",
-                "",
-                "",
-                "",
-                "",
                 "zero",
                 "120",
                 "200",
                 "45",
-                "",
-                "",
                 "y",
                 "q",
             ]
@@ -536,10 +543,42 @@ class CliStorageTests(unittest.TestCase):
         self.assertTrue(any("positive integer" in line for line in output))
         self.assertTrue(any("cannot exceed" in line for line in output))
 
+    def test_interview_prep_new_rejects_unknown_level_and_canonicalizes_alias(
+        self,
+    ) -> None:
+        answers = iter(
+            ["backend", "baby genious", "junior", "", "", "", "y", "q"]
+        )
+        output: list[str] = []
+
+        cli.cmd_new(
+            Namespace(
+                topic="Algorithms",
+                goal="Practice algorithms",
+                interview_prep=True,
+                mastery_profile=None,
+                template=None,
+            ),
+            input_func=lambda _prompt: next(answers),
+            output_func=output.append,
+        )
+
+        profile = cli.interview_prep.load_profile(
+            cli.interview_profile_path("algorithms")
+        )
+        self.assertEqual(profile["profile"]["target_level"], "entry")
+        self.assertTrue(
+            any(
+                "Choose a target level: intern, entry, mid, senior, or staff."
+                in line
+                for line in output
+            )
+        )
+
     def test_interview_prep_new_cancel_before_confirmation_publishes_nothing(
         self,
     ) -> None:
-        answers = iter([""] * 11 + ["n", "q"])
+        answers = iter([""] * 5 + ["n", "q"])
 
         result = cli.cmd_new(
             Namespace(
@@ -4997,7 +5036,7 @@ class InteractiveTests(unittest.TestCase):
         self.assertIn("1  Quick Learn", clean)
         self.assertIn("2  New course", clean)
         self.assertIn("s  Starter courses", clean)
-        self.assertIn("i  Interview prep", clean)
+        self.assertIn("i  New interview course", clean)
         self.assertNotIn("1  Resume", clean)
         self.assertNotIn("  10  REPL", clean)
 
@@ -5014,7 +5053,7 @@ class InteractiveTests(unittest.TestCase):
         self.assertIn("1  Quick Learn", clean)
         self.assertIn("2  New course", clean)
         self.assertIn("s  Starter courses", clean)
-        self.assertIn("i  Interview prep", clean)
+        self.assertIn("i  New interview course", clean)
         self.assertNotIn("1  Resume", clean)
         self.assertNotIn("Next step", output)
 
@@ -5091,7 +5130,7 @@ class InteractiveTests(unittest.TestCase):
         self.assertIn("7  Quick Learn", output)
         self.assertIn("8  New course", output)
         self.assertIn("s  Starter courses", output)
-        self.assertIn("i  Interview prep", output)
+        self.assertIn("i  New interview course", output)
         self.assertIn("q  Quit", output)
         self.assertNotIn("-  ", output)
         self.assertFalse(any("Topic status" in line for line in output))
@@ -5162,22 +5201,34 @@ class InteractiveTests(unittest.TestCase):
 
     def test_menu_interview_prep_uses_algorithms_template(self) -> None:
         calls = []
+        prompts = []
         original_cmd_new = cli.cmd_new
 
         def fake_cmd_new(args: Namespace, **kwargs) -> int:
             calls.append((args, kwargs))
             return 0
 
+        def input_func(prompt: str) -> str:
+            prompts.append(prompt)
+            return ""
+
         cli.cmd_new = fake_cmd_new
         try:
             cli.menu_interview_prep(
-                iter_input(["", ""]),
+                input_func,
                 lambda _text: None,
             )
         finally:
             cli.cmd_new = original_cmd_new
 
         args, kwargs = calls[0]
+        self.assertEqual(
+            prompts,
+            [
+                "Goal [Prepare for LeetCode-style coding interviews with algorithms, "
+                "data structures, and timed problem solving]: "
+            ],
+        )
         self.assertEqual(args.topic, "Coding Interview Prep")
         self.assertIn("LeetCode-style", args.goal)
         self.assertEqual(args.template, "algorithms")
@@ -5196,12 +5247,37 @@ class InteractiveTests(unittest.TestCase):
             ),
         )
         output = []
+        calls = []
 
-        exit_code = cli.run_menu(input_func=iter_input(["q"]), output_func=output.append)
+        with mock.patch.object(
+            cli,
+            "menu_resume",
+            side_effect=lambda _input, _output: calls.append(cli.get_active_topic()),
+        ):
+            exit_code = cli.run_menu(
+                input_func=iter_input(["1", "q"]), output_func=output.append
+            )
 
         self.assertEqual(exit_code, 0)
         self.assertIn("1  Continue interview prep", output)
         self.assertNotIn("1  Start course", output)
+        self.assertNotIn("i  Interview prep", output)
+        self.assertNotIn("i  New interview course", output)
+        self.assertEqual(calls, ["coding-interview-prep"])
+        self.assertEqual(cli.get_active_topic(), "coding-interview-prep")
+
+    def test_unstarted_ordinary_course_menu_offers_new_interview_course(self) -> None:
+        call_silent(
+            cli.cmd_new,
+            Namespace(topic="Python Practice", goal="Practice Python"),
+        )
+        output = []
+
+        exit_code = cli.run_menu(input_func=iter_input(["q"]), output_func=output.append)
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("1  Start course", output)
+        self.assertIn("i  New interview course", output)
 
     def test_menu_create_topic_can_continue_to_course_start(self) -> None:
         calls = []

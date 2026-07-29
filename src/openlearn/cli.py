@@ -951,10 +951,15 @@ def run_menu(input_func=input, output_func=print) -> int:
             "Starter courses",
             lambda: menu_starter_courses(input_func, output_func),
         )
-        quick_actions["i"] = (
-            "Interview prep",
-            lambda: menu_interview_prep(input_func, output_func),
-        )
+        if not (
+            unstarted
+            and active
+            and interview_profile_path(active).exists()
+        ):
+            quick_actions["i"] = (
+                "New interview course",
+                lambda: menu_interview_prep(input_func, output_func),
+            )
 
         rows = [(key, label) for key, (label, _action) in quick_actions.items()]
         rows.extend((str(index), label) for index, (label, _action) in enumerate(actions, start=1))
@@ -1097,13 +1102,11 @@ def menu_interview_prep(input_func, output_func) -> None:
     )
     output_func("Interview prep")
     output_func("Creates a structured algorithms course with an adaptive placement.")
-    name = input_func(f"Course name [{default_name}]: ").strip() or default_name
-    output_func("")
     goal = input_func(f"Goal [{default_goal}]: ").strip() or default_goal
     output_func("")
     cmd_new(
         argparse.Namespace(
-            topic=name,
+            topic=default_name,
             goal=goal,
             mastery_profile=None,
             template="algorithms",
@@ -2568,15 +2571,24 @@ INTERVIEW_PROFILE_SETUP_FIELDS = (
     ("role_family", "Target role family"),
     ("target_level", "Target level"),
     ("interview_date", "Interview date (YYYY-MM-DD, optional)"),
-    ("coding_language", "Coding language"),
-    ("data_structures_experience", "Data structures experience"),
-    ("algorithms_experience", "Algorithms experience"),
-    ("interview_experience", "Interview experience"),
     ("weekly_minutes", "Weekly practice minutes"),
     ("session_minutes", "Session minutes"),
-    ("target_notes", "Target notes (optional)"),
-    ("accessibility_preferences", "Accessibility preferences (optional)"),
 )
+
+INTERVIEW_TARGET_LEVEL_ALIASES = {
+    "": "unspecified",
+    "unspecified": "unspecified",
+    "intern": "intern",
+    "entry": "entry",
+    "entry-level": "entry",
+    "entry level": "entry",
+    "junior": "entry",
+    "mid": "mid",
+    "mid-level": "mid",
+    "mid level": "mid",
+    "senior": "senior",
+    "staff": "staff",
+}
 
 
 def _profile_setup_display(value: object) -> str:
@@ -2598,6 +2610,17 @@ def collect_interview_profile(
                         f"{label} [{_profile_setup_display(default)}]: "
                     ).strip()
                     candidate: object = answer if answer else default
+                    if field == "target_level":
+                        canonical_level = INTERVIEW_TARGET_LEVEL_ALIASES.get(
+                            str(candidate).strip().lower()
+                        )
+                        if canonical_level is None:
+                            output_func(
+                                "Choose a target level: intern, entry, mid, "
+                                "senior, or staff."
+                            )
+                            continue
+                        candidate = canonical_level
                     if field == "interview_date" and candidate:
                         try:
                             date.fromisoformat(str(candidate))
@@ -2640,6 +2663,9 @@ def collect_interview_profile(
         output_func("Interview-prep profile:")
         for field, label in INTERVIEW_PROFILE_SETUP_FIELDS:
             output_func(f"- {label}: {_profile_setup_display(values[field])}")
+        output_func(
+            "Advanced profile details use sensible defaults and can be edited later."
+        )
         try:
             confirmation = input_func("Create this interview-prep course? [Y/n]: ")
         except (EOFError, KeyboardInterrupt):
