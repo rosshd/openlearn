@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import copy
 import json
 import os
 import re
@@ -884,12 +885,15 @@ def _recommendations(
     }
 
 
-def refresh_staleness(path: Path, *, now: Clock = _utcnow) -> dict[str, object]:
-    value = load_profile(path)
-    placement = value["placement"]
+def project_staleness(
+    value: Mapping[str, object], *, now: Clock = _utcnow
+) -> dict[str, object]:
+    """Return the current stale projection without mutating caller state or storage."""
+    projected = copy.deepcopy(dict(value))
+    placement = projected["placement"]
     assert isinstance(placement, dict)
     completed = placement.get("completed_at")
-    stale = placement.get("profile_revision") != value.get("profile_revision")
+    stale = placement.get("profile_revision") != projected.get("profile_revision")
     if isinstance(completed, str):
         try:
             completed_at = datetime.fromisoformat(completed.replace("Z", "+00:00"))
@@ -899,6 +903,13 @@ def refresh_staleness(path: Path, *, now: Clock = _utcnow) -> dict[str, object]:
             stale = stale or (now().astimezone(timezone.utc) - completed_at).days > STALE_AFTER_DAYS
     if stale and placement.get("status") == "provisional":
         placement["status"] = "stale"
-        value["recommendations"] = None
-        _write(path, value)
-    return value
+        projected["recommendations"] = None
+    return projected
+
+
+def refresh_staleness(path: Path, *, now: Clock = _utcnow) -> dict[str, object]:
+    value = load_profile(path)
+    projected = project_staleness(value, now=now)
+    if projected != value:
+        _write(path, projected)
+    return projected

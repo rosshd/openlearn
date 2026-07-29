@@ -381,6 +381,114 @@ class CliStorageTests(unittest.TestCase):
         self.assertTrue(any("works offline" in line.lower() for line in output))
         self.assertTrue(any("model-backed teaching" in line.lower() for line in output))
 
+    def test_interview_prep_new_retry_cleans_precommit_profile_and_event_orphans(
+        self,
+    ) -> None:
+        args = Namespace(
+            topic="Algorithms",
+            goal="Practice algorithms",
+            interview_prep=True,
+            mastery_profile=None,
+            template=None,
+        )
+
+        for stage in ("after_profile", "after_creation_event"):
+            with self.subTest(stage=stage):
+                def fail_at_stage(current: str) -> None:
+                    if current == stage:
+                        raise RuntimeError(f"simulated {stage} interruption")
+
+                with mock.patch.object(
+                    cli, "_new_course_checkpoint", side_effect=fail_at_stage
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "simulated"):
+                        cli.cmd_new(args, output_func=lambda _line: None)
+
+                self.assertFalse(cli.topic_path("algorithms").exists())
+                self.assertTrue(cli.interview_profile_path("algorithms").exists())
+                if stage == "after_creation_event":
+                    self.assertTrue(cli.topic_events_path("algorithms").exists())
+
+                result = cli.cmd_new(args, output_func=lambda _line: None)
+
+                self.assertEqual(result, 0)
+                self.assertTrue(cli.topic_path("algorithms").exists())
+                self.assertTrue(cli.interview_profile_path("algorithms").exists())
+                events = cli.load_event_log(cli.topic_events_path("algorithms"))
+                self.assertEqual(
+                    sum(
+                        event.get("event_type") == "interview_profile_created"
+                        for event in events
+                    ),
+                    1,
+                )
+                cli.delete_topic_files("algorithms")
+
+    def test_interview_prep_new_topic_is_visibility_marker_after_profile_and_event(
+        self,
+    ) -> None:
+        observed: list[tuple[str, bool, bool, bool]] = []
+
+        def observe(stage: str) -> None:
+            observed.append(
+                (
+                    stage,
+                    cli.topic_path("algorithms").exists(),
+                    cli.interview_profile_path("algorithms").exists(),
+                    cli.topic_events_path("algorithms").exists(),
+                )
+            )
+
+        with mock.patch.object(cli, "_new_course_checkpoint", side_effect=observe):
+            cli.cmd_new(
+                Namespace(
+                    topic="Algorithms",
+                    goal="Practice algorithms",
+                    interview_prep=True,
+                    mastery_profile=None,
+                    template=None,
+                ),
+                output_func=lambda _line: None,
+            )
+
+        self.assertIn(("after_profile", False, True, False), observed)
+        self.assertIn(("after_creation_event", False, True, True), observed)
+        self.assertIn(("after_topic", True, True, True), observed)
+
+    def test_interview_prep_new_interruption_after_topic_is_fully_visible(
+        self,
+    ) -> None:
+        args = Namespace(
+            topic="Algorithms",
+            goal="Practice algorithms",
+            interview_prep=True,
+            mastery_profile=None,
+            template=None,
+        )
+
+        def fail_after_topic(stage: str) -> None:
+            if stage == "after_topic":
+                raise RuntimeError("simulated post-commit interruption")
+
+        with mock.patch.object(
+            cli, "_new_course_checkpoint", side_effect=fail_after_topic
+        ):
+            with self.assertRaisesRegex(RuntimeError, "post-commit"):
+                cli.cmd_new(args, output_func=lambda _line: None)
+
+        self.assertTrue(cli.topic_path("algorithms").exists())
+        self.assertTrue(cli.interview_profile_path("algorithms").exists())
+        events = cli.load_event_log(cli.topic_events_path("algorithms"))
+        self.assertEqual(
+            sum(
+                event.get("event_type") == "interview_profile_created"
+                for event in events
+            ),
+            1,
+        )
+        with self.assertRaisesRegex(cli.OpenLearnError, "topic already exists"):
+            cli.cmd_new(args, output_func=lambda _line: None)
+
     def test_interview_prep_new_reprompts_invalid_date_and_minutes_before_publish(
         self,
     ) -> None:
@@ -448,6 +556,104 @@ class CliStorageTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertFalse(cli.topic_path("algorithms").exists())
         self.assertFalse(cli.interview_profile_path("algorithms").exists())
+
+    def test_interview_creation_and_multiline_interruptions_preserve_exact_state(
+        self,
+    ) -> None:
+        default_profile_answers = [""] * len(cli.INTERVIEW_PROFILE_SETUP_FIELDS)
+        cases = (
+            ("confirmation", default_profile_answers, False, None, 0),
+            (
+                "post_create",
+                [*default_profile_answers, "y"],
+                True,
+                "not_started",
+                0,
+            ),
+            (
+                "multiline",
+                [
+                    *default_profile_answers,
+                    "y",
+                    "y",
+                    "Recent coding practice.",
+                    "What should I return?",
+                    "Use a sliding window.",
+                    "def first_unique_window(text, width):",
+                ],
+                True,
+                "in_progress",
+                3,
+            ),
+        )
+        for interruption in (EOFError, KeyboardInterrupt):
+            for phase, answers, published, status, evidence_count in cases:
+                with self.subTest(interruption=interruption.__name__, phase=phase):
+                    slug = f"{interruption.__name__}-{phase}".lower().replace("_", "-")
+                    remaining = iter(answers)
+                    output: list[str] = []
+                    active_before = cli.get_active_topic()
+
+                    def input_func(_prompt: str) -> str:
+                        try:
+                            return next(remaining)
+                        except StopIteration:
+                            raise interruption() from None
+
+                    result = cli.cmd_new(
+                        Namespace(
+                            topic=slug,
+                            goal="Practice algorithms",
+                            interview_prep=True,
+                            mastery_profile=None,
+                            template=None,
+                        ),
+                        input_func=input_func,
+                        output_func=output.append,
+                    )
+
+                    self.assertEqual(result, 0)
+                    self.assertEqual(cli.topic_path(slug).exists(), published)
+                    self.assertEqual(
+                        cli.interview_profile_path(slug).exists(),
+                        published,
+                    )
+                    if not published:
+                        self.assertFalse(cli.topic_events_path(slug).exists())
+                        self.assertEqual(cli.get_active_topic(), active_before)
+                        self.assertIn("Nothing was saved", "\n".join(output))
+                        continue
+
+                    profile = cli.interview_prep.load_profile(
+                        cli.interview_profile_path(slug)
+                    )
+                    placement = profile["placement"]
+                    self.assertEqual(placement["status"], status)
+                    self.assertEqual(
+                        len(placement["evidence_refs"]),
+                        evidence_count,
+                    )
+                    self.assertFalse(cli.read_topic(slug).metadata["course_started"])
+                    if phase == "post_create":
+                        events = cli.load_event_log(cli.topic_events_path(slug))
+                        self.assertEqual(
+                            [event["event_type"] for event in events],
+                            ["interview_profile_created"],
+                        )
+                        self.assertIn("Course saved", "\n".join(output))
+                    else:
+                        self.assertEqual(
+                            placement["next_stage"],
+                            "implementation",
+                        )
+                        self.assertEqual(
+                            list(placement["observations"]),
+                            ["calibration", "clarification", "plan"],
+                        )
+                        self.assertIn(
+                            "Placement saved at implementation (3/7)",
+                            "\n".join(output),
+                        )
 
     def test_interview_profile_commands_create_edit_inspect_defer_and_clear(self) -> None:
         call_silent(
@@ -842,6 +1048,120 @@ class CliStorageTests(unittest.TestCase):
         self.assertIn("defer and continue", prompts[0])
         self.assertIn("Placement: not_started (0/7)", output)
 
+    def test_not_started_and_stale_resume_start_placement_before_provider(self) -> None:
+        for initial_status in ("not_started", "stale"):
+            with self.subTest(initial_status=initial_status):
+                slug = f"{initial_status}-start".replace("_", "-")
+                call_silent(
+                    cli.cmd_new,
+                    Namespace(
+                        topic=slug,
+                        goal="Practice algorithms",
+                        interview_prep=True,
+                        mastery_profile=None,
+                        template=None,
+                    ),
+                )
+                if initial_status == "stale":
+                    cli.cmd_interview_placement(
+                        Namespace(topic=slug, action="start"),
+                        input_func=iter_input(["/baseline"]),
+                        output_func=lambda _line: None,
+                    )
+                    cli.cmd_interview_edit(
+                        Namespace(topic=slug, field="role_family", value="backend"),
+                        output_func=lambda _line: None,
+                    )
+
+                with mock.patch.object(cli, "provider_is_configured") as provider:
+                    result = cli.cmd_resume(
+                        Namespace(topic=slug, model=None),
+                        input_func=iter_input(["y", "/stop"]),
+                        output_func=lambda _line: None,
+                    )
+
+                profile = cli.interview_prep.load_profile(
+                    cli.interview_profile_path(slug)
+                )
+                self.assertEqual(result, 0)
+                provider.assert_not_called()
+                self.assertEqual(profile["placement"]["status"], "in_progress")
+                self.assertEqual(profile["placement"]["next_stage"], "calibration")
+                self.assertEqual(profile["placement"]["evidence_refs"], [])
+                self.assertFalse(cli.read_topic(slug).metadata["course_started"])
+
+    def test_not_started_and_stale_resume_defer_before_provider_and_skip_legacy_quiz(
+        self,
+    ) -> None:
+        for initial_status in ("not_started", "stale"):
+            with self.subTest(initial_status=initial_status):
+                slug = f"{initial_status}-defer".replace("_", "-")
+                call_silent(
+                    cli.cmd_new,
+                    Namespace(
+                        topic=slug,
+                        goal="Practice algorithms",
+                        interview_prep=True,
+                        mastery_profile=None,
+                        template=None,
+                    ),
+                )
+                if initial_status == "stale":
+                    cli.cmd_interview_placement(
+                        Namespace(topic=slug, action="start"),
+                        input_func=iter_input(["/baseline"]),
+                        output_func=lambda _line: None,
+                    )
+                    cli.cmd_interview_edit(
+                        Namespace(topic=slug, field="role_family", value="backend"),
+                        output_func=lambda _line: None,
+                    )
+                provider_states: list[str] = []
+                prompts: list[str] = []
+                answers = iter(["d", "y"])
+
+                def input_func(prompt: str) -> str:
+                    prompts.append(prompt)
+                    return next(answers)
+
+                def provider_ready() -> bool:
+                    value = cli.interview_prep.load_profile(
+                        cli.interview_profile_path(slug)
+                    )
+                    provider_states.append(str(value["placement"]["status"]))
+                    return True
+
+                with (
+                    mock.patch.object(
+                        cli, "_openlearn_mock_enabled", return_value=True
+                    ),
+                    mock.patch.object(
+                        cli,
+                        "provider_is_configured",
+                        side_effect=provider_ready,
+                    ),
+                ):
+                    result = cli.cmd_resume(
+                        Namespace(topic=slug, model=None),
+                        input_func=input_func,
+                        output_func=lambda _line: None,
+                    )
+
+                profile = cli.interview_prep.load_profile(
+                    cli.interview_profile_path(slug)
+                )
+                self.assertEqual(result, 0)
+                self.assertEqual(provider_states, ["deferred"])
+                self.assertEqual(profile["placement"]["status"], "deferred")
+                self.assertTrue(cli.read_topic(slug).metadata["course_started"])
+                self.assertFalse(
+                    any("Run optional placement quiz" in prompt for prompt in prompts)
+                )
+                self.assertIn(
+                    "Is this an acceptable course outline? [y/N]: ",
+                    prompts,
+                )
+
     def test_stale_interview_resume_requires_explicit_choice_before_teaching(self) -> None:
         call_silent(
             cli.cmd_new,
@@ -955,6 +1275,230 @@ class CliStorageTests(unittest.TestCase):
         self.assertIn("Interview placement: provisional", transcript)
         self.assertNotIn("Learner selected a less demanding baseline", transcript)
 
+    def test_interview_resume_dry_run_does_not_recover_pending_profile_edit(
+        self,
+    ) -> None:
+        call_silent(
+            cli.cmd_new,
+            Namespace(
+                topic="Algorithms",
+                goal="Practice algorithms",
+                interview_prep=True,
+                mastery_profile=None,
+                template=None,
+            ),
+        )
+        cli._write_interview_edit_journal(
+            "algorithms",
+            profile_revision=1,
+            field="weekly_minutes",
+            value=60,
+        )
+        before = snapshot_files(Path(self.home.name))
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            result = cli.main(["resume", "algorithms", "--dry-run"])
+
+        self.assertEqual(result, 0)
+        self.assertEqual(snapshot_files(Path(self.home.name)), before)
+        self.assertTrue(cli.interview_edit_journal_path("algorithms").exists())
+        self.assertIn("saved profile edit is pending", output.getvalue())
+
+    def test_interview_resume_dry_run_does_not_enter_in_progress_placement(
+        self,
+    ) -> None:
+        call_silent(
+            cli.cmd_new,
+            Namespace(
+                topic="Algorithms",
+                goal="Practice algorithms",
+                interview_prep=True,
+                mastery_profile=None,
+                template=None,
+            ),
+        )
+        cli.cmd_interview_placement(
+            Namespace(topic="algorithms", action="start"),
+            input_func=iter_input(
+                [
+                    "Recent coding practice.",
+                    "What should I return?",
+                    "Use a sliding window.",
+                    "/stop",
+                ]
+            ),
+            output_func=lambda _line: None,
+        )
+        before = snapshot_files(Path(self.home.name))
+        output: list[str] = []
+
+        original_dry_run = cli._DRY_RUN
+        cli._DRY_RUN = True
+        try:
+            result = cli.cmd_resume(
+                Namespace(topic="algorithms", model=None),
+                input_func=lambda _prompt: (_ for _ in ()).throw(
+                    AssertionError("dry run must not enter placement")
+                ),
+                output_func=output.append,
+            )
+        finally:
+            cli._DRY_RUN = original_dry_run
+
+        self.assertEqual(result, 0)
+        self.assertEqual(snapshot_files(Path(self.home.name)), before)
+        transcript = "\n".join(output)
+        self.assertIn("Placement: in_progress (3/7)", transcript)
+        self.assertIn("implementation", transcript)
+        self.assertIn("Run openlearn resume algorithms", transcript)
+
+    def test_resume_refreshes_expired_provisional_placement_before_routing(self) -> None:
+        call_silent(
+            cli.cmd_new,
+            Namespace(
+                topic="Algorithms",
+                goal="Practice algorithms",
+                interview_prep=True,
+                mastery_profile=None,
+                template=None,
+            ),
+        )
+        cli.cmd_interview_placement(
+            Namespace(topic="algorithms", action="start"),
+            input_func=iter_input(["/baseline"]),
+            output_func=lambda _line: None,
+        )
+        make_interview_placement_expired("algorithms")
+        output: list[str] = []
+
+        result = cli.cmd_resume(
+            Namespace(topic="algorithms", model=None),
+            input_func=iter_input(["q"]),
+            output_func=output.append,
+        )
+
+        profile = cli.interview_prep.load_profile(
+            cli.interview_profile_path("algorithms")
+        )
+        self.assertEqual(result, 0)
+        self.assertEqual(profile["placement"]["status"], "stale")
+        self.assertIn("Placement: stale", "\n".join(output))
+
+    def test_expired_provisional_closes_old_activity_before_new_placement(
+        self,
+    ) -> None:
+        call_silent(
+            cli.cmd_new,
+            Namespace(
+                topic="Algorithms",
+                goal="Practice algorithms",
+                interview_prep=True,
+                mastery_profile=None,
+                template=None,
+            ),
+        )
+        cli.cmd_interview_placement(
+            Namespace(topic="algorithms", action="start"),
+            input_func=iter_input(
+                [
+                    "Recent coding practice.",
+                    "What should I return?",
+                    "Use a sliding window.",
+                    "def first_unique_window(text, width):",
+                    "    return -1",
+                    "/done",
+                    "Test edge cases.",
+                    "O(n) time and O(width) space.",
+                    "/stop",
+                ]
+            ),
+            output_func=lambda _line: None,
+        )
+
+        with mock.patch.object(
+            cli,
+            "transition_topic_activity",
+            side_effect=RuntimeError("simulated transition interruption"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "transition interruption"):
+                cli.cmd_interview_placement(
+                    Namespace(topic="algorithms", action="resume"),
+                    input_func=iter_input(["Keep only the active streaming window."]),
+                    output_func=lambda _line: None,
+                )
+
+        interrupted = cli.interview_prep.load_profile(
+            cli.interview_profile_path("algorithms")
+        )
+        old_activity = cli._current_interview_activity("algorithms")
+        old_attempt_id = interrupted["placement"]["attempt_id"]
+        old_activity_id = old_activity["activity_id"]
+        self.assertEqual(interrupted["placement"]["status"], "provisional")
+        self.assertEqual(old_activity["status"], "active")
+        self.assertEqual(len(interrupted["placement"]["evidence_refs"]), 7)
+        make_interview_placement_expired("algorithms")
+
+        cli.cmd_resume(
+            Namespace(topic="algorithms", model=None),
+            input_func=iter_input(["y", "/stop"]),
+            output_func=lambda _line: None,
+        )
+
+        restarted = cli.interview_prep.load_profile(
+            cli.interview_profile_path("algorithms")
+        )
+        new_activity = cli._current_interview_activity("algorithms")
+        self.assertEqual(restarted["placement"]["status"], "in_progress")
+        self.assertEqual(restarted["placement"]["next_stage"], "calibration")
+        self.assertEqual(restarted["placement"]["evidence_refs"], [])
+        self.assertNotEqual(restarted["placement"]["attempt_id"], old_attempt_id)
+        self.assertNotEqual(new_activity["activity_id"], old_activity_id)
+        self.assertEqual(new_activity["evidence_refs"], [])
+        synchronized = cli.sync_interview_placement("algorithms")
+        self.assertEqual(synchronized["placement"]["evidence_refs"], [])
+
+    def test_resume_dry_run_projects_expired_staleness_without_writing(self) -> None:
+        call_silent(
+            cli.cmd_new,
+            Namespace(
+                topic="Algorithms",
+                goal="Practice algorithms",
+                interview_prep=True,
+                mastery_profile=None,
+                template=None,
+            ),
+        )
+        cli.cmd_interview_placement(
+            Namespace(topic="algorithms", action="start"),
+            input_func=iter_input(["/baseline"]),
+            output_func=lambda _line: None,
+        )
+        make_interview_placement_expired("algorithms")
+        before = snapshot_files(Path(self.home.name))
+        output: list[str] = []
+
+        original_dry_run = cli._DRY_RUN
+        cli._DRY_RUN = True
+        try:
+            result = cli.cmd_resume(
+                Namespace(topic="algorithms", model=None),
+                input_func=lambda _prompt: (_ for _ in ()).throw(
+                    AssertionError("dry run must not enter stale routing")
+                ),
+                output_func=output.append,
+            )
+        finally:
+            cli._DRY_RUN = original_dry_run
+
+        self.assertEqual(result, 0)
+        self.assertEqual(snapshot_files(Path(self.home.name)), before)
+        self.assertIn("Placement: stale", "\n".join(output))
+        stored = cli.interview_prep.load_profile(
+            cli.interview_profile_path("algorithms")
+        )
+        self.assertEqual(stored["placement"]["status"], "provisional")
+
     def test_provider_preflight_accepts_mock_and_keyless_local_modes(self) -> None:
         with mock.patch.object(cli, "_openlearn_mock_enabled", return_value=True):
             self.assertTrue(cli.provider_is_configured())
@@ -1050,6 +1594,81 @@ class CliStorageTests(unittest.TestCase):
         self.assertEqual(len(profile["placement"]["evidence_refs"]), 3)
         self.assertTrue(any("terminal instead" in line for line in output))
 
+    def test_placement_editor_handles_malformed_env_and_saved_config(self) -> None:
+        for config, editor in (
+            ({}, "'unterminated"),
+            ({"editor": "'unterminated"}, None),
+        ):
+            with self.subTest(config=config, editor=editor):
+                output: list[str] = []
+                env = {"EDITOR": editor} if editor is not None else {}
+                with (
+                    mock.patch.object(cli, "read_config", return_value=config),
+                    mock.patch.dict(os.environ, env, clear=False),
+                ):
+                    if editor is None:
+                        os.environ.pop("EDITOR", None)
+                        os.environ.pop("VISUAL", None)
+                    response = cli._placement_editor_response(output.append)
+
+                self.assertIsNone(response)
+                self.assertIn("Could not open the configured editor", "\n".join(output))
+
+    def test_placement_editor_uses_private_file_and_returns_filtered_multiline_code(
+        self,
+    ) -> None:
+        seen: dict[str, object] = {}
+
+        def edit_file(argv, check=False):
+            path = Path(argv[-1])
+            seen["argv"] = argv
+            seen["check"] = check
+            seen["path"] = path
+            seen["mode"] = stat.S_IMODE(path.stat().st_mode)
+            path.write_text(
+                "# openLearn: instruction\n"
+                "# learner comment\n"
+                "def solve():\n"
+                "    return 1\n",
+                encoding="utf-8",
+            )
+            return subprocess.CompletedProcess(argv, 0)
+
+        with (
+            mock.patch.object(cli, "configured_editor_argv", return_value=["code", "--wait"]),
+            mock.patch.object(cli.subprocess, "run", side_effect=edit_file),
+        ):
+            response = cli._placement_editor_response()
+
+        self.assertEqual(seen["argv"][:-1], ["code", "--wait"])
+        self.assertIs(seen["check"], False)
+        self.assertEqual(seen["mode"], 0o600)
+        self.assertEqual(
+            response,
+            "# learner comment\ndef solve():\n    return 1",
+        )
+        self.assertFalse(Path(seen["path"]).exists())
+
+    def test_placement_editor_warns_when_private_file_cleanup_fails(self) -> None:
+        output: list[str] = []
+        created_path: list[Path] = []
+
+        def close_editor(argv, check=False):
+            created_path.append(Path(argv[-1]))
+            return subprocess.CompletedProcess(argv, 1)
+
+        with (
+            mock.patch.object(cli, "configured_editor_argv", return_value=["nvim"]),
+            mock.patch.object(cli.subprocess, "run", side_effect=close_editor),
+            mock.patch.object(Path, "unlink", side_effect=OSError("permission denied")),
+        ):
+            response = cli._placement_editor_response(output.append)
+
+        self.assertIsNone(response)
+        transcript = "\n".join(output)
+        self.assertIn(str(created_path[0]), transcript)
+        self.assertIn("Remove it manually", transcript)
+        created_path[0].unlink()
 
     def test_interview_placement_recovers_activity_evidence_after_fault(self) -> None:
         call_silent(
@@ -16499,6 +17118,23 @@ def iter_input(values):
         return next(iterator)
 
     return read
+
+
+def snapshot_files(root: Path) -> dict[str, bytes]:
+    return {
+        str(path.relative_to(root)): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+def make_interview_placement_expired(slug: str) -> None:
+    path = cli.interview_profile_path(slug)
+    value = json.loads(path.read_text(encoding="utf-8"))
+    expired = (datetime.now(timezone.utc) - timedelta(days=91)).isoformat()
+    value["placement"]["completed_at"] = expired
+    value["placement"]["updated_at"] = expired
+    path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def mark_course_started(slug: str) -> None:
