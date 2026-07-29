@@ -376,6 +376,8 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
         if args.func is cmd_review:
             return cmd_review(args, input_func=input if sys.stdin.isatty() else None)
+        if args.func is cmd_new:
+            return cmd_new(args, input_func=input if sys.stdin.isatty() else None)
         return args.func(args)
     except DryRunPrompt as request:
         print_dry_run_prompt(request)
@@ -1040,7 +1042,11 @@ def menu_start_course(input_func, output_func) -> None:
 
 
 def menu_resume(input_func, output_func) -> None:
-    cmd_resume(argparse.Namespace(topic=None, model=None), output_func=output_func)
+    cmd_resume(
+        argparse.Namespace(topic=None, model=None),
+        input_func=input_func,
+        output_func=output_func,
+    )
     run_repl(input_func=input_func, output_func=output_func, show_intro=False)
 
 
@@ -2178,6 +2184,7 @@ def handle_repl_command(
     elif name in {"resume", "r"}:
         cmd_resume(
             argparse.Namespace(topic=args[0] if args else None, model=model),
+            input_func=input_func,
             output_func=output_func,
         )
     elif name in {"next", "n"}:
@@ -2526,6 +2533,114 @@ def default_interview_profile_values() -> dict[str, object]:
     }
 
 
+INTERVIEW_PROFILE_SETUP_FIELDS = (
+    ("role_family", "Target role family"),
+    ("target_level", "Target level"),
+    ("interview_date", "Interview date (YYYY-MM-DD, optional)"),
+    ("coding_language", "Coding language"),
+    ("data_structures_experience", "Data structures experience"),
+    ("algorithms_experience", "Algorithms experience"),
+    ("interview_experience", "Interview experience"),
+    ("weekly_minutes", "Weekly practice minutes"),
+    ("session_minutes", "Session minutes"),
+    ("target_notes", "Target notes (optional)"),
+    ("accessibility_preferences", "Accessibility preferences (optional)"),
+)
+
+
+def _profile_setup_display(value: object) -> str:
+    return str(value) if value not in {"", None} else "Not provided"
+
+
+def collect_interview_profile(
+    input_func, output_func=print
+) -> dict[str, object] | None:
+    """Collect and canonically validate a profile before any learner files exist."""
+    defaults = default_interview_profile_values()
+    while True:
+        values: dict[str, object] = {}
+        try:
+            for field, label in INTERVIEW_PROFILE_SETUP_FIELDS:
+                default = defaults[field]
+                while True:
+                    answer = input_func(
+                        f"{label} [{_profile_setup_display(default)}]: "
+                    ).strip()
+                    candidate: object = answer if answer else default
+                    if field == "interview_date" and candidate:
+                        try:
+                            date.fromisoformat(str(candidate))
+                        except ValueError:
+                            output_func("Enter a date as YYYY-MM-DD, or leave it blank.")
+                            continue
+                    if field in {"weekly_minutes", "session_minutes"}:
+                        try:
+                            candidate = int(str(candidate))
+                        except (TypeError, ValueError):
+                            output_func(f"{label} must be a positive integer.")
+                            continue
+                        if candidate < 1 or candidate > 10_080:
+                            output_func(
+                                f"{label} must be a positive integer between 1 and 10080."
+                            )
+                            continue
+                        weekly_minutes = values.get("weekly_minutes")
+                        if (
+                            field == "session_minutes"
+                            and isinstance(weekly_minutes, int)
+                            and candidate > weekly_minutes
+                        ):
+                            output_func(
+                                "Session minutes cannot exceed weekly practice minutes."
+                            )
+                            continue
+                    values[field] = candidate
+                    break
+        except (EOFError, KeyboardInterrupt):
+            output_func("\nInterview-prep course creation cancelled. Nothing was saved.")
+            return None
+
+        try:
+            values = interview_prep.normalize_profile_update(defaults, values)
+        except ValueError as exc:
+            output_func(f"Profile needs another edit: {exc}")
+            continue
+
+        output_func("Interview-prep profile:")
+        for field, label in INTERVIEW_PROFILE_SETUP_FIELDS:
+            output_func(f"- {label}: {_profile_setup_display(values[field])}")
+        try:
+            confirmation = input_func("Create this interview-prep course? [Y/n]: ")
+        except (EOFError, KeyboardInterrupt):
+            output_func("\nInterview-prep course creation cancelled. Nothing was saved.")
+            return None
+        if confirmation.strip().lower() in {"", "y", "yes"}:
+            return values
+        try:
+            choice = input_func("Edit profile or cancel? [e/c]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            output_func("\nInterview-prep course creation cancelled. Nothing was saved.")
+            return None
+        if choice in {"e", "edit"}:
+            defaults = values
+            continue
+        output_func("Interview-prep course creation cancelled. Nothing was saved.")
+        return None
+
+
+def _print_interview_capability_notice(output_func=print) -> None:
+    output_func(
+        "Profile setup and bounded placement works offline without a model provider."
+    )
+    if provider_is_configured():
+        output_func("Model-backed teaching is ready when you continue to course planning.")
+    else:
+        output_func(
+            "Model-backed teaching still needs a provider. "
+            "Run 'openlearn config set-key' before starting the course."
+        )
+
+
 def interview_profile_values(args: argparse.Namespace) -> dict[str, object]:
     return {
         field: getattr(args, field)
@@ -2727,6 +2842,17 @@ def _load_interview_profile(slug: str) -> dict[str, object]:
         raise OpenLearnError(str(exc)) from exc
 
 
+def _read_interview_profile_without_recovery(slug: str) -> dict[str, object]:
+    """Read adjacent interview state without locks, journals, or storage writes."""
+    if not topic_path(slug).exists():
+        raise OpenLearnError(f"topic not found: {slug}")
+    try:
+        value = interview_prep.load_profile(interview_profile_path(slug))
+    except ValueError as exc:
+        raise OpenLearnError(str(exc)) from exc
+    return interview_prep.project_staleness(value)
+
+
 def cmd_interview_setup(args: argparse.Namespace, output_func=print) -> int:
     slug = resolve_topic_slug(getattr(args, "topic", None))
     if not topic_path(slug).exists():
@@ -2876,7 +3002,8 @@ INTERVIEW_PLACEMENT_PROMPTS = {
     ),
     "plan": "Explain your initial approach and the data structures you would use.",
     "implementation": (
-        "Write your implementation now. The placement will not reveal a full solution."
+        "Enter code below; finish with a line containing only /done. "
+        "Use /editor first to open your configured editor, or /skip, /baseline, /stop."
     ),
     "tests": "List or run representative tests, including edge cases, and report what happened.",
     "complexity": "Analyze the time and space complexity of your implementation.",
@@ -2896,6 +3023,115 @@ def _print_placement_status(value: dict[str, object], output_func=print) -> None
     )
     if placement.get("next_stage"):
         output_func(f"Next evidence: {placement['next_stage']}")
+
+
+def _print_placement_saved(
+    slug: str, stage: str, value: dict[str, object], output_func=print
+) -> None:
+    placement = value["placement"]
+    assert isinstance(placement, dict)
+    evidence_count = len(placement.get("evidence_refs", []))
+    output_func(
+        f"Placement saved at {stage} "
+        f"({evidence_count}/{len(interview_prep.PLACEMENT_STAGES)}). "
+        "Run openlearn resume to continue."
+    )
+    output_func(
+        "Troubleshooting: "
+        f"openlearn interview placement {slug} resume"
+    )
+
+
+def _placement_editor_response(output_func=print) -> str | None:
+    instructions = (
+        "# openLearn: enter your implementation below.\n"
+        "# openLearn: save and close the editor when finished.\n\n"
+    )
+    temp_path: Path | None = None
+    try:
+        editor = configured_editor_argv()
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            prefix="openlearn-placement-",
+            suffix=".py",
+            delete=False,
+        ) as temp_file:
+            temp_path = Path(temp_file.name)
+            temp_file.write(instructions)
+        temp_path.chmod(0o600)
+        result = subprocess.run([*editor, str(temp_path)], check=False)
+        if result.returncode != 0:
+            output_func(
+                "Editor closed without saving an implementation. "
+                "You can enter code in the terminal instead."
+            )
+            return None
+        lines = temp_path.read_text(encoding="utf-8").splitlines()
+        response = "\n".join(
+            line for line in lines if not line.startswith("# openLearn:")
+        ).strip("\n")
+        if not response.strip():
+            output_func(
+                "The editor did not contain an implementation. "
+                "You can enter code in the terminal instead."
+            )
+            return None
+        return response
+    except (OSError, OpenLearnError) as exc:
+        output_func(
+            f"Could not open the configured editor: {exc}. "
+            "You can enter code in the terminal instead."
+        )
+        return None
+    finally:
+        if temp_path is not None:
+            try:
+                temp_path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                output_func(
+                    f"Warning: could not remove private editor file {temp_path}: {exc}. "
+                    f"Remove it manually with: rm -- {shlex.quote(str(temp_path))}"
+                )
+
+
+PLACEMENT_COMMANDS = {
+    command: name
+    for name in ("stop", "discard", "skip", "baseline")
+    for command in (name, f"/{name}")
+}
+
+
+def _placement_command(response: str) -> str | None:
+    return PLACEMENT_COMMANDS.get(response.strip().lower())
+
+
+def _read_placement_implementation(input_func, output_func=print) -> str | None:
+    first_line = input_func("implementation> ")
+    if not first_line.strip():
+        output_func(
+            "Enter code below; finish with a line containing only /done. "
+            "Use /editor first to open your configured editor, or /skip, /baseline, /stop."
+        )
+        return None
+    if first_line.strip().lower() == "/editor":
+        return _placement_editor_response(output_func)
+    if _placement_command(first_line) is not None:
+        return first_line
+    if first_line.strip().lower() == "/done":
+        output_func(
+            "No implementation was entered. Paste code, use /editor, "
+            "/skip, /baseline, or /stop."
+        )
+        return None
+    lines = [first_line]
+    while True:
+        line = input_func("... ")
+        if line.strip().lower() == "/done":
+            return "\n".join(lines)
+        lines.append(line)
 
 
 def interview_placement_activity_request() -> dict[str, object]:
@@ -2986,54 +3222,67 @@ def sync_interview_placement(slug: str) -> dict[str, object]:
         raise OpenLearnError(
             "interview placement activity reference does not match durable activity state"
         )
-    if activity is None or placement.get("status") not in {"in_progress", "provisional"}:
-        return profile_value
-    existing_refs = placement.get("evidence_refs")
-    assert isinstance(existing_refs, list)
-    existing_ids = {
-        str(ref["evidence_id"])
-        for ref in existing_refs
-        if isinstance(ref, dict) and isinstance(ref.get("evidence_id"), str)
-    }
-    activity_ref_ids = {
-        str(ref["evidence_id"])
-        for ref in activity.get("evidence_refs", [])
-        if isinstance(ref, dict) and isinstance(ref.get("evidence_id"), str)
-    }
-    if not existing_ids <= activity_ref_ids:
-        raise OpenLearnError(
-            "interview profile evidence references do not match durable activity evidence"
-        )
-    recovered_evidence = _interview_activity_evidence(slug, activity)
-    with interview_profile_write_lock(slug):
-        for evidence_id, stage, response in recovered_evidence:
-            if evidence_id in existing_ids:
-                continue
-            if stage == "baseline":
-                profile_value = interview_prep.complete_with_baseline(
-                    interview_profile_path(slug),
-                    evidence_id=evidence_id,
-                    reason=response,
-                )
-            else:
-                profile_value = interview_prep.record_placement_evidence(
-                    interview_profile_path(slug),
-                    stage,
-                    response,
-                    evidence_id=evidence_id,
-                )
-            existing_ids.add(evidence_id)
+    if activity is not None and placement.get("status") in {
+        "in_progress",
+        "provisional",
+    }:
+        existing_refs = placement.get("evidence_refs")
+        assert isinstance(existing_refs, list)
+        existing_ids = {
+            str(ref["evidence_id"])
+            for ref in existing_refs
+            if isinstance(ref, dict) and isinstance(ref.get("evidence_id"), str)
+        }
+        activity_refs = activity.get("evidence_refs")
+        assert isinstance(activity_refs, list)
+        activity_ref_ids = {
+            str(ref["evidence_id"])
+            for ref in activity_refs
+            if isinstance(ref, dict) and isinstance(ref.get("evidence_id"), str)
+        }
+        if not existing_ids <= activity_ref_ids:
+            raise OpenLearnError(
+                "interview profile evidence references do not match durable activity evidence"
+            )
+        if existing_ids != activity_ref_ids:
+            recovered_evidence = _interview_activity_evidence(slug, activity)
+            with interview_profile_write_lock(slug):
+                for evidence_id, stage, response in recovered_evidence:
+                    if evidence_id in existing_ids:
+                        continue
+                    if stage == "baseline":
+                        profile_value = interview_prep.complete_with_baseline(
+                            interview_profile_path(slug),
+                            evidence_id=evidence_id,
+                            reason=response,
+                        )
+                    else:
+                        profile_value = interview_prep.record_placement_evidence(
+                            interview_profile_path(slug),
+                            stage,
+                            response,
+                            evidence_id=evidence_id,
+                        )
+                    existing_ids.add(evidence_id)
+        placement = profile_value["placement"]
+        assert isinstance(placement, dict)
+        observations = placement.get("observations")
+        baseline_selected = isinstance(observations, dict) and "baseline" in observations
+        if placement.get("status") == "provisional" and activity.get("status") == "active":
+            transition_topic_activity(
+                slug,
+                activity,
+                "abandoned" if baseline_selected else "completed",
+                reason="learner_selected_less_demanding_baseline" if baseline_selected else "",
+            )
+
     placement = profile_value["placement"]
     assert isinstance(placement, dict)
-    observations = placement.get("observations")
-    baseline_selected = isinstance(observations, dict) and "baseline" in observations
-    if placement.get("status") == "provisional" and activity.get("status") == "active":
-        transition_topic_activity(
-            slug,
-            activity,
-            "abandoned" if baseline_selected else "completed",
-            reason="learner_selected_less_demanding_baseline" if baseline_selected else "",
-        )
+    if placement.get("status") == "provisional":
+        with interview_profile_write_lock(slug):
+            profile_value = interview_prep.refresh_staleness(
+                interview_profile_path(slug)
+            )
     return profile_value
 
 
@@ -3121,15 +3370,24 @@ def cmd_interview_placement(
                 )
             output_func(f"\n{stage_prompt}")
             try:
-                response = input_func(f"{stage}> ")
+                if stage == "implementation":
+                    response = _read_placement_implementation(input_func, output_func)
+                    if response is None:
+                        continue
+                else:
+                    response = input_func(f"{stage}> ")
             except (EOFError, KeyboardInterrupt):
-                output_func("\nPlacement interrupted and saved. Resume with the same command.")
+                output_func("")
+                _print_placement_saved(slug, stage, value, output_func)
                 return 0
-            command = response.strip().lower()
-            if command in {"/stop", "stop"}:
-                output_func("Placement saved. Resume when ready.")
+            if not response.strip():
+                output_func("Enter a response, /skip, /baseline, or /stop.")
+                continue
+            command = _placement_command(response)
+            if command == "stop":
+                _print_placement_saved(slug, stage, value, output_func)
                 return 0
-            if command in {"/discard", "discard"}:
+            if command == "discard":
                 activity = _current_interview_activity(slug)
                 if activity is not None and activity.get("status") == "active":
                     transition_topic_activity(
@@ -3151,7 +3409,7 @@ def cmd_interview_placement(
             activity = _current_interview_activity(slug)
             if activity is None or activity.get("status") != "active":
                 raise OpenLearnError("validated interview placement activity is not active")
-            if command in {"/baseline", "baseline"}:
+            if command == "baseline":
                 record_topic_activity_evidence(
                     slug,
                     activity,
@@ -3169,7 +3427,7 @@ def cmd_interview_placement(
                     "All unobserved axes remain uncertain."
                 )
                 break
-            if command in {"/skip", "skip"}:
+            if command == "skip":
                 response = f"Learner skipped {stage}; evidence remains uncertain."
             record_topic_activity_evidence(
                 slug,
@@ -3178,13 +3436,19 @@ def cmd_interview_placement(
                 {"stage": stage, "response": response},
             )
             value = sync_interview_placement(slug)
+            if stage == "clarification" and command != "skip":
+                output_func(interview_prep.PLACEMENT_ASSUMPTION_CARD)
         output_func("Placement complete. Results are provisional and grant no mastery.")
         return cmd_interview_profile(argparse.Namespace(topic=slug), output_func=output_func)
     except ValueError as exc:
         raise OpenLearnError(str(exc)) from exc
 
 
-def cmd_new(args: argparse.Namespace, output_func=print) -> int:
+def _new_course_checkpoint(_stage: str) -> None:
+    """Test seam for durable interview-course publication ordering."""
+
+
+def cmd_new(args: argparse.Namespace, output_func=print, input_func=None) -> int:
     template_slug = getattr(args, "template", None)
     template = None
     if template_slug:
@@ -3197,11 +3461,18 @@ def cmd_new(args: argparse.Namespace, output_func=print) -> int:
             output_func(f"Could not load template '{template_slug}': {exc}")
             return 1
 
-    topics_dir().mkdir(parents=True, exist_ok=True)
     slug = slugify(args.topic)
     path = topic_path(slug)
     if path.exists():
         raise OpenLearnError(f"topic already exists: {slug}")
+    profile_values = default_interview_profile_values()
+    if getattr(args, "interview_prep", False) and input_func is not None:
+        collected = collect_interview_profile(input_func, output_func)
+        if collected is None:
+            return 0
+        profile_values = collected
+
+    topics_dir().mkdir(parents=True, exist_ok=True)
 
     title = args.topic.strip() or slug.replace("-", " ").title()
     goal = args.goal or (template.goal if template is not None else "")
@@ -3251,6 +3522,7 @@ def cmd_new(args: argparse.Namespace, output_func=print) -> int:
 ## Session Log
 
 """
+    interview_prep_enabled = bool(getattr(args, "interview_prep", False))
     with topic_store_locks(slug, include_journal=True):
         if path.exists():
             raise OpenLearnError(f"topic already exists: {slug}")
@@ -3265,28 +3537,60 @@ def cmd_new(args: argparse.Namespace, output_func=print) -> int:
             shutil.rmtree(data_dir)
             fsync_directory(data_dir.parent)
         durable_unlink(topic_deletion_tombstone_path(slug))
+        if interview_prep_enabled:
+            with file_lock(interview_profile_path(slug)):
+                profile_value = interview_prep.create_profile(
+                    interview_profile_path(slug),
+                    profile_values,
+                )
+            _new_course_checkpoint("after_profile")
+            log_event(
+                slug,
+                "interview_profile_created",
+                {
+                    "profile_revision": profile_value["profile_revision"],
+                    "placement_status": "not_started",
+                },
+            )
+            _new_course_checkpoint("after_creation_event")
         write_topic(path, metadata, body)
+        if interview_prep_enabled:
+            _new_course_checkpoint("after_topic")
     set_active_topic(slug)
     output_func(f"Created {path}")
     output_func(f"Mastery profile: {selected_profile}")
     if template is not None:
         output_func(f"Template '{template.name}' loaded ({len(template.units)} units).")
-    if getattr(args, "interview_prep", False):
-        with interview_profile_write_lock(slug):
-            interview_prep.create_profile(
-                interview_profile_path(slug),
-                default_interview_profile_values(),
-            )
-        log_event(
-            slug,
-            "interview_profile_created",
-            {"profile_revision": 1, "placement_status": "not_started"},
-        )
+    if interview_prep_enabled:
         output_func("Interview-prep mode enabled with a local editable profile.")
-        output_func(
-            f"Review it with 'openlearn interview profile {slug}', then run placement "
-            f"or defer it with 'openlearn interview placement {slug} defer'."
-        )
+        _print_interview_capability_notice(output_func)
+        if input_func is None:
+            output_func(
+                f"Review it with 'openlearn interview profile {slug}', then run placement "
+                f"or defer it with 'openlearn interview placement {slug} defer'."
+            )
+            return 0
+        try:
+            placement_choice = input_func(
+                "Start offline placement now? [Y/n/d/q]: "
+            ).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            output_func(
+                f"\nCourse saved. Run openlearn resume to continue {slug}."
+            )
+            return 0
+        if placement_choice in {"", "y", "yes"}:
+            return cmd_interview_placement(
+                argparse.Namespace(topic=slug, action="start"),
+                input_func=input_func,
+                output_func=output_func,
+            )
+        if placement_choice in {"d", "defer"}:
+            return cmd_interview_placement(
+                argparse.Namespace(topic=slug, action="defer"),
+                output_func=output_func,
+            )
+        output_func(f"Course saved. Run openlearn resume to continue {slug}.")
     return 0
 
 
@@ -3337,23 +3641,198 @@ def active_topic_needs_course_start(active_slug: str | None) -> bool:
     return not bool(topic.metadata.get("course_started"))
 
 
-def start_course(input_func=input, output_func=print, model: str | None = None) -> int:
-    topic = read_topic(resolve_topic_slug(None))
-    set_active_topic(topic.slug)
+def interview_planning_context(
+    slug: str, value: dict[str, object] | None = None
+) -> str:
+    """Return bounded, derived profile and placement context for course planning."""
+    if value is None:
+        if not interview_profile_path(slug).exists():
+            return ""
+        value = (
+            _read_interview_profile_without_recovery(slug)
+            if _DRY_RUN
+            else sync_interview_placement(slug)
+        )
+    profile = value["profile"]
+    placement = value["placement"]
+    assert isinstance(profile, dict) and isinstance(placement, dict)
+    status = str(placement.get("status") or "not_started")
+    lines = [
+        f"Interview placement: {status}",
+        (
+            "Profile target: "
+            f"{profile.get('role_family') or 'general SWE'} at "
+            f"{profile.get('target_level') or 'unspecified'}; "
+            f"coding language {profile.get('coding_language') or 'python'}"
+        ),
+    ]
+    interview_date = str(profile.get("interview_date") or "").strip()
+    if interview_date:
+        lines.append(f"Interview date: {interview_date}")
+
+    recommendations = value.get("recommendations")
+    if isinstance(recommendations, dict):
+        lines.extend(
+            [
+                f"Target: {recommendations.get('target')}",
+                (
+                    "Schedule: "
+                    f"{recommendations.get('sessions_per_week')} x "
+                    f"{recommendations.get('session_minutes')} minutes "
+                    f"({recommendations.get('weekly_minutes')} minutes/week)"
+                ),
+                f"Horizon: {recommendations.get('horizon')}",
+            ]
+        )
+        priorities = recommendations.get("priorities")
+        if isinstance(priorities, list) and priorities:
+            lines.append(
+                "Planning priorities: "
+                + "; ".join(one_line(str(priority)) for priority in priorities[:3])
+            )
+    else:
+        scheduled, session, sessions = interview_prep.practice_schedule(profile)
+        lines.append(
+            f"Schedule: {sessions} x {session} minutes "
+            f"({scheduled} minutes/week)"
+        )
+
+    result = placement.get("result")
+    if isinstance(result, dict):
+        lines.append(f"Provisional starting level: {result.get('starting_level')}")
+        gaps = result.get("gaps")
+        if isinstance(gaps, dict):
+            statuses = []
+            for axis in (
+                "prerequisites",
+                "coding_fluency",
+                "reasoning",
+                "interview_process",
+            ):
+                detail = gaps.get(axis)
+                if isinstance(detail, dict):
+                    statuses.append(
+                        f"{axis.replace('_', ' ')}={detail.get('status')}"
+                    )
+            if statuses:
+                lines.append("Gap statuses: " + "; ".join(statuses))
+        uncertainty = result.get("uncertainty")
+        if isinstance(uncertainty, list) and uncertainty:
+            lines.append(
+                "Uncertainty: "
+                + "; ".join(one_line(str(item)) for item in uncertainty[:3])
+            )
+    elif status == "deferred":
+        lines.append(
+            "Uncertainty: Placement was deferred, so skill gaps were not observed."
+        )
+    elif status == "stale":
+        lines.append(
+            "Uncertainty: Prior placement recommendations were invalidated by profile changes."
+        )
+    return "\n".join(lines)
+
+
+def _interview_placement_progress(value: dict[str, object]) -> tuple[str, int]:
+    placement = value["placement"]
+    assert isinstance(placement, dict)
+    refs = placement.get("evidence_refs")
+    evidence_count = len(refs) if isinstance(refs, list) else 0
+    return str(placement.get("status") or "not_started"), evidence_count
+
+
+def _print_interview_continuity(
+    topic: Topic,
+    value: dict[str, object],
+    output_func=print,
+) -> None:
+    status, evidence_count = _interview_placement_progress(value)
+    output_func(f"Interview-prep course: {topic.metadata.get('topic', topic.slug)}")
+    output_func(
+        f"Placement: {status} "
+        f"({evidence_count}/{len(interview_prep.PLACEMENT_STAGES)})"
+    )
+
+
+def _preflight_interview_provider(
+    topic: Topic,
+    value: dict[str, object],
+    output_func=print,
+    *,
+    show_continuity: bool = True,
+) -> None:
+    if provider_is_configured():
+        return
+    if show_continuity:
+        _print_interview_continuity(topic, value, output_func)
+    output_func("Model-backed course planning is not configured yet.")
+    output_func("Configure it with: openlearn config set-key")
+    output_func(f"Then continue with: openlearn resume {topic.slug}")
+    raise OpenLearnError(
+        "Model-backed teaching is unavailable, but all work is saved: your "
+        "interview profile, placement evidence, and course state remain intact."
+    )
+
+
+def start_course(
+    input_func=input,
+    output_func=print,
+    model: str | None = None,
+    topic_value: str | None = None,
+) -> int:
+    topic = read_topic(resolve_topic_slug(topic_value))
+    interview_value = None
+    if interview_profile_path(topic.slug).exists():
+        interview_value = (
+            _read_interview_profile_without_recovery(topic.slug)
+            if _DRY_RUN
+            else sync_interview_placement(topic.slug)
+        )
+        _preflight_interview_provider(topic, interview_value, output_func)
+    return _start_course(
+        topic,
+        interview_value,
+        input_func=input_func,
+        output_func=output_func,
+        model=model,
+    )
+
+
+def _start_course(
+    topic: Topic,
+    interview_value: dict[str, object] | None,
+    *,
+    input_func=input,
+    output_func=print,
+    model: str | None = None,
+) -> int:
+    if not _DRY_RUN:
+        set_active_topic(topic.slug)
     model = model or str(topic.metadata.get("model") or configured_model())
     feedback = ""
     rejected_outline = ""
-
-    placement_answer = (
-        input_func("Run optional placement quiz before planning? [y/N]: ").strip().lower()
+    placement_context = (
+        interview_planning_context(topic.slug, interview_value)
+        if interview_value is not None
+        else placement_context_prompt(topic.slug)
     )
-    output_func("")
-    if placement_answer in {"y", "yes"}:
-        run_placement_quiz(topic, model, input_func, output_func)
-        topic = read_topic(topic.slug)
+
+    if interview_value is None:
+        placement_answer = (
+            input_func("Run optional placement quiz before planning? [y/N]: ").strip().lower()
+        )
+        output_func("")
+        if placement_answer in {"y", "yes"}:
+            run_placement_quiz(topic, model, input_func, output_func)
+            topic = read_topic(topic.slug)
 
     while True:
-        outline_prompt = course_outline_prompt(topic, feedback, rejected_outline)
+        outline_prompt = course_outline_prompt(
+            topic,
+            feedback,
+            rejected_outline,
+            placement_context=placement_context,
+        )
         print_section("Course outline", output_func)
         output_func("Review this outline before the course starts.")
         outline = call_openai_streaming(
@@ -3806,6 +4285,7 @@ def course_outline_prompt(
     rejected_outline: str = "",
     *,
     quick_learn: bool = False,
+    placement_context: str | None = None,
 ) -> str:
     goal = str(topic.metadata.get("goal") or "")
     template_units = topic.metadata.get("template_units")
@@ -3815,7 +4295,8 @@ def course_outline_prompt(
         template_hint = (
             f"\nSuggested unit structure (adapt freely, don't copy verbatim):\n{units_text}\n"
         )
-    placement_context = placement_context_prompt(topic.slug)
+    if placement_context is None:
+        placement_context = placement_context_prompt(topic.slug)
     revision_text = ""
     if feedback:
         revision_text = (
@@ -3873,6 +4354,9 @@ def course_outline_prompt(
 
 
 def placement_context_prompt(slug: str) -> str:
+    interview_context = interview_planning_context(slug)
+    if interview_context:
+        return interview_context
     path = topic_context_dir(slug) / PLACEMENT_CONTEXT_FILENAME
     if not path.exists():
         return ""
@@ -10718,14 +11202,207 @@ def cmd_due(_args: argparse.Namespace, output_func=print) -> int:
     return 0
 
 
-def cmd_resume(args: argparse.Namespace, output_func=print) -> int:
+def _resume_interview_course_transition(
+    topic: Topic,
+    value: dict[str, object],
+    *,
+    input_func=input,
+    output_func=print,
+    model: str | None = None,
+) -> int:
+    _print_interview_continuity(topic, value, output_func)
+    _preflight_interview_provider(
+        topic,
+        value,
+        output_func,
+        show_continuity=False,
+    )
+    return _start_course(
+        topic,
+        value,
+        input_func=input_func,
+        output_func=output_func,
+        model=model,
+    )
+
+
+def _resume_unstarted_interview(
+    topic: Topic,
+    value: dict[str, object],
+    *,
+    input_func=input,
+    output_func=print,
+    model: str | None = None,
+) -> int:
+    _print_interview_continuity(topic, value, output_func)
+    try:
+        choice = input_func(
+            "Start offline placement now, defer and continue to course planning, "
+            "or exit? [Y/d/q]: "
+        ).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        output_func(f"\nCourse saved. Run openlearn resume {topic.slug} to continue.")
+        return 0
+    if choice in {"", "y", "yes"}:
+        return cmd_interview_placement(
+            argparse.Namespace(topic=topic.slug, action="start"),
+            input_func=input_func,
+            output_func=output_func,
+        )
+    if choice in {"d", "defer"}:
+        cmd_interview_placement(
+            argparse.Namespace(topic=topic.slug, action="defer"),
+            output_func=output_func,
+        )
+        deferred = sync_interview_placement(topic.slug)
+        return _resume_interview_course_transition(
+            topic,
+            deferred,
+            input_func=input_func,
+            output_func=output_func,
+            model=model,
+        )
+    output_func(f"Course saved. Run openlearn resume {topic.slug} to continue.")
+    return 0
+
+
+def _resume_stale_interview(
+    topic: Topic,
+    value: dict[str, object],
+    *,
+    input_func=input,
+    output_func=print,
+    model: str | None = None,
+) -> int:
+    _print_interview_continuity(topic, value, output_func)
+    output_func(
+        "Profile changes invalidated the prior placement recommendations. "
+        "Choose a new offline placement or explicitly defer it for profile-only planning."
+    )
+    try:
+        choice = input_func("New placement, defer, or exit? [Y/d/q]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        output_func(f"\nCourse saved. Run openlearn resume {topic.slug} to continue.")
+        return 0
+    if choice in {"", "y", "yes"}:
+        return cmd_interview_placement(
+            argparse.Namespace(topic=topic.slug, action="start"),
+            input_func=input_func,
+            output_func=output_func,
+        )
+    if choice in {"d", "defer"}:
+        cmd_interview_placement(
+            argparse.Namespace(topic=topic.slug, action="defer"),
+            output_func=output_func,
+        )
+        deferred = sync_interview_placement(topic.slug)
+        return _resume_interview_course_transition(
+            topic,
+            deferred,
+            input_func=input_func,
+            output_func=output_func,
+            model=model,
+        )
+    output_func(f"Course saved. Run openlearn resume {topic.slug} to continue.")
+    return 0
+
+
+def _print_interview_dry_run_guidance(
+    topic: Topic,
+    value: dict[str, object],
+    output_func=print,
+    *,
+    pending_profile_edit: bool = False,
+) -> None:
+    _print_interview_continuity(topic, value, output_func)
+    placement = value["placement"]
+    assert isinstance(placement, dict)
+    status = str(placement.get("status") or "not_started")
+    next_stage = placement.get("next_stage")
+    if pending_profile_edit:
+        output_func(
+            "A saved profile edit is pending. Dry run leaves it untouched."
+        )
+    elif status == "in_progress" and isinstance(next_stage, str):
+        output_func(f"Next offline placement stage: {next_stage}.")
+    elif status == "not_started":
+        output_func("Offline placement has not started.")
+    elif status == "stale":
+        output_func(
+            "Profile changes or elapsed time invalidated the prior recommendations."
+        )
+    output_func("Dry run does not advance or change offline interview state.")
+    output_func(f"Run openlearn resume {topic.slug} without --dry-run to continue.")
+
+
+def cmd_resume(args: argparse.Namespace, input_func=input, output_func=print) -> int:
     topic = read_topic(resolve_topic_slug(args.topic))
-    topic = restore_learner_preferences_from_history(topic)
-    set_active_topic(topic.slug)
-    set_review_session_active(topic.slug, False)
     model = args.model or str(topic.metadata.get("model") or configured_model())
-    refresh_imported_source_folders(topic.slug, model=model, output_func=output_func)
-    topic = read_topic(topic.slug)
+    interview_value = None
+    if interview_profile_path(topic.slug).exists():
+        interview_value = (
+            _read_interview_profile_without_recovery(topic.slug)
+            if _DRY_RUN
+            else sync_interview_placement(topic.slug)
+        )
+    if _DRY_RUN and interview_value is not None:
+        pending_profile_edit = interview_edit_journal_path(topic.slug).exists()
+        status, _evidence_count = _interview_placement_progress(interview_value)
+        unfinished_route = (
+            not bool(topic.metadata.get("course_started"))
+            and status in {"not_started", "in_progress", "stale"}
+        )
+        if pending_profile_edit or unfinished_route:
+            _print_interview_dry_run_guidance(
+                topic,
+                interview_value,
+                output_func,
+                pending_profile_edit=pending_profile_edit,
+            )
+            return 0
+
+    if not bool(topic.metadata.get("course_started")) and interview_value is not None:
+        status, _evidence_count = _interview_placement_progress(interview_value)
+        if status == "in_progress":
+            return cmd_interview_placement(
+                argparse.Namespace(topic=topic.slug, action="resume"),
+                input_func=input_func,
+                output_func=output_func,
+            )
+        if status == "not_started":
+            return _resume_unstarted_interview(
+                topic,
+                interview_value,
+                input_func=input_func,
+                output_func=output_func,
+                model=model,
+            )
+        if status == "stale":
+            return _resume_stale_interview(
+                topic,
+                interview_value,
+                input_func=input_func,
+                output_func=output_func,
+                model=model,
+            )
+        if status in {"deferred", "provisional"}:
+            return _resume_interview_course_transition(
+                topic,
+                interview_value,
+                input_func=input_func,
+                output_func=output_func,
+                model=model,
+            )
+        raise OpenLearnError(f"unsupported interview placement state: {status}")
+
+    if interview_value is not None:
+        _preflight_interview_provider(topic, interview_value, output_func)
+    if not _DRY_RUN:
+        topic = restore_learner_preferences_from_history(topic)
+        set_active_topic(topic.slug)
+        set_review_session_active(topic.slug, False)
+        refresh_imported_source_folders(topic.slug, model=model, output_func=output_func)
+        topic = read_topic(topic.slug)
     resume_context = resume_context_prompt(topic)
     last_learner_message = last_actual_learner_message(topic)
     should_update_metadata = topic.metadata.get("last_answer_status") in {"needs_work", "partial"}
@@ -12243,6 +12920,8 @@ def _base_url_allows_keyless_requests(base_url: str) -> bool:
 def provider_is_configured(config: dict[str, object] | None = None) -> bool:
     """Whether a model call can be attempted: a key is set, or the base URL is
     a local/custom endpoint (for example Ollama) that may be keyless."""
+    if _DRY_RUN or _openlearn_mock_enabled():
+        return True
     if configured_openai_api_key():
         return True
     return not base_url_requires_api_key(configured_base_url(config))

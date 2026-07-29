@@ -121,6 +121,11 @@ openlearn interview clear backend-interviews
 Placement observes clarification, planning, implementation, testing, complexity reasoning, and a follow-up on an original bundled problem.
 Its result is provisional, names uncertainty across prerequisite, coding-fluency, reasoning, and interview-process gaps, and never grants mastery.
 Interruptions are resumable, while explicit discard or profile clearing preserves append-only attempt evidence.
+The normal recovery command is `openlearn resume [topic]`.
+It returns an unfinished placement to its exact next stage before any provider or source work, then carries a deferred or provisional result into course planning without offering the separate legacy placement quiz.
+Course planning receives only a bounded summary of the target, schedule, gap statuses, uncertainty, and recommendations; raw calibration, code, tests, and reasoning stay in local append-only evidence.
+If model-backed teaching is not configured, resume reports the adjacent placement state, confirms that all work is saved, and gives both the configuration and resume commands before changing course state.
+Dry-run, mock mode, and keyless localhost providers remain available without a hosted API key.
 During placement, `/skip` leaves only the current evidence axis uncertain and continues, while `/baseline` ends the attempt with an explicit reduced-demand provisional baseline.
 Coding placement rubric v1 validates implementation structure only for Python.
 Learners who prefer another language may still complete placement, but their implementation evidence remains uncertain unless they edit the profile to opt into Python and rerun it.

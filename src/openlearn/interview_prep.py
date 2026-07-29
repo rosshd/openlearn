@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import copy
 import json
 import os
 import re
@@ -47,6 +48,15 @@ PLACEMENT_PROBLEM = {
     "source": "openLearn original problem bank",
     "license": "AGPL-3.0-or-later",
 }
+
+PLACEMENT_ASSUMPTION_CARD = (
+    "Interviewer assumptions:\n"
+    "- `text` is a Python string and `width` is an integer.\n"
+    "- Return the zero-based start index of the first qualifying window.\n"
+    "- Return -1 when no qualifying window exists, including nonpositive widths "
+    "and widths larger than the text.\n"
+    "- Character comparison uses Python string characters exactly as provided."
+)
 
 Clock = Callable[[], datetime]
 EventAppender = Callable[[str, dict[str, object]], None]
@@ -806,17 +816,22 @@ def _provisional_result(observations: Mapping[str, object]) -> dict[str, object]
     }
 
 
-def _recommendations(
-    value: Mapping[str, object], *, current_date: date
-) -> dict[str, object]:
-    profile = value["profile"]
-    assert isinstance(profile, dict)
+def practice_schedule(profile: Mapping[str, object]) -> tuple[int, int, int]:
     weekly = profile["weekly_minutes"]
     requested_session = profile["session_minutes"]
     assert isinstance(weekly, int) and isinstance(requested_session, int)
     session = min(requested_session, weekly)
     sessions = max(1, weekly // session)
     scheduled = min(weekly, sessions * session)
+    return scheduled, session, sessions
+
+
+def _recommendations(
+    value: Mapping[str, object], *, current_date: date
+) -> dict[str, object]:
+    profile = value["profile"]
+    assert isinstance(profile, dict)
+    scheduled, session, sessions = practice_schedule(profile)
     role = str(profile.get("role_family") or "general SWE")
     level = str(profile.get("target_level") or "target")
     interview_date = str(profile.get("interview_date") or "")
@@ -870,12 +885,15 @@ def _recommendations(
     }
 
 
-def refresh_staleness(path: Path, *, now: Clock = _utcnow) -> dict[str, object]:
-    value = load_profile(path)
-    placement = value["placement"]
+def project_staleness(
+    value: Mapping[str, object], *, now: Clock = _utcnow
+) -> dict[str, object]:
+    """Return the current stale projection without mutating caller state or storage."""
+    projected = copy.deepcopy(dict(value))
+    placement = projected["placement"]
     assert isinstance(placement, dict)
     completed = placement.get("completed_at")
-    stale = placement.get("profile_revision") != value.get("profile_revision")
+    stale = placement.get("profile_revision") != projected.get("profile_revision")
     if isinstance(completed, str):
         try:
             completed_at = datetime.fromisoformat(completed.replace("Z", "+00:00"))
@@ -885,6 +903,13 @@ def refresh_staleness(path: Path, *, now: Clock = _utcnow) -> dict[str, object]:
             stale = stale or (now().astimezone(timezone.utc) - completed_at).days > STALE_AFTER_DAYS
     if stale and placement.get("status") == "provisional":
         placement["status"] = "stale"
-        value["recommendations"] = None
-        _write(path, value)
-    return value
+        projected["recommendations"] = None
+    return projected
+
+
+def refresh_staleness(path: Path, *, now: Clock = _utcnow) -> dict[str, object]:
+    value = load_profile(path)
+    projected = project_staleness(value, now=now)
+    if projected != value:
+        _write(path, projected)
+    return projected

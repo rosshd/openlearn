@@ -59,6 +59,13 @@ Profile publication takes the topic identity lock before the profile lock, so co
 Effective profile edits are validated before mutation and publish a topic-generation-aware edit journal while holding the topic identity lock, allowing an interrupted activity abandonment and profile reset to finish on the next profile read.
 Recovery verifies that same generation again under the topic lock immediately before profile publication, so a stale edit cannot mutate a deleted and recreated topic with the same slug.
 Profile edits invalidate affected recommendations and mark completed placement stale without deleting attempt events.
+Generic resume inspects and synchronizes this adjacent state before model-backed tutor or source-refresh work.
+An in-progress placement resumes offline at its exact next stage, not-started and stale states require an explicit learner route, and deferred or provisional states transition into course planning.
+Course-outline construction derives a bounded interview summary from canonical profile and placement projections.
+The summary includes target, schedule, provisional gap statuses, uncertainty, and at most three priorities, while raw activity evidence remains excluded from provider prompts and topic metadata.
+Interview-prep course planning skips the ordinary optional placement quiz because the bounded placement already owns that learner decision.
+Before an interview-prep course plan or tutor resume can call a remote provider, a deterministic preflight accepts mock mode, dry-run mode, saved or environment keys, and keyless localhost endpoints.
+A failed preflight prints compact adjacent continuity and returns before source refresh, tutor output, active-topic mutation, or course mutation.
 Topics without the adjacent file behave exactly as ordinary topics and receive no interview prompts.
 
 ## Interview Skill Graph
@@ -178,6 +185,7 @@ Non-local provider base URLs require an API key, while localhost OpenAI-compatib
 When no key is configured for a keyless endpoint, requests omit the `Authorization` header; a 401 response is reported as an API-key-required endpoint.
 Bare `openlearn` skips first-run onboarding for saved keys, environment keys, `OPENLEARN_MOCK=1`, or keyless localhost providers with a configured model.
 For `chat`, `resume`, `next`, and `review`, `--dry-run` prints the rendered system and user messages instead of calling the provider or mutating local files.
+For an unstarted interview-prep topic, `resume` first follows the adjacent placement routing table; for a started course, it preserves normal tutor continuity after the provider preflight.
 Learner-metadata extraction can use `OPENLEARN_EXTRACTOR_MODEL` or `extractor_model`; otherwise it uses the tutor model.
 Extractor calls send a reduced metadata snapshot limited to pending checks, focus, known concepts, weak spots, and review due items.
 
