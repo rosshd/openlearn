@@ -61,18 +61,27 @@ class InterviewPrepTests(unittest.TestCase):
     def finish_attempt(self) -> dict[str, object]:
         self.create()
         self.start()
+        passing_source = (
+            "def first_unique_window(text, width):\n"
+            "    if width <= 0 or width > len(text):\n"
+            "        return -1\n"
+            "    for i in range(len(text) - width + 1):\n"
+            "        if len(set(text[i:i + width])) == width:\n"
+            "            return i\n"
+            "    return -1"
+        )
+        passing_execution = interview_prep.placement_execution_evidence(
+            passing_source,
+            outcome="passed",
+            tests_passed=True,
+            return_code=0,
+        )
         responses = {
             "calibration": "I use Python weekly but have not interviewed recently.",
             "clarification": "Can width be zero, and may text contain Unicode?",
             "plan": "Use a sliding window and counts; shrink duplicates.",
-            "implementation": (
-                "def first_unique_window(text, width):\n"
-                "    for i in range(len(text) - width + 1):\n"
-                "        if len(set(text[i:i + width])) == width:\n"
-                "            return i\n"
-                "    return -1"
-            ),
-            "tests": "empty input, width 1, duplicate windows, no match, Unicode",
+            "implementation": passing_execution,
+            "tests": passing_execution,
             "complexity": "O(n * width) time and O(width) space.",
             "follow_up": "Track last-seen positions to avoid rebuilding each set.",
         }
@@ -158,7 +167,7 @@ class InterviewPrepTests(unittest.TestCase):
             set(placement["result"]["gaps"]),
             {"prerequisites", "coding_fluency", "reasoning", "interview_process"},
         )
-        self.assertLessEqual(recommendations["weekly_minutes"], 180)
+        self.assertEqual(recommendations["weekly_minutes"], 180)
         self.assertLessEqual(
             recommendations["sessions_per_week"] * recommendations["session_minutes"], 180
         )
@@ -168,6 +177,151 @@ class InterviewPrepTests(unittest.TestCase):
                 for ref in placement["evidence_refs"]
             )
         )
+
+    def test_problem_bundle_is_runnable_and_covers_boundaries(self) -> None:
+        problem = interview_prep.PLACEMENT_PROBLEM
+
+        self.assertEqual(problem["function_name"], "first_unique_window")
+        self.assertGreaterEqual(len(problem["examples"]), 2)
+        case_names = {case["name"] for case in problem["test_cases"]}
+        self.assertEqual(
+            case_names,
+            {
+                "normal_match",
+                "no_match",
+                "repeated_characters",
+                "width_one",
+                "nonpositive_width",
+                "width_greater_than_text",
+                "empty_text",
+            },
+        )
+        namespace: dict[str, object] = {}
+        exec(problem["function_stub"], namespace)
+        with self.assertRaises(NotImplementedError):
+            namespace["first_unique_window"]("abc", 2)
+
+        candidate_namespace: dict[str, object] = {}
+        exec(
+            "def first_unique_window(text, width):\n"
+            "    if width <= 0 or width > len(text):\n"
+            "        return -1\n"
+            "    for index in range(len(text) - width + 1):\n"
+            "        if len(set(text[index:index + width])) == width:\n"
+            "            return index\n"
+            "    return -1\n",
+            candidate_namespace,
+        )
+        function = candidate_namespace[problem["function_name"]]
+        for case in problem["test_cases"]:
+            inputs = case["inputs"]
+            self.assertEqual(
+                function(inputs["text"], inputs["width"]),
+                case["expected"],
+                case["name"],
+            )
+
+    def test_clarification_response_combines_contract_and_examples(self) -> None:
+        response = interview_prep.placement_clarification_response(
+            "What are the inputs and outputs formatted as? "
+            "can you also give me example inputs and outputs"
+        )
+
+        self.assertIn("Python string", response)
+        self.assertIn("integer", response)
+        self.assertIn("zero-based", response)
+        self.assertIn("first_unique_window(", response)
+        self.assertGreaterEqual(response.count("->"), 2)
+
+    def test_unknown_clarification_receives_complete_contract(self) -> None:
+        response = interview_prep.placement_clarification_response(
+            "Could you tell me anything else useful before I begin?"
+        )
+
+        self.assertIn("Return -1", response)
+        self.assertIn("Character comparison", response)
+        self.assertGreaterEqual(response.count("->"), 2)
+
+    def test_execution_evidence_requires_exact_versioned_envelope(self) -> None:
+        source = "def first_unique_window(text, width):\n    return -1"
+        passed = interview_prep.placement_execution_evidence(
+            source,
+            outcome="passed",
+            tests_passed=True,
+            return_code=0,
+        )
+        failed = interview_prep.placement_execution_evidence(
+            source,
+            outcome="failed",
+            tests_passed=False,
+            return_code=1,
+        )
+
+        plain_implementation = interview_prep._evidence_observation(
+            "implementation", source, coding_language="python"
+        )
+        failed_implementation = interview_prep._evidence_observation(
+            "implementation", failed, coding_language="python"
+        )
+        passed_implementation = interview_prep._evidence_observation(
+            "implementation", passed, coding_language="python"
+        )
+        failed_tests = interview_prep._evidence_observation(
+            "tests", failed, coding_language="python"
+        )
+        passed_tests = interview_prep._evidence_observation(
+            "tests", passed, coding_language="python"
+        )
+
+        self.assertEqual(plain_implementation["status"], "not_observed")
+        self.assertEqual(failed_implementation["status"], "not_observed")
+        self.assertEqual(failed_tests["status"], "not_observed")
+        self.assertEqual(passed_implementation["status"], "observed")
+        self.assertEqual(passed_tests["status"], "observed")
+        self.assertIn("execution_passed", passed_implementation["signals"])
+
+        malformed = json.loads(passed)
+        malformed["extra"] = True
+        self.assertEqual(
+            interview_prep._evidence_observation(
+                "tests", json.dumps(malformed), coding_language="python"
+            )["status"],
+            "not_observed",
+        )
+
+    def test_test_prose_and_skips_do_not_become_observed_execution(self) -> None:
+        prose = interview_prep._evidence_observation(
+            "tests",
+            "I would test empty and edge cases with an assert.",
+            coding_language="python",
+        )
+        skipped = interview_prep._evidence_observation(
+            "implementation",
+            "Learner skipped implementation.",
+            coding_language="python",
+        )
+        unsupported = interview_prep._evidence_observation(
+            "implementation",
+            "function first_unique_window(text, width) { return -1; }",
+            coding_language="javascript",
+        )
+
+        self.assertEqual(prose["status"], "not_observed")
+        self.assertEqual(skipped["status"], "uncertain")
+        self.assertEqual(unsupported["status"], "uncertain")
+
+    def test_practice_schedule_preserves_non_divisible_weekly_budget(self) -> None:
+        scheduled, session, sessions = interview_prep.practice_schedule(
+            {"weekly_minutes": 120, "session_minutes": 45}
+        )
+
+        self.assertEqual((scheduled, session, sessions), (120, 40, 3))
+        self.profile["weekly_minutes"] = 120
+        self.profile["session_minutes"] = 45
+        recommendations = self.finish_attempt()["recommendations"]
+        self.assertEqual(recommendations["weekly_minutes"], 120)
+        self.assertEqual(recommendations["session_minutes"], 40)
+        self.assertEqual(recommendations["sessions_per_week"], 3)
 
     def test_repeated_and_stale_placement_keep_prior_attempt_evidence(self) -> None:
         first = self.finish_attempt()

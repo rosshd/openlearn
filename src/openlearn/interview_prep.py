@@ -47,6 +47,66 @@ PLACEMENT_PROBLEM = {
     ),
     "source": "openLearn original problem bank",
     "license": "AGPL-3.0-or-later",
+    "function_name": "first_unique_window",
+    "function_stub": (
+        "def first_unique_window(text: str, width: int) -> int:\n"
+        '    """Return the first all-distinct window index, or -1."""\n'
+        "    raise NotImplementedError\n"
+    ),
+    "examples": [
+        {
+            "inputs": {"text": "aabcde", "width": 3},
+            "expected": 1,
+        },
+        {
+            "inputs": {"text": "aaaa", "width": 2},
+            "expected": -1,
+        },
+    ],
+    "test_cases": [
+        {
+            "name": "normal_match",
+            "inputs": {"text": "aabcde", "width": 3},
+            "expected": 1,
+            "hidden": False,
+        },
+        {
+            "name": "no_match",
+            "inputs": {"text": "aaaa", "width": 2},
+            "expected": -1,
+            "hidden": False,
+        },
+        {
+            "name": "repeated_characters",
+            "inputs": {"text": "abccdef", "width": 4},
+            "expected": 3,
+            "hidden": True,
+        },
+        {
+            "name": "width_one",
+            "inputs": {"text": "zz", "width": 1},
+            "expected": 0,
+            "hidden": True,
+        },
+        {
+            "name": "nonpositive_width",
+            "inputs": {"text": "abc", "width": 0},
+            "expected": -1,
+            "hidden": True,
+        },
+        {
+            "name": "width_greater_than_text",
+            "inputs": {"text": "abc", "width": 4},
+            "expected": -1,
+            "hidden": True,
+        },
+        {
+            "name": "empty_text",
+            "inputs": {"text": "", "width": 1},
+            "expected": -1,
+            "hidden": True,
+        },
+    ],
 }
 
 PLACEMENT_ASSUMPTION_CARD = (
@@ -57,9 +117,121 @@ PLACEMENT_ASSUMPTION_CARD = (
     "and widths larger than the text.\n"
     "- Character comparison uses Python string characters exactly as provided."
 )
+PLACEMENT_EXECUTION_EVIDENCE_KIND = "openlearn-placement-execution-v1"
 
 Clock = Callable[[], datetime]
 EventAppender = Callable[[str, dict[str, object]], None]
+
+
+def placement_clarification_response(question: str) -> str:
+    """Answer placement clarifications deterministically from the problem contract."""
+    normalized = question.casefold()
+    asks_contract = bool(
+        re.search(r"\b(?:input|output|return|format|signature|parameter)\w*\b", normalized)
+    )
+    asks_examples = bool(re.search(r"\b(?:example|sample)\w*\b", normalized))
+    asks_constraints = bool(
+        re.search(
+            r"\b(?:constraint|edge|boundar|width|character|unicode|case-sensitive)\w*\b",
+            normalized,
+        )
+    )
+    sections: list[str] = []
+    if asks_contract:
+        sections.append(
+            "Contract:\n"
+            "- Call `first_unique_window(text, width)` with a Python string and an integer.\n"
+            "- Return the zero-based start index of the first width-character window "
+            "whose characters are all distinct.\n"
+            "- Return -1 when no qualifying window exists."
+        )
+    if asks_constraints:
+        sections.append(
+            "Constraints and edges:\n"
+            "- Return -1 when width is nonpositive or greater than len(text).\n"
+            "- Character comparison uses Python string characters exactly as provided "
+            "(including case and Unicode)."
+        )
+    if asks_examples:
+        sections.append(_placement_examples_text())
+    if not sections:
+        sections.extend((PLACEMENT_ASSUMPTION_CARD, _placement_examples_text()))
+    return "\n\n".join(sections)
+
+
+def _placement_examples_text() -> str:
+    examples = PLACEMENT_PROBLEM["examples"]
+    assert isinstance(examples, list)
+    lines = ["Examples:"]
+    for example in examples:
+        assert isinstance(example, dict)
+        inputs = example["inputs"]
+        assert isinstance(inputs, dict)
+        lines.append(
+            f"- first_unique_window({inputs['text']!r}, {inputs['width']}) "
+            f"-> {example['expected']}"
+        )
+    return "\n".join(lines)
+
+
+def placement_execution_evidence(
+    source: str,
+    *,
+    outcome: str,
+    tests_passed: bool,
+    return_code: int | None,
+) -> str:
+    """Create the exact versioned envelope accepted by placement scoring."""
+    if not isinstance(source, str) or not source.strip():
+        raise ValueError("placement execution source must be non-empty text")
+    if not isinstance(outcome, str) or not outcome.strip():
+        raise ValueError("placement execution outcome must be non-empty text")
+    if not isinstance(tests_passed, bool):
+        raise ValueError("placement execution tests_passed must be boolean")
+    if return_code is not None and (
+        isinstance(return_code, bool) or not isinstance(return_code, int)
+    ):
+        raise ValueError("placement execution return_code must be an integer or null")
+    return json.dumps(
+        {
+            "kind": PLACEMENT_EXECUTION_EVIDENCE_KIND,
+            "source": source,
+            "outcome": outcome.strip(),
+            "tests_passed": tests_passed,
+            "return_code": return_code,
+        },
+        sort_keys=True,
+    )
+
+
+def _parse_placement_execution_evidence(response: str) -> dict[str, object] | None:
+    try:
+        value = json.loads(response)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(value, dict) or set(value) != {
+        "kind",
+        "source",
+        "outcome",
+        "tests_passed",
+        "return_code",
+    }:
+        return None
+    return_code = value.get("return_code")
+    if (
+        value.get("kind") != PLACEMENT_EXECUTION_EVIDENCE_KIND
+        or not isinstance(value.get("source"), str)
+        or not str(value["source"]).strip()
+        or not isinstance(value.get("outcome"), str)
+        or not str(value["outcome"]).strip()
+        or not isinstance(value.get("tests_passed"), bool)
+        or (
+            return_code is not None
+            and (isinstance(return_code, bool) or not isinstance(return_code, int))
+        )
+    ):
+        return None
+    return value
 
 
 def _utcnow() -> datetime:
@@ -653,9 +825,12 @@ def complete_with_baseline(
 def _evidence_observation(
     stage: str, response: str, *, coding_language: str
 ) -> dict[str, object]:
+    execution = _parse_placement_execution_evidence(response)
     normalized = response.lower()
-    skipped = "skipped" in normalized or "less demanding baseline" in normalized
-    non_attempt = bool(
+    skipped = execution is None and (
+        "skipped" in normalized or "less demanding baseline" in normalized
+    )
+    non_attempt = execution is None and bool(
         re.search(
             r"\b(?:i\s+(?:do not|don't|cannot|can't|could not|couldn't)\s+"
             r"(?:know|do|answer|implement|explain)|no idea|unable to|not sure how)\b",
@@ -669,6 +844,13 @@ def _evidence_observation(
         term in normalized for term in ("set", "dict", "map", "window", "index")
     ):
         signals.append("named_data_structure_or_strategy")
+    if execution is not None:
+        signals.append("execution_evidence_received")
+        signals.append(
+            "execution_passed"
+            if execution["tests_passed"]
+            else "execution_failed"
+        )
     unsupported_implementation_language = (
         stage == "implementation" and coding_language.strip().lower() != "python"
     )
@@ -678,8 +860,11 @@ def _evidence_observation(
         and stage == "implementation"
         and not unsupported_implementation_language
     ):
+        implementation_source = (
+            str(execution["source"]) if execution is not None else response
+        )
         try:
-            tree = ast.parse(response)
+            tree = ast.parse(implementation_source)
         except SyntaxError:
             tree = None
         functions = (
@@ -697,10 +882,6 @@ def _evidence_observation(
             signals.append("produced_return_path")
     if unsupported_implementation_language:
         signals.append("unsupported_language_for_rubric")
-    if not skipped and not non_attempt and stage == "tests" and any(
-        term in normalized for term in ("empty", "edge", "duplicate", "no match", "assert")
-    ):
-        signals.append("named_edge_case")
     if (
         not skipped
         and not non_attempt
@@ -718,19 +899,34 @@ def _evidence_observation(
     required_by_stage = {
         "clarification": {"asked_clarifying_question"},
         "plan": {"named_data_structure_or_strategy"},
-        "implementation": {"produced_function", "produced_return_path"},
-        "tests": {"named_edge_case"},
         "complexity": {"stated_complexity"},
         "follow_up": {"engaged_with_follow_up"},
     }
     required = required_by_stage.get(stage, set())
-    status = (
-        "uncertain"
-        if skipped or unsupported_implementation_language
-        else "not_observed"
-        if non_attempt or (required and not required <= set(signals))
-        else "observed"
-    )
+    if skipped or unsupported_implementation_language:
+        status = "uncertain"
+    elif non_attempt:
+        status = "not_observed"
+    elif stage == "implementation":
+        status = (
+            "observed"
+            if execution is not None
+            and execution["tests_passed"] is True
+            and {"produced_function", "produced_return_path"} <= set(signals)
+            else "not_observed"
+        )
+    elif stage == "tests":
+        status = (
+            "observed"
+            if execution is not None and execution["tests_passed"] is True
+            else "not_observed"
+        )
+    else:
+        status = (
+            "not_observed"
+            if required and not required <= set(signals)
+            else "observed"
+        )
     return {
         "status": status,
         "substantive": not skipped and not non_attempt and len(response.split()) >= 3,
@@ -820,10 +1016,9 @@ def practice_schedule(profile: Mapping[str, object]) -> tuple[int, int, int]:
     weekly = profile["weekly_minutes"]
     requested_session = profile["session_minutes"]
     assert isinstance(weekly, int) and isinstance(requested_session, int)
-    session = min(requested_session, weekly)
-    sessions = max(1, weekly // session)
-    scheduled = min(weekly, sessions * session)
-    return scheduled, session, sessions
+    sessions = max(1, (weekly + requested_session - 1) // requested_session)
+    session = (weekly + sessions - 1) // sessions
+    return weekly, session, sessions
 
 
 def _recommendations(
