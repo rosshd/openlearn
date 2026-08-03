@@ -3079,10 +3079,12 @@ INTERVIEW_PLACEMENT_PROMPTS = {
 def _print_placement_status(value: dict[str, object], output_func=print) -> None:
     placement = value["placement"]
     assert isinstance(placement, dict)
+    stages = interview_prep.placement_stages(placement)
     output_func(
         f"Placement: {placement.get('status')} "
-        f"(rubric {placement.get('rubric_version')}, "
-        f"evidence {len(placement.get('evidence_refs', []))}/{len(interview_prep.PLACEMENT_STAGES)})"
+        f"(lifecycle {placement.get('lifecycle_version') or interview_prep.PLACEMENT_V1}, "
+        f"rubric {placement.get('rubric_version')}, "
+        f"evidence {len(placement.get('evidence_refs', []))}/{len(stages)})"
     )
     if placement.get("next_stage"):
         output_func(f"Next evidence: {placement['next_stage']}")
@@ -3094,9 +3096,10 @@ def _print_placement_saved(
     placement = value["placement"]
     assert isinstance(placement, dict)
     evidence_count = len(placement.get("evidence_refs", []))
+    stages = interview_prep.placement_stages(placement)
     output_func(
         f"Placement saved at {stage} "
-        f"({evidence_count}/{len(interview_prep.PLACEMENT_STAGES)}). "
+        f"({evidence_count}/{len(stages)}). "
         "Run openlearn resume to continue."
     )
     output_func(
@@ -3186,7 +3189,14 @@ def _record_placement_execution(
     activity: dict[str, object],
     response: str,
 ) -> None:
-    for stage in ("implementation", "tests"):
+    profile_value = _load_interview_profile(slug)
+    placement = profile_value["placement"]
+    assert isinstance(placement, dict)
+    stages = interview_prep.placement_stages(placement)
+    execution_stages = tuple(
+        stage for stage in ("implementation", "tests") if stage in stages
+    )
+    for stage in execution_stages:
         activity = record_topic_activity_evidence(
             slug,
             activity,
@@ -3203,7 +3213,16 @@ def _skip_placement_implementation_and_dependents(
     slug: str,
     activity: dict[str, object],
 ) -> dict[str, object]:
-    for stage in ("implementation", "tests", "complexity", "follow_up"):
+    profile_value = _load_interview_profile(slug)
+    placement = profile_value["placement"]
+    assert isinstance(placement, dict)
+    stages = interview_prep.placement_stages(placement)
+    skip_stages = tuple(
+        stage
+        for stage in ("implementation", "tests", "complexity", "follow_up")
+        if stage in stages
+    )
+    for stage in skip_stages:
         activity = record_topic_activity_evidence(
             slug,
             activity,
@@ -3216,7 +3235,19 @@ def _skip_placement_implementation_and_dependents(
                 activity, "implementation-skip", stage
             ),
         )
-    return sync_interview_placement(slug)
+    value = sync_interview_placement(slug)
+    placement = value["placement"]
+    assert isinstance(placement, dict)
+    next_stage = placement.get("next_stage")
+    if isinstance(next_stage, str) and next_stage in interview_prep.placement_optional_stages(
+        placement
+    ):
+        with interview_profile_write_lock(slug):
+            value = interview_prep.skip_optional_placement_stage(
+                interview_profile_path(slug), next_stage
+            )
+        value = sync_interview_placement(slug)
+    return value
 
 
 def _placement_batch_evidence_id(
@@ -3231,19 +3262,29 @@ def _placement_batch_evidence_id(
 def _recover_placement_evidence_batch(
     slug: str, activity: dict[str, object]
 ) -> dict[str, object]:
+    profile_value = _load_interview_profile(slug)
+    placement = profile_value["placement"]
+    assert isinstance(placement, dict)
+    lifecycle_stages = interview_prep.placement_stages(placement)
     evidence = _interview_activity_evidence(slug, activity)
     by_stage = {stage: response for _identifier, stage, response in evidence}
     implementation = by_stage.get("implementation")
     if implementation is None:
         return activity
     if interview_prep._parse_placement_execution_evidence(implementation) is not None:
-        stages = ("implementation", "tests")
+        stages = tuple(
+            stage for stage in ("implementation", "tests") if stage in lifecycle_stages
+        )
         batch = "execution"
         responses = {stage: implementation for stage in stages}
     elif implementation == (
         "Learner skipped implementation; evidence remains uncertain."
     ):
-        stages = ("implementation", "tests", "complexity", "follow_up")
+        stages = tuple(
+            stage
+            for stage in ("implementation", "tests", "complexity", "follow_up")
+            if stage in lifecycle_stages
+        )
         batch = "implementation-skip"
         responses = {
             stage: f"Learner skipped {stage}; evidence remains uncertain."
@@ -3824,6 +3865,8 @@ def cmd_interview_placement(
                 value = interview_prep.start_placement(
                     path,
                     activity_id=str(activity["activity_id"]),
+                    # The compact placement UI will deliberately switch this selector.
+                    lifecycle_version=interview_prep.PLACEMENT_V1,
                 )
         output_func(
             "Bounded coding placement started. Type /stop to resume later, /discard to "
@@ -3837,13 +3880,17 @@ def cmd_interview_placement(
             stage = placement.get("next_stage")
             if not isinstance(stage, str):
                 break
-            stage_prompt = INTERVIEW_PLACEMENT_PROMPTS[stage]
+            stage_prompt = INTERVIEW_PLACEMENT_PROMPTS.get(stage)
+            if stage_prompt is None:
+                raise OpenLearnError(
+                    f"placement lifecycle stage {stage!r} is not supported by this CLI"
+                )
             profile = value["profile"]
             assert isinstance(profile, dict)
             language = str(profile.get("coding_language") or "").strip()
             if stage == "implementation" and language.lower() != "python":
                 stage_prompt += (
-                    f"\nRubric {interview_prep.PLACEMENT_RUBRIC_VERSION} validates "
+                    f"\nRubric {placement.get('rubric_version')} validates "
                     f"implementation structure only for Python. {language or 'Your preferred language'} "
                     "code will remain uncertain, not failed. To opt into scored implementation "
                     f"evidence, stop and run 'openlearn interview edit {slug} "
@@ -3909,6 +3956,14 @@ def cmd_interview_placement(
                 )
                 break
             if command == "skip":
+                if stage in interview_prep.placement_optional_stages(placement):
+                    with interview_profile_write_lock(slug):
+                        value = interview_prep.skip_optional_placement_stage(path, stage)
+                    value = sync_interview_placement(slug)
+                    output_func(
+                        f"Optional {stage} skipped without creating placement evidence."
+                    )
+                    break
                 if stage == "implementation":
                     _reconcile_pending_placement_runs(slug, activity)
                     value = _skip_placement_implementation_and_dependents(
@@ -4246,10 +4301,13 @@ def _print_interview_continuity(
     output_func=print,
 ) -> None:
     status, evidence_count = _interview_placement_progress(value)
+    placement = value["placement"]
+    assert isinstance(placement, dict)
+    stages = interview_prep.placement_stages(placement)
     output_func(f"Interview-prep course: {topic.metadata.get('topic', topic.slug)}")
     output_func(
         f"Placement: {status} "
-        f"({evidence_count}/{len(interview_prep.PLACEMENT_STAGES)})"
+        f"({evidence_count}/{len(stages)})"
     )
 
 

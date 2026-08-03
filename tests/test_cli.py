@@ -809,6 +809,10 @@ class CliStorageTests(unittest.TestCase):
             cli.interview_profile_path("algorithms")
         )
         self.assertEqual(interrupted["placement"]["status"], "in_progress")
+        self.assertEqual(
+            interrupted["placement"]["lifecycle_version"],
+            cli.interview_prep.PLACEMENT_V1,
+        )
         self.assertEqual(interrupted["placement"]["next_stage"], "clarification")
         self.assertTrue(any("saved" in line.lower() for line in first_output))
         self.assertTrue(
@@ -818,6 +822,7 @@ class CliStorageTests(unittest.TestCase):
                 for line in first_output
             )
         )
+
         self.assertTrue(
             any(
                 "openlearn interview placement algorithms resume" in line
@@ -872,6 +877,38 @@ class CliStorageTests(unittest.TestCase):
                 for event in evidence_events
             )
         )
+
+    def test_interview_placement_status_uses_recorded_compact_lifecycle(self) -> None:
+        self.create_interview_topic()
+        path = cli.interview_profile_path("algorithms")
+        value = cli.interview_prep.load_profile(path)
+        value["placement"]["lifecycle_version"] = cli.interview_prep.PLACEMENT_V2
+        value["placement"]["rubric_version"] = cli.interview_prep.PLACEMENT_V2
+        path.write_text(json.dumps(value), encoding="utf-8")
+        before = path.read_text(encoding="utf-8")
+        output: list[str] = []
+
+        cli.cmd_interview_placement(
+            Namespace(topic="algorithms", action="status"),
+            output_func=output.append,
+        )
+
+        self.assertIn("lifecycle coding-placement-v2", output[0])
+        self.assertIn("evidence 0/3", output[0])
+        self.assertEqual(path.read_text(encoding="utf-8"), before)
+
+    def test_interview_placement_status_rejects_unknown_lifecycle_recoverably(self) -> None:
+        self.create_interview_topic()
+        path = cli.interview_profile_path("algorithms")
+        value = cli.interview_prep.load_profile(path)
+        value["placement"]["lifecycle_version"] = "coding-placement-v99"
+        path.write_text(json.dumps(value), encoding="utf-8")
+
+        with self.assertRaisesRegex(cli.OpenLearnError, "lifecycle is unsupported"):
+            cli.cmd_interview_placement(
+                Namespace(topic="algorithms", action="status"),
+                output_func=lambda _line: None,
+            )
 
     def test_interview_placement_answers_clarification_and_reprompts_blank_code(
         self,
