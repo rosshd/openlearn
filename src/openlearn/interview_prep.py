@@ -14,9 +14,12 @@ from pathlib import Path
 from uuid import uuid4
 
 PROFILE_SCHEMA_VERSION = 1
-PLACEMENT_RUBRIC_VERSION = "coding-placement-v1"
+PLACEMENT_V1 = "coding-placement-v1"
+PLACEMENT_V2 = "coding-placement-v2"
+# Compatibility alias for the production CLI until its compact UI deliberately opts in.
+PLACEMENT_RUBRIC_VERSION = PLACEMENT_V1
 STALE_AFTER_DAYS = 90
-PLACEMENT_STAGES = (
+PLACEMENT_V1_STAGES = (
     "calibration",
     "clarification",
     "plan",
@@ -25,6 +28,49 @@ PLACEMENT_STAGES = (
     "complexity",
     "follow_up",
 )
+PLACEMENT_V2_STAGES = ("conversation", "implementation", "debrief")
+# Kept as the historical stage list for callers that construct v1 fixtures.
+PLACEMENT_STAGES = PLACEMENT_V1_STAGES
+PLACEMENT_LIFECYCLES = {
+    PLACEMENT_V1: {
+        "stages": PLACEMENT_V1_STAGES,
+        "optional_stages": (),
+    },
+    PLACEMENT_V2: {
+        "stages": PLACEMENT_V2_STAGES,
+        "optional_stages": ("debrief",),
+    },
+}
+PLACEMENT_RUBRICS = {
+    PLACEMENT_V1: {
+        "axes": {
+            "prerequisites": ("plan",),
+            "coding_fluency": ("implementation", "tests"),
+            "reasoning": ("plan", "complexity", "follow_up"),
+            "interview_process": ("clarification", "tests", "follow_up"),
+        },
+        "evidence": {
+            "prerequisites": ("plan", "implementation"),
+            "coding_fluency": ("implementation", "tests"),
+            "reasoning": ("plan", "complexity", "follow_up"),
+            "interview_process": ("clarification", "tests", "follow_up"),
+        },
+    },
+    PLACEMENT_V2: {
+        "axes": {
+            "prerequisites": ("conversation",),
+            "coding_fluency": ("implementation",),
+            "reasoning": ("conversation", "debrief"),
+            "interview_process": ("conversation", "debrief"),
+        },
+        "evidence": {
+            "prerequisites": ("conversation",),
+            "coding_fluency": ("implementation",),
+            "reasoning": ("conversation", "debrief"),
+            "interview_process": ("conversation", "debrief"),
+        },
+    },
+}
 PROFILE_FIELDS = (
     "role_family",
     "target_level",
@@ -121,6 +167,35 @@ PLACEMENT_EXECUTION_EVIDENCE_KIND = "openlearn-placement-execution-v1"
 
 Clock = Callable[[], datetime]
 EventAppender = Callable[[str, dict[str, object]], None]
+
+
+def _placement_versions(
+    placement: Mapping[str, object],
+) -> tuple[str, str]:
+    """Resolve recorded versions, inferring v1 only for legacy records."""
+    rubric = placement.get("rubric_version")
+    lifecycle = placement.get("lifecycle_version")
+    if "lifecycle_version" not in placement and rubric == PLACEMENT_V1:
+        lifecycle = PLACEMENT_V1
+    if not isinstance(lifecycle, str) or lifecycle not in PLACEMENT_LIFECYCLES:
+        raise ValueError("interview-prep placement lifecycle is unsupported")
+    if not isinstance(rubric, str) or rubric not in PLACEMENT_RUBRICS:
+        raise ValueError("interview-prep placement rubric is unsupported")
+    if lifecycle != rubric:
+        raise ValueError("interview-prep placement lifecycle and rubric do not match")
+    return str(lifecycle), str(rubric)
+
+
+def placement_stages(placement: Mapping[str, object]) -> tuple[str, ...]:
+    lifecycle, _rubric = _placement_versions(placement)
+    definition = PLACEMENT_LIFECYCLES[lifecycle]
+    return tuple(str(stage) for stage in definition["stages"])
+
+
+def placement_optional_stages(placement: Mapping[str, object]) -> tuple[str, ...]:
+    lifecycle, _rubric = _placement_versions(placement)
+    definition = PLACEMENT_LIFECYCLES[lifecycle]
+    return tuple(str(stage) for stage in definition["optional_stages"])
 
 
 def placement_clarification_response(question: str) -> str:
@@ -345,10 +420,19 @@ def _normalized_profile(values: Mapping[str, object]) -> dict[str, object]:
     return normalized
 
 
-def _empty_placement() -> dict[str, object]:
+def _empty_placement(
+    version: str = PLACEMENT_V1, *, include_lifecycle: bool = True
+) -> dict[str, object]:
+    if (
+        not isinstance(version, str)
+        or version not in PLACEMENT_LIFECYCLES
+        or version not in PLACEMENT_RUBRICS
+    ):
+        raise ValueError("interview-prep placement version is unsupported")
     return {
         "status": "not_started",
-        "rubric_version": PLACEMENT_RUBRIC_VERSION,
+        **({"lifecycle_version": version} if include_lifecycle else {}),
+        "rubric_version": version,
         "attempt_id": None,
         "activity_id": None,
         "started_at": None,
@@ -361,6 +445,14 @@ def _empty_placement() -> dict[str, object]:
         "observations": {},
         "result": None,
     }
+
+
+def _empty_placement_for_reset(placement: Mapping[str, object]) -> dict[str, object]:
+    lifecycle_version, _rubric_version = _placement_versions(placement)
+    return _empty_placement(
+        lifecycle_version,
+        include_lifecycle="lifecycle_version" in placement,
+    )
 
 
 def _validated_timestamp(value: object, label: str, *, optional: bool = False) -> None:
@@ -377,7 +469,9 @@ def _validated_timestamp(value: object, label: str, *, optional: bool = False) -
 
 
 def _validate_placement(placement: Mapping[str, object]) -> None:
-    if set(placement) != set(_empty_placement()):
+    legacy_keys = set(_empty_placement(PLACEMENT_V1, include_lifecycle=False))
+    current_keys = set(_empty_placement())
+    if frozenset(placement) not in {frozenset(legacy_keys), frozenset(current_keys)}:
         raise ValueError("interview-prep placement state is malformed")
     status = placement.get("status")
     if status not in {
@@ -388,8 +482,8 @@ def _validate_placement(placement: Mapping[str, object]) -> None:
         "stale",
     }:
         raise ValueError("interview-prep placement status is invalid")
-    if placement.get("rubric_version") != PLACEMENT_RUBRIC_VERSION:
-        raise ValueError("interview-prep placement rubric is unsupported")
+    _lifecycle_version, _rubric_version = _placement_versions(placement)
+    stages = placement_stages(placement)
     activity_id = placement.get("activity_id")
     if activity_id is not None and (
         not isinstance(activity_id, str)
@@ -417,10 +511,10 @@ def _validate_placement(placement: Mapping[str, object]) -> None:
     if problem_id is not None and problem_id != PLACEMENT_PROBLEM["problem_id"]:
         raise ValueError("interview-prep placement problem reference is invalid")
     next_stage = placement.get("next_stage")
-    if next_stage is not None and next_stage not in PLACEMENT_STAGES:
+    if next_stage is not None and next_stage not in stages:
         raise ValueError("interview-prep placement next stage is invalid")
     refs = placement.get("evidence_refs")
-    if not isinstance(refs, list) or len(refs) > len(PLACEMENT_STAGES) + 1:
+    if not isinstance(refs, list) or len(refs) > len(stages) + 1:
         raise ValueError("interview-prep placement evidence references are invalid")
     for ref in refs:
         if (
@@ -433,7 +527,7 @@ def _validate_placement(placement: Mapping[str, object]) -> None:
             raise ValueError("interview-prep placement evidence reference is invalid")
     observations = placement.get("observations")
     if not isinstance(observations, dict) or not set(observations) <= {
-        *PLACEMENT_STAGES,
+        *stages,
         "baseline",
     }:
         raise ValueError("interview-prep placement observations are invalid")
@@ -609,7 +703,7 @@ def edit_profile(
         placement["status"] = "stale"
         placement["updated_at"] = _timestamp(now)
     elif placement.get("status") == "in_progress":
-        value["placement"] = _empty_placement()
+        value["placement"] = _empty_placement_for_reset(placement)
     _write(path, value)
     append_event(
         "interview_profile_edited",
@@ -656,13 +750,17 @@ def defer_placement(
     assert isinstance(placement, dict)
     if placement.get("status") == "in_progress":
         raise ValueError("discard or complete the in-progress placement before deferring")
-    placement.update(_empty_placement())
+    lifecycle_version, rubric_version = _placement_versions(placement)
+    placement.update(_empty_placement(lifecycle_version))
     placement["status"] = "deferred"
     placement["updated_at"] = _timestamp(now)
     _write(path, value)
     append_event(
         "interview_placement_deferred",
-        {"rubric_version": PLACEMENT_RUBRIC_VERSION},
+        {
+            "lifecycle_version": lifecycle_version,
+            "rubric_version": rubric_version,
+        },
     )
     return value
 
@@ -671,8 +769,17 @@ def start_placement(
     path: Path,
     *,
     activity_id: str,
+    lifecycle_version: str = PLACEMENT_V1,
+    rubric_version: str | None = None,
     now: Clock = _utcnow,
 ) -> dict[str, object]:
+    if rubric_version is None:
+        rubric_version = lifecycle_version
+    candidate = {
+        "lifecycle_version": lifecycle_version,
+        "rubric_version": rubric_version,
+    }
+    _placement_versions(candidate)
     value = refresh_staleness(path, now=now)
     placement = value["placement"]
     assert isinstance(placement, dict)
@@ -681,7 +788,8 @@ def start_placement(
     timestamp = _timestamp(now)
     placement.update(
         {
-            **_empty_placement(),
+            **_empty_placement(lifecycle_version),
+            "rubric_version": rubric_version,
             "status": "in_progress",
             "attempt_id": f"interview_attempt_{uuid4().hex}",
             "activity_id": activity_id,
@@ -689,7 +797,7 @@ def start_placement(
             "updated_at": timestamp,
             "profile_revision": value["profile_revision"],
             "problem_id": PLACEMENT_PROBLEM["problem_id"],
-            "next_stage": PLACEMENT_STAGES[0],
+            "next_stage": placement_stages(candidate)[0],
         }
     )
     value["recommendations"] = None
@@ -707,7 +815,7 @@ def discard_placement(
         raise ValueError("there is no in-progress placement to discard")
     attempt_id = placement.get("attempt_id")
     refs = list(placement.get("evidence_refs", []))
-    value["placement"] = _empty_placement()
+    value["placement"] = _empty_placement_for_reset(placement)
     value["recommendations"] = None
     _write(path, value)
     append_event(
@@ -760,19 +868,68 @@ def record_placement_evidence(
         stage,
         response,
         coding_language=str(profile.get("coding_language") or ""),
+        rubric_version=str(placement["rubric_version"]),
     )
     placement["updated_at"] = _timestamp(now)
-    index = PLACEMENT_STAGES.index(stage)
-    if index + 1 < len(PLACEMENT_STAGES):
-        placement["next_stage"] = PLACEMENT_STAGES[index + 1]
+    stages = placement_stages(placement)
+    index = stages.index(stage)
+    if index + 1 < len(stages):
+        placement["next_stage"] = stages[index + 1]
     else:
-        placement["next_stage"] = None
-        placement["status"] = "provisional"
-        placement["completed_at"] = _timestamp(now)
-        placement["result"] = _provisional_result(observations)
-        value["recommendations"] = _recommendations(value, current_date=now().date())
+        _complete_placement(value, now=now)
     _write(path, value)
     return value
+
+
+def skip_optional_placement_stage(
+    path: Path,
+    stage: str,
+    *,
+    now: Clock = _utcnow,
+) -> dict[str, object]:
+    """Complete an optional stage without inventing evidence or observations."""
+    value = load_profile(path)
+    placement = value["placement"]
+    assert isinstance(placement, dict)
+    if placement.get("status") == "provisional":
+        observations = placement.get("observations")
+        if (
+            stage in placement_optional_stages(placement)
+            and isinstance(observations, dict)
+            and stage not in observations
+        ):
+            return value
+    if placement.get("status") != "in_progress":
+        raise ValueError("placement is not in progress")
+    if placement.get("next_stage") != stage:
+        raise ValueError(f"expected {placement.get('next_stage')} evidence, received {stage}")
+    if stage not in placement_optional_stages(placement):
+        raise ValueError("placement stage is not optional")
+    stages = placement_stages(placement)
+    index = stages.index(stage)
+    if index + 1 < len(stages):
+        placement["next_stage"] = stages[index + 1]
+        placement["updated_at"] = _timestamp(now)
+    else:
+        _complete_placement(value, now=now)
+    _write(path, value)
+    return value
+
+
+def _complete_placement(value: dict[str, object], *, now: Clock) -> None:
+    placement = value["placement"]
+    assert isinstance(placement, dict)
+    observations = placement["observations"]
+    assert isinstance(observations, dict)
+    timestamp = _timestamp(now)
+    placement["next_stage"] = None
+    placement["status"] = "provisional"
+    placement["updated_at"] = timestamp
+    placement["completed_at"] = timestamp
+    placement["result"] = _provisional_result(
+        observations, rubric_version=str(placement["rubric_version"])
+    )
+    value["recommendations"] = _recommendations(value, current_date=now().date())
 
 
 def complete_with_baseline(
@@ -808,7 +965,9 @@ def complete_with_baseline(
     placement["next_stage"] = None
     placement["updated_at"] = timestamp
     placement["completed_at"] = timestamp
-    result = _provisional_result(observations)
+    result = _provisional_result(
+        observations, rubric_version=str(placement["rubric_version"])
+    )
     result["starting_level"] = "learner-selected-baseline"
     uncertainty = result["uncertainty"]
     assert isinstance(uncertainty, list)
@@ -823,8 +982,14 @@ def complete_with_baseline(
 
 
 def _evidence_observation(
-    stage: str, response: str, *, coding_language: str
+    stage: str,
+    response: str,
+    *,
+    coding_language: str,
+    rubric_version: str = PLACEMENT_V1,
 ) -> dict[str, object]:
+    if rubric_version not in PLACEMENT_RUBRICS:
+        raise ValueError("interview-prep placement rubric is unsupported")
     execution = _parse_placement_execution_evidence(response)
     normalized = response.lower()
     skipped = execution is None and (
@@ -896,11 +1061,27 @@ def _evidence_observation(
         and len(response.split()) >= 5
     ):
         signals.append("engaged_with_follow_up")
+    if (
+        not skipped
+        and not non_attempt
+        and stage == "conversation"
+        and len(response.split()) >= 3
+    ):
+        signals.append("engaged_in_conversation")
+    if (
+        not skipped
+        and not non_attempt
+        and stage == "debrief"
+        and len(response.split()) >= 5
+    ):
+        signals.append("engaged_in_debrief")
     required_by_stage = {
         "clarification": {"asked_clarifying_question"},
         "plan": {"named_data_structure_or_strategy"},
         "complexity": {"stated_complexity"},
         "follow_up": {"engaged_with_follow_up"},
+        "conversation": {"engaged_in_conversation"},
+        "debrief": {"engaged_in_debrief"},
     }
     required = required_by_stage.get(stage, set())
     if skipped or unsupported_implementation_language:
@@ -956,15 +1137,21 @@ def _axis_status(observations: Mapping[str, object], stages: tuple[str, ...]) ->
     return "uncertain"
 
 
-def _provisional_result(observations: Mapping[str, object]) -> dict[str, object]:
+def _provisional_result(
+    observations: Mapping[str, object], *, rubric_version: str = PLACEMENT_V1
+) -> dict[str, object]:
+    rubric = PLACEMENT_RUBRICS.get(rubric_version)
+    if rubric is None:
+        raise ValueError("interview-prep placement rubric is unsupported")
+    axes = rubric["axes"]
+    assert isinstance(axes, dict)
     axis_statuses = {
-        "prerequisites": _axis_status(observations, ("plan",)),
-        "coding_fluency": _axis_status(observations, ("implementation", "tests")),
-        "reasoning": _axis_status(observations, ("plan", "complexity", "follow_up")),
-        "interview_process": _axis_status(
-            observations, ("clarification", "tests", "follow_up")
-        ),
+        axis: _axis_status(observations, tuple(stages))
+        for axis, stages in axes.items()
     }
+    evidence = rubric["evidence"]
+    assert isinstance(evidence, dict)
+    evidence_by_axis = {axis: list(stages) for axis, stages in evidence.items()}
     not_observed_count = sum(
         status == "not_observed" for status in axis_statuses.values()
     )
@@ -972,22 +1159,22 @@ def _provisional_result(observations: Mapping[str, object]) -> dict[str, object]
     gaps: dict[str, dict[str, object]] = {
         "prerequisites": {
             "status": axis_statuses["prerequisites"],
-            "evidence": ["plan", "implementation"],
+            "evidence": evidence_by_axis["prerequisites"],
             "note": "Data-structure prerequisites need confirmation through later retrieval.",
         },
         "coding_fluency": {
             "status": axis_statuses["coding_fluency"],
-            "evidence": ["implementation", "tests"],
+            "evidence": evidence_by_axis["coding_fluency"],
             "note": "Placement observes production fluency but does not establish mastery.",
         },
         "reasoning": {
             "status": axis_statuses["reasoning"],
-            "evidence": ["plan", "complexity", "follow_up"],
+            "evidence": evidence_by_axis["reasoning"],
             "note": "Reasoning remains provisional until repeated on a novel problem.",
         },
         "interview_process": {
             "status": axis_statuses["interview_process"],
-            "evidence": ["clarification", "tests", "follow_up"],
+            "evidence": evidence_by_axis["interview_process"],
             "note": "Interview-format familiarity is separate from prerequisite knowledge.",
         },
     }

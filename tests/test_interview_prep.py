@@ -133,6 +133,184 @@ class InterviewPrepTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "expected clarification"):
             self.record("plan", "Use a set.")
 
+    def test_compact_v2_records_versions_and_skips_optional_debrief_without_evidence(
+        self,
+    ) -> None:
+        self.create()
+        started = interview_prep.start_placement(
+            self.path,
+            activity_id="act_0123456789abcdef0123456789abcdef",
+            lifecycle_version=interview_prep.PLACEMENT_V2,
+            now=lambda: NOW,
+        )
+
+        placement = started["placement"]
+        self.assertEqual(placement["lifecycle_version"], interview_prep.PLACEMENT_V2)
+        self.assertEqual(placement["rubric_version"], interview_prep.PLACEMENT_V2)
+        self.assertEqual(placement["next_stage"], "conversation")
+        self.record("conversation", "I would clarify constraints and use a set window.")
+        execution = interview_prep.placement_execution_evidence(
+            "def first_unique_window(text, width):\n    return -1",
+            outcome="passed",
+            tests_passed=True,
+            return_code=0,
+        )
+        self.record("implementation", execution)
+
+        interrupted = interview_prep.load_profile(self.path)
+        self.assertEqual(interrupted["placement"]["next_stage"], "debrief")
+        self.assertEqual(len(interrupted["placement"]["evidence_refs"]), 2)
+        completed = interview_prep.skip_optional_placement_stage(
+            self.path, "debrief", now=lambda: NOW
+        )
+        repeated = interview_prep.skip_optional_placement_stage(
+            self.path, "debrief", now=lambda: NOW
+        )
+
+        self.assertEqual(completed, repeated)
+        self.assertEqual(completed["placement"]["status"], "provisional")
+        self.assertNotIn("debrief", completed["placement"]["observations"])
+        self.assertEqual(len(completed["placement"]["evidence_refs"]), 2)
+        self.assertFalse(completed["placement"]["result"]["mastery_update_applied"])
+        self.assertEqual(completed["placement"]["result"]["patterns_marked_known"], [])
+
+    def test_compact_v2_baseline_is_terminal_and_grants_no_mastery(self) -> None:
+        self.create()
+        interview_prep.start_placement(
+            self.path,
+            activity_id="act_0123456789abcdef0123456789abcdef",
+            lifecycle_version=interview_prep.PLACEMENT_V2,
+            now=lambda: NOW,
+        )
+
+        value = interview_prep.complete_with_baseline(
+            self.path,
+            evidence_id="evidence_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            reason="Prefer a lower-demand baseline.",
+            now=lambda: NOW,
+        )
+
+        self.assertEqual(value["placement"]["status"], "provisional")
+        self.assertEqual(value["placement"]["rubric_version"], interview_prep.PLACEMENT_V2)
+        self.assertFalse(value["placement"]["result"]["mastery_update_applied"])
+
+    def test_compact_v2_can_complete_with_recorded_debrief(self) -> None:
+        self.create()
+        interview_prep.start_placement(
+            self.path,
+            activity_id="act_0123456789abcdef0123456789abcdef",
+            lifecycle_version=interview_prep.PLACEMENT_V2,
+            now=lambda: NOW,
+        )
+        self.record("conversation", "I would clarify constraints and use a set window.")
+        self.record(
+            "implementation",
+            interview_prep.placement_execution_evidence(
+                "def first_unique_window(text, width):\n    return -1",
+                outcome="passed",
+                tests_passed=True,
+                return_code=0,
+            ),
+        )
+
+        completed = self.record(
+            "debrief", "I would improve the solution with last-seen indices."
+        )
+
+        self.assertEqual(completed["placement"]["status"], "provisional")
+        self.assertIn("debrief", completed["placement"]["observations"])
+        self.assertEqual(len(completed["placement"]["evidence_refs"]), 3)
+
+    def test_legacy_v1_resume_and_terminal_result_keep_v1_semantics(self) -> None:
+        self.create()
+        self.start()
+        self.record("calibration", "I write Python regularly.")
+        legacy = json.loads(self.path.read_text(encoding="utf-8"))
+        del legacy["placement"]["lifecycle_version"]
+        self.path.write_text(json.dumps(legacy), encoding="utf-8")
+        before_load = self.path.read_text(encoding="utf-8")
+
+        resumed = interview_prep.load_profile(self.path)
+
+        self.assertEqual(resumed["placement"]["next_stage"], "clarification")
+        self.assertNotIn("lifecycle_version", resumed["placement"])
+        self.assertEqual(self.path.read_text(encoding="utf-8"), before_load)
+        responses = {
+            "clarification": "Can width be zero?",
+            "plan": "Use a set for each window.",
+            "implementation": interview_prep.placement_execution_evidence(
+                "def first_unique_window(text, width):\n    return -1",
+                outcome="passed",
+                tests_passed=True,
+                return_code=0,
+            ),
+            "tests": interview_prep.placement_execution_evidence(
+                "def first_unique_window(text, width):\n    return -1",
+                outcome="passed",
+                tests_passed=True,
+                return_code=0,
+            ),
+            "complexity": "O(n * width) time and O(width) space.",
+            "follow_up": "Use last-seen indices for streaming input.",
+        }
+        for stage in interview_prep.PLACEMENT_V1_STAGES[1:]:
+            self.record(stage, responses[stage])
+        completed = interview_prep.load_profile(self.path)
+
+        self.assertEqual(completed["placement"]["status"], "provisional")
+        self.assertEqual(completed["placement"]["rubric_version"], interview_prep.PLACEMENT_V1)
+        self.assertNotIn("lifecycle_version", completed["placement"])
+        self.assertIn("tests", completed["placement"]["observations"])
+        self.assertEqual(
+            completed["placement"]["result"]["gaps"]["prerequisites"]["evidence"],
+            ["plan", "implementation"],
+        )
+
+    def test_legacy_defer_resolves_versions_without_key_error(self) -> None:
+        value = self.create()
+        del value["placement"]["lifecycle_version"]
+        self.path.write_text(json.dumps(value), encoding="utf-8")
+
+        deferred = interview_prep.defer_placement(
+            self.path, self.append, now=lambda: NOW
+        )
+
+        self.assertEqual(deferred["placement"]["status"], "deferred")
+        self.assertEqual(self.events[-1][1]["lifecycle_version"], interview_prep.PLACEMENT_V1)
+
+    def test_legacy_discard_preserves_missing_lifecycle_key(self) -> None:
+        value = self.create()
+        value = self.start()
+        del value["placement"]["lifecycle_version"]
+        self.path.write_text(json.dumps(value), encoding="utf-8")
+
+        discarded = interview_prep.discard_placement(
+            self.path, self.append, now=lambda: NOW
+        )
+
+        self.assertEqual(discarded["placement"]["status"], "not_started")
+        self.assertNotIn("lifecycle_version", discarded["placement"])
+        self.assertEqual(
+            discarded["placement"]["rubric_version"], interview_prep.PLACEMENT_V1
+        )
+
+    def test_unknown_or_mismatched_versions_fail_closed(self) -> None:
+        for lifecycle, rubric, message in (
+            (None, interview_prep.PLACEMENT_V1, "lifecycle"),
+            ([interview_prep.PLACEMENT_V1], interview_prep.PLACEMENT_V1, "lifecycle"),
+            ("coding-placement-v99", interview_prep.PLACEMENT_V1, "lifecycle"),
+            (interview_prep.PLACEMENT_V2, "coding-placement-v99", "rubric"),
+            (interview_prep.PLACEMENT_V2, interview_prep.PLACEMENT_V1, "do not match"),
+        ):
+            with self.subTest(lifecycle=lifecycle, rubric=rubric):
+                value = self.create()
+                value["placement"]["lifecycle_version"] = lifecycle
+                value["placement"]["rubric_version"] = rubric
+                self.path.write_text(json.dumps(value), encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, message):
+                    interview_prep.load_profile(self.path)
+                self.path.unlink()
+
     def test_interrupted_placement_can_be_explicitly_discarded(self) -> None:
         self.create()
         self.start()
@@ -151,6 +329,46 @@ class InterviewPrepTests(unittest.TestCase):
         self.assertEqual(len(discard_events), 1)
         self.assertEqual(len(discard_events[0]["evidence_refs"]), 1)
         self.assertFalse(discard_events[0]["attempt_evidence_deleted"])
+
+    def test_v2_profile_edit_and_discard_resets_preserve_lifecycle(self) -> None:
+        self.create()
+        interview_prep.start_placement(
+            self.path,
+            activity_id="act_0123456789abcdef0123456789abcdef",
+            lifecycle_version=interview_prep.PLACEMENT_V2,
+            now=lambda: NOW,
+        )
+
+        edited = interview_prep.edit_profile(
+            self.path,
+            {"weekly_minutes": 90},
+            self.append,
+            now=lambda: NOW,
+        )
+
+        self.assertEqual(
+            edited["placement"]["lifecycle_version"], interview_prep.PLACEMENT_V2
+        )
+        self.assertEqual(
+            edited["placement"]["rubric_version"], interview_prep.PLACEMENT_V2
+        )
+        interview_prep.start_placement(
+            self.path,
+            activity_id="act_0123456789abcdef0123456789abcdef",
+            lifecycle_version=interview_prep.PLACEMENT_V2,
+            now=lambda: NOW,
+        )
+
+        discarded = interview_prep.discard_placement(
+            self.path, self.append, now=lambda: NOW
+        )
+
+        self.assertEqual(
+            discarded["placement"]["lifecycle_version"], interview_prep.PLACEMENT_V2
+        )
+        self.assertEqual(
+            discarded["placement"]["rubric_version"], interview_prep.PLACEMENT_V2
+        )
 
     def test_completed_result_is_provisional_and_time_bounded(self) -> None:
         result = self.finish_attempt()

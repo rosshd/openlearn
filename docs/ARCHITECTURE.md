@@ -51,7 +51,10 @@ Learner preferences capture explicit navigation choices such as skipped material
 Quick Learn topics also store `learning_mode`, `quick_source_type`, `quick_source_label`, and `coverage_contract` so they can remain visibly separate and enforce source-grounded concept coverage.
 
 Interview prep is explicitly opt-in and stores its learner-owned profile in `<slug>.interview.json`, separate from shareable topic metadata, general learner preferences, and concept mastery.
-The file contains a versioned profile revision, resumable placement status, opaque activity and evidence references, derived tri-state observations, a rubric version, a provisional gap assessment, and target-horizon-aware recommendations.
+The file contains a versioned profile revision, resumable placement status, opaque activity and evidence references, derived tri-state observations, recorded lifecycle and rubric versions, a provisional gap assessment, and target-horizon-aware recommendations.
+Legacy records without `lifecycle_version` are interpreted only as coding placement v1 when their recorded rubric is v1, while unknown or mismatched versions fail closed without rewriting evidence.
+The compact v2 contract contains conversation, implementation, and an optional debrief, and omitting that debrief does not create placeholder evidence.
+The production CLI continues to select v1 until the compact conversation UI deliberately opts into v2.
 Raw calibration and reasoning remain in append-only namespaced activity evidence events rather than being copied into topic metadata or the interview profile.
 Python placement code lives in a persistent learner-owned drill workspace with durable attempt snapshots, while trusted hidden-test outcomes are recorded as append-only execution evidence.
 Coding placement rubric v1 accepts only secure Python runner evidence for scored implementation and testing observations; skipped dependent stages and runner infrastructure failures remain uncertain rather than being treated as failed evidence.
