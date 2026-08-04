@@ -51,12 +51,15 @@ Learner preferences capture explicit navigation choices such as skipped material
 Quick Learn topics also store `learning_mode`, `quick_source_type`, `quick_source_label`, and `coverage_contract` so they can remain visibly separate and enforce source-grounded concept coverage.
 
 Interview prep is explicitly opt-in and stores its learner-owned profile in `<slug>.interview.json`, separate from shareable topic metadata, general learner preferences, and concept mastery.
-The file contains a versioned profile revision, resumable placement status, opaque activity and evidence references, derived tri-state observations, recorded lifecycle and rubric versions, a provisional gap assessment, and target-horizon-aware recommendations.
+The file contains a versioned profile revision, resumable placement status, an optional current-stage draft, opaque activity and evidence references, derived tri-state observations, recorded lifecycle and rubric versions, a provisional gap assessment, target-horizon-aware recommendations, and a course-start passport.
 Legacy records without `lifecycle_version` are interpreted only as coding placement v1 when their recorded rubric is v1, while unknown or mismatched versions fail closed without rewriting evidence.
 The compact v2 contract contains conversation, implementation, and an optional debrief, and omitting that debrief does not create placeholder evidence.
-The production CLI continues to select v1 until the compact conversation UI deliberately opts into v2.
-Raw calibration and reasoning remain in append-only namespaced activity evidence events rather than being copied into topic metadata or the interview profile.
-Python placement code lives in a persistent learner-owned drill workspace with durable attempt snapshots, while trusted hidden-test outcomes are recorded as append-only execution evidence.
+The production CLI starts new attempts with reasoning-placement v3, whose durable stages are clarification and reasoning.
+Accepted draft lines are saved in the profile until `/done` publishes one joined observation through append-only namespaced activity evidence and clears the matching draft.
+The v3 activity is non-executable and never creates a coding attempt, opens an editor, or invokes a runner.
+Its course-start passport can route the learner from deterministic reasoning signals, but coding fluency always remains unobserved and no mastery update is applied.
+Historical coding-placement v1 and v2 records retain their recorded lifecycle and rubric semantics.
+Legacy Python placement code remains in a persistent learner-owned drill workspace with durable attempt snapshots, while trusted hidden-test outcomes remain append-only execution evidence.
 Coding placement rubric v1 accepts only secure Python runner evidence for scored implementation and testing observations; skipped dependent stages and runner infrastructure failures remain uncertain rather than being treated as failed evidence.
 Interrupted activity transactions recover through the activity journal, and placement resume idempotently projects any recovered evidence into the profile before asking for the next stage.
 Profile publication takes the topic identity lock before the profile lock, so concurrent topic deletion cannot recreate an orphan profile.
@@ -71,6 +74,7 @@ Interview-prep course planning skips the ordinary optional placement quiz becaus
 Before an interview-prep course plan or tutor resume can call a remote provider, a deterministic preflight accepts mock mode, dry-run mode, saved or environment keys, and keyless localhost endpoints.
 A failed preflight prints compact adjacent continuity and returns before source refresh, tutor output, active-topic mutation, or course mutation.
 Topics without the adjacent file behave exactly as ordinary topics and receive no interview prompts.
+The `technical-interview-prep` course template declares its interview entry mode, while ordinary starter templates retain the normal course-creation path.
 
 ## Interview Skill Graph
 
@@ -205,7 +209,8 @@ Public GitHub repositories are shallow-cloned with terminal prompts, system conf
 
 Bare `openlearn` starts onboarding when no saved key, environment key, or fully configured keyless localhost provider is available.
 `OPENLEARN_MOCK=1` and already usable environment configuration skip onboarding.
-Onboarding validates credentials with `{base_url}/models`, persists settings through the existing config commands, then can launch Quick Learn, the Vim starter course, or the menu.
+Onboarding selects a destination before provider setup.
+Technical Interview Prep can launch its offline placement immediately, while model-backed destinations validate credentials with `{base_url}/models` and persist settings through the existing config commands before launch.
 
 ## Interactive UI
 

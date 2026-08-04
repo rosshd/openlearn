@@ -67,3 +67,5 @@ Secure `/check` execution requires an existing Docker or Podman installation and
 openLearn neither installs the runtime nor pulls the image automatically.
 The generic per-call worker uses only the Python standard library inside the image.
 Run `openlearn doctor` to inspect local readiness and print the explicit acquisition command.
+Initial technical-interview placement is conversation-only and does not use the editor, runner, Docker, Podman, or the pinned image.
+These dependencies apply only when the learner reaches a later coding drill or other executable course activity.

@@ -73,6 +73,21 @@ Original, curated, and licensed exercises preserve source and license metadata i
 Official LeetCode integration is link-out only: openLearn validates the official HTTPS problem URL, opens it after consent, and creates a local learner-owned solution scaffold without copying the remote statement, examples, or tests.
 The durable manual dogfood flow for Neovim and a graphical IDE is in `manual-tests/tutor-coding-drills.md`.
 
+## Interview Placement Boundary
+
+Initial technical-interview placement is a short offline routing conversation, not a coding test.
+It asks for clarification questions and a complete solution route covering the approach, data structure or technique, edge cases and tests, and time and space complexity.
+Each stage accepts multiple saved lines and advances only when the learner uses `/done` or explicitly skips it.
+Stop, EOF, and interruption preserve the current stage draft for the next `openlearn resume`.
+
+The course-start passport may use reasoning evidence to recommend a first activity, but it must keep coding fluency unobserved and cannot grant mastery or interview readiness.
+Provider access begins at course planning, not placement.
+The placement path must not open an editor, create a coding workspace, run learner code, or inspect Docker or Podman.
+
+Real coding evidence is collected later through accepted course activities.
+Normal coding practice may use the learner's configured editor and secure runner, while a controlled-editor timed mock interview is a separate later experience.
+Neither later path changes the conservative evidence rules below.
+
 ## Interview Skill Evidence
 
 Interview readiness uses a versioned static skill graph rather than model prose as its source of skill identity and prerequisites.

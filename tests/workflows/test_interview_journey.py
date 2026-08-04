@@ -12,101 +12,120 @@ if sys.platform == "win32":
 import pexpect
 
 
-CALIBRATION = (
-    "I have completed data structures and algorithims college course months ago, "
-    "and have done leetcoding on and off for the past 2 years, but can never stay "
-    "consistant. I intern at state farm currently, and have some outside projects "
-    "I work on like an AI tutor application and a guitar digital tuning pedal."
-)
-CLARIFICATION = (
-    "How is the input given to us? is it an array or text separated by commas? "
-    "what would you like for me to return when I find a solution? "
-    "Can I see example inputs and outputs?"
-)
-PLAN = (
-    "I would use a sliding window with a hashmap to keep track of amounts of "
-    "charactors. When they are all unique, I would return the result"
-)
 def test_interview_prep_public_cli_journey(spawn_openlearn, monkeypatch) -> None:
-    proc = spawn_openlearn.spawn(
-        "new",
-        "Leetcode Sweep",
-        "--goal",
-        "Build consistent coding interview practice",
-        "--interview-prep",
-        timeout=10,
+    templates_dir = Path(__file__).resolve().parents[2] / "src" / "openlearn" / "templates"
+    template_choice = next(
+        str(index)
+        for index, path in enumerate(sorted(templates_dir.glob("*.json")), start=1)
+        if path.stem == "technical-interview-prep"
+    )
+    first = spawn_openlearn.spawn(timeout=10)
+    try:
+        first.expect("Starter courses")
+        first.sendline("s")
+        first.expect(f"{template_choice}  Technical Interview Prep")
+        first.sendline(template_choice)
+        first.expect("Placement is a short offline reasoning conversation")
+        first.expect("Start placement, defer it, or go back")
+        first.sendline("")
+        first.expect("Short reasoning placement started")
+        first.expect("clarification>")
+        first.sendline("Can width exceed the text length?")
+        first.expect("Line saved")
+        first.expect("clarification>")
+        first.sendline("Should I return the zero-based start index?")
+        first.expect("Line saved")
+        first.expect("clarification>")
+        first.sendline("/stop")
+        first.expect(r"Placement saved at clarification \(0/2\)")
+        first.expect("Continue interview prep")
+        first.sendline("q")
+        first.expect(pexpect.EOF)
+        first.child.close()
+        assert first.child.exitstatus == 0
+        transcript = first.clean_output
+        assert "implementation>" not in transcript
+        assert "open your configured editor" not in transcript
+        assert "Docker" not in transcript
+        assert "Podman" not in transcript
+    finally:
+        first.close()
+
+    clarification_resume = spawn_openlearn.spawn(
+        "resume", "technical-interview-prep", timeout=10
     )
     try:
-        for prompt in (
-            "Target role family",
-            "Target level",
-            "Interview date",
-            "Weekly practice minutes",
-            "Session minutes",
-        ):
-            proc.expect(prompt)
-            proc.sendline("")
-        proc.expect("Create this interview-prep course")
-        proc.sendline("y")
-        proc.expect("Start offline placement now")
-        proc.sendline("y")
-
-        proc.expect("calibration>")
-        proc.sendline(CALIBRATION)
-        proc.expect("clarification>")
-        proc.sendline(CLARIFICATION)
-        proc.expect("Python string")
-        proc.expect("zero-based start index")
-        proc.expect("Examples:")
-        proc.expect("plan>")
-        proc.sendline(PLAN)
-        proc.expect("implementation>")
-        proc.sendline("/skip")
-        proc.expect("Dependent coding evidence remains uncertain")
-        proc.expect("Placement complete")
-        proc.expect("Placement: provisional")
-        proc.expect("Placement saved. Continue from the main menu to build your course plan.")
-        proc.expect(pexpect.EOF)
-        proc.child.close()
-        assert proc.child.exitstatus == 0
-        transcript = proc.clean_output
-        assert "must be non-empty" not in transcript
-        assert "No previous session yet" not in transcript
-        for removed_prompt in (
-            "Coding language",
-            "Data structures experience",
-            "Algorithms experience",
-            "Interview experience",
-            "Target notes",
-            "Accessibility preferences",
-        ):
-            assert removed_prompt not in transcript
-        assert "tests>" not in transcript
-        assert "complexity>" not in transcript
-        assert "follow_up>" not in transcript
+        clarification_resume.expect("Resumed saved clarification draft with 2 lines")
+        clarification_resume.expect("clarification>")
+        clarification_resume.sendline("/show")
+        clarification_resume.expect("Can width exceed the text length")
+        clarification_resume.expect("Should I return the zero-based start index")
+        clarification_resume.expect("clarification>")
+        clarification_resume.sendline("/done")
+        clarification_resume.expect("Clarification saved")
+        clarification_resume.expect("reasoning>")
+        clarification_resume.sendline("Use a sliding window and a set of seen characters.")
+        clarification_resume.expect("Line saved")
+        clarification_resume.expect("reasoning>")
+        clarification_resume.sendline(
+            "Test width one, repeated characters, and no valid window."
+        )
+        clarification_resume.expect("Line saved")
+        clarification_resume.expect("reasoning>")
+        clarification_resume.sendline("/stop")
+        clarification_resume.expect(r"Placement saved at reasoning \(1/2\)")
+        clarification_resume.expect(pexpect.EOF)
+        clarification_resume.child.close()
+        assert clarification_resume.child.exitstatus == 0
     finally:
-        proc.close()
+        clarification_resume.close()
+
+    reasoning_resume = spawn_openlearn.spawn(
+        "resume", "technical-interview-prep", timeout=10
+    )
+    try:
+        reasoning_resume.expect("Resumed saved reasoning draft with 2 lines")
+        reasoning_resume.expect("reasoning>")
+        reasoning_resume.sendline("The scan is O(n) time and O(width) space.")
+        reasoning_resume.expect("Line saved")
+        reasoning_resume.expect("reasoning>")
+        reasoning_resume.sendline("/done")
+        reasoning_resume.expect("Reasoning saved")
+        reasoning_resume.expect("course-start passport")
+        reasoning_resume.expect("Starting route:")
+        reasoning_resume.expect("First activity:")
+        reasoning_resume.expect("Coding fluency was not observed")
+        reasoning_resume.expect("Continue from the main menu to start your first activity")
+        reasoning_resume.expect(pexpect.EOF)
+        reasoning_resume.child.close()
+        assert reasoning_resume.child.exitstatus == 0
+        transcript = reasoning_resume.clean_output
+        assert "reasoning-placement-v3" not in transcript
+        assert "mastery" not in transcript.lower()
+    finally:
+        reasoning_resume.close()
 
     with monkeypatch.context() as patch:
         for key in ("OPENLEARN_MOCK", "OPENAI_API_KEY", "OPENLEARN_BASE_URL"):
             patch.delitem(spawn_openlearn.env, key, raising=False)
-        missing_provider = spawn_openlearn.spawn("resume", "leetcode-sweep", timeout=10)
+        missing_provider = spawn_openlearn.spawn(
+            "resume", "technical-interview-prep", timeout=10
+        )
         try:
-            missing_provider.expect("Placement: provisional \\(7/7\\)")
+            missing_provider.expect(r"Placement: provisional \(2/2\)")
             missing_provider.expect("Model-backed course planning is not configured")
             missing_provider.expect("openlearn config set-key")
+            missing_provider.expect("openlearn resume technical-interview-prep")
             missing_provider.expect("all work is saved")
             missing_provider.expect(pexpect.EOF)
             missing_provider.child.close()
             assert missing_provider.child.exitstatus == 1
-            assert "Where you left off" not in missing_provider.clean_output
-            assert "No previous session yet" not in missing_provider.clean_output
         finally:
             missing_provider.close()
 
-    course = spawn_openlearn.spawn("resume", "leetcode-sweep", timeout=10)
+    course = spawn_openlearn.spawn("resume", "technical-interview-prep", timeout=10)
     try:
-        course.expect("Placement: provisional \\(7/7\\)")
+        course.expect(r"Placement: provisional \(2/2\)")
         course.expect("Course outline")
         course.expect("Is this an acceptable course outline")
         course.sendline("y")
@@ -117,21 +136,38 @@ def test_interview_prep_public_cli_journey(spawn_openlearn, monkeypatch) -> None
         assert course.child.exitstatus == 0
         transcript = course.clean_output
         assert "Run optional placement quiz" not in transcript
-        assert "No previous session yet" not in transcript
+        assert "implementation>" not in transcript
     finally:
         course.close()
 
     status = spawn_openlearn.run(
-        "interview", "placement", "leetcode-sweep", "status"
+        "interview", "placement", "technical-interview-prep", "status"
     )
     assert "Placement: provisional" in status.stdout
-    assert "evidence 7/7" in status.stdout
+    assert "evidence 2/2" in status.stdout
 
     home = Path(spawn_openlearn.env["OPENLEARN_HOME"])
     profile = json.loads(
-        (home / "learning-topics" / "leetcode-sweep.interview.json").read_text(
+        (home / "learning-topics" / "technical-interview-prep.interview.json").read_text(
             encoding="utf-8"
         )
     )
-    assert profile["placement"]["result"]["mastery_update_applied"] is False
-    assert len(profile["placement"]["evidence_refs"]) == 7
+    result = profile["placement"]["result"]
+    assert result["mastery_update_applied"] is False
+    assert result["gaps"]["coding_fluency"]["status"] == "uncertain"
+    assert result["passport"]["uncertainty_to_verify"] == (
+        "Implement and test a complete solution without autocomplete."
+    )
+    assert len(profile["placement"]["evidence_refs"]) == 2
+
+    spawn_openlearn.run(
+        "new",
+        "Ordinary Algorithms",
+        "--goal",
+        "Learn algorithms without interview setup",
+        "--template",
+        "algorithms",
+    )
+    assert not (
+        home / "learning-topics" / "ordinary-algorithms.interview.json"
+    ).exists()

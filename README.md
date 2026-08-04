@@ -55,10 +55,12 @@ On macOS and Windows, the runtime may provide its normal Linux VM while openLear
 
 ## Configuration
 
-On the first bare `openlearn` run without a usable provider configuration, openLearn guides you through provider selection, live key validation, model selection, and a first learning activity.
+On the first bare `openlearn` run without a usable provider configuration, openLearn first offers a learning destination.
+The recommended Technical Interview Prep destination can begin its offline reasoning placement immediately and defer provider setup until course planning.
+Other destinations continue through provider selection, live key validation, and model selection before their first model-backed activity.
 The built-in presets cover OpenAI, Anthropic-compatible APIs, Ollama, and custom OpenAI-compatible providers.
 Set `OPENAI_API_KEY` to skip this onboarding flow and use environment-based configuration; valid keyless localhost providers such as Ollama are already configured when their base URL and model are set.
-The final onboarding step can start Quick Learn from a file, start the Vim starter course, or open the menu.
+The onboarding destination menu can start the recommended Technical Interview Prep course, start Quick Learn from a file, start the Vim starter course, or open the main menu.
 
 Interactive setup:
 
@@ -97,15 +99,17 @@ If `OPENLEARN_HOME` is unset, openLearn uses the current directory when it conta
 ```bash
 openlearn new vim --goal "Use Vim comfortably for real editing"
 openlearn new interview-prep --template algorithms
+openlearn new technical-interview-prep --template technical-interview-prep
 openlearn new backend-interviews --interview-prep
 openlearn resume
 ```
 
-Run `openlearn templates` to list the bundled Vim, Git, Python, SQL, algorithms, and other starter outlines.
+Run `openlearn templates` to list the bundled Technical Interview Prep, Vim, Git, Python, SQL, algorithms, and other starter outlines.
 From the main menu, press `s` to browse and create any bundled starter course or `i` for `New interview course`.
+Technical Interview Prep uses a LeetCode-style algorithms and data-structures outline and enters the same interview-prep flow as the shortcut.
 When the active interview course has unfinished placement, the menu shows `Continue interview prep` and hides the new-course shortcut.
 An explicit `--goal` takes precedence over a template's default goal.
-`--interview-prep` is an explicit opt-in that creates a separate learner-owned local profile and offers a bounded coding placement.
+`--interview-prep` is an explicit opt-in that creates a separate learner-owned local profile and offers a short reasoning placement.
 Normal topic creation does not create interview metadata or show placement prompts.
 
 Manage the profile and optional placement independently:
@@ -120,20 +124,22 @@ openlearn interview placement backend-interviews discard
 openlearn interview clear backend-interviews
 ```
 
-Placement observes clarification, planning, implementation, testing, complexity reasoning, and a follow-up on an original bundled problem.
-Its result is provisional, names uncertainty across prerequisite, coding-fluency, reasoning, and interview-process gaps, and never grants mastery.
+New placement uses one original bundled problem to collect clarification questions and a spoken or typed solution route covering the approach, data structure or technique, edge cases and tests, and time and space complexity.
+Enter one line at a time, use `/show` to review the current section, `/undo` to remove its latest line, and use `/done` to submit that section.
+The two sections are durable, so `/stop`, EOF, and interruption resume at the exact stage with the saved draft.
+The result is a provisional course-start passport that recommends a first activity, records reasoning signals and a practice priority, and explicitly leaves coding fluency unobserved.
+It never grants mastery or claims interview readiness.
 Interruptions are resumable, while explicit discard or profile clearing preserves append-only attempt evidence.
 The normal recovery command is `openlearn resume [topic]`.
 It returns an unfinished placement to its exact next stage before any provider or source work, then carries a deferred or provisional result into course planning without offering the separate legacy placement quiz.
 Course planning receives only a bounded summary of the target, schedule, gap statuses, uncertainty, and recommendations.
-Raw calibration and reasoning stay in local append-only evidence, while code and execution outcomes remain in learner-owned workspaces and durable attempt records.
+Raw reasoning stays in local append-only evidence.
 If model-backed teaching is not configured, resume reports the adjacent placement state, confirms that all work is saved, and gives both the configuration and resume commands before changing course state.
 Dry-run, mock mode, and keyless localhost providers remain available without a hosted API key.
-During placement, pressing Enter at the implementation prompt opens a persistent learner-owned workspace in the configured editor with the problem, examples, and function stub.
-After the learner saves and closes the editor, the secure runner executes hidden tests and records actual passed or failed execution evidence for implementation and testing.
-Placement execution scoring is Python-only; other preferred languages remain available for later practice but cannot produce scored runner evidence in this placement.
-Using `/skip` at implementation marks implementation, testing, complexity, and follow-up evidence uncertain instead of asking dependent questions about code that was not observed.
-Using `/baseline` ends the attempt with an explicit reduced-demand provisional baseline.
+Initial reasoning placement does not open an editor, create a coding workspace, execute code, or require Docker or Podman.
+Existing coding-placement v1 and v2 records remain readable under their recorded lifecycle instead of being reinterpreted as reasoning evidence.
+Real implementation, testing, and revision happen later through course coding drills.
+Those drills can open the configured editor and use secure `/check` execution, while a controlled-editor mock interview remains a later interview experience rather than a placement requirement.
 
 For assessment material, Quick Learn creates a separate focused topic and begins teaching without placement or outline approval:
 
