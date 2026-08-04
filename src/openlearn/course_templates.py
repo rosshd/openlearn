@@ -8,6 +8,8 @@ from importlib.resources.abc import Traversable
 
 TEMPLATE_ID_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 TEMPLATE_FIELDS = frozenset({"name", "slug", "goal", "tags", "units"})
+OPTIONAL_TEMPLATE_FIELDS = frozenset({"entry_mode"})
+TEMPLATE_ENTRY_MODES = frozenset({"interview_prep"})
 
 
 class CourseTemplateError(ValueError):
@@ -25,6 +27,7 @@ class CourseTemplate:
     goal: str
     tags: tuple[str, ...]
     units: tuple[str, ...]
+    entry_mode: str | None = None
 
 
 def validate_template_id(template_id: str) -> str:
@@ -102,9 +105,11 @@ def _read_course_template(resource: Traversable) -> CourseTemplate:
         raise CourseTemplateError(
             f"invalid course template '{resource.name}': expected a JSON object"
         )
-    if set(raw) != TEMPLATE_FIELDS:
+    if not TEMPLATE_FIELDS.issubset(raw) or not set(raw).issubset(
+        TEMPLATE_FIELDS | OPTIONAL_TEMPLATE_FIELDS
+    ):
         missing = sorted(TEMPLATE_FIELDS - set(raw))
-        unexpected = sorted(set(raw) - TEMPLATE_FIELDS)
+        unexpected = sorted(set(raw) - TEMPLATE_FIELDS - OPTIONAL_TEMPLATE_FIELDS)
         details = []
         if missing:
             details.append(f"missing {', '.join(missing)}")
@@ -127,7 +132,22 @@ def _read_course_template(resource: Traversable) -> CourseTemplate:
     goal = _required_string(raw["goal"], resource.name, "goal")
     tags = _required_string_list(raw["tags"], resource.name, "tags")
     units = _required_string_list(raw["units"], resource.name, "units")
-    return CourseTemplate(name=name, slug=slug, goal=goal, tags=tags, units=units)
+    entry_mode = raw.get("entry_mode")
+    if entry_mode is not None:
+        entry_mode = _required_string(entry_mode, resource.name, "entry_mode")
+        if entry_mode not in TEMPLATE_ENTRY_MODES:
+            raise CourseTemplateError(
+                f"invalid course template '{resource.name}': unsupported entry_mode "
+                f"'{entry_mode}'"
+            )
+    return CourseTemplate(
+        name=name,
+        slug=slug,
+        goal=goal,
+        tags=tags,
+        units=units,
+        entry_mode=entry_mode,
+    )
 
 
 def _required_string(value: object, filename: str, field: str) -> str:

@@ -1,0 +1,19 @@
+{
+  "name": "Technical Interview Prep",
+  "slug": "technical-interview-prep",
+  "goal": "Prepare for LeetCode-style coding interviews with algorithms, data structures, and clear solution reasoning",
+  "tags": ["interviews", "algorithms", "data-structures"],
+  "units": [
+    "Unit 1: Interview Problem Solving - clarification, examples, constraints, and communication",
+    "Unit 2: Complexity and Tradeoffs - time, space, and choosing an approach",
+    "Unit 3: Arrays and Hashing - lookup, counting, and prefix patterns",
+    "Sliding Window Foundations",
+    "Unit 5: Two Pointers - sorted inputs, partitioning, and in-place reasoning",
+    "Unit 6: Stacks and Queues - monotonic structures and traversal frontiers",
+    "Unit 7: Linked Lists - pointer manipulation, reversal, and cycle detection",
+    "Unit 8: Trees and Graphs - DFS, BFS, recursion, and iterative traversal",
+    "Unit 9: Backtracking and Dynamic Programming - state, choices, memoization, and pruning",
+    "Unit 10: Timed Interview Practice - communicate, implement, test, and improve"
+  ],
+  "entry_mode": "interview_prep"
+}

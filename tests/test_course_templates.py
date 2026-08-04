@@ -46,6 +46,21 @@ class CourseTemplateTests(unittest.TestCase):
         self.assertEqual(template.slug, "python-basics")
         self.assertEqual(template.tags, ("programming", "beginner"))
         self.assertEqual(template.units, ("Unit 1: Values", "Unit 2: Functions"))
+        self.assertIsNone(template.entry_mode)
+
+    def test_loads_supported_optional_entry_mode(self) -> None:
+        self.write_template(entry_mode="interview_prep")
+
+        template = course_templates.load_course_template("python-basics")
+
+        self.assertEqual(template.entry_mode, "interview_prep")
+
+    def test_rejects_unknown_or_malformed_entry_mode(self) -> None:
+        for entry_mode in ("quiz", " interview_prep", 1, ""):
+            with self.subTest(entry_mode=entry_mode):
+                self.write_template(entry_mode=entry_mode)
+                with self.assertRaises(course_templates.CourseTemplateError):
+                    course_templates.load_course_template("python-basics")
 
     def test_rejects_template_id_path_traversal(self) -> None:
         with self.assertRaisesRegex(

@@ -328,28 +328,15 @@ def launch_destination(
     from openlearn import cli
 
     if destination is OnboardingDestination.INTERVIEW_PREP:
-        slug = "coding-interview-prep"
-        cli.cmd_new(
-            Namespace(
-                topic="Coding Interview Prep",
-                goal=(
-                    "Prepare for coding interviews with LeetCode-style algorithms "
-                    "and data structures practice"
-                ),
-                mastery_profile=None,
-                template="algorithms",
-                interview_prep=True,
-            ),
+        template = cli.load_course_template("technical-interview-prep")
+        cli.create_interview_course_from_template(
+            template,
             input_func=input_func,
             output_func=output_func,
         )
-        if cli.get_active_topic() != slug:
-            output_func("No interview-prep course created. Opening the menu.")
-            return
-        cli.cmd_resume(
-            Namespace(topic=slug, model=None),
-            input_func=input_func,
-            output_func=output_func,
+        output_func(
+            "Model setup can wait until your first model-backed lesson. "
+            "Run 'openlearn init', then 'openlearn resume'."
         )
         return
 
@@ -435,16 +422,24 @@ def run_onboarding(
     output_func: OutputFunc = print,
 ) -> bool:
     output_func("Welcome to openlearn.")
-    output_func(
-        "First, connect a model provider. OpenRouter is the recommended low-cost option."
-    )
-    if not configure_provider(input_func=input_func, output_func=output_func):
-        return False
-
     destination = prompt_for_destination(
         input_func=input_func,
         output_func=output_func,
     )
+    if destination is OnboardingDestination.INTERVIEW_PREP:
+        output_func("You can start interview prep offline. Model setup comes later.")
+        launch_destination(
+            destination,
+            input_func=input_func,
+            output_func=output_func,
+        )
+        return True
+
+    output_func(
+        "Next, connect a model provider. OpenRouter is the recommended low-cost option."
+    )
+    if not configure_provider(input_func=input_func, output_func=output_func):
+        return False
     launch_destination(
         destination,
         input_func=input_func,

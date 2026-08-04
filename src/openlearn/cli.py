@@ -62,6 +62,7 @@ from openlearn.coding_activities import (
     suppress_coding_drill_action,
 )
 from openlearn.course_templates import (
+    CourseTemplate,
     CourseTemplateError,
     CourseTemplateNotFoundError,
     available_course_templates,
@@ -929,6 +930,10 @@ def run_menu(input_func=input, output_func=print) -> int:
                     "Continue interview prep",
                     lambda: menu_resume(input_func, output_func),
                 )
+                add_action(
+                    "Interview settings",
+                    lambda: menu_interview_settings(input_func, output_func),
+                )
             else:
                 add_action("Start course", lambda: menu_start_course(input_func, output_func))
             add_action("Context files", lambda: menu_context_files(input_func, output_func))
@@ -943,6 +948,11 @@ def run_menu(input_func=input, output_func=print) -> int:
             add_action("Chat", lambda: menu_ask(input_func, output_func))
             add_action("Review", lambda: menu_review(input_func, output_func))
             add_action("Course options", lambda: menu_course_options(input_func, output_func))
+            if interview_profile_path(active).exists():
+                add_action(
+                    "Interview settings",
+                    lambda: menu_interview_settings(input_func, output_func),
+                )
             add_action("Context files", lambda: menu_context_files(input_func, output_func))
         if recent_topic_summaries():
             add_action("Topics", lambda: menu_topics(input_func, output_func))
@@ -1079,6 +1089,14 @@ def menu_starter_courses(input_func, output_func) -> None:
         return
 
     template = templates[int(choice) - 1]
+    if template.entry_mode == "interview_prep":
+        create_interview_course_from_template(
+            template,
+            input_func=input_func,
+            output_func=output_func,
+        )
+        return
+
     name = input_func(f"Course name [{template.name}]: ").strip() or template.name
     output_func("")
     goal = input_func(f"Goal [{template.goal}]: ").strip() or template.goal
@@ -1096,28 +1114,74 @@ def menu_starter_courses(input_func, output_func) -> None:
 
 
 def menu_interview_prep(input_func, output_func) -> None:
-    default_name = "Coding Interview Prep"
+    template = load_course_template("technical-interview-prep")
+    create_interview_course_from_template(
+        template,
+        input_func=input_func,
+        output_func=output_func,
+    )
+
+
+def _available_course_name(default_name: str) -> str:
     course_name = default_name
     suffix = 2
     while topic_path(slugify(course_name)).exists():
         course_name = f"{default_name} {suffix}"
         suffix += 1
-    default_goal = (
-        "Prepare for LeetCode-style coding interviews with algorithms, "
-        "data structures, and timed problem solving"
+    return course_name
+
+
+def create_interview_course_from_template(
+    template: CourseTemplate,
+    *,
+    input_func,
+    output_func,
+) -> int:
+    """Create an interview course from defaults after an explicit entry choice."""
+    if template.entry_mode != "interview_prep":
+        raise OpenLearnError("course template is not an interview-prep entry")
+    output_func(template.name)
+    output_func(template.goal)
+    output_func(
+        "Placement is a short offline reasoning conversation. No coding setup is needed."
     )
-    output_func("Interview prep")
-    output_func("Creates a structured algorithms course with an adaptive placement.")
-    goal = input_func(f"Goal [{default_goal}]: ").strip() or default_goal
-    output_func("")
-    cmd_new(
+    while True:
+        try:
+            choice = input_func(
+                "Start placement, defer it, or go back? [Y/d/b]: "
+            ).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            output_func("\nNo course created.")
+            return 0
+        output_func("")
+        if choice in {"b", "back", "q", "quit"}:
+            output_func("No course created.")
+            return 0
+        if choice in {"", "y", "yes", "d", "defer"}:
+            break
+        output_func("Choose start, defer, or back.")
+
+    course_name = _available_course_name(template.name)
+    result = cmd_new(
         argparse.Namespace(
             topic=course_name,
-            goal=goal,
+            goal=template.goal,
             mastery_profile=None,
-            template="algorithms",
+            template=template.slug,
             interview_prep=True,
         ),
+        output_func=output_func,
+    )
+    if result:
+        return result
+    slug = slugify(course_name)
+    if choice in {"d", "defer"}:
+        return cmd_interview_placement(
+            argparse.Namespace(topic=slug, action="defer"),
+            output_func=output_func,
+        )
+    return cmd_interview_placement(
+        argparse.Namespace(topic=slug, action="start"),
         input_func=input_func,
         output_func=output_func,
     )
@@ -1740,6 +1804,36 @@ def menu_course_options(input_func, output_func) -> None:
         if not changed:
             return
         save_course_options(slug, options, new_profile)
+
+
+def menu_interview_settings(input_func, output_func) -> None:
+    slug = resolve_topic_slug(None)
+    while True:
+        profile = _load_interview_profile(slug)
+        values = profile["profile"]
+        assert isinstance(values, dict)
+        output_func("Interview settings")
+        for index, (field, label) in enumerate(INTERVIEW_SETTINGS_FIELDS, start=1):
+            value = values[field]
+            output_func(f"{index}. {label}: {value or 'Not provided'}")
+        output_func("b. Back")
+        choice = input_func("Choose setting to edit: ").strip().lower()
+        output_func("")
+        if choice in {"b", "back", "q", "quit", ""}:
+            return
+        if not choice.isdigit() or not 1 <= int(choice) <= len(INTERVIEW_SETTINGS_FIELDS):
+            output_func("Choose a setting number, or b to go back.")
+            continue
+        field, label = INTERVIEW_SETTINGS_FIELDS[int(choice) - 1]
+        value = input_func(f"{label}: ").strip()
+        output_func("")
+        try:
+            cmd_interview_edit(
+                argparse.Namespace(topic=slug, field=field, value=value),
+                output_func=output_func,
+            )
+        except OpenLearnError as exc:
+            print_error(str(exc), output_func)
 
 
 def menu_course_options_dict(
@@ -2579,6 +2673,16 @@ INTERVIEW_PROFILE_SETUP_FIELDS = (
     ("interview_date", "Interview date (YYYY-MM-DD, optional)"),
     ("weekly_minutes", "Weekly practice minutes"),
     ("session_minutes", "Session minutes"),
+)
+
+INTERVIEW_SETTINGS_FIELDS = (
+    *INTERVIEW_PROFILE_SETUP_FIELDS,
+    ("coding_language", "Coding language"),
+    ("data_structures_experience", "Data structures experience"),
+    ("algorithms_experience", "Algorithms experience"),
+    ("interview_experience", "Interview experience"),
+    ("target_notes", "Target notes"),
+    ("accessibility_preferences", "Accessibility preferences"),
 )
 
 INTERVIEW_TARGET_LEVEL_ALIASES = {
@@ -4214,12 +4318,23 @@ def cmd_new(args: argparse.Namespace, output_func=print, input_func=None) -> int
             output_func(f"Could not load template '{template_slug}': {exc}")
             return 1
 
+    template_interview_prep = bool(
+        template is not None and template.entry_mode == "interview_prep"
+    )
+    interview_prep_enabled = bool(
+        getattr(args, "interview_prep", False) or template_interview_prep
+    )
+
     slug = slugify(args.topic)
     path = topic_path(slug)
     if path.exists():
         raise OpenLearnError(f"topic already exists: {slug}")
     profile_values = default_interview_profile_values()
-    if getattr(args, "interview_prep", False) and input_func is not None:
+    if (
+        interview_prep_enabled
+        and not template_interview_prep
+        and input_func is not None
+    ):
         collected = collect_interview_profile(input_func, output_func)
         if collected is None:
             return 0
@@ -4275,7 +4390,6 @@ def cmd_new(args: argparse.Namespace, output_func=print, input_func=None) -> int
 ## Session Log
 
 """
-    interview_prep_enabled = bool(getattr(args, "interview_prep", False))
     with topic_store_locks(slug, include_journal=True):
         if path.exists():
             raise OpenLearnError(f"topic already exists: {slug}")

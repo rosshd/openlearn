@@ -153,27 +153,27 @@ class DestinationPromptTests(unittest.TestCase):
 
 
 class DestinationLaunchTests(unittest.TestCase):
-    def test_interview_prep_uses_algorithms_template_and_resume_router(self) -> None:
+    def test_interview_prep_uses_premade_template_and_defers_provider(self) -> None:
         with (
-            patch.object(cli, "cmd_new") as cmd_new,
-            patch.object(cli, "get_active_topic", return_value="coding-interview-prep"),
-            patch.object(cli, "cmd_resume") as cmd_resume,
+            patch.object(cli, "load_course_template") as load_template,
+            patch.object(cli, "create_interview_course_from_template") as create_course,
         ):
+            template = object()
+            load_template.return_value = template
+            output: list[str] = []
             onboarding.launch_destination(
                 onboarding.OnboardingDestination.INTERVIEW_PREP,
                 input_func=lambda _prompt: "",
-                output_func=lambda _text: None,
+                output_func=output.append,
             )
 
-        new_args = cmd_new.call_args.args[0]
-        self.assertEqual(new_args.topic, "Coding Interview Prep")
-        self.assertIn("LeetCode-style", new_args.goal)
-        self.assertEqual(new_args.template, "algorithms")
-        self.assertTrue(new_args.interview_prep)
-        self.assertIsNotNone(cmd_new.call_args.kwargs["input_func"])
-        resume_args = cmd_resume.call_args.args[0]
-        self.assertEqual(resume_args.topic, "coding-interview-prep")
-        self.assertIsNone(resume_args.model)
+        load_template.assert_called_once_with("technical-interview-prep")
+        create_course.assert_called_once_with(
+            template,
+            input_func=unittest.mock.ANY,
+            output_func=output.append,
+        )
+        self.assertTrue(any("Model setup can wait" in line for line in output))
 
     def test_quick_learn_imports_file_and_starts_lesson(self) -> None:
         context = cli.PendingContext("guide.md", "Guide contents\n")
@@ -538,12 +538,13 @@ class OnboardingFlowTests(unittest.TestCase):
             output,
             [
                 "Welcome to openlearn.",
-                "First, connect a model provider. OpenRouter is the recommended low-cost option.",
+                "Next, connect a model provider. OpenRouter is the recommended low-cost option.",
             ],
         )
         self.assertEqual(
             calls,
             [
+                "destination",
                 "provider",
                 ("base_url", preset),
                 ("key", preset, "https://api.openai.com/v1"),
@@ -554,7 +555,6 @@ class OnboardingFlowTests(unittest.TestCase):
                     "gpt-4.1-mini",
                     "https://api.openai.com/v1",
                 ),
-                "destination",
                 ("launch", onboarding.OnboardingDestination.QUICK_LEARN),
             ],
         )
@@ -640,8 +640,31 @@ class OnboardingFlowTests(unittest.TestCase):
         self.assertFalse(ready)
         prompt_for_model.assert_not_called()
         persist_configuration.assert_not_called()
-        prompt_for_destination.assert_not_called()
+        prompt_for_destination.assert_called_once()
         launch_destination.assert_not_called()
+
+    def test_interview_destination_runs_offline_before_provider_setup(self) -> None:
+        calls: list[object] = []
+        output: list[str] = []
+        with (
+            patch.object(
+                onboarding,
+                "prompt_for_destination",
+                return_value=onboarding.OnboardingDestination.INTERVIEW_PREP,
+            ),
+            patch.object(onboarding, "configure_provider") as configure_provider,
+            patch.object(
+                onboarding,
+                "launch_destination",
+                side_effect=lambda destination, **_kwargs: calls.append(destination),
+            ),
+        ):
+            ready = onboarding.run_onboarding(output_func=output.append)
+
+        self.assertTrue(ready)
+        configure_provider.assert_not_called()
+        self.assertEqual(calls, [onboarding.OnboardingDestination.INTERVIEW_PREP])
+        self.assertTrue(any("start interview prep offline" in line.lower() for line in output))
 
 
 class InitCommandTests(unittest.TestCase):

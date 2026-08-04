@@ -3221,6 +3221,14 @@ class CliStorageTests(unittest.TestCase):
 
         self.assertGreaterEqual(len(templates), 8)
         self.assertIn("algorithms", {template.slug for template in templates})
+        interview_template = next(
+            template
+            for template in templates
+            if template.slug == "technical-interview-prep"
+        )
+        self.assertIn("LeetCode-style", interview_template.goal)
+        self.assertIn("Sliding Window Foundations", interview_template.units)
+        self.assertEqual(interview_template.entry_mode, "interview_prep")
         for template in templates:
             self.assertTrue(template.name)
             self.assertTrue(template.goal)
@@ -6056,9 +6064,15 @@ class InteractiveTests(unittest.TestCase):
 
     def test_menu_can_create_a_bundled_starter_course(self) -> None:
         output = []
+        templates = cli.available_course_templates()
+        vim_choice = next(
+            str(index)
+            for index, template in enumerate(templates, start=1)
+            if template.slug == "vim"
+        )
 
         exit_code = cli.run_menu(
-            input_func=iter_input(["s", "8", "", "", "q"]),
+            input_func=iter_input(["s", vim_choice, "", "", "q"]),
             output_func=output.append,
         )
 
@@ -6070,70 +6084,138 @@ class InteractiveTests(unittest.TestCase):
         self.assertIn("Starter courses", output)
         self.assertTrue(any("Vim" in line and "8 units" in line for line in output))
 
-    def test_menu_interview_prep_uses_algorithms_template(self) -> None:
-        calls = []
-        prompts = []
-        original_cmd_new = cli.cmd_new
-
-        def fake_cmd_new(args: Namespace, **kwargs) -> int:
-            calls.append((args, kwargs))
-            return 0
-
-        def input_func(prompt: str) -> str:
-            prompts.append(prompt)
-            return ""
-
-        cli.cmd_new = fake_cmd_new
-        try:
+    def test_menu_interview_prep_uses_premade_template(self) -> None:
+        with mock.patch.object(cli, "create_interview_course_from_template") as create:
             cli.menu_interview_prep(
-                input_func,
+                lambda _prompt: "b",
                 lambda _text: None,
             )
-        finally:
-            cli.cmd_new = original_cmd_new
 
-        args, kwargs = calls[0]
-        self.assertEqual(
-            prompts,
-            [
-                "Goal [Prepare for LeetCode-style coding interviews with algorithms, "
-                "data structures, and timed problem solving]: "
-            ],
-        )
-        self.assertEqual(args.topic, "Coding Interview Prep")
-        self.assertIn("LeetCode-style", args.goal)
-        self.assertEqual(args.template, "algorithms")
-        self.assertTrue(args.interview_prep)
-        self.assertIn("input_func", kwargs)
+        template = create.call_args.args[0]
+        self.assertEqual(template.slug, "technical-interview-prep")
+        self.assertEqual(template.entry_mode, "interview_prep")
 
     def test_menu_interview_prep_numbers_a_second_course(self) -> None:
         call_silent(
             cli.cmd_new,
             Namespace(
-                topic="Coding Interview Prep",
+                topic="Technical Interview Prep",
                 goal="Prepare for interviews",
-                mastery_profile=None,
-                template="algorithms",
+                template="technical-interview-prep",
                 interview_prep=True,
             ),
         )
-        calls = []
 
-        with mock.patch.object(
-            cli,
-            "cmd_new",
-            side_effect=lambda args, **kwargs: calls.append((args, kwargs)) or 0,
-        ):
-            cli.menu_interview_prep(
-                iter_input([""]),
-                lambda _text: None,
+        self.assertEqual(
+            cli._available_course_name("Technical Interview Prep"),
+            "Technical Interview Prep 2",
+        )
+
+    def test_interview_template_back_creates_nothing(self) -> None:
+        template = cli.load_course_template("technical-interview-prep")
+
+        result = cli.create_interview_course_from_template(
+            template,
+            input_func=iter_input(["b"]),
+            output_func=lambda _text: None,
+        )
+
+        self.assertEqual(result, 0)
+        self.assertFalse(cli.topic_path("technical-interview-prep").exists())
+        self.assertFalse(cli.interview_profile_path("technical-interview-prep").exists())
+
+    def test_starter_menu_routes_interview_template_by_data(self) -> None:
+        templates = cli.available_course_templates()
+        choice = next(
+            str(index)
+            for index, template in enumerate(templates, start=1)
+            if template.slug == "technical-interview-prep"
+        )
+        with mock.patch.object(cli, "create_interview_course_from_template") as create:
+            cli.menu_starter_courses(
+                input_func=iter_input([choice]),
+                output_func=lambda _text: None,
             )
 
-        args, kwargs = calls[0]
-        self.assertEqual(args.topic, "Coding Interview Prep 2")
-        self.assertEqual(args.template, "algorithms")
-        self.assertTrue(args.interview_prep)
-        self.assertIn("input_func", kwargs)
+        self.assertEqual(create.call_args.args[0].slug, "technical-interview-prep")
+
+    def test_interview_template_defer_uses_defaults_without_questionnaire(self) -> None:
+        template = cli.load_course_template("technical-interview-prep")
+        prompts: list[str] = []
+
+        def input_func(prompt: str) -> str:
+            prompts.append(prompt)
+            return "d"
+
+        result = cli.create_interview_course_from_template(
+            template,
+            input_func=input_func,
+            output_func=lambda _text: None,
+        )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(prompts, ["Start placement, defer it, or go back? [Y/d/b]: "])
+        topic = cli.read_topic("technical-interview-prep")
+        profile = cli.interview_prep.load_profile(
+            cli.interview_profile_path("technical-interview-prep")
+        )
+        self.assertEqual(topic.metadata["goal"], template.goal)
+        self.assertEqual(topic.metadata["template_units"], list(template.units))
+        self.assertEqual(profile["profile"], cli.default_interview_profile_values())
+        self.assertEqual(profile["placement"]["status"], "deferred")
+
+    def test_interview_template_start_creates_then_starts_reasoning_placement(self) -> None:
+        template = cli.load_course_template("technical-interview-prep")
+        with mock.patch.object(cli, "cmd_interview_placement", return_value=0) as placement:
+            result = cli.create_interview_course_from_template(
+                template,
+                input_func=iter_input([""]),
+                output_func=lambda _text: None,
+            )
+
+        self.assertEqual(result, 0)
+        args = placement.call_args.args[0]
+        self.assertEqual(args.topic, "technical-interview-prep")
+        self.assertEqual(args.action, "start")
+        self.assertTrue(cli.topic_path("technical-interview-prep").exists())
+        self.assertTrue(cli.interview_profile_path("technical-interview-prep").exists())
+
+    def test_explicit_interview_template_infers_profile_but_algorithms_does_not(self) -> None:
+        call_silent(
+            cli.cmd_new,
+            Namespace(
+                topic="Interview Template",
+                goal="",
+                template="technical-interview-prep",
+            ),
+        )
+        call_silent(
+            cli.cmd_new,
+            Namespace(topic="Ordinary Algorithms", goal="", template="algorithms"),
+        )
+
+        self.assertTrue(cli.interview_profile_path("interview-template").exists())
+        self.assertFalse(cli.interview_profile_path("ordinary-algorithms").exists())
+
+    def test_interview_settings_edits_profile_without_replaying_setup(self) -> None:
+        call_silent(
+            cli.cmd_new,
+            Namespace(
+                topic="Interview Settings",
+                goal="",
+                template="technical-interview-prep",
+            ),
+        )
+
+        cli.menu_interview_settings(
+            input_func=iter_input(["1", "backend", "b"]),
+            output_func=lambda _text: None,
+        )
+
+        profile = cli.interview_prep.load_profile(
+            cli.interview_profile_path("interview-settings")
+        )
+        self.assertEqual(profile["profile"]["role_family"], "backend")
 
     def test_unstarted_interview_course_continues_setup_from_menu(self) -> None:
         call_silent(
