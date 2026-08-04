@@ -3073,6 +3073,14 @@ INTERVIEW_PLACEMENT_PROMPTS = {
     "follow_up": (
         "Follow-up: how would you improve the approach for a very long input or streaming text?"
     ),
+    "reasoning": (
+        "Talk through one complete solution route. Include:\n"
+        "- your approach\n"
+        "- the data structure or technique you would use\n"
+        "- edge cases and tests\n"
+        "- time and space complexity\n"
+        "Add one line at a time. Type /done when the response is complete."
+    ),
 }
 
 
@@ -3110,7 +3118,7 @@ def _print_placement_saved(
 
 PLACEMENT_COMMANDS = {
     command: name
-    for name in ("stop", "discard", "skip", "baseline")
+    for name in ("stop", "discard", "skip", "baseline", "done", "show", "undo")
     for command in (name, f"/{name}")
 }
 
@@ -3378,6 +3386,7 @@ def _reconcile_terminal_placement_attempt(
     placement = profile_value.get("placement")
     if (
         not isinstance(placement, dict)
+        or placement.get("lifecycle_version") == interview_prep.PLACEMENT_V3
         or placement.get("status") not in {"not_started", "provisional"}
         or activity.get("status") not in {"completed", "abandoned", "cancelled"}
     ):
@@ -3626,8 +3635,11 @@ def _run_placement_implementation(
     return True
 
 
-def interview_placement_activity_request() -> dict[str, object]:
+def interview_placement_activity_request(
+    lifecycle_version: str = interview_prep.PLACEMENT_V1,
+) -> dict[str, object]:
     public_cases = _placement_runner_cases(include_hidden=False)
+    reasoning_only = lifecycle_version == interview_prep.PLACEMENT_V3
     return {
         "domain": "coding",
         "kind": "interview_problem",
@@ -3640,13 +3652,19 @@ def interview_placement_activity_request() -> dict[str, object]:
             "title": interview_prep.PLACEMENT_PROBLEM["title"],
             "language": "python",
             "problem_id": interview_prep.PLACEMENT_PROBLEM["problem_id"],
-            "function_name": interview_prep.PLACEMENT_PROBLEM["function_name"],
-            "test_cases": public_cases,
-            "tool_requests": [
-                {"action": "create_drill_workspace", "payload": {}},
-                {"action": "open_configured_editor", "payload": {}},
-                {"action": "run_drill_tests", "payload": {}},
-            ],
+            **(
+                {"tool_requests": []}
+                if reasoning_only
+                else {
+                    "function_name": interview_prep.PLACEMENT_PROBLEM["function_name"],
+                    "test_cases": public_cases,
+                    "tool_requests": [
+                        {"action": "create_drill_workspace", "payload": {}},
+                        {"action": "open_configured_editor", "payload": {}},
+                        {"action": "run_drill_tests", "payload": {}},
+                    ],
+                }
+            ),
         },
         "resources": [
             {
@@ -3788,20 +3806,29 @@ def sync_interview_placement(slug: str) -> dict[str, object]:
     return profile_value
 
 
-def _begin_interview_activity(slug: str) -> dict[str, object]:
+def _begin_interview_activity(
+    slug: str,
+    lifecycle_version: str = interview_prep.PLACEMENT_V3,
+) -> dict[str, object]:
     current = _current_interview_activity(slug)
     if current is not None and current.get("status") == "active":
         return current
-    activity = propose_topic_activity(slug, interview_placement_activity_request())
+    activity = propose_topic_activity(
+        slug, interview_placement_activity_request(lifecycle_version)
+    )
     activity = accept_topic_activity(slug, activity, learner_confirmed=True)
     return transition_topic_activity(slug, activity, "active")
 
 
 def _discard_interview_placement(slug: str, path: Path) -> dict[str, object]:
-    sync_interview_placement(slug)
+    profile_value = sync_interview_placement(slug)
+    placement = profile_value["placement"]
+    assert isinstance(placement, dict)
+    reasoning_only = placement.get("lifecycle_version") == interview_prep.PLACEMENT_V3
     activity = _current_interview_activity(slug)
     if activity is not None and activity.get("status") == "active":
-        _reconcile_pending_placement_runs(slug, activity)
+        if not reasoning_only:
+            _reconcile_pending_placement_runs(slug, activity)
         activity = transition_topic_activity(
             slug,
             activity,
@@ -3819,6 +3846,165 @@ def _discard_interview_placement(slug: str, path: Path) -> dict[str, object]:
     if activity is not None:
         _reconcile_terminal_placement_attempt(slug, activity, value)
     return value
+
+
+def _print_reasoning_placement_passport(
+    value: dict[str, object], output_func=print
+) -> None:
+    placement = value["placement"]
+    assert isinstance(placement, dict)
+    result = placement.get("result")
+    passport = result.get("passport") if isinstance(result, dict) else None
+    if not isinstance(passport, dict):
+        raise OpenLearnError("reasoning placement passport is unavailable")
+    output_func("Placement complete. Here is your course-start passport:")
+    output_func(f"Starting route: {passport['starting_route']}")
+    output_func(f"First activity: {passport['first_activity']}")
+    signals = passport.get("reasoning_signals")
+    if isinstance(signals, list):
+        output_func("Reasoning signals:")
+        for signal in signals:
+            output_func(f"- {signal}")
+    output_func(f"Practice priority: {passport['practice_priority']}")
+    output_func(f"Verify later: {passport['uncertainty_to_verify']}")
+    output_func(
+        "Coding fluency was not observed. You will verify it during later course practice."
+    )
+    output_func("Placement saved. Continue from the main menu to start your first activity.")
+
+
+def _print_reasoning_placement_draft(
+    path: Path, stage: str, output_func=print
+) -> None:
+    draft = interview_prep.placement_draft(path)
+    lines = draft.get("lines") if isinstance(draft, dict) else None
+    if not isinstance(lines, list) or not lines:
+        output_func("Draft is empty.")
+        return
+    output_func(f"Current {stage} draft:")
+    for line in lines:
+        output_func(f"- {line}")
+
+
+def _run_reasoning_interview_placement(
+    slug: str,
+    path: Path,
+    *,
+    input_func=input,
+    output_func=print,
+) -> int:
+    output_func(
+        "Short reasoning placement started (about 5 minutes). "
+        "There is no coding task or editor in this placement."
+    )
+    output_func(
+        "Add one line at a time. Use /done to submit a section, /show to review it, "
+        "/undo to remove its last line, /skip to leave it uncertain, or /stop to resume later."
+    )
+    while True:
+        value = sync_interview_placement(slug)
+        placement = value["placement"]
+        assert isinstance(placement, dict)
+        stage = placement.get("next_stage")
+        if not isinstance(stage, str):
+            break
+        stage_prompt = INTERVIEW_PLACEMENT_PROMPTS.get(stage)
+        if stage_prompt is None:
+            raise OpenLearnError(
+                f"placement lifecycle stage {stage!r} is not supported by this CLI"
+            )
+        output_func(f"\n{stage_prompt}")
+        draft = interview_prep.placement_draft(path)
+        if isinstance(draft, dict) and draft.get("stage") == stage:
+            lines = draft.get("lines")
+            if isinstance(lines, list) and lines:
+                output_func(
+                    f"Resumed saved {stage} draft with {len(lines)} "
+                    f"line{'s' if len(lines) != 1 else ''}. Use /show to review it."
+                )
+        try:
+            response = input_func(f"{stage}> ")
+        except (EOFError, KeyboardInterrupt):
+            output_func("")
+            _print_placement_saved(slug, stage, value, output_func)
+            return 0
+        if not response.strip():
+            output_func("Nothing added. Enter a line or use /show, /done, /skip, or /stop.")
+            continue
+        command = _placement_command(response)
+        if command == "stop":
+            _print_placement_saved(slug, stage, value, output_func)
+            return 0
+        if command == "baseline":
+            output_func(
+                "/baseline is available only in legacy coding placements. "
+                "Continue this section, use /skip, or use /stop."
+            )
+            continue
+        if command == "discard":
+            try:
+                confirmation = input_func(
+                    "Discard this placement draft and start over later? Type yes to confirm: "
+                )
+            except (EOFError, KeyboardInterrupt):
+                output_func("")
+                _print_placement_saved(slug, stage, value, output_func)
+                return 0
+            if confirmation.strip().lower() != "yes":
+                output_func("Discard cancelled. Your placement draft is still saved.")
+                continue
+            _discard_interview_placement(slug, path)
+            output_func("Placement discarded. Append-only evidence was preserved.")
+            return 0
+        if command == "show":
+            _print_reasoning_placement_draft(path, stage, output_func)
+            continue
+        if command == "undo":
+            with interview_profile_write_lock(slug):
+                interview_prep.undo_placement_draft_line(path, stage)
+            _print_reasoning_placement_draft(path, stage, output_func)
+            continue
+        if command == "skip":
+            with interview_profile_write_lock(slug):
+                value = interview_prep.skip_optional_placement_stage(path, stage)
+            value = sync_interview_placement(slug)
+            output_func(f"{stage.capitalize()} skipped. This area remains uncertain.")
+            placement = value["placement"]
+            assert isinstance(placement, dict)
+            if placement.get("status") == "provisional":
+                break
+            continue
+        if command == "done":
+            draft = interview_prep.placement_draft(path)
+            lines = draft.get("lines") if isinstance(draft, dict) else None
+            if not isinstance(lines, list) or not lines:
+                output_func("Add at least one line before using /done, or use /skip.")
+                continue
+            activity = _current_interview_activity(slug)
+            if activity is None or activity.get("status") != "active":
+                raise OpenLearnError("validated interview placement activity is not active")
+            evidence_id = interview_prep.placement_evidence_id(placement, stage)
+            record_topic_activity_evidence(
+                slug,
+                activity,
+                "interview_observation",
+                {"stage": stage, "response": "\n".join(str(line) for line in lines)},
+                evidence_id=evidence_id,
+            )
+            sync_interview_placement(slug)
+            output_func(f"{stage.capitalize()} saved.")
+            continue
+        if command is not None:
+            output_func(f"/{command} is not available at this step.")
+            continue
+        with interview_profile_write_lock(slug):
+            interview_prep.append_placement_draft_line(path, stage, response)
+        output_func("Line saved.")
+        if stage == "clarification":
+            output_func(interview_prep.placement_clarification_response(response))
+    value = sync_interview_placement(slug)
+    _print_reasoning_placement_passport(value, output_func)
+    return 0
 
 
 def cmd_interview_placement(
@@ -3851,6 +4037,9 @@ def cmd_interview_placement(
         placement = value["placement"]
         assert isinstance(placement, dict)
         if action == "resume" and placement.get("status") == "provisional":
+            if placement.get("lifecycle_version") == interview_prep.PLACEMENT_V3:
+                _print_reasoning_placement_passport(value, output_func)
+                return 0
             output_func("Placement complete. Results are provisional and grant no mastery.")
             result = cmd_interview_profile(
                 argparse.Namespace(topic=slug), output_func=output_func
@@ -3860,14 +4049,24 @@ def cmd_interview_placement(
             )
             return result
         if placement.get("status") != "in_progress":
-            activity = _begin_interview_activity(slug)
+            activity = _begin_interview_activity(
+                slug, lifecycle_version=interview_prep.PLACEMENT_V3
+            )
             with interview_profile_write_lock(slug):
                 value = interview_prep.start_placement(
                     path,
                     activity_id=str(activity["activity_id"]),
-                    # The compact placement UI will deliberately switch this selector.
-                    lifecycle_version=interview_prep.PLACEMENT_V1,
+                    lifecycle_version=interview_prep.PLACEMENT_V3,
                 )
+            placement = value["placement"]
+            assert isinstance(placement, dict)
+        if placement.get("lifecycle_version") == interview_prep.PLACEMENT_V3:
+            return _run_reasoning_interview_placement(
+                slug,
+                path,
+                input_func=input_func,
+                output_func=output_func,
+            )
         output_func(
             "Bounded coding placement started. Type /stop to resume later, /discard to "
             "discard this attempt, /skip to leave one stage uncertain, or /baseline "

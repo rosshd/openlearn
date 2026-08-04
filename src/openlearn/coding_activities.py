@@ -423,6 +423,7 @@ class CodingActivityAdapter:
                 "tests",
                 "complexity",
                 "follow_up",
+                "reasoning",
                 "baseline",
             }
             if stage not in allowed_stages:

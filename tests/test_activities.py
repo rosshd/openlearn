@@ -352,6 +352,24 @@ class ActivityContractTests(unittest.TestCase):
             },
         )
         self.assertEqual(legacy["tool_requests"], [])
+        reasoning_only = adapter.validate_request(
+            "interview_problem",
+            {
+                "title": "Reasoning placement",
+                "language": "python",
+                "problem_id": "first_unique_window_v1",
+                "tool_requests": [],
+            },
+        )
+        self.assertNotIn("function_name", reasoning_only)
+        self.assertNotIn("test_cases", reasoning_only)
+        for stage in ("clarification", "reasoning"):
+            with self.subTest(stage=stage):
+                evidence = adapter.validate_evidence(
+                    "interview_observation",
+                    {"stage": stage, "response": "Observed response"},
+                )
+                self.assertEqual(evidence["stage"], stage)
         with self.assertRaisesRegex(ActivityContractError, "invalid interview"):
             adapter.validate_evidence(
                 "interview_observation",

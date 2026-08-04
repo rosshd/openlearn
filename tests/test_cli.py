@@ -910,6 +910,139 @@ class CliStorageTests(unittest.TestCase):
                 output_func=lambda _line: None,
             )
 
+    def test_reasoning_placement_resumes_multiline_drafts_without_coding_tools(self) -> None:
+        slug = self.create_interview_topic()
+        first_output: list[str] = []
+        coding_seams = (
+            mock.patch.object(
+                cli,
+                "_placement_workspace",
+                side_effect=AssertionError("reasoning placement must not create a workspace"),
+            ),
+            mock.patch.object(
+                cli,
+                "_run_placement_implementation",
+                side_effect=AssertionError("reasoning placement must not run code"),
+            ),
+            mock.patch.object(
+                cli,
+                "open_drill_in_editor",
+                side_effect=AssertionError("reasoning placement must not open an editor"),
+            ),
+        )
+        with coding_seams[0], coding_seams[1], coding_seams[2]:
+            cli.cmd_interview_placement(
+                Namespace(topic=slug, action="start"),
+                input_func=iter_input(
+                    [
+                        "Can width exceed the text length?",
+                        "Should I return the window start?",
+                        "/show",
+                        "/undo",
+                        "What should I return if there is no window?",
+                        "/stop",
+                    ]
+                ),
+                output_func=first_output.append,
+            )
+
+        saved = cli.interview_prep.load_profile(cli.interview_profile_path(slug))
+        self.assertEqual(saved["placement"]["lifecycle_version"], cli.interview_prep.PLACEMENT_V3)
+        self.assertEqual(
+            saved["placement"]["draft"]["lines"],
+            [
+                "Can width exceed the text length?",
+                "What should I return if there is no window?",
+            ],
+        )
+        self.assertTrue(any("Current clarification draft" in line for line in first_output))
+        self.assertTrue(any("Constraints and edges:" in line for line in first_output))
+
+        resumed_output: list[str] = []
+        with (
+            mock.patch.object(
+                cli,
+                "_placement_workspace",
+                side_effect=AssertionError("reasoning placement must not create a workspace"),
+            ),
+            mock.patch.object(
+                cli,
+                "_run_placement_implementation",
+                side_effect=AssertionError("reasoning placement must not run code"),
+            ),
+            mock.patch.object(
+                cli,
+                "open_drill_in_editor",
+                side_effect=AssertionError("reasoning placement must not open an editor"),
+            ),
+        ):
+            cli.cmd_interview_placement(
+                Namespace(topic=slug, action="resume"),
+                input_func=iter_input(
+                    [
+                        "/show",
+                        "/done",
+                        "Use a sliding window and a set.",
+                        "Test width one, repeated characters, and no valid window.",
+                        "The scan is O(n) time and O(width) space.",
+                        "/done",
+                    ]
+                ),
+                output_func=resumed_output.append,
+            )
+
+        completed = cli.interview_prep.load_profile(cli.interview_profile_path(slug))
+        placement = completed["placement"]
+        self.assertEqual(placement["status"], "provisional")
+        self.assertIsNone(placement["draft"])
+        self.assertEqual(len(placement["evidence_refs"]), 2)
+        expected_ids = {
+            cli.interview_prep.placement_evidence_id(placement, stage)
+            for stage in ("clarification", "reasoning")
+        }
+        self.assertEqual(
+            {ref["evidence_id"] for ref in placement["evidence_refs"]}, expected_ids
+        )
+        rendered = "\n".join(resumed_output)
+        self.assertIn("course-start passport", rendered)
+        self.assertIn("Starting route:", rendered)
+        self.assertIn("Coding fluency was not observed", rendered)
+        self.assertNotIn(cli.interview_prep.PLACEMENT_V3, rendered)
+        self.assertNotIn("rubric", rendered.lower())
+
+    def test_reasoning_placement_commands_are_safe_and_explicit(self) -> None:
+        slug = self.create_interview_topic("Reasoning Commands")
+        output: list[str] = []
+        cli.cmd_interview_placement(
+            Namespace(topic=slug, action="start"),
+            input_func=iter_input(["/baseline", "/skip", "/skip"]),
+            output_func=output.append,
+        )
+
+        completed = cli.interview_prep.load_profile(cli.interview_profile_path(slug))
+        self.assertEqual(completed["placement"]["status"], "provisional")
+        self.assertEqual(completed["placement"]["evidence_refs"], [])
+        self.assertIn("available only in legacy coding placements", "\n".join(output))
+
+        discard_slug = self.create_interview_topic("Reasoning Discard")
+        cli.cmd_interview_placement(
+            Namespace(topic=discard_slug, action="start"),
+            input_func=iter_input(["A saved question", "/discard", "no", "/stop"]),
+            output_func=lambda _line: None,
+        )
+        retained = cli.interview_prep.load_profile(cli.interview_profile_path(discard_slug))
+        self.assertEqual(retained["placement"]["status"], "in_progress")
+        self.assertEqual(retained["placement"]["draft"]["lines"], ["A saved question"])
+
+        cli.cmd_interview_placement(
+            Namespace(topic=discard_slug, action="resume"),
+            input_func=iter_input(["/discard", "yes"]),
+            output_func=lambda _line: None,
+        )
+        discarded = cli.interview_prep.load_profile(cli.interview_profile_path(discard_slug))
+        self.assertEqual(discarded["placement"]["status"], "not_started")
+        self.assertIsNone(discarded["placement"]["draft"])
+
     def test_interview_placement_answers_clarification_and_reprompts_blank_code(
         self,
     ) -> None:
