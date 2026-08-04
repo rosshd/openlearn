@@ -1815,7 +1815,7 @@ def menu_interview_settings(input_func, output_func) -> None:
         output_func("Interview settings")
         for index, (field, label) in enumerate(INTERVIEW_SETTINGS_FIELDS, start=1):
             value = values[field]
-            output_func(f"{index}. {label}: {value or 'Not provided'}")
+            output_func(f"{index}. {label}: {_profile_setup_display(value)}")
         output_func("b. Back")
         choice = input_func("Choose setting to edit: ").strip().lower()
         output_func("")
@@ -3159,6 +3159,9 @@ def cmd_interview_clear(
 
 
 INTERVIEW_PLACEMENT_PROMPTS = {
+    "conversation": (
+        "Talk through the problem, your clarifying questions, and the approach you would take."
+    ),
     "calibration": (
         "Brief calibration: describe your recent coding work and interview practice. "
         "Self-report provides context but will not determine the result."
@@ -3184,6 +3187,10 @@ INTERVIEW_PLACEMENT_PROMPTS = {
         "- edge cases and tests\n"
         "- time and space complexity\n"
         "Add one line at a time. Type /done when the response is complete."
+    ),
+    "debrief": (
+        "Debrief the solution: what worked, what you would improve, and how you would "
+        "handle a harder follow-up."
     ),
 }
 
@@ -3831,6 +3838,18 @@ def _interview_activity_evidence(
     return evidence
 
 
+def _finish_interview_placement_discard(slug: str, path: Path) -> dict[str, object]:
+    queued_events: list[tuple[str, dict[str, object]]] = []
+    with interview_profile_write_lock(slug):
+        value = interview_prep.discard_placement(
+            path,
+            lambda event_type, data: queued_events.append((event_type, data)),
+        )
+    for event_type, data in queued_events:
+        log_event(slug, event_type, data)
+    return value
+
+
 def sync_interview_placement(slug: str) -> dict[str, object]:
     """Recover contract evidence into the profile projection idempotently."""
     profile_value = _load_interview_profile(slug)
@@ -3843,11 +3862,23 @@ def sync_interview_placement(slug: str) -> dict[str, object]:
         raise OpenLearnError(
             "interview placement activity reference does not match durable activity state"
         )
+    if (
+        placement.get("status") == "in_progress"
+        and activity is not None
+        and activity.get("status") == "abandoned"
+        and activity.get("status_reason") == "learner_discarded_placement"
+    ):
+        profile_value = _finish_interview_placement_discard(
+            slug, interview_profile_path(slug)
+        )
+        placement = profile_value["placement"]
+        assert isinstance(placement, dict)
     if activity is not None and placement.get("status") in {
         "in_progress",
         "provisional",
     }:
-        activity = _recover_placement_evidence_batch(slug, activity)
+        if placement.get("lifecycle_version") != interview_prep.PLACEMENT_V3:
+            activity = _recover_placement_evidence_batch(slug, activity)
         existing_refs = placement.get("evidence_refs")
         assert isinstance(existing_refs, list)
         existing_ids = {
@@ -3939,14 +3970,7 @@ def _discard_interview_placement(slug: str, path: Path) -> dict[str, object]:
             "abandoned",
             reason="learner_discarded_placement",
         )
-    queued_events: list[tuple[str, dict[str, object]]] = []
-    with interview_profile_write_lock(slug):
-        value = interview_prep.discard_placement(
-            path,
-            lambda event_type, data: queued_events.append((event_type, data)),
-        )
-    for event_type, data in queued_events:
-        log_event(slug, event_type, data)
+    value = _finish_interview_placement_discard(slug, path)
     if activity is not None:
         _reconcile_terminal_placement_attempt(slug, activity, value)
     return value
@@ -3974,7 +3998,30 @@ def _print_reasoning_placement_passport(
     output_func(
         "Coding fluency was not observed. You will verify it during later course practice."
     )
-    output_func("Placement saved. Continue from the main menu to start your first activity.")
+
+
+def _continue_after_reasoning_placement(
+    slug: str,
+    value: dict[str, object],
+    *,
+    input_func=input,
+    output_func=print,
+) -> int:
+    if not provider_is_configured():
+        output_func("Placement is complete and saved.")
+        output_func(
+            "Model setup is only needed for the lesson. Run 'openlearn init', then "
+            f"'openlearn resume {slug}' to start the named first activity."
+        )
+        return 0
+    output_func("Starting your named first activity now.")
+    return _resume_interview_course_transition(
+        read_topic(slug),
+        value,
+        input_func=input_func,
+        output_func=output_func,
+        model=configured_model(),
+    )
 
 
 def _print_reasoning_placement_draft(
@@ -4070,7 +4117,7 @@ def _run_reasoning_interview_placement(
             continue
         if command == "skip":
             with interview_profile_write_lock(slug):
-                value = interview_prep.skip_optional_placement_stage(path, stage)
+                interview_prep.skip_optional_placement_stage(path, stage)
             value = sync_interview_placement(slug)
             output_func(f"{stage.capitalize()} skipped. This area remains uncertain.")
             placement = value["placement"]
@@ -4092,7 +4139,7 @@ def _run_reasoning_interview_placement(
                 slug,
                 activity,
                 "interview_observation",
-                {"stage": stage, "response": "\n".join(str(line) for line in lines)},
+                {"stage": stage, "response": "\n".join(lines)},
                 evidence_id=evidence_id,
             )
             sync_interview_placement(slug)
@@ -4108,7 +4155,53 @@ def _run_reasoning_interview_placement(
             output_func(interview_prep.placement_clarification_response(response))
     value = sync_interview_placement(slug)
     _print_reasoning_placement_passport(value, output_func)
-    return 0
+    return _continue_after_reasoning_placement(
+        slug,
+        value,
+        input_func=input_func,
+        output_func=output_func,
+    )
+
+
+def _choose_legacy_placement_route(
+    slug: str,
+    path: Path,
+    *,
+    input_func=input,
+    output_func=print,
+) -> str:
+    output_func("An older coding placement is still in progress.")
+    output_func(
+        "1. Start the new short reasoning placement (recommended; published evidence is preserved)"
+    )
+    output_func("2. Continue the older coding placement")
+    output_func("d. Decide later and keep the older placement saved")
+    try:
+        choice = input_func("Choose [1]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        output_func(f"\nOlder placement saved. Run openlearn resume {slug} to continue.")
+        return "exit"
+    if choice in {"d", "defer", "q", "quit"}:
+        output_func(f"Older placement saved. Run openlearn resume {slug} to continue.")
+        return "exit"
+    if choice in {"2", "old", "legacy"}:
+        return "legacy"
+    if choice not in {"", "1", "new"}:
+        output_func("Choose 1, 2, or d.")
+        return "exit"
+    try:
+        confirmation = input_func(
+            "Replace the active coding placement with the short reasoning placement? [y/N]: "
+        ).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        output_func(f"\nOlder placement saved. Run openlearn resume {slug} to continue.")
+        return "exit"
+    if confirmation not in {"y", "yes"}:
+        output_func("Switch cancelled. The older placement is still saved.")
+        return "exit"
+    _discard_interview_placement(slug, path)
+    output_func("Published evidence was preserved. Starting the short placement.")
+    return "new"
 
 
 def cmd_interview_placement(
@@ -4152,6 +4245,22 @@ def cmd_interview_placement(
                 "Placement saved. Continue from the main menu to build your course plan."
             )
             return result
+        if (
+            placement.get("status") == "in_progress"
+            and placement.get("lifecycle_version") != interview_prep.PLACEMENT_V3
+        ):
+            route = _choose_legacy_placement_route(
+                slug,
+                path,
+                input_func=input_func,
+                output_func=output_func,
+            )
+            if route == "exit":
+                return 0
+            if route == "new":
+                value = sync_interview_placement(slug)
+                placement = value["placement"]
+                assert isinstance(placement, dict)
         if placement.get("status") != "in_progress":
             activity = _begin_interview_activity(
                 slug, lifecycle_version=interview_prep.PLACEMENT_V3
@@ -4567,6 +4676,13 @@ def interview_planning_context(
     result = placement.get("result")
     if isinstance(result, dict):
         lines.append(f"Provisional starting level: {result.get('starting_level')}")
+        passport = result.get("passport")
+        if isinstance(passport, dict) and passport.get("first_activity"):
+            lines.append(
+                "Required first activity: "
+                f"{one_line(str(passport['first_activity']))}. "
+                "Make this unit 1 and teach it first."
+            )
         gaps = result.get("gaps")
         if isinstance(gaps, dict):
             statuses = []
@@ -4686,6 +4802,13 @@ def _start_course(
         if interview_value is not None
         else placement_context_prompt(topic.slug)
     )
+    first_activity = None
+    if interview_value is not None:
+        placement = interview_value.get("placement")
+        result = placement.get("result") if isinstance(placement, dict) else None
+        passport = result.get("passport") if isinstance(result, dict) else None
+        if isinstance(passport, dict) and passport.get("first_activity"):
+            first_activity = one_line(str(passport["first_activity"]))
 
     if interview_value is None:
         placement_answer = (
@@ -4724,13 +4847,26 @@ def _start_course(
         rejected_outline = outline
 
     save_course_started(topic, outline_prompt, outline)
-    teach_first_lesson(read_topic(topic.slug), outline, model, output_func)
+    teach_first_lesson(
+        read_topic(topic.slug),
+        outline,
+        model,
+        output_func,
+        first_activity=first_activity,
+    )
     return 0
 
 
-def teach_first_lesson(topic: Topic, outline: str, model: str, output_func=print) -> None:
+def teach_first_lesson(
+    topic: Topic,
+    outline: str,
+    model: str,
+    output_func=print,
+    *,
+    first_activity: str | None = None,
+) -> None:
     print_section("First lesson", output_func)
-    lesson_prompt = first_lesson_prompt(outline)
+    lesson_prompt = first_lesson_prompt(outline, first_activity=first_activity)
     global _LAST_RESPONSE_ANSWER_KEY
     raw_lesson = call_openai_with_status(
         model,
@@ -5233,9 +5369,15 @@ def placement_context_prompt(slug: str) -> str:
     return first_lines(path.read_text(encoding="utf-8").strip(), 80)
 
 
-def first_lesson_prompt(outline: str) -> str:
+def first_lesson_prompt(outline: str, *, first_activity: str | None = None) -> str:
+    required_activity = (
+        f"The required first activity is {first_activity}. Teach that activity now. "
+        if first_activity
+        else ""
+    )
     return (
         "Start teaching unit 1 from this accepted course plan. "
+        f"{required_activity}"
         "Do not repeat the whole plan. Teach exactly one concept. "
         "Use exactly one **Lesson:** section and no other primary label. "
         "Explain the concept in 2-4 sentences. One short concrete example may "
@@ -16849,6 +16991,13 @@ def _mock_openai_response(model: str, system: str, user: str) -> str:
     # First lesson must precede course-outline matching because its prompt embeds
     # the accepted course plan.
     if "start teaching unit 1" in prompt or "start teaching" in prompt or "first lesson" in prompt:
+        if "sliding window foundations" in prompt:
+            return (
+                "**Lesson:**\nSliding Window Foundations uses a moving range to avoid "
+                "recomputing every candidate substring. Track the active window and its "
+                "character set, then move the left edge whenever a duplicate appears.\n"
+                "<!-- covered: Sliding Window Foundations -->"
+            )
         return (
             "**Lesson:**\nNormal vs Insert modes: Normal mode runs commands, while "
             "Insert mode enters text. "
@@ -16861,6 +17010,19 @@ def _mock_openai_response(model: str, system: str, user: str) -> str:
         or "course plan" in prompt
         or "create a concise course plan before teaching" in prompt
     ):
+        if "required first activity: sliding window foundations" in prompt:
+            return (
+                "Scope: Interview algorithms\nExcludes: System design\n"
+                "Assumptions: Basic Python\nUnits:\n"
+                "1. Sliding Window Foundations (3 slides, difficulty 4/10) - Build and trace a distinct-character window.\n"
+                "Concepts: Sliding window; Character set; Window invariants\n"
+                "2. Hash Maps (3 slides, difficulty 4/10) - Track counts and last-seen positions.\n"
+                "Concepts: Hash map; Frequency counting; Last-seen index\n"
+                "3. Two Pointers (3 slides, difficulty 5/10) - Coordinate moving boundaries.\n"
+                "Concepts: Two pointers; Boundary movement\n"
+                "4. Timed Practice (2 slides, difficulty 5/10) - Explain and test a complete solution.\n"
+                "Concepts: Edge cases; Complexity analysis"
+            )
         return "Scope: Mock scope\nExcludes: None\nAssumptions: Beginner\nUnits:\n1. Modes (2 slides) - Understand insert vs normal.\n2. Movement (2 slides) - h j k l.\n3. Editing (2 slides) - x dd p.\n4. Save and quit (1 slide) - :wq"
     # Default small tutor response
     return "**Lesson:** Mock reply. Ask a focused question to continue."

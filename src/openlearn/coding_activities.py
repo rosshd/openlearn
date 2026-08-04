@@ -423,6 +423,8 @@ class CodingActivityAdapter:
                 "tests",
                 "complexity",
                 "follow_up",
+                "conversation",
+                "debrief",
                 "reasoning",
                 "baseline",
             }

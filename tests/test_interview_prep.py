@@ -692,6 +692,27 @@ class InterviewPrepTests(unittest.TestCase):
         self.assertEqual(skipped["status"], "uncertain")
         self.assertEqual(unsupported["status"], "uncertain")
 
+    def test_strategy_signals_require_complete_words(self) -> None:
+        false_positive = interview_prep._evidence_observation(
+            "reasoning",
+            "I would offset the latest pointer, test edges, use O(n) time and O(1) space.",
+            coding_language="python",
+            rubric_version=interview_prep.PLACEMENT_V3,
+        )
+        positive = interview_prep._evidence_observation(
+            "reasoning",
+            "I would use a hashmap window, test edges, use O(n) time and O(1) space.",
+            coding_language="python",
+            rubric_version=interview_prep.PLACEMENT_V3,
+        )
+
+        self.assertNotIn(
+            "named_data_structure_or_strategy", false_positive["signals"]
+        )
+        self.assertEqual(false_positive["status"], "not_observed")
+        self.assertIn("named_data_structure_or_strategy", positive["signals"])
+        self.assertEqual(positive["status"], "observed")
+
     def test_practice_schedule_preserves_non_divisible_weekly_budget(self) -> None:
         scheduled, session, sessions = interview_prep.practice_schedule(
             {"weekly_minutes": 120, "session_minutes": 45}

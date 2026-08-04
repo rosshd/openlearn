@@ -129,6 +129,8 @@ Enter one line at a time, use `/show` to review the current section, `/undo` to 
 The two sections are durable, so `/stop`, EOF, and interruption resume at the exact stage with the saved draft.
 The result is a provisional course-start passport that recommends a first activity, records reasoning signals and a practice priority, and explicitly leaves coding fluency unobserved.
 It never grants mastery or claims interview readiness.
+When a provider is ready, completion continues directly into course planning and the named first activity.
+Without a provider, completion still succeeds and prints `openlearn init` plus the exact resume command.
 Interruptions are resumable, while explicit discard or profile clearing preserves append-only attempt evidence.
 The normal recovery command is `openlearn resume [topic]`.
 It returns an unfinished placement to its exact next stage before any provider or source work, then carries a deferred or provisional result into course planning without offering the separate legacy placement quiz.
@@ -138,6 +140,7 @@ If model-backed teaching is not configured, resume reports the adjacent placemen
 Dry-run, mock mode, and keyless localhost providers remain available without a hosted API key.
 Initial reasoning placement does not open an editor, create a coding workspace, execute code, or require Docker or Podman.
 Existing coding-placement v1 and v2 records remain readable under their recorded lifecycle instead of being reinterpreted as reasoning evidence.
+Resuming an active legacy attempt offers the recommended short placement, continued legacy placement, or a safe exit, and requires confirmation before replacing the active attempt.
 Real implementation, testing, and revision happen later through course coding drills.
 Those drills can open the configured editor and use secure `/check` execution, while a controlled-editor mock interview remains a later interview experience rather than a placement requirement.
 

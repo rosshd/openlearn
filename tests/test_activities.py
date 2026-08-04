@@ -363,7 +363,7 @@ class ActivityContractTests(unittest.TestCase):
         )
         self.assertNotIn("function_name", reasoning_only)
         self.assertNotIn("test_cases", reasoning_only)
-        for stage in ("clarification", "reasoning"):
+        for stage in ("clarification", "reasoning", "conversation", "debrief"):
             with self.subTest(stage=stage):
                 evidence = adapter.validate_evidence(
                     "interview_observation",

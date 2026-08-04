@@ -12,7 +12,7 @@ if sys.platform == "win32":
 import pexpect
 
 
-def test_interview_prep_public_cli_journey(spawn_openlearn, monkeypatch) -> None:
+def test_interview_prep_public_cli_journey(spawn_openlearn) -> None:
     templates_dir = Path(__file__).resolve().parents[2] / "src" / "openlearn" / "templates"
     template_choice = next(
         str(index)
@@ -95,7 +95,12 @@ def test_interview_prep_public_cli_journey(spawn_openlearn, monkeypatch) -> None
         reasoning_resume.expect("Starting route:")
         reasoning_resume.expect("First activity:")
         reasoning_resume.expect("Coding fluency was not observed")
-        reasoning_resume.expect("Continue from the main menu to start your first activity")
+        reasoning_resume.expect("Starting your named first activity now")
+        reasoning_resume.expect("Course outline")
+        reasoning_resume.expect("Is this an acceptable course outline")
+        reasoning_resume.sendline("y")
+        reasoning_resume.expect("First lesson")
+        reasoning_resume.expect("Sliding Window Foundations")
         reasoning_resume.expect(pexpect.EOF)
         reasoning_resume.child.close()
         assert reasoning_resume.child.exitstatus == 0
@@ -104,41 +109,6 @@ def test_interview_prep_public_cli_journey(spawn_openlearn, monkeypatch) -> None
         assert "mastery" not in transcript.lower()
     finally:
         reasoning_resume.close()
-
-    with monkeypatch.context() as patch:
-        for key in ("OPENLEARN_MOCK", "OPENAI_API_KEY", "OPENLEARN_BASE_URL"):
-            patch.delitem(spawn_openlearn.env, key, raising=False)
-        missing_provider = spawn_openlearn.spawn(
-            "resume", "technical-interview-prep", timeout=10
-        )
-        try:
-            missing_provider.expect(r"Placement: provisional \(2/2\)")
-            missing_provider.expect("Model-backed course planning is not configured")
-            missing_provider.expect("openlearn config set-key")
-            missing_provider.expect("openlearn resume technical-interview-prep")
-            missing_provider.expect("all work is saved")
-            missing_provider.expect(pexpect.EOF)
-            missing_provider.child.close()
-            assert missing_provider.child.exitstatus == 1
-        finally:
-            missing_provider.close()
-
-    course = spawn_openlearn.spawn("resume", "technical-interview-prep", timeout=10)
-    try:
-        course.expect(r"Placement: provisional \(2/2\)")
-        course.expect("Course outline")
-        course.expect("Is this an acceptable course outline")
-        course.sendline("y")
-        course.expect("First lesson")
-        course.expect("Normal vs Insert")
-        course.expect(pexpect.EOF)
-        course.child.close()
-        assert course.child.exitstatus == 0
-        transcript = course.clean_output
-        assert "Run optional placement quiz" not in transcript
-        assert "implementation>" not in transcript
-    finally:
-        course.close()
 
     status = spawn_openlearn.run(
         "interview", "placement", "technical-interview-prep", "status"

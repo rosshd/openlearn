@@ -58,10 +58,11 @@ The next process must return to reasoning with that draft intact and without dup
 EOF or an interrupted terminal should preserve the same state.
 
 Initial placement must never open an editor, create a drill workspace, execute code, or require Docker or Podman.
-Existing coding-placement v1 and v2 records remain readable and continue under their recorded lifecycle rather than being reinterpreted as reasoning evidence.
+Existing coding-placement v1 and v2 records remain readable.
+Resuming one must offer the recommended short reasoning placement, continued legacy placement, or a safe exit, and must confirm before abandoning an active legacy activity.
 
-After placement, temporarily remove the provider configuration and run resume.
-The command must show `Placement: provisional (2/2)`, confirm that all work is saved, and print both `openlearn config set-key` and the exact resume command.
+To test the providerless boundary, temporarily remove provider configuration before submitting the final reasoning section.
+Placement must complete successfully, confirm that it is saved, and print `openlearn init` plus the exact resume command.
 Provider setup is required for course planning and teaching, not for placement.
 
 Restore the provider or enable deterministic mock teaching:
@@ -71,7 +72,7 @@ export OPENLEARN_MOCK=1
 openlearn resume technical-interview-prep
 ```
 
-The command must go directly to `Course outline` without offering the ordinary optional placement quiz.
+With a configured provider, placement completion or the saved resume action must go directly to `Course outline` without offering the ordinary optional placement quiz.
 Accept the outline and confirm that `First lesson` plus visible lesson content is rendered.
 
 Finally, inspect the durable result:

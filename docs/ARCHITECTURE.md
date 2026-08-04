@@ -59,6 +59,7 @@ Accepted draft lines are saved in the profile until `/done` publishes one joined
 The v3 activity is non-executable and never creates a coding attempt, opens an editor, or invokes a runner.
 Its course-start passport can route the learner from deterministic reasoning signals, but coding fluency always remains unobserved and no mastery update is applied.
 Historical coding-placement v1 and v2 records retain their recorded lifecycle and rubric semantics.
+An active historical attempt is never silently converted: resume offers new reasoning placement, continued legacy placement, or a safe exit, and confirms before abandoning the active legacy activity.
 Legacy Python placement code remains in a persistent learner-owned drill workspace with durable attempt snapshots, while trusted hidden-test outcomes remain append-only execution evidence.
 Coding placement rubric v1 accepts only secure Python runner evidence for scored implementation and testing observations; skipped dependent stages and runner infrastructure failures remain uncertain rather than being treated as failed evidence.
 Interrupted activity transactions recover through the activity journal, and placement resume idempotently projects any recovered evidence into the profile before asking for the next stage.
@@ -67,7 +68,8 @@ Effective profile edits are validated before mutation and publish a topic-genera
 Recovery verifies that same generation again under the topic lock immediately before profile publication, so a stale edit cannot mutate a deleted and recreated topic with the same slug.
 Profile edits invalidate affected recommendations and mark completed placement stale without deleting attempt events.
 Generic resume inspects and synchronizes this adjacent state before model-backed tutor or source-refresh work.
-An in-progress placement resumes offline at its exact next stage, not-started and stale states require an explicit learner route, and deferred or provisional states transition into course planning.
+An in-progress v3 placement resumes offline at its exact next stage, active legacy attempts use the migration chooser, not-started and stale states require an explicit learner route, and deferred or provisional states transition into course planning.
+Completed v3 placement enters course planning immediately when a provider is ready; otherwise it succeeds offline and prints the exact setup and resume action.
 Course-outline construction derives a bounded interview summary from canonical profile and placement projections.
 The summary includes target, schedule, provisional gap statuses, uncertainty, and at most three priorities, while raw activity evidence remains excluded from provider prompts and topic metadata.
 Interview-prep course planning skips the ordinary optional placement quiz because the bounded placement already owns that learner decision.

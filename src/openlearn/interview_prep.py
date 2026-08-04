@@ -914,16 +914,21 @@ def discard_placement(
     return value
 
 
-def placement_draft(path: Path) -> dict[str, object] | None:
-    """Load a copy of the active v3 draft, if one exists."""
+def _load_v3_placement(path: Path) -> tuple[dict[str, object], dict[str, object]]:
     value = load_profile(path)
     placement = value["placement"]
     assert isinstance(placement, dict)
     lifecycle_version, _rubric_version = _placement_versions(placement)
     if lifecycle_version != PLACEMENT_V3:
         raise ValueError("placement drafts are available only for v3 placement")
+    return value, placement
+
+
+def placement_draft(path: Path) -> dict[str, object] | None:
+    """Load a copy of the active v3 draft, if one exists."""
+    _value, placement = _load_v3_placement(path)
     draft = placement.get("draft")
-    return copy.deepcopy(draft) if isinstance(draft, dict) else None
+    return draft if isinstance(draft, dict) else None
 
 
 def append_placement_draft_line(
@@ -934,12 +939,7 @@ def append_placement_draft_line(
     now: Clock = _utcnow,
 ) -> dict[str, object]:
     """Durably append one bounded line without publishing or advancing placement."""
-    value = load_profile(path)
-    placement = value["placement"]
-    assert isinstance(placement, dict)
-    lifecycle_version, _rubric_version = _placement_versions(placement)
-    if lifecycle_version != PLACEMENT_V3:
-        raise ValueError("placement drafts are available only for v3 placement")
+    value, placement = _load_v3_placement(path)
     if placement.get("status") != "in_progress":
         raise ValueError("placement is not in progress")
     expected = placement.get("next_stage")
@@ -959,7 +959,7 @@ def append_placement_draft_line(
             raise ValueError("placement draft does not match the active stage")
         stored_lines = draft.get("lines")
         assert isinstance(stored_lines, list)
-        lines = [str(item) for item in stored_lines]
+        lines = stored_lines
     if len(lines) >= DRAFT_MAX_LINES or len("\n".join([*lines, normalized])) > DRAFT_MAX_LENGTH:
         raise ValueError("placement draft is too large")
     timestamp = _timestamp(now)
@@ -980,12 +980,7 @@ def undo_placement_draft_line(
     now: Clock = _utcnow,
 ) -> dict[str, object]:
     """Remove only the most recent line from the matching active v3 draft."""
-    value = load_profile(path)
-    placement = value["placement"]
-    assert isinstance(placement, dict)
-    lifecycle_version, _rubric_version = _placement_versions(placement)
-    if lifecycle_version != PLACEMENT_V3:
-        raise ValueError("placement drafts are available only for v3 placement")
+    value, placement = _load_v3_placement(path)
     if placement.get("status") != "in_progress" or placement.get("next_stage") != stage:
         raise ValueError(f"expected {placement.get('next_stage')} draft, received {stage}")
     draft = placement.get("draft")
@@ -1009,12 +1004,7 @@ def clear_placement_draft(
     now: Clock = _utcnow,
 ) -> dict[str, object]:
     """Clear only a draft that matches the active v3 stage."""
-    value = load_profile(path)
-    placement = value["placement"]
-    assert isinstance(placement, dict)
-    lifecycle_version, _rubric_version = _placement_versions(placement)
-    if lifecycle_version != PLACEMENT_V3:
-        raise ValueError("placement drafts are available only for v3 placement")
+    value, placement = _load_v3_placement(path)
     if placement.get("status") != "in_progress" or placement.get("next_stage") != stage:
         raise ValueError(f"expected {placement.get('next_stage')} draft, received {stage}")
     draft = placement.get("draft")
@@ -1245,7 +1235,9 @@ def _evidence_observation(
         not skipped
         and not non_attempt
         and stage == "plan"
-        and any(term in normalized for term in ("set", "dict", "map", "window", "index"))
+        and re.search(
+            r"\b(?:set|dict|dictionary|map|hashmap|window|index)\b", normalized
+        )
     ):
         signals.append("named_data_structure_or_strategy")
     if execution is not None:
@@ -1294,7 +1286,9 @@ def _evidence_observation(
     if not skipped and not non_attempt and stage == "debrief" and len(response.split()) >= 5:
         signals.append("engaged_in_debrief")
     if not skipped and not non_attempt and stage == "reasoning":
-        if any(term in normalized for term in ("set", "dict", "map", "window", "index")):
+        if re.search(
+            r"\b(?:set|dict|dictionary|map|hashmap|window|index)\b", normalized
+        ):
             signals.append("named_data_structure_or_strategy")
         if any(
             term in normalized
