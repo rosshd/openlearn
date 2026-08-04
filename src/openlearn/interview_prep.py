@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import copy
+import hashlib
 import json
 import os
 import re
@@ -16,8 +17,8 @@ from uuid import uuid4
 PROFILE_SCHEMA_VERSION = 1
 PLACEMENT_V1 = "coding-placement-v1"
 PLACEMENT_V2 = "coding-placement-v2"
-# Compatibility alias for the production CLI until its compact UI deliberately opts in.
-PLACEMENT_RUBRIC_VERSION = PLACEMENT_V1
+PLACEMENT_V3 = "reasoning-placement-v3"
+PLACEMENT_RUBRIC_VERSION = PLACEMENT_V3
 STALE_AFTER_DAYS = 90
 PLACEMENT_V1_STAGES = (
     "calibration",
@@ -29,6 +30,7 @@ PLACEMENT_V1_STAGES = (
     "follow_up",
 )
 PLACEMENT_V2_STAGES = ("conversation", "implementation", "debrief")
+PLACEMENT_V3_STAGES = ("clarification", "reasoning")
 # Kept as the historical stage list for callers that construct v1 fixtures.
 PLACEMENT_STAGES = PLACEMENT_V1_STAGES
 PLACEMENT_LIFECYCLES = {
@@ -39,6 +41,10 @@ PLACEMENT_LIFECYCLES = {
     PLACEMENT_V2: {
         "stages": PLACEMENT_V2_STAGES,
         "optional_stages": ("debrief",),
+    },
+    PLACEMENT_V3: {
+        "stages": PLACEMENT_V3_STAGES,
+        "optional_stages": PLACEMENT_V3_STAGES,
     },
 }
 PLACEMENT_RUBRICS = {
@@ -70,7 +76,24 @@ PLACEMENT_RUBRICS = {
             "interview_process": ("conversation", "debrief"),
         },
     },
+    PLACEMENT_V3: {
+        "axes": {
+            "prerequisites": ("reasoning",),
+            "coding_fluency": (),
+            "reasoning": ("reasoning",),
+            "interview_process": ("clarification", "reasoning"),
+        },
+        "evidence": {
+            "prerequisites": ("reasoning",),
+            "coding_fluency": (),
+            "reasoning": ("reasoning",),
+            "interview_process": ("clarification", "reasoning"),
+        },
+    },
 }
+DRAFT_MAX_LINES = 50
+DRAFT_MAX_LINE_LENGTH = 4_000
+DRAFT_MAX_LENGTH = 40_000
 PROFILE_FIELDS = (
     "role_family",
     "target_level",
@@ -243,8 +266,7 @@ def _placement_examples_text() -> str:
         inputs = example["inputs"]
         assert isinstance(inputs, dict)
         lines.append(
-            f"- first_unique_window({inputs['text']!r}, {inputs['width']}) "
-            f"-> {example['expected']}"
+            f"- first_unique_window({inputs['text']!r}, {inputs['width']}) -> {example['expected']}"
         )
     return "\n".join(lines)
 
@@ -381,9 +403,7 @@ def load_profile(path: Path) -> dict[str, object]:
     if placement.get("status") in {"in_progress", "provisional"} and (
         placement.get("profile_revision") != revision
     ):
-        raise ValueError(
-            "interview-prep placement does not match the current profile revision"
-        )
+        raise ValueError("interview-prep placement does not match the current profile revision")
     _validate_recommendations(value.get("recommendations"), expected_revision=revision)
     return value
 
@@ -421,7 +441,7 @@ def _normalized_profile(values: Mapping[str, object]) -> dict[str, object]:
 
 
 def _empty_placement(
-    version: str = PLACEMENT_V1, *, include_lifecycle: bool = True
+    version: str = PLACEMENT_V3, *, include_lifecycle: bool = True
 ) -> dict[str, object]:
     if (
         not isinstance(version, str)
@@ -429,7 +449,7 @@ def _empty_placement(
         or version not in PLACEMENT_RUBRICS
     ):
         raise ValueError("interview-prep placement version is unsupported")
-    return {
+    placement = {
         "status": "not_started",
         **({"lifecycle_version": version} if include_lifecycle else {}),
         "rubric_version": version,
@@ -445,6 +465,9 @@ def _empty_placement(
         "observations": {},
         "result": None,
     }
+    if version == PLACEMENT_V3:
+        placement["draft"] = None
+    return placement
 
 
 def _empty_placement_for_reset(placement: Mapping[str, object]) -> dict[str, object]:
@@ -470,8 +493,13 @@ def _validated_timestamp(value: object, label: str, *, optional: bool = False) -
 
 def _validate_placement(placement: Mapping[str, object]) -> None:
     legacy_keys = set(_empty_placement(PLACEMENT_V1, include_lifecycle=False))
-    current_keys = set(_empty_placement())
-    if frozenset(placement) not in {frozenset(legacy_keys), frozenset(current_keys)}:
+    versioned_legacy_keys = set(_empty_placement(PLACEMENT_V1))
+    v3_keys = set(_empty_placement(PLACEMENT_V3))
+    if frozenset(placement) not in {
+        frozenset(legacy_keys),
+        frozenset(versioned_legacy_keys),
+        frozenset(v3_keys),
+    }:
         raise ValueError("interview-prep placement state is malformed")
     status = placement.get("status")
     if status not in {
@@ -482,12 +510,15 @@ def _validate_placement(placement: Mapping[str, object]) -> None:
         "stale",
     }:
         raise ValueError("interview-prep placement status is invalid")
-    _lifecycle_version, _rubric_version = _placement_versions(placement)
+    lifecycle_version, rubric_version = _placement_versions(placement)
+    if lifecycle_version == PLACEMENT_V3 and set(placement) != v3_keys:
+        raise ValueError("interview-prep placement v3 draft state is malformed")
+    if lifecycle_version != PLACEMENT_V3 and "draft" in placement:
+        raise ValueError("interview-prep legacy placement draft state is malformed")
     stages = placement_stages(placement)
     activity_id = placement.get("activity_id")
     if activity_id is not None and (
-        not isinstance(activity_id, str)
-        or re.fullmatch(r"act_[a-f0-9]{32}", activity_id) is None
+        not isinstance(activity_id, str) or re.fullmatch(r"act_[a-f0-9]{32}", activity_id) is None
     ):
         raise ValueError("interview-prep placement activity reference is invalid")
     attempt_id = placement.get("attempt_id")
@@ -497,9 +528,7 @@ def _validate_placement(placement: Mapping[str, object]) -> None:
     ):
         raise ValueError("interview-prep placement attempt reference is invalid")
     for key in ("started_at", "updated_at", "completed_at"):
-        _validated_timestamp(
-            placement.get(key), f"placement {key}", optional=True
-        )
+        _validated_timestamp(placement.get(key), f"placement {key}", optional=True)
     placement_revision = placement.get("profile_revision")
     if placement_revision is not None and (
         not isinstance(placement_revision, int)
@@ -525,6 +554,8 @@ def _validate_placement(placement: Mapping[str, object]) -> None:
             or re.fullmatch(r"evidence_[a-f0-9]{32}", str(ref["evidence_id"])) is None
         ):
             raise ValueError("interview-prep placement evidence reference is invalid")
+    if len({str(ref["evidence_id"]) for ref in refs}) != len(refs):
+        raise ValueError("interview-prep placement evidence references are duplicated")
     observations = placement.get("observations")
     if not isinstance(observations, dict) or not set(observations) <= {
         *stages,
@@ -534,22 +565,48 @@ def _validate_placement(placement: Mapping[str, object]) -> None:
     for stage, observation in observations.items():
         if (
             not isinstance(observation, dict)
-            or set(observation)
-            != {"status", "substantive", "skipped", "non_attempt", "signals"}
-            or observation.get("status")
-            not in {"observed", "not_observed", "uncertain"}
+            or set(observation) != {"status", "substantive", "skipped", "non_attempt", "signals"}
+            or observation.get("status") not in {"observed", "not_observed", "uncertain"}
             or not isinstance(observation.get("signals"), list)
             or not all(isinstance(item, str) for item in observation["signals"])
             or not isinstance(observation.get("substantive"), bool)
             or not isinstance(observation.get("skipped"), bool)
             or not isinstance(observation.get("non_attempt"), bool)
         ):
-            raise ValueError(
-                f"interview-prep placement observation for {stage} is malformed"
+            raise ValueError(f"interview-prep placement observation for {stage} is malformed")
+    draft = placement.get("draft")
+    if lifecycle_version == PLACEMENT_V3 and draft is not None:
+        draft_stage = draft.get("stage") if isinstance(draft, dict) else None
+        matching_published_draft = (
+            isinstance(draft_stage, str)
+            and draft_stage in stages
+            and draft_stage in observations
+            and any(
+                ref.get("evidence_id") == placement_evidence_id(placement, draft_stage)
+                for ref in refs
             )
+        )
+        if (
+            not isinstance(draft, dict)
+            or set(draft) != {"stage", "lines", "updated_at"}
+            or (draft_stage != next_stage and not matching_published_draft)
+            or not isinstance(draft.get("lines"), list)
+            or not draft["lines"]
+            or len(draft["lines"]) > DRAFT_MAX_LINES
+            or not all(
+                isinstance(line, str)
+                and bool(line.strip())
+                and line == line.strip()
+                and len(line) <= DRAFT_MAX_LINE_LENGTH
+                for line in draft["lines"]
+            )
+            or len("\n".join(draft["lines"])) > DRAFT_MAX_LENGTH
+        ):
+            raise ValueError("interview-prep placement draft is malformed")
+        _validated_timestamp(draft.get("updated_at"), "placement draft updated_at")
     result = placement.get("result")
     if result is not None:
-        _validate_result(result)
+        _validate_result(result, rubric_version=rubric_version)
     if status in {"not_started", "deferred"} and any(
         placement.get(key) is not None
         for key in (
@@ -582,15 +639,18 @@ def _validate_placement(placement: Mapping[str, object]) -> None:
         raise ValueError("interview-prep completed placement state is inconsistent")
 
 
-def _validate_result(result: object) -> None:
-    if not isinstance(result, dict) or set(result) != {
+def _validate_result(result: object, *, rubric_version: str = PLACEMENT_V1) -> None:
+    expected = {
         "provisional",
         "starting_level",
         "mastery_update_applied",
         "patterns_marked_known",
         "gaps",
         "uncertainty",
-    }:
+    }
+    if rubric_version == PLACEMENT_V3:
+        expected.add("passport")
+    if not isinstance(result, dict) or set(result) != expected:
         raise ValueError("interview-prep placement result is malformed")
     if (
         result.get("provisional") is not True
@@ -617,11 +677,36 @@ def _validate_result(result: object) -> None:
             or not isinstance(detail.get("note"), str)
         ):
             raise ValueError("interview-prep placement gap detail is invalid")
+    if rubric_version == PLACEMENT_V3:
+        passport = result.get("passport")
+        if (
+            not isinstance(passport, dict)
+            or set(passport)
+            != {
+                "starting_route",
+                "first_activity",
+                "reasoning_signals",
+                "practice_priority",
+                "uncertainty_to_verify",
+            }
+            or not all(
+                isinstance(passport.get(key), str) and bool(str(passport[key]).strip())
+                for key in (
+                    "starting_route",
+                    "first_activity",
+                    "practice_priority",
+                    "uncertainty_to_verify",
+                )
+            )
+            or not isinstance(passport.get("reasoning_signals"), list)
+            or not passport["reasoning_signals"]
+            or len(passport["reasoning_signals"]) > 8
+            or not all(isinstance(item, str) and item for item in passport["reasoning_signals"])
+        ):
+            raise ValueError("interview-prep placement passport is invalid")
 
 
-def _validate_recommendations(
-    recommendations: object, *, expected_revision: int
-) -> None:
+def _validate_recommendations(recommendations: object, *, expected_revision: int) -> None:
     if recommendations is None:
         return
     if not isinstance(recommendations, dict):
@@ -724,9 +809,7 @@ def normalize_profile_update(
     return _normalized_profile({**current, **changes})
 
 
-def clear_profile(
-    path: Path, append_event: EventAppender, *, now: Clock = _utcnow
-) -> None:
+def clear_profile(path: Path, append_event: EventAppender, *, now: Clock = _utcnow) -> None:
     value = load_profile(path)
     placement = value["placement"]
     assert isinstance(placement, dict)
@@ -751,7 +834,9 @@ def defer_placement(
     if placement.get("status") == "in_progress":
         raise ValueError("discard or complete the in-progress placement before deferring")
     lifecycle_version, rubric_version = _placement_versions(placement)
-    placement.update(_empty_placement(lifecycle_version))
+    value["placement"] = _empty_placement_for_reset(placement)
+    placement = value["placement"]
+    assert isinstance(placement, dict)
     placement["status"] = "deferred"
     placement["updated_at"] = _timestamp(now)
     _write(path, value)
@@ -769,7 +854,7 @@ def start_placement(
     path: Path,
     *,
     activity_id: str,
-    lifecycle_version: str = PLACEMENT_V1,
+    lifecycle_version: str = PLACEMENT_V3,
     rubric_version: str | None = None,
     now: Clock = _utcnow,
 ) -> dict[str, object]:
@@ -786,20 +871,18 @@ def start_placement(
     if placement.get("status") == "in_progress":
         return value
     timestamp = _timestamp(now)
-    placement.update(
-        {
-            **_empty_placement(lifecycle_version),
-            "rubric_version": rubric_version,
-            "status": "in_progress",
-            "attempt_id": f"interview_attempt_{uuid4().hex}",
-            "activity_id": activity_id,
-            "started_at": timestamp,
-            "updated_at": timestamp,
-            "profile_revision": value["profile_revision"],
-            "problem_id": PLACEMENT_PROBLEM["problem_id"],
-            "next_stage": placement_stages(candidate)[0],
-        }
-    )
+    value["placement"] = {
+        **_empty_placement(lifecycle_version),
+        "rubric_version": rubric_version,
+        "status": "in_progress",
+        "attempt_id": f"interview_attempt_{uuid4().hex}",
+        "activity_id": activity_id,
+        "started_at": timestamp,
+        "updated_at": timestamp,
+        "profile_revision": value["profile_revision"],
+        "problem_id": PLACEMENT_PROBLEM["problem_id"],
+        "next_stage": placement_stages(candidate)[0],
+    }
     value["recommendations"] = None
     _write(path, value)
     return value
@@ -831,6 +914,139 @@ def discard_placement(
     return value
 
 
+def placement_draft(path: Path) -> dict[str, object] | None:
+    """Load a copy of the active v3 draft, if one exists."""
+    value = load_profile(path)
+    placement = value["placement"]
+    assert isinstance(placement, dict)
+    lifecycle_version, _rubric_version = _placement_versions(placement)
+    if lifecycle_version != PLACEMENT_V3:
+        raise ValueError("placement drafts are available only for v3 placement")
+    draft = placement.get("draft")
+    return copy.deepcopy(draft) if isinstance(draft, dict) else None
+
+
+def append_placement_draft_line(
+    path: Path,
+    stage: str,
+    line: str,
+    *,
+    now: Clock = _utcnow,
+) -> dict[str, object]:
+    """Durably append one bounded line without publishing or advancing placement."""
+    value = load_profile(path)
+    placement = value["placement"]
+    assert isinstance(placement, dict)
+    lifecycle_version, _rubric_version = _placement_versions(placement)
+    if lifecycle_version != PLACEMENT_V3:
+        raise ValueError("placement drafts are available only for v3 placement")
+    if placement.get("status") != "in_progress":
+        raise ValueError("placement is not in progress")
+    expected = placement.get("next_stage")
+    if stage != expected:
+        raise ValueError(f"expected {expected} draft, received {stage}")
+    if not isinstance(line, str) or not line.strip():
+        raise ValueError("placement draft line must be non-empty")
+    normalized = line.strip()
+    if len(normalized) > DRAFT_MAX_LINE_LENGTH:
+        raise ValueError("placement draft line is too large")
+    draft = placement.get("draft")
+    if draft is None:
+        lines: list[str] = []
+    else:
+        assert isinstance(draft, dict)
+        if draft.get("stage") != stage:
+            raise ValueError("placement draft does not match the active stage")
+        stored_lines = draft.get("lines")
+        assert isinstance(stored_lines, list)
+        lines = [str(item) for item in stored_lines]
+    if len(lines) >= DRAFT_MAX_LINES or len("\n".join([*lines, normalized])) > DRAFT_MAX_LENGTH:
+        raise ValueError("placement draft is too large")
+    timestamp = _timestamp(now)
+    placement["draft"] = {
+        "stage": stage,
+        "lines": [*lines, normalized],
+        "updated_at": timestamp,
+    }
+    placement["updated_at"] = timestamp
+    _write(path, value)
+    return value
+
+
+def undo_placement_draft_line(
+    path: Path,
+    stage: str,
+    *,
+    now: Clock = _utcnow,
+) -> dict[str, object]:
+    """Remove only the most recent line from the matching active v3 draft."""
+    value = load_profile(path)
+    placement = value["placement"]
+    assert isinstance(placement, dict)
+    lifecycle_version, _rubric_version = _placement_versions(placement)
+    if lifecycle_version != PLACEMENT_V3:
+        raise ValueError("placement drafts are available only for v3 placement")
+    if placement.get("status") != "in_progress" or placement.get("next_stage") != stage:
+        raise ValueError(f"expected {placement.get('next_stage')} draft, received {stage}")
+    draft = placement.get("draft")
+    if not isinstance(draft, dict) or draft.get("stage") != stage:
+        return value
+    lines = draft.get("lines")
+    assert isinstance(lines, list)
+    timestamp = _timestamp(now)
+    placement["draft"] = (
+        {"stage": stage, "lines": lines[:-1], "updated_at": timestamp} if len(lines) > 1 else None
+    )
+    placement["updated_at"] = timestamp
+    _write(path, value)
+    return value
+
+
+def clear_placement_draft(
+    path: Path,
+    stage: str,
+    *,
+    now: Clock = _utcnow,
+) -> dict[str, object]:
+    """Clear only a draft that matches the active v3 stage."""
+    value = load_profile(path)
+    placement = value["placement"]
+    assert isinstance(placement, dict)
+    lifecycle_version, _rubric_version = _placement_versions(placement)
+    if lifecycle_version != PLACEMENT_V3:
+        raise ValueError("placement drafts are available only for v3 placement")
+    if placement.get("status") != "in_progress" or placement.get("next_stage") != stage:
+        raise ValueError(f"expected {placement.get('next_stage')} draft, received {stage}")
+    draft = placement.get("draft")
+    if not isinstance(draft, dict):
+        return value
+    if draft.get("stage") != stage:
+        raise ValueError("placement draft does not match the active stage")
+    placement["draft"] = None
+    placement["updated_at"] = _timestamp(now)
+    _write(path, value)
+    return value
+
+
+def placement_evidence_id(placement: Mapping[str, object], stage: str) -> str:
+    """Return the stable event identity for one v3 attempt-stage publication."""
+    lifecycle_version, _rubric_version = _placement_versions(placement)
+    if lifecycle_version != PLACEMENT_V3:
+        raise ValueError("deterministic placement evidence IDs are v3-only")
+    attempt_id = placement.get("attempt_id")
+    if (
+        not isinstance(attempt_id, str)
+        or re.fullmatch(r"interview_attempt_[a-f0-9]{32}", attempt_id) is None
+    ):
+        raise ValueError("placement attempt reference is invalid")
+    if stage not in placement_stages(placement):
+        raise ValueError("placement stage is invalid")
+    digest = hashlib.sha256(
+        f"openlearn-placement-evidence-v3\0{attempt_id}\0{stage}".encode()
+    ).hexdigest()[:32]
+    return f"evidence_{digest}"
+
+
 def record_placement_evidence(
     path: Path,
     stage: str,
@@ -842,6 +1058,20 @@ def record_placement_evidence(
     value = load_profile(path)
     placement = value["placement"]
     assert isinstance(placement, dict)
+    lifecycle_version, _rubric_version = _placement_versions(placement)
+    refs = placement.get("evidence_refs")
+    assert isinstance(refs, list)
+    if lifecycle_version == PLACEMENT_V3:
+        expected_id = placement_evidence_id(placement, stage)
+        if evidence_id != expected_id:
+            raise ValueError("v3 placement evidence ID must be deterministic")
+        if any(ref.get("evidence_id") == evidence_id for ref in refs):
+            draft = placement.get("draft")
+            if isinstance(draft, dict) and draft.get("stage") == stage:
+                placement["draft"] = None
+                placement["updated_at"] = _timestamp(now)
+                _write(path, value)
+            return value
     if placement.get("status") != "in_progress":
         raise ValueError("placement is not in progress")
     expected = placement.get("next_stage")
@@ -852,8 +1082,6 @@ def record_placement_evidence(
     response = response.strip()
     if len(response) > 40_000:
         raise ValueError("placement evidence is too large")
-    refs = placement.get("evidence_refs")
-    assert isinstance(refs, list)
     refs.append(
         {
             "evidence_id": evidence_id,
@@ -870,6 +1098,11 @@ def record_placement_evidence(
         coding_language=str(profile.get("coding_language") or ""),
         rubric_version=str(placement["rubric_version"]),
     )
+    if lifecycle_version == PLACEMENT_V3:
+        draft = placement.get("draft")
+        if isinstance(draft, dict) and draft.get("stage") != stage:
+            raise ValueError("placement draft does not match published stage")
+        placement["draft"] = None
     placement["updated_at"] = _timestamp(now)
     stages = placement_stages(placement)
     index = stages.index(stage)
@@ -907,6 +1140,8 @@ def skip_optional_placement_stage(
         raise ValueError("placement stage is not optional")
     stages = placement_stages(placement)
     index = stages.index(stage)
+    if placement.get("lifecycle_version") == PLACEMENT_V3:
+        placement["draft"] = None
     if index + 1 < len(stages):
         placement["next_stage"] = stages[index + 1]
         placement["updated_at"] = _timestamp(now)
@@ -944,6 +1179,9 @@ def complete_with_baseline(
     assert isinstance(placement, dict)
     if placement.get("status") != "in_progress":
         raise ValueError("placement is not in progress")
+    lifecycle_version, _rubric_version = _placement_versions(placement)
+    if lifecycle_version == PLACEMENT_V3:
+        raise ValueError("baseline completion is available only for legacy placement")
     refs = placement["evidence_refs"]
     observations = placement["observations"]
     assert isinstance(refs, list) and isinstance(observations, dict)
@@ -965,9 +1203,7 @@ def complete_with_baseline(
     placement["next_stage"] = None
     placement["updated_at"] = timestamp
     placement["completed_at"] = timestamp
-    result = _provisional_result(
-        observations, rubric_version=str(placement["rubric_version"])
-    )
+    result = _provisional_result(observations, rubric_version=str(placement["rubric_version"]))
     result["starting_level"] = "learner-selected-baseline"
     uncertainty = result["uncertainty"]
     assert isinstance(uncertainty, list)
@@ -1005,17 +1241,16 @@ def _evidence_observation(
     signals: list[str] = []
     if not skipped and not non_attempt and stage == "clarification" and "?" in response:
         signals.append("asked_clarifying_question")
-    if not skipped and not non_attempt and stage == "plan" and any(
-        term in normalized for term in ("set", "dict", "map", "window", "index")
+    if (
+        not skipped
+        and not non_attempt
+        and stage == "plan"
+        and any(term in normalized for term in ("set", "dict", "map", "window", "index"))
     ):
         signals.append("named_data_structure_or_strategy")
     if execution is not None:
         signals.append("execution_evidence_received")
-        signals.append(
-            "execution_passed"
-            if execution["tests_passed"]
-            else "execution_failed"
-        )
+        signals.append("execution_passed" if execution["tests_passed"] else "execution_failed")
     unsupported_implementation_language = (
         stage == "implementation" and coding_language.strip().lower() != "python"
     )
@@ -1025,9 +1260,7 @@ def _evidence_observation(
         and stage == "implementation"
         and not unsupported_implementation_language
     ):
-        implementation_source = (
-            str(execution["source"]) if execution is not None else response
-        )
+        implementation_source = str(execution["source"]) if execution is not None else response
         try:
             tree = ast.parse(implementation_source)
         except SyntaxError:
@@ -1054,27 +1287,24 @@ def _evidence_observation(
         and re.search(r"\bo\s*\([^)]{1,30}\)", normalized)
     ):
         signals.append("stated_complexity")
-    if (
-        not skipped
-        and not non_attempt
-        and stage == "follow_up"
-        and len(response.split()) >= 5
-    ):
+    if not skipped and not non_attempt and stage == "follow_up" and len(response.split()) >= 5:
         signals.append("engaged_with_follow_up")
-    if (
-        not skipped
-        and not non_attempt
-        and stage == "conversation"
-        and len(response.split()) >= 3
-    ):
+    if not skipped and not non_attempt and stage == "conversation" and len(response.split()) >= 3:
         signals.append("engaged_in_conversation")
-    if (
-        not skipped
-        and not non_attempt
-        and stage == "debrief"
-        and len(response.split()) >= 5
-    ):
+    if not skipped and not non_attempt and stage == "debrief" and len(response.split()) >= 5:
         signals.append("engaged_in_debrief")
+    if not skipped and not non_attempt and stage == "reasoning":
+        if any(term in normalized for term in ("set", "dict", "map", "window", "index")):
+            signals.append("named_data_structure_or_strategy")
+        if any(
+            term in normalized
+            for term in ("edge", "test", "empty", "invalid", "duplicate", "width one")
+        ):
+            signals.append("covered_edges_and_tests")
+        if re.search(r"\bo\s*\([^)]{1,30}\)\s*(?:time)?", normalized):
+            signals.append("stated_time_complexity")
+        if re.search(r"\bo\s*\([^)]{1,30}\)\s*space", normalized):
+            signals.append("stated_space_complexity")
     required_by_stage = {
         "clarification": {"asked_clarifying_question"},
         "plan": {"named_data_structure_or_strategy"},
@@ -1082,6 +1312,12 @@ def _evidence_observation(
         "follow_up": {"engaged_with_follow_up"},
         "conversation": {"engaged_in_conversation"},
         "debrief": {"engaged_in_debrief"},
+        "reasoning": {
+            "named_data_structure_or_strategy",
+            "covered_edges_and_tests",
+            "stated_time_complexity",
+            "stated_space_complexity",
+        },
     }
     required = required_by_stage.get(stage, set())
     if skipped or unsupported_implementation_language:
@@ -1103,11 +1339,7 @@ def _evidence_observation(
             else "not_observed"
         )
     else:
-        status = (
-            "not_observed"
-            if required and not required <= set(signals)
-            else "observed"
-        )
+        status = "not_observed" if required and not required <= set(signals) else "observed"
     return {
         "status": status,
         "substantive": not skipped and not non_attempt and len(response.split()) >= 3,
@@ -1146,16 +1378,19 @@ def _provisional_result(
     axes = rubric["axes"]
     assert isinstance(axes, dict)
     axis_statuses = {
-        axis: _axis_status(observations, tuple(stages))
-        for axis, stages in axes.items()
+        axis: _axis_status(observations, tuple(stages)) for axis, stages in axes.items()
     }
     evidence = rubric["evidence"]
     assert isinstance(evidence, dict)
     evidence_by_axis = {axis: list(stages) for axis, stages in evidence.items()}
-    not_observed_count = sum(
-        status == "not_observed" for status in axis_statuses.values()
-    )
+    not_observed_count = sum(status == "not_observed" for status in axis_statuses.values())
     uncertain_count = sum(status == "uncertain" for status in axis_statuses.values())
+    coding_note = (
+        "Coding fluency was not observed in this reasoning-only placement and must "
+        "be verified during later course practice."
+        if rubric_version == PLACEMENT_V3
+        else "Placement observes production fluency but does not establish mastery."
+    )
     gaps: dict[str, dict[str, object]] = {
         "prerequisites": {
             "status": axis_statuses["prerequisites"],
@@ -1165,7 +1400,7 @@ def _provisional_result(
         "coding_fluency": {
             "status": axis_statuses["coding_fluency"],
             "evidence": evidence_by_axis["coding_fluency"],
-            "note": "Placement observes production fluency but does not establish mastery.",
+            "note": coding_note,
         },
         "reasoning": {
             "status": axis_statuses["reasoning"],
@@ -1178,7 +1413,7 @@ def _provisional_result(
             "note": "Interview-format familiarity is separate from prerequisite knowledge.",
         },
     }
-    return {
+    result: dict[str, object] = {
         "provisional": True,
         "starting_level": (
             "foundational"
@@ -1197,6 +1432,45 @@ def _provisional_result(
             "Self-report is context only; recommendations rely on observed evidence.",
         ],
     }
+    if rubric_version == PLACEMENT_V3:
+        reasoning = observations.get("reasoning")
+        observed_signals = list(reasoning.get("signals", [])) if isinstance(reasoning, dict) else []
+        public_signal_labels = {
+            "named_data_structure_or_strategy": "Named an approach and data structure",
+            "covered_edges_and_tests": "Covered edge cases and expected tests",
+            "stated_time_complexity": "Explained time complexity",
+            "stated_space_complexity": "Explained space complexity",
+        }
+        reasoning_signals = [
+            public_signal_labels[signal]
+            for signal in observed_signals
+            if signal in public_signal_labels
+        ]
+        if not reasoning_signals:
+            reasoning_signals = ["Reasoning needs confirmation during guided practice"]
+        strong_reasoning = len(reasoning_signals) == len(public_signal_labels)
+        result["starting_level"] = (
+            "developing-reasoning" if strong_reasoning else "foundational-reasoning"
+        )
+        uncertainty = result["uncertainty"]
+        assert isinstance(uncertainty, list)
+        uncertainty.append(
+            "Coding fluency remains unobserved until a later unaided implementation."
+        )
+        result["passport"] = {
+            "starting_route": ("Pattern practice" if strong_reasoning else "Interview foundations"),
+            "first_activity": "Sliding Window Foundations",
+            "reasoning_signals": reasoning_signals,
+            "practice_priority": (
+                "Turn the proposed approach into a complete tested implementation."
+                if strong_reasoning
+                else "Practice structuring an approach with edge cases and complexity."
+            ),
+            "uncertainty_to_verify": (
+                "Implement and test a complete solution without autocomplete."
+            ),
+        }
+    return result
 
 
 def practice_schedule(profile: Mapping[str, object]) -> tuple[int, int, int]:
@@ -1208,9 +1482,7 @@ def practice_schedule(profile: Mapping[str, object]) -> tuple[int, int, int]:
     return weekly, session, sessions
 
 
-def _recommendations(
-    value: Mapping[str, object], *, current_date: date
-) -> dict[str, object]:
+def _recommendations(value: Mapping[str, object], *, current_date: date) -> dict[str, object]:
     profile = value["profile"]
     assert isinstance(profile, dict)
     scheduled, session, sessions = practice_schedule(profile)
@@ -1253,9 +1525,7 @@ def _recommendations(
         process = axis_labels["interview_process"]
         priorities = [process, *[item for item in priorities if item != process]]
     if not priorities:
-        priorities = [
-            f"Raise transfer difficulty toward the {role} {level} interview bar."
-        ]
+        priorities = [f"Raise transfer difficulty toward the {role} {level} interview bar."]
     return {
         "profile_revision": value["profile_revision"],
         "weekly_minutes": scheduled,
@@ -1267,9 +1537,7 @@ def _recommendations(
     }
 
 
-def project_staleness(
-    value: Mapping[str, object], *, now: Clock = _utcnow
-) -> dict[str, object]:
+def project_staleness(value: Mapping[str, object], *, now: Clock = _utcnow) -> dict[str, object]:
     """Return the current stale projection without mutating caller state or storage."""
     projected = copy.deepcopy(dict(value))
     placement = projected["placement"]

@@ -45,6 +45,7 @@ class InterviewPrepTests(unittest.TestCase):
         return interview_prep.start_placement(
             self.path,
             activity_id="act_0123456789abcdef0123456789abcdef",
+            lifecycle_version=interview_prep.PLACEMENT_V1,
             now=lambda: NOW,
         )
 
@@ -112,14 +113,200 @@ class InterviewPrepTests(unittest.TestCase):
 
     def test_deferred_placement_can_be_started_later(self) -> None:
         self.create()
-        deferred = interview_prep.defer_placement(
-            self.path, self.append, now=lambda: NOW
-        )
+        deferred = interview_prep.defer_placement(self.path, self.append, now=lambda: NOW)
         self.assertEqual(deferred["placement"]["status"], "deferred")
 
         started = self.start()
         self.assertEqual(started["placement"]["status"], "in_progress")
         self.assertEqual(started["placement"]["next_stage"], "calibration")
+
+    def test_new_placement_defaults_to_v3_reasoning_lifecycle(self) -> None:
+        created = self.create()
+
+        self.assertEqual(created["placement"]["lifecycle_version"], interview_prep.PLACEMENT_V3)
+        self.assertIsNone(created["placement"]["draft"])
+        started = interview_prep.start_placement(
+            self.path,
+            activity_id="act_0123456789abcdef0123456789abcdef",
+            now=lambda: NOW,
+        )
+
+        self.assertEqual(started["placement"]["next_stage"], "clarification")
+        self.assertEqual(started["placement"]["rubric_version"], interview_prep.PLACEMENT_V3)
+
+    def test_v3_draft_is_durable_bounded_and_does_not_advance(self) -> None:
+        self.create()
+        started = interview_prep.start_placement(
+            self.path,
+            activity_id="act_0123456789abcdef0123456789abcdef",
+            now=lambda: NOW,
+        )
+
+        first = interview_prep.append_placement_draft_line(
+            self.path, "clarification", "Can width be zero?", now=lambda: NOW
+        )
+        second = interview_prep.append_placement_draft_line(
+            self.path, "clarification", "Can text contain Unicode?", now=lambda: NOW
+        )
+
+        self.assertEqual(started["placement"]["next_stage"], "clarification")
+        self.assertEqual(second["placement"]["next_stage"], "clarification")
+        self.assertEqual(second["placement"]["evidence_refs"], [])
+        self.assertEqual(
+            interview_prep.placement_draft(self.path),
+            {
+                "stage": "clarification",
+                "lines": ["Can width be zero?", "Can text contain Unicode?"],
+                "updated_at": NOW.isoformat(),
+            },
+        )
+        undone = interview_prep.undo_placement_draft_line(
+            self.path, "clarification", now=lambda: NOW
+        )
+        self.assertEqual(undone["placement"]["draft"]["lines"], ["Can width be zero?"])
+        cleared = interview_prep.clear_placement_draft(self.path, "clarification", now=lambda: NOW)
+        self.assertIsNone(cleared["placement"]["draft"])
+        with self.assertRaisesRegex(ValueError, "non-empty"):
+            interview_prep.append_placement_draft_line(
+                self.path, "clarification", "   ", now=lambda: NOW
+            )
+        with self.assertRaisesRegex(ValueError, "too large"):
+            interview_prep.append_placement_draft_line(
+                self.path, "clarification", "x" * 4_001, now=lambda: NOW
+            )
+        with self.assertRaisesRegex(ValueError, "expected clarification"):
+            interview_prep.append_placement_draft_line(
+                self.path, "reasoning", "Use a set.", now=lambda: NOW
+            )
+        self.assertEqual(first["placement"]["draft"]["stage"], "clarification")
+
+    def test_v3_publish_uses_deterministic_id_and_reconciles_matching_draft(self) -> None:
+        self.create()
+        started = interview_prep.start_placement(
+            self.path,
+            activity_id="act_0123456789abcdef0123456789abcdef",
+            now=lambda: NOW,
+        )
+        placement = started["placement"]
+        evidence_id = interview_prep.placement_evidence_id(placement, "clarification")
+        self.assertEqual(
+            evidence_id,
+            interview_prep.placement_evidence_id(placement, "clarification"),
+        )
+        interview_prep.append_placement_draft_line(
+            self.path, "clarification", "Can width be zero?", now=lambda: NOW
+        )
+
+        published = interview_prep.record_placement_evidence(
+            self.path,
+            "clarification",
+            "Can width be zero?",
+            evidence_id=evidence_id,
+            now=lambda: NOW,
+        )
+        stale_projection = json.loads(self.path.read_text(encoding="utf-8"))
+        stale_projection["placement"]["draft"] = {
+            "stage": "clarification",
+            "lines": ["Can width be zero?"],
+            "updated_at": NOW.isoformat(),
+        }
+        self.path.write_text(json.dumps(stale_projection), encoding="utf-8")
+        replayed = interview_prep.record_placement_evidence(
+            self.path,
+            "clarification",
+            "Can width be zero?",
+            evidence_id=evidence_id,
+            now=lambda: NOW,
+        )
+
+        self.assertEqual(published, replayed)
+        self.assertIsNone(replayed["placement"]["draft"])
+        self.assertEqual(len(replayed["placement"]["evidence_refs"]), 1)
+        with self.assertRaisesRegex(ValueError, "deterministic"):
+            interview_prep.record_placement_evidence(
+                self.path,
+                "reasoning",
+                "Use a set.",
+                evidence_id="evidence_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                now=lambda: NOW,
+            )
+
+    def test_v3_reasoning_passport_keeps_coding_unobserved_and_grants_no_mastery(
+        self,
+    ) -> None:
+        self.create()
+        started = interview_prep.start_placement(
+            self.path,
+            activity_id="act_0123456789abcdef0123456789abcdef",
+            now=lambda: NOW,
+        )
+        clarification_id = interview_prep.placement_evidence_id(
+            started["placement"], "clarification"
+        )
+        after_clarification = interview_prep.record_placement_evidence(
+            self.path,
+            "clarification",
+            "Can width be zero and can text contain Unicode?",
+            evidence_id=clarification_id,
+            now=lambda: NOW,
+        )
+        reasoning_id = interview_prep.placement_evidence_id(
+            after_clarification["placement"], "reasoning"
+        )
+        completed = interview_prep.record_placement_evidence(
+            self.path,
+            "reasoning",
+            (
+                "I would use a sliding window with a set, return -1 for empty or "
+                "invalid widths, and test duplicates and width one. This takes "
+                "O(n) time and O(width) space."
+            ),
+            evidence_id=reasoning_id,
+            now=lambda: NOW,
+        )
+
+        result = completed["placement"]["result"]
+        self.assertEqual(result["gaps"]["coding_fluency"]["status"], "uncertain")
+        self.assertEqual(result["gaps"]["coding_fluency"]["evidence"], [])
+        self.assertFalse(result["mastery_update_applied"])
+        self.assertEqual(result["patterns_marked_known"], [])
+        self.assertEqual(
+            result["passport"]["uncertainty_to_verify"],
+            "Implement and test a complete solution without autocomplete.",
+        )
+        self.assertEqual(result["passport"]["first_activity"], "Sliding Window Foundations")
+        self.assertNotIn("Can width", json.dumps(result["passport"]))
+
+    def test_v3_rejects_malformed_drafts_and_baseline_but_legacy_reset_survives(
+        self,
+    ) -> None:
+        value = self.create()
+        value["placement"]["draft"] = {
+            "stage": "reasoning",
+            "lines": ["cross-stage draft"],
+            "updated_at": NOW.isoformat(),
+        }
+        self.path.write_text(json.dumps(value), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "draft"):
+            interview_prep.load_profile(self.path)
+
+        self.path.unlink()
+        self.create()
+        interview_prep.start_placement(
+            self.path,
+            activity_id="act_0123456789abcdef0123456789abcdef",
+            now=lambda: NOW,
+        )
+        with self.assertRaisesRegex(ValueError, "legacy"):
+            interview_prep.complete_with_baseline(
+                self.path,
+                evidence_id="evidence_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                reason="baseline",
+                now=lambda: NOW,
+            )
+        discarded = interview_prep.discard_placement(self.path, self.append, now=lambda: NOW)
+        self.assertEqual(discarded["placement"]["lifecycle_version"], interview_prep.PLACEMENT_V3)
+        self.assertIsNone(discarded["placement"]["draft"])
 
     def test_interrupted_placement_resumes_without_duplicating_evidence(self) -> None:
         self.create()
@@ -213,9 +400,7 @@ class InterviewPrepTests(unittest.TestCase):
             ),
         )
 
-        completed = self.record(
-            "debrief", "I would improve the solution with last-seen indices."
-        )
+        completed = self.record("debrief", "I would improve the solution with last-seen indices.")
 
         self.assertEqual(completed["placement"]["status"], "provisional")
         self.assertIn("debrief", completed["placement"]["observations"])
@@ -268,12 +453,12 @@ class InterviewPrepTests(unittest.TestCase):
 
     def test_legacy_defer_resolves_versions_without_key_error(self) -> None:
         value = self.create()
-        del value["placement"]["lifecycle_version"]
+        value["placement"] = interview_prep._empty_placement(
+            interview_prep.PLACEMENT_V1, include_lifecycle=False
+        )
         self.path.write_text(json.dumps(value), encoding="utf-8")
 
-        deferred = interview_prep.defer_placement(
-            self.path, self.append, now=lambda: NOW
-        )
+        deferred = interview_prep.defer_placement(self.path, self.append, now=lambda: NOW)
 
         self.assertEqual(deferred["placement"]["status"], "deferred")
         self.assertEqual(self.events[-1][1]["lifecycle_version"], interview_prep.PLACEMENT_V1)
@@ -284,15 +469,11 @@ class InterviewPrepTests(unittest.TestCase):
         del value["placement"]["lifecycle_version"]
         self.path.write_text(json.dumps(value), encoding="utf-8")
 
-        discarded = interview_prep.discard_placement(
-            self.path, self.append, now=lambda: NOW
-        )
+        discarded = interview_prep.discard_placement(self.path, self.append, now=lambda: NOW)
 
         self.assertEqual(discarded["placement"]["status"], "not_started")
         self.assertNotIn("lifecycle_version", discarded["placement"])
-        self.assertEqual(
-            discarded["placement"]["rubric_version"], interview_prep.PLACEMENT_V1
-        )
+        self.assertEqual(discarded["placement"]["rubric_version"], interview_prep.PLACEMENT_V1)
 
     def test_unknown_or_mismatched_versions_fail_closed(self) -> None:
         for lifecycle, rubric, message in (
@@ -316,15 +497,11 @@ class InterviewPrepTests(unittest.TestCase):
         self.start()
         self.record("calibration", "Some practice.")
 
-        discarded = interview_prep.discard_placement(
-            self.path, self.append, now=lambda: NOW
-        )
+        discarded = interview_prep.discard_placement(self.path, self.append, now=lambda: NOW)
         self.assertEqual(discarded["placement"]["status"], "not_started")
         self.assertEqual(discarded["placement"]["evidence_refs"], [])
         discard_events = [
-            data
-            for kind, data in self.events
-            if kind == "interview_placement_state_discarded"
+            data for kind, data in self.events if kind == "interview_placement_state_discarded"
         ]
         self.assertEqual(len(discard_events), 1)
         self.assertEqual(len(discard_events[0]["evidence_refs"]), 1)
@@ -346,12 +523,8 @@ class InterviewPrepTests(unittest.TestCase):
             now=lambda: NOW,
         )
 
-        self.assertEqual(
-            edited["placement"]["lifecycle_version"], interview_prep.PLACEMENT_V2
-        )
-        self.assertEqual(
-            edited["placement"]["rubric_version"], interview_prep.PLACEMENT_V2
-        )
+        self.assertEqual(edited["placement"]["lifecycle_version"], interview_prep.PLACEMENT_V2)
+        self.assertEqual(edited["placement"]["rubric_version"], interview_prep.PLACEMENT_V2)
         interview_prep.start_placement(
             self.path,
             activity_id="act_0123456789abcdef0123456789abcdef",
@@ -359,16 +532,10 @@ class InterviewPrepTests(unittest.TestCase):
             now=lambda: NOW,
         )
 
-        discarded = interview_prep.discard_placement(
-            self.path, self.append, now=lambda: NOW
-        )
+        discarded = interview_prep.discard_placement(self.path, self.append, now=lambda: NOW)
 
-        self.assertEqual(
-            discarded["placement"]["lifecycle_version"], interview_prep.PLACEMENT_V2
-        )
-        self.assertEqual(
-            discarded["placement"]["rubric_version"], interview_prep.PLACEMENT_V2
-        )
+        self.assertEqual(discarded["placement"]["lifecycle_version"], interview_prep.PLACEMENT_V2)
+        self.assertEqual(discarded["placement"]["rubric_version"], interview_prep.PLACEMENT_V2)
 
     def test_completed_result_is_provisional_and_time_bounded(self) -> None:
         result = self.finish_attempt()
@@ -376,7 +543,7 @@ class InterviewPrepTests(unittest.TestCase):
         recommendations = result["recommendations"]
 
         self.assertEqual(placement["status"], "provisional")
-        self.assertEqual(placement["rubric_version"], interview_prep.PLACEMENT_RUBRIC_VERSION)
+        self.assertEqual(placement["rubric_version"], interview_prep.PLACEMENT_V1)
         self.assertEqual(len(placement["evidence_refs"]), len(interview_prep.PLACEMENT_STAGES))
         self.assertNotIn("responses", placement)
         self.assertTrue(placement["result"]["provisional"])
@@ -390,10 +557,7 @@ class InterviewPrepTests(unittest.TestCase):
             recommendations["sessions_per_week"] * recommendations["session_minutes"], 180
         )
         self.assertTrue(
-            all(
-                set(ref) == {"evidence_id", "event_type"}
-                for ref in placement["evidence_refs"]
-            )
+            all(set(ref) == {"evidence_id", "event_type"} for ref in placement["evidence_refs"])
         )
 
     def test_problem_bundle_is_runnable_and_covers_boundaries(self) -> None:
