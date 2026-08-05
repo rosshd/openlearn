@@ -1017,6 +1017,11 @@ class CliStorageTests(unittest.TestCase):
         )
         self.assertTrue(any("Current clarification draft" in line for line in first_output))
         self.assertTrue(any("Constraints and edges:" in line for line in first_output))
+        self.assertEqual(
+            sum("Original coding problem:" in line for line in first_output), 1
+        )
+        self.assertFalse(any("Resumed saved" in line for line in first_output))
+        self.assertTrue(any(line.startswith("Interviewer:\n") for line in first_output))
 
         resumed_output: list[str] = []
         with (
@@ -1064,6 +1069,8 @@ class CliStorageTests(unittest.TestCase):
             {ref["evidence_id"] for ref in placement["evidence_refs"]}, expected_ids
         )
         rendered = "\n".join(resumed_output)
+        self.assertEqual(rendered.count("Original coding problem:"), 1)
+        self.assertEqual(rendered.count("Resumed saved clarification draft"), 1)
         self.assertIn("course-start passport", rendered)
         self.assertIn("Starting route:", rendered)
         self.assertIn("Coding fluency was not observed", rendered)

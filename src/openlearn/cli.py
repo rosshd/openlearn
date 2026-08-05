@@ -4073,86 +4073,90 @@ def _run_reasoning_interview_placement(
                     f"Resumed saved {stage} draft with {len(lines)} "
                     f"line{'s' if len(lines) != 1 else ''}. Use /show to review it."
                 )
-        try:
-            response = input_func(f"{stage}> ")
-        except (EOFError, KeyboardInterrupt):
-            output_func("")
-            _print_placement_saved(slug, stage, value, output_func)
-            return 0
-        if not response.strip():
-            output_func("Nothing added. Enter a line or use /show, /done, /skip, or /stop.")
-            continue
-        command = _placement_command(response)
-        if command == "stop":
-            _print_placement_saved(slug, stage, value, output_func)
-            return 0
-        if command == "baseline":
-            output_func(
-                "/baseline is available only in legacy coding placements. "
-                "Continue this section, use /skip, or use /stop."
-            )
-            continue
-        if command == "discard":
+        while True:
             try:
-                confirmation = input_func(
-                    "Discard this placement draft and start over later? Type yes to confirm: "
-                )
+                response = input_func(f"{stage}> ")
             except (EOFError, KeyboardInterrupt):
                 output_func("")
                 _print_placement_saved(slug, stage, value, output_func)
                 return 0
-            if confirmation.strip().lower() != "yes":
-                output_func("Discard cancelled. Your placement draft is still saved.")
+            if not response.strip():
+                output_func(
+                    "Nothing added. Enter a line or use /show, /done, /skip, or /stop."
+                )
                 continue
-            _discard_interview_placement(slug, path)
-            output_func("Placement discarded. Append-only evidence was preserved.")
-            return 0
-        if command == "show":
-            _print_reasoning_placement_draft(path, stage, output_func)
-            continue
-        if command == "undo":
-            with interview_profile_write_lock(slug):
-                interview_prep.undo_placement_draft_line(path, stage)
-            _print_reasoning_placement_draft(path, stage, output_func)
-            continue
-        if command == "skip":
-            with interview_profile_write_lock(slug):
-                interview_prep.skip_optional_placement_stage(path, stage)
-            value = sync_interview_placement(slug)
-            output_func(f"{stage.capitalize()} skipped. This area remains uncertain.")
-            placement = value["placement"]
-            assert isinstance(placement, dict)
-            if placement.get("status") == "provisional":
+            command = _placement_command(response)
+            if command == "stop":
+                _print_placement_saved(slug, stage, value, output_func)
+                return 0
+            if command == "baseline":
+                output_func(
+                    "/baseline is available only in legacy coding placements. "
+                    "Continue this section, use /skip, or use /stop."
+                )
+                continue
+            if command == "discard":
+                try:
+                    confirmation = input_func(
+                        "Discard this placement draft and start over later? "
+                        "Type yes to confirm: "
+                    )
+                except (EOFError, KeyboardInterrupt):
+                    output_func("")
+                    _print_placement_saved(slug, stage, value, output_func)
+                    return 0
+                if confirmation.strip().lower() != "yes":
+                    output_func("Discard cancelled. Your placement draft is still saved.")
+                    continue
+                _discard_interview_placement(slug, path)
+                output_func("Placement discarded. Append-only evidence was preserved.")
+                return 0
+            if command == "show":
+                _print_reasoning_placement_draft(path, stage, output_func)
+                continue
+            if command == "undo":
+                with interview_profile_write_lock(slug):
+                    interview_prep.undo_placement_draft_line(path, stage)
+                _print_reasoning_placement_draft(path, stage, output_func)
+                continue
+            if command == "skip":
+                with interview_profile_write_lock(slug):
+                    interview_prep.skip_optional_placement_stage(path, stage)
+                output_func(
+                    f"{stage.capitalize()} skipped. This area remains uncertain."
+                )
                 break
-            continue
-        if command == "done":
-            draft = interview_prep.placement_draft(path)
-            lines = draft.get("lines") if isinstance(draft, dict) else None
-            if not isinstance(lines, list) or not lines:
-                output_func("Add at least one line before using /done, or use /skip.")
+            if command == "done":
+                draft = interview_prep.placement_draft(path)
+                lines = draft.get("lines") if isinstance(draft, dict) else None
+                if not isinstance(lines, list) or not lines:
+                    output_func("Add at least one line before using /done, or use /skip.")
+                    continue
+                activity = _current_interview_activity(slug)
+                if activity is None or activity.get("status") != "active":
+                    raise OpenLearnError(
+                        "validated interview placement activity is not active"
+                    )
+                evidence_id = interview_prep.placement_evidence_id(placement, stage)
+                record_topic_activity_evidence(
+                    slug,
+                    activity,
+                    "interview_observation",
+                    {"stage": stage, "response": "\n".join(lines)},
+                    evidence_id=evidence_id,
+                )
+                sync_interview_placement(slug)
+                output_func(f"{stage.capitalize()} saved.")
+                break
+            if command is not None:
+                output_func(f"/{command} is not available at this step.")
                 continue
-            activity = _current_interview_activity(slug)
-            if activity is None or activity.get("status") != "active":
-                raise OpenLearnError("validated interview placement activity is not active")
-            evidence_id = interview_prep.placement_evidence_id(placement, stage)
-            record_topic_activity_evidence(
-                slug,
-                activity,
-                "interview_observation",
-                {"stage": stage, "response": "\n".join(lines)},
-                evidence_id=evidence_id,
-            )
-            sync_interview_placement(slug)
-            output_func(f"{stage.capitalize()} saved.")
-            continue
-        if command is not None:
-            output_func(f"/{command} is not available at this step.")
-            continue
-        with interview_profile_write_lock(slug):
-            interview_prep.append_placement_draft_line(path, stage, response)
-        output_func("Line saved.")
-        if stage == "clarification":
-            output_func(interview_prep.placement_clarification_response(response))
+            with interview_profile_write_lock(slug):
+                interview_prep.append_placement_draft_line(path, stage, response)
+            output_func("Line saved.")
+            if stage == "clarification":
+                answer = interview_prep.placement_clarification_response(response)
+                output_func(f"Interviewer:\n{answer}")
     value = sync_interview_placement(slug)
     _print_reasoning_placement_passport(value, output_func)
     return _continue_after_reasoning_placement(
