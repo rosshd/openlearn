@@ -40,7 +40,7 @@ from urllib.request import Request, urlopen
 
 from platformdirs import user_data_dir
 
-from openlearn import __version__, application, code_runner, providers
+from openlearn import __version__, code_runner
 from openlearn import interview_attempts
 from openlearn import interview_prep
 from openlearn import stats as stats_metrics
@@ -2544,6 +2544,8 @@ def handle_repl_command(
 
 
 def cmd_config_show(_args: argparse.Namespace) -> int:
+    from openlearn import application, providers
+
     config = read_config()
     provider = application.provider_status()
     model = provider.model
@@ -2575,6 +2577,8 @@ def cmd_config_show(_args: argparse.Namespace) -> int:
 
 
 def cmd_config_set_key(args: argparse.Namespace) -> int:
+    from openlearn import application, providers
+
     api_key = args.api_key or getpass.getpass("OpenAI API key: ").strip()
     if not api_key:
         raise OpenLearnError("API key cannot be empty")
@@ -2588,6 +2592,8 @@ def cmd_config_set_key(args: argparse.Namespace) -> int:
 
 
 def cmd_config_set_model(args: argparse.Namespace) -> int:
+    from openlearn import application, providers
+
     model = args.model.strip()
     if not model:
         raise OpenLearnError("model cannot be empty")
@@ -2633,6 +2639,8 @@ def cmd_config_clear_extractor_model(_args: argparse.Namespace) -> int:
 
 
 def cmd_config_set_base_url(args: argparse.Namespace) -> int:
+    from openlearn import application, providers
+
     base_url = args.base_url.strip().rstrip("/")
     if not base_url.startswith(("https://", "http://")):
         raise OpenLearnError("base URL must start with https:// or http://")
@@ -2658,6 +2666,8 @@ def cmd_config_set_editor(args: argparse.Namespace) -> int:
 
 
 def cmd_config_clear_key(_args: argparse.Namespace) -> int:
+    from openlearn import application, providers
+
     try:
         application.remove_provider_api_key()
     except providers.ProviderConfigurationError as exc:
