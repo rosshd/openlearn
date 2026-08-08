@@ -264,8 +264,7 @@ def test_environment_managed_provider_requires_explicit_verification(
     managed_client = TestClient(create_app(testing=True))
 
     response = managed_client.get("/", follow_redirects=False)
-    assert response.status_code == 303
-    assert response.headers["location"].endswith("/setup")
+    assert response.status_code == 200
 
     monkeypatch.setenv("OPENLEARN_PROVIDER_VERIFIED", "1")
     verified_client = TestClient(create_app(testing=True))
@@ -273,6 +272,148 @@ def test_environment_managed_provider_requires_explicit_verification(
     setup = managed_client.get("/setup")
     assert "Environment managed" in setup.text
     assert 'data-endpoint="/api/setup"' not in setup.text
+
+
+def test_unverified_provider_allows_provider_free_course_browsing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENLEARN_HOME", str(tmp_path))
+    monkeypatch.delenv("OPENLEARN_MOCK", raising=False)
+    for name in (
+        "OPENAI_API_KEY",
+        "OPENLEARN_BASE_URL",
+        "OPENLEARN_MODEL",
+        "OPENLEARN_PROVIDER_VERIFIED",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    browsing_client = TestClient(create_app(testing=True))
+
+    assert browsing_client.get("/", follow_redirects=False).status_code == 200
+    assert browsing_client.get("/dashboard", follow_redirects=False).status_code == 200
+    starters = browsing_client.get("/courses/new", follow_redirects=False)
+    assert starters.status_code == 200
+    assert "Technical Interview Prep" in starters.text
+
+
+def test_provider_setup_preserves_safe_model_backed_destination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENLEARN_HOME", str(tmp_path))
+    monkeypatch.delenv("OPENLEARN_MOCK", raising=False)
+    config.save_provider_configuration(
+        base_url="https://openrouter.ai/api/v1",
+        model="google/gemini-2.5-flash-lite",
+        api_key="unverified-key",
+        verified=False,
+        home=tmp_path,
+        environ={},
+    )
+    setup_client = TestClient(create_app(testing=True))
+
+    redirect = setup_client.get("/courses/example", follow_redirects=False)
+    assert redirect.status_code == 303
+    assert redirect.headers["location"].endswith(
+        "/setup?next=%2Fcourses%2Fexample"
+    )
+
+    setup = setup_client.get("/setup?next=/courses/example")
+    assert 'data-success-url="/courses/example"' in setup.text
+
+    unsafe = setup_client.get("/setup?next=https://attacker.example")
+    assert 'data-success-url="/dashboard"' in unsafe.text
+
+
+def test_managed_unverified_setup_never_claims_provider_is_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENLEARN_HOME", str(tmp_path))
+    monkeypatch.delenv("OPENLEARN_MOCK", raising=False)
+    monkeypatch.setenv("OPENLEARN_BASE_URL", "http://127.0.0.1:11434/v1")
+    monkeypatch.setenv("OPENLEARN_MODEL", "local-model")
+    monkeypatch.delenv("OPENLEARN_PROVIDER_VERIFIED", raising=False)
+
+    setup = TestClient(create_app(testing=True)).get("/setup")
+
+    assert "Your provider is ready" not in setup.text
+    assert "not yet verified" in setup.text
+
+
+@pytest.mark.parametrize(
+    ("validation_status", "retain_secret"),
+    [
+        (providers.ValidationStatus.NETWORK_ERROR, True),
+        (providers.ValidationStatus.REJECTED, False),
+        (providers.ValidationStatus.HTTP_ERROR, False),
+    ],
+)
+def test_setup_retains_secret_only_for_retryable_network_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    validation_status: providers.ValidationStatus,
+    retain_secret: bool,
+) -> None:
+    monkeypatch.setenv("OPENLEARN_HOME", str(tmp_path))
+    monkeypatch.delenv("OPENLEARN_MOCK", raising=False)
+    monkeypatch.setattr(
+        providers,
+        "validate_provider",
+        lambda *_args, **_kwargs: providers.ValidationResult(validation_status),
+    )
+    setup_client = TestClient(create_app(testing=True))
+    token = csrf(setup_client, "/setup")
+
+    response = setup_client.post(
+        "/api/setup",
+        headers={"x-csrf-token": token},
+        json={
+            "provider": "openrouter",
+            "api_key": "current-page-only-secret",
+            "model": "google/gemini-2.5-flash-lite",
+            "base_url": "https://openrouter.ai/api/v1",
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["retain_secret"] is retain_secret
+    assert "current-page-only-secret" not in response.text
+
+
+def test_setup_rejects_provider_when_selected_model_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENLEARN_HOME", str(tmp_path))
+    monkeypatch.delenv("OPENLEARN_MOCK", raising=False)
+    monkeypatch.setattr(
+        providers,
+        "validate_provider",
+        lambda *_args, **_kwargs: providers.ValidationResult(
+            providers.ValidationStatus.VALID
+        ),
+    )
+    monkeypatch.setattr(
+        providers,
+        "validate_provider_model",
+        lambda *_args, **_kwargs: providers.ValidationResult(
+            providers.ValidationStatus.HTTP_ERROR, "model_unavailable"
+        ),
+    )
+    setup_client = TestClient(create_app(testing=True))
+    token = csrf(setup_client, "/setup")
+
+    response = setup_client.post(
+        "/api/setup",
+        headers={"x-csrf-token": token},
+        json={
+            "provider": "openrouter",
+            "api_key": "valid-key",
+            "model": "missing-model",
+            "base_url": "https://openrouter.ai/api/v1",
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"] == "That model is not available from this provider."
+    assert not (tmp_path / "config.json").exists()
 
 
 def test_fresh_setup_defaults_to_consistent_openrouter_preset(
@@ -386,10 +527,14 @@ def test_unverified_setup_stays_on_setup_and_blocks_teaching(
     assert saved.json()["ready"] is False
     assert saved.json()["requires_validation"] is True
     assert "saved-but-unverified-secret" not in saved.text
-    for path in ("/", "/dashboard", "/courses/new", "/courses/example"):
+    for path in ("/", "/dashboard", "/courses/new"):
         response = unverified_client.get(path, follow_redirects=False)
-        assert response.status_code == 303
-        assert response.headers["location"].endswith("/setup")
+        assert response.status_code == 200
+    response = unverified_client.get("/courses/example", follow_redirects=False)
+    assert response.status_code == 303
+    assert response.headers["location"].endswith(
+        "/setup?next=%2Fcourses%2Fexample"
+    )
 
     create = unverified_client.post(
         "/api/courses",

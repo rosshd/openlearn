@@ -24,6 +24,7 @@ from openlearn.providers import (
     set_saved_base_url,
     set_saved_model,
     validate_provider,
+    validate_provider_model,
     ValidationResult,
 )
 
@@ -190,6 +191,24 @@ def test_presets_keep_openrouter_recommendation_and_local_keyless_behavior() -> 
     assert openrouter.default_model == "google/gemini-2.5-flash-lite"
     assert openrouter.key_required is True
     assert preset_for_base_url("http://127.0.0.1:8000/v1").key_required is False
+
+
+def test_selected_model_must_exist_in_provider_catalog() -> None:
+    def opener(request, *, timeout):
+        assert request.full_url == "https://provider.example/v1/models"
+        assert timeout == 10
+        return Response(body={"data": [{"id": "available-model"}]})
+
+    available = validate_provider_model(
+        "https://provider.example/v1", "secret", "available-model", opener=opener
+    )
+    missing = validate_provider_model(
+        "https://provider.example/v1", "secret", "missing-model", opener=opener
+    )
+
+    assert available.status is ValidationStatus.VALID
+    assert missing.status is ValidationStatus.HTTP_ERROR
+    assert missing.detail == "model_unavailable"
 
 
 def test_validation_result_persistence_requires_explicit_unverified_action(tmp_path) -> None:

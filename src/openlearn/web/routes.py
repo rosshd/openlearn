@@ -62,7 +62,23 @@ async def _provider_ready(request: Request) -> bool:
 
 
 def _setup_redirect(request: Request) -> RedirectResponse:
-    return RedirectResponse(request.url_for("setup"), status_code=303)
+    destination = request.url.path
+    if request.url.query:
+        destination = f"{destination}?{request.url.query}"
+    target = request.url_for("setup").include_query_params(next=destination)
+    return RedirectResponse(target, status_code=303)
+
+
+def _safe_setup_destination(request: Request) -> str:
+    destination = request.query_params.get("next", "")
+    if (
+        destination.startswith("/")
+        and not destination.startswith("//")
+        and "\\" not in destination
+        and len(destination) <= 2048
+    ):
+        return destination
+    return request.url_for("dashboard").path
 
 
 def _setup_required(request: Request) -> JSONResponse:
@@ -81,8 +97,6 @@ async def health() -> dict[str, str]:
 
 @router.get("/", response_class=HTMLResponse)
 async def home(request: Request) -> Any:
-    if not await _provider_ready(request):
-        return _setup_redirect(request)
     return await _dashboard_response(request)
 
 
@@ -92,7 +106,12 @@ async def setup(request: Request) -> Any:
     response = _templates(request).TemplateResponse(
         request,
         "setup.html",
-        _context(request, provider=status, page_title="Set up openlearn"),
+        _context(
+            request,
+            provider=status,
+            setup_destination=_safe_setup_destination(request),
+            page_title="Set up openlearn",
+        ),
     )
     response.headers["Cache-Control"] = "no-store"
     return response
@@ -113,8 +132,6 @@ async def save_setup(request: Request) -> JSONResponse:
 
 @router.get("/dashboard", response_class=HTMLResponse, name="dashboard")
 async def dashboard(request: Request) -> Any:
-    if not await _provider_ready(request):
-        return _setup_redirect(request)
     return await _dashboard_response(request)
 
 
@@ -129,8 +146,6 @@ async def _dashboard_response(request: Request) -> Any:
 
 @router.get("/courses/new", response_class=HTMLResponse, name="new_course")
 async def new_course(request: Request) -> Any:
-    if not await _provider_ready(request):
-        return _setup_redirect(request)
     templates = await _call(request, "course_templates")
     return _templates(request).TemplateResponse(
         request,

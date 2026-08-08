@@ -32,6 +32,7 @@ class ProviderPresetTests(unittest.TestCase):
         self.assertEqual(
             onboarding.PROVIDER_PRESETS["openrouter"],
             onboarding.ProviderPreset(
+                slug="openrouter",
                 name="OpenRouter",
                 base_url="https://openrouter.ai/api/v1",
                 default_model="google/gemini-2.5-flash-lite",
@@ -43,6 +44,7 @@ class ProviderPresetTests(unittest.TestCase):
         self.assertEqual(
             onboarding.PROVIDER_PRESETS["openai"],
             onboarding.ProviderPreset(
+                slug="openai",
                 name="OpenAI",
                 base_url="https://api.openai.com/v1",
                 default_model="gpt-4.1-mini",
@@ -52,6 +54,7 @@ class ProviderPresetTests(unittest.TestCase):
         self.assertEqual(
             onboarding.PROVIDER_PRESETS["ollama"],
             onboarding.ProviderPreset(
+                slug="ollama",
                 name="Ollama",
                 base_url="http://localhost:11434/v1",
                 default_model="llama3.1",
@@ -320,7 +323,7 @@ class ProviderValidationTests(unittest.TestCase):
         )
 
         self.assertEqual(result.status, onboarding.ValidationStatus.NETWORK_ERROR)
-        self.assertIn("connection refused", result.detail)
+        self.assertEqual(result.detail, "provider_unreachable")
 
 
 class ValidatedKeyPromptTests(unittest.TestCase):
@@ -516,6 +519,11 @@ class OnboardingFlowTests(unittest.TestCase):
                 ),
             ),
             patch.object(
+                onboarding.providers,
+                "validate_provider_model",
+                return_value=onboarding.ValidationResult(onboarding.ValidationStatus.VALID),
+            ),
+            patch.object(
                 onboarding,
                 "prompt_for_destination",
                 side_effect=lambda **_kwargs: (
@@ -547,8 +555,8 @@ class OnboardingFlowTests(unittest.TestCase):
                 "destination",
                 "provider",
                 ("base_url", preset),
-                ("key", preset, "https://api.openai.com/v1"),
                 ("model", preset),
+                ("key", preset, "https://api.openai.com/v1"),
                 (
                     "persist",
                     "secret-key",
@@ -591,6 +599,11 @@ class OnboardingFlowTests(unittest.TestCase):
                 ),
             ),
             patch.object(
+                onboarding.providers,
+                "validate_provider_model",
+                return_value=onboarding.ValidationResult(onboarding.ValidationStatus.VALID),
+            ),
+            patch.object(
                 onboarding,
                 "prompt_for_destination",
                 return_value=onboarding.OnboardingDestination.MENU,
@@ -603,23 +616,23 @@ class OnboardingFlowTests(unittest.TestCase):
         prompt_for_provider.assert_not_called()
         prompt_for_base_url.assert_not_called()
         selected = calls[0][1]
-        self.assertEqual(selected.name, "Environment-configured OpenAI-compatible provider")
+        self.assertEqual(selected.name, "OpenAI-compatible provider")
         self.assertTrue(selected.key_required)
         self.assertEqual(
             calls,
             [
-                ("key", selected, "https://api.example.com/v1"),
                 ("model", selected),
+                ("key", selected, "https://api.example.com/v1"),
                 ("persist", "secret-key", "example-model", "https://api.example.com/v1"),
             ],
         )
         self.assertIn(
-            "OPENLEARN_BASE_URL is set; using Environment-configured OpenAI-compatible provider at https://api.example.com/v1.",
+            "OPENLEARN_BASE_URL is set; using OpenAI-compatible provider at https://api.example.com/v1.",
             output,
         )
         self.assertIn("Provider selection is locked by the environment.", output)
 
-    def test_stops_without_model_or_persistence_when_validation_fails(self) -> None:
+    def test_stops_without_persistence_when_validation_fails(self) -> None:
         preset = onboarding.PROVIDER_PRESETS["openai"]
 
         with (
@@ -638,7 +651,7 @@ class OnboardingFlowTests(unittest.TestCase):
             ready = onboarding.run_onboarding(output_func=lambda _text: None)
 
         self.assertFalse(ready)
-        prompt_for_model.assert_not_called()
+        prompt_for_model.assert_called_once()
         persist_configuration.assert_not_called()
         prompt_for_destination.assert_called_once()
         launch_destination.assert_not_called()

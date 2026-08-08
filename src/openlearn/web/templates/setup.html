@@ -17,12 +17,17 @@
       <p class="eyebrow">Provider setup</p>
       <span class="state-chip">Environment managed</span>
     </div>
+    {% if provider.ready %}
     <h2 id="managed-provider-title">Your provider is ready</h2>
-    <p class="field-note">Provider credentials are supplied by your shell environment. Change them there, then restart openlearn.</p>
+    <p class="field-note">Provider credentials are supplied and verified by your shell environment. Change them there, then restart openlearn.</p>
+    {% else %}
+    <h2 id="managed-provider-title">Your provider is not yet verified</h2>
+    <p class="field-note">Provider settings are supplied by your shell environment, but openlearn has not verified the selected model. Validate those settings before model-backed teaching.</p>
+    {% endif %}
     <a class="primary-action" href="{{ url_for('dashboard') }}"><span>Continue to your workbench</span><span aria-hidden="true">→</span></a>
   </section>
   {% else %}
-  <form class="work-panel form-stack" data-json-form data-endpoint="/api/setup" data-success-url="/dashboard" novalidate>
+  <form class="work-panel form-stack" data-json-form data-endpoint="/api/setup" data-success-url="{{ setup_destination }}" novalidate>
     <div class="form-header">
       <p class="eyebrow">Provider setup</p>
       <span class="state-chip">Local config</span>

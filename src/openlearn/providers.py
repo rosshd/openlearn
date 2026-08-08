@@ -302,6 +302,63 @@ def validate_provider(
     return ValidationResult(ValidationStatus.HTTP_ERROR, f"http_{status}")
 
 
+def validate_provider_model(
+    base_url: str,
+    api_key: str | None,
+    model: str,
+    *,
+    opener: UrlOpener = _DEFAULT_OPENER,
+    timeout_seconds: int = 10,
+) -> ValidationResult:
+    """Confirm that the selected provider advertises the requested model."""
+    normalized = _normalized_provider_url(base_url)
+    selected_model = model.strip()
+    if normalized is None:
+        return ValidationResult(ValidationStatus.HTTP_ERROR, "invalid_base_url")
+    if not selected_model or _CONTROL_CHARACTERS.search(selected_model):
+        return ValidationResult(ValidationStatus.HTTP_ERROR, "invalid_model")
+    if not _api_key_is_safe(api_key):
+        return ValidationResult(ValidationStatus.REJECTED, "invalid_api_key")
+    if not api_key and not base_url_allows_keyless_requests(normalized):
+        return ValidationResult(ValidationStatus.REJECTED, "key_required")
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    try:
+        request = Request(f"{normalized}/models", headers=headers, method="GET")
+        response = opener(request, timeout=timeout_seconds)
+        with response:
+            status = response.getcode()
+            payload = _read_provider_response(response) if status == 200 else b""
+    except HTTPError as exc:
+        status = exc.code
+        exc.close()
+        if status in {401, 403}:
+            return ValidationResult(ValidationStatus.REJECTED, "credential_rejected")
+        return ValidationResult(ValidationStatus.HTTP_ERROR, f"http_{status}")
+    except (URLError, TimeoutError, OSError):
+        return ValidationResult(ValidationStatus.NETWORK_ERROR, "provider_unreachable")
+    except (TypeError, ValueError, UnicodeError, ProviderError):
+        return ValidationResult(ValidationStatus.HTTP_ERROR, "invalid_model_catalog")
+    if status in {401, 403}:
+        return ValidationResult(ValidationStatus.REJECTED, "credential_rejected")
+    if status != 200:
+        return ValidationResult(ValidationStatus.HTTP_ERROR, f"http_{status}")
+    try:
+        decoded = json.loads(payload.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError):
+        return ValidationResult(ValidationStatus.HTTP_ERROR, "invalid_model_catalog")
+    entries = decoded.get("data") if isinstance(decoded, dict) else None
+    if not isinstance(entries, list):
+        return ValidationResult(ValidationStatus.HTTP_ERROR, "invalid_model_catalog")
+    identifiers = {
+        entry.get("id")
+        for entry in entries
+        if isinstance(entry, dict) and isinstance(entry.get("id"), str)
+    }
+    if selected_model not in identifiers:
+        return ValidationResult(ValidationStatus.HTTP_ERROR, "model_unavailable")
+    return ValidationResult(ValidationStatus.VALID)
+
+
 def persist_validation_result(
     *,
     base_url: str,

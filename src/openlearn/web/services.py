@@ -311,6 +311,11 @@ class OpenLearnWebServices:
             if os.environ.get("OPENLEARN_MOCK") in {"1", "true", "yes"}
             else providers.validate_provider(base_url, api_key)
         )
+        if (
+            validation.status is providers.ValidationStatus.VALID
+            and os.environ.get("OPENLEARN_MOCK") not in {"1", "true", "yes"}
+        ):
+            validation = providers.validate_provider_model(base_url, api_key, model)
         try:
             providers.persist_validation_result(
                 base_url=base_url,
@@ -320,6 +325,12 @@ class OpenLearnWebServices:
                 allow_unverified=request.save_unverified,
             )
         except (providers.ProviderConfigurationError, config.ConfigError) as error:
+            if validation.detail == "model_unavailable":
+                return {
+                    "ok": False,
+                    "retain_secret": False,
+                    "error": "That model is not available from this provider.",
+                }
             messages = {
                 "rejected_provider_credentials": "That API key was rejected. Check it and try again.",
                 "unverified_provider_requires_explicit_confirmation": (
@@ -329,6 +340,8 @@ class OpenLearnWebServices:
             }
             return {
                 "ok": False,
+                "retain_secret": validation.status
+                is providers.ValidationStatus.NETWORK_ERROR,
                 "error": messages.get(
                     str(error), "The provider configuration could not be saved."
                 ),

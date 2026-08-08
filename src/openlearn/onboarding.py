@@ -3,67 +3,18 @@ from __future__ import annotations
 import getpass
 import os
 from argparse import Namespace
-from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from types import TracebackType
-from typing import Callable, Protocol, Self
-from urllib.parse import urlparse
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from typing import Callable
+
+from openlearn import providers
 
 
-@dataclass(frozen=True)
-class ProviderPreset:
-    name: str
-    base_url: str | None
-    default_model: str | None
-    key_required: bool
-    setup_url: str | None = None
-    recommendation: str | None = None
-
-
-PROVIDER_PRESETS = {
-    "openrouter": ProviderPreset(
-        name="OpenRouter",
-        base_url="https://openrouter.ai/api/v1",
-        default_model="google/gemini-2.5-flash-lite",
-        key_required=True,
-        setup_url="https://openrouter.ai/keys",
-        recommendation="recommended - inexpensive models from many providers",
-    ),
-    "openai": ProviderPreset(
-        name="OpenAI",
-        base_url="https://api.openai.com/v1",
-        default_model="gpt-4.1-mini",
-        key_required=True,
-    ),
-    "anthropic-compatible": ProviderPreset(
-        name="Anthropic-compatible",
-        base_url=None,
-        default_model=None,
-        key_required=True,
-    ),
-    "ollama": ProviderPreset(
-        name="Ollama",
-        base_url="http://localhost:11434/v1",
-        default_model="llama3.1",
-        key_required=False,
-    ),
-    "custom": ProviderPreset(
-        name="Custom OpenAI-compatible provider",
-        base_url=None,
-        default_model=None,
-        key_required=True,
-    ),
-}
-
-
-class ValidationStatus(Enum):
-    VALID = "valid"
-    REJECTED = "rejected"
-    NETWORK_ERROR = "network_error"
-    HTTP_ERROR = "http_error"
+ProviderPreset = providers.ProviderPreset
+PROVIDER_PRESETS = providers.PROVIDER_PRESETS
+ValidationStatus = providers.ValidationStatus
+ValidationResult = providers.ValidationResult
+validate_provider = providers.validate_provider
 
 
 class OnboardingDestination(Enum):
@@ -73,26 +24,6 @@ class OnboardingDestination(Enum):
     MENU = "menu"
 
 
-@dataclass(frozen=True)
-class ValidationResult:
-    status: ValidationStatus
-    detail: str = ""
-
-
-class UrlResponse(Protocol):
-    def __enter__(self) -> Self: ...
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_value: BaseException | None,
-        traceback: TracebackType | None,
-    ) -> bool | None: ...
-
-    def getcode(self) -> int: ...
-
-
-UrlOpener = Callable[..., UrlResponse]
 InputFunc = Callable[[str], str]
 OutputFunc = Callable[[str], None]
 KeyInputFunc = Callable[[str], str]
@@ -122,22 +53,8 @@ def _normalize_base_url(base_url: str) -> str:
     return base_url.strip().rstrip("/")
 
 
-def _base_url_allows_keyless_requests(base_url: str) -> bool:
-    parsed = urlparse(base_url)
-    return parsed.hostname in {"localhost", "127.0.0.1", "::1"}
-
-
 def preset_for_base_url(base_url: str) -> ProviderPreset:
-    normalized = _normalize_base_url(base_url)
-    for preset in PROVIDER_PRESETS.values():
-        if preset.base_url and _normalize_base_url(preset.base_url) == normalized:
-            return preset
-    return ProviderPreset(
-        name="Environment-configured OpenAI-compatible provider",
-        base_url=normalized,
-        default_model=None,
-        key_required=not _base_url_allows_keyless_requests(normalized),
-    )
+    return providers.preset_for_base_url(base_url)
 
 
 def prompt_for_base_url(
@@ -199,52 +116,16 @@ def prompt_for_destination(
         output_func(f"Choose an option from 1 to {len(destinations)}.")
 
 
-def validate_provider(
-    base_url: str,
-    api_key: str,
-    *,
-    opener: UrlOpener = urlopen,
-) -> ValidationResult:
-    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-    normalized_base_url = base_url.rstrip("/")
-    openrouter_base_url = PROVIDER_PRESETS["openrouter"].base_url
-    endpoint = (
-        "key"
-        if openrouter_base_url
-        and normalized_base_url == openrouter_base_url.rstrip("/")
-        else "models"
-    )
-    request = Request(
-        f"{normalized_base_url}/{endpoint}",
-        headers=headers,
-        method="GET",
-    )
-    try:
-        response = opener(request, timeout=10)
-        with response:
-            status = response.getcode()
-    except HTTPError as exc:
-        if exc.code in {401, 403}:
-            return ValidationResult(ValidationStatus.REJECTED)
-        return ValidationResult(ValidationStatus.HTTP_ERROR, str(exc))
-    except (URLError, TimeoutError) as exc:
-        return ValidationResult(ValidationStatus.NETWORK_ERROR, str(exc))
-
-    if status == 200:
-        return ValidationResult(ValidationStatus.VALID)
-    if status in {401, 403}:
-        return ValidationResult(ValidationStatus.REJECTED)
-    return ValidationResult(ValidationStatus.HTTP_ERROR, f"HTTP {status}")
-
-
 def prompt_for_validated_key(
     preset: ProviderPreset,
     base_url: str,
     *,
+    model: str | None = None,
     input_func: InputFunc = input,
     output_func: OutputFunc = print,
     key_input_func: KeyInputFunc | None = None,
     validator: ProviderValidator = validate_provider,
+    model_validator=providers.validate_provider_model,
 ) -> str | None:
     key_input = key_input_func or getpass.getpass
     if preset.setup_url:
@@ -265,9 +146,14 @@ def prompt_for_validated_key(
 
         output_func("Testing connection...")
         result = validator(base_url, api_key)
+        if result.status is ValidationStatus.VALID and model:
+            result = model_validator(base_url, api_key or None, model)
         if result.status is ValidationStatus.VALID:
             output_func("Connection successful.")
             return api_key
+        if result.detail == "model_unavailable":
+            output_func("That model is not available from this provider.")
+            return None
         if result.status is ValidationStatus.REJECTED:
             output_func(f"Key rejected by {preset.name}.")
             if preset.setup_url:
@@ -399,20 +285,20 @@ def configure_provider(
             input_func=input_func,
             output_func=output_func,
         )
-    api_key = prompt_for_validated_key(
-        preset,
-        base_url,
-        input_func=input_func,
-        output_func=output_func,
-    )
-    if api_key is None:
-        return False
-
     model = prompt_for_model(
         preset,
         input_func=input_func,
         output_func=output_func,
     )
+    api_key = prompt_for_validated_key(
+        preset,
+        base_url,
+        model=model,
+        input_func=input_func,
+        output_func=output_func,
+    )
+    if api_key is None:
+        return False
     persist_configuration(api_key, model, base_url)
     return True
 

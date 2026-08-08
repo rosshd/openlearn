@@ -146,7 +146,7 @@ for (const form of document.querySelectorAll("[data-json-form]")) {
       const destination = result.initialization_url || result.focus_url || result.redirect || form.dataset.successUrl;
       if (destination) window.location.assign(appUrl(destination));
     } catch (error) {
-      if (form.elements.api_key) form.elements.api_key.value = "";
+      if (form.elements.api_key && !error.payload?.retain_secret) form.elements.api_key.value = "";
       if (errorBox) {
         errorBox.textContent = error.message;
         errorBox.hidden = false;

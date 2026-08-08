@@ -321,18 +321,31 @@ def test_real_browser_unverified_provider_stays_in_setup(
                 page.locator("#api-key").fill("browser-secret-must-clear")
                 page.locator("#model").fill("offline-model")
                 page.locator("#base-url").fill("http://127.0.0.1:1/v1")
-                page.locator('input[name="save_unverified"]').check()
                 page.get_by_role("button", name="Test and save").click()
 
+                playwright.expect(page.locator("[data-form-error]")).to_contain_text(
+                    "could not be reached"
+                )
+                assert page.url.endswith("/setup")
+                assert page.locator("#api-key").input_value() == (
+                    "browser-secret-must-clear"
+                )
+                assert page.locator("#model").input_value() == "offline-model"
+                assert page.locator("#base-url").input_value() == "http://127.0.0.1:1/v1"
+
+                page.locator('input[name="save_unverified"]').check()
+                page.get_by_role("button", name="Test and save").click()
                 playwright.expect(page.locator("[data-form-status]")).to_contain_text(
                     "teaching stays locked"
                 )
-                assert page.url.endswith("/setup")
                 assert page.locator("#api-key").input_value() == ""
                 assert not page.locator('input[name="save_unverified"]').is_checked()
 
                 page.goto(f"{app_url}/courses/new")
-                assert page.url.endswith("/setup")
+                assert page.url.endswith("/courses/new")
+                playwright.expect(
+                    page.get_by_text("Technical Interview Prep", exact=True).first
+                ).to_be_visible()
                 browser.close()
         finally:
             process.terminate()
