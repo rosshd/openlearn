@@ -162,7 +162,15 @@ class PlaceholderServices:
         return {"ok": False, "error": "Review services are unavailable."}
 
     def data_summary(self) -> dict[str, Any]:
-        return {"files": 0, "bytes": 0, "credentials_present": False, "excluded": []}
+        from openlearn import data_management
+
+        return {
+            "files": 0,
+            "bytes": 0,
+            "credentials_present": False,
+            "excluded": [],
+            "confirmations": data_management.confirmation_phrases(),
+        }
 
     def manage_data(self, request: Any) -> dict[str, Any]:
         return {"ok": False, "error": "Data services are unavailable.", "request": request}

@@ -31,6 +31,16 @@ MAX_ARCHIVE_RATIO = 100
 _CREDENTIAL_KEYS = frozenset({"api_key", "openai_api_key"})
 
 
+def confirmation_phrases() -> dict[str, str]:
+    """Return the exact confirmation phrases shared by presentation adapters."""
+    return {
+        "credentials": CREDENTIAL_CONFIRMATION,
+        "move": MOVE_CONFIRMATION,
+        "reset": RESET_CONFIRMATION,
+        "delete": DELETE_CONFIRMATION,
+    }
+
+
 class DataManagementError(RuntimeError):
     """A whole-home operation could not be completed safely."""
 
@@ -112,14 +122,6 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _is_relative_to(path: Path, parent: Path) -> bool:
-    try:
-        path.relative_to(parent)
-    except ValueError:
-        return False
-    return True
-
-
 def _resolved(path: Path) -> Path:
     return path.expanduser().resolve(strict=False)
 
@@ -142,7 +144,9 @@ def _assert_safe_home(
 
 def _assert_safe_destination(destination: Path, source: Path | None = None) -> Path:
     resolved = _assert_safe_home(destination)
-    if source is not None and (_is_relative_to(resolved, source) or _is_relative_to(source, resolved)):
+    if source is not None and (
+        resolved.is_relative_to(source) or source.is_relative_to(resolved)
+    ):
         raise UnsafeHomeError("destination must not contain or contain the Openlearn home")
     return resolved
 
@@ -227,9 +231,25 @@ def _read_regular_file(path: Path, home: Path) -> bytes:
     if stat.S_ISLNK(status.st_mode) or not stat.S_ISREG(status.st_mode):
         raise UnsafeHomeError(f"unsupported file type in Openlearn home: {_relative(path, home)}")
     resolved = path.resolve(strict=True)
-    if not _is_relative_to(resolved, home):
+    if not resolved.is_relative_to(home):
         raise UnsafeHomeError("path escapes the resolved Openlearn home")
     return path.read_bytes()
+
+
+def _regular_file_digest(path: Path, home: Path) -> tuple[int, str]:
+    status = path.lstat()
+    if stat.S_ISLNK(status.st_mode) or not stat.S_ISREG(status.st_mode):
+        raise UnsafeHomeError(f"unsupported file type in Openlearn home: {_relative(path, home)}")
+    resolved = path.resolve(strict=True)
+    if not resolved.is_relative_to(home):
+        raise UnsafeHomeError("path escapes the resolved Openlearn home")
+    size = 0
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            size += len(chunk)
+            digest.update(chunk)
+    return size, digest.hexdigest()
 
 
 def inventory_home(home: Path) -> HomeInventory:
@@ -269,10 +289,13 @@ def inventory_home(home: Path) -> HomeInventory:
             if category is None:
                 excluded.append(relative)
                 continue
-            content = _read_regular_file(candidate, resolved)
+            size, digest = _regular_file_digest(candidate, resolved)
             if relative == "config.json":
+                if size > MAX_ARCHIVE_ENTRY_BYTES:
+                    raise UnsafeHomeError("config.json exceeds the supported size limit")
+                content = _read_regular_file(candidate, resolved)
                 credentials_present = _config_has_credentials(content)
-            entries.append(InventoryEntry(relative, category, len(content), _sha256(content)))
+            entries.append(InventoryEntry(relative, category, size, digest))
     return HomeInventory(
         resolved,
         tuple(sorted(entries, key=lambda entry: entry.relative_path)),
@@ -281,43 +304,42 @@ def inventory_home(home: Path) -> HomeInventory:
     )
 
 
-def _manifest(home: Path, *, include_credentials: bool) -> tuple[HomeInventory, dict[str, bytes], dict[str, object]]:
-    inventory = inventory_home(home)
-    payload: dict[str, bytes] = {}
+def _manifest_for_inventory(
+    inventory: HomeInventory, *, include_credentials: bool
+) -> dict[str, object]:
     entries: list[dict[str, object]] = []
     for entry in inventory.entries:
-        source_content = _read_regular_file(
-            inventory.home / entry.relative_path, inventory.home
-        )
-        if len(source_content) != entry.size or _sha256(source_content) != entry.sha256:
-            raise DataManagementError(
-                "Openlearn data changed while the backup was being created; retry the backup"
+        if entry.relative_path == "config.json" and not include_credentials:
+            content = _read_regular_file(inventory.home / entry.relative_path, inventory.home)
+            if len(content) != entry.size or _sha256(content) != entry.sha256:
+                raise DataManagementError(
+                    "Openlearn data changed while the backup was being created; retry the backup"
+                )
+            archived = _archive_bytes(
+                entry.relative_path, content, include_credentials=False
             )
-        content = _archive_bytes(
-            entry.relative_path,
-            source_content,
-            include_credentials=include_credentials,
-        )
-        payload[entry.relative_path] = content
-        entries.append(
-            {
-                "path": entry.relative_path,
-                "category": entry.category,
-                "size": len(content),
-                "sha256": _sha256(content),
-            }
-        )
-    manifest: dict[str, object] = {
+            entries.append(
+                {
+                    "path": entry.relative_path,
+                    "category": entry.category,
+                    "size": len(archived),
+                    "sha256": _sha256(archived),
+                }
+            )
+        else:
+            entries.append(entry.as_dict())
+    return {
         "manifest_version": MANIFEST_VERSION,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "credentials_included": include_credentials,
         "entries": entries,
         "excluded_paths": list(inventory.excluded_paths),
     }
-    return inventory, payload, manifest
 
 
-def _write_archive(archive: Path, payload: dict[str, bytes], manifest: dict[str, object]) -> None:
+def _write_archive(
+    archive: Path, inventory: HomeInventory, *, include_credentials: bool
+) -> dict[str, object]:
     archive.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(
         prefix=f".{archive.name}.", suffix=".tmp", dir=archive.parent
@@ -325,9 +347,75 @@ def _write_archive(archive: Path, payload: dict[str, bytes], manifest: dict[str,
     try:
         os.close(descriptor)
         with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED) as value:
-            value.writestr("manifest.json", json.dumps(manifest, indent=2, sort_keys=True) + "\n")
-            for relative, content in sorted(payload.items()):
-                value.writestr(f"data/{relative}", content)
+            total = 0
+            manifest_entries: list[dict[str, object]] = []
+            for entry in inventory.entries:
+                source = inventory.home / entry.relative_path
+                if entry.relative_path == "config.json" and not include_credentials:
+                    source_content = _read_regular_file(source, inventory.home)
+                    if len(source_content) != entry.size or _sha256(source_content) != entry.sha256:
+                        raise DataManagementError(
+                            "Openlearn data changed while the backup was being created; retry the backup"
+                        )
+                    archived = _archive_bytes(
+                        entry.relative_path, source_content, include_credentials=False
+                    )
+                    if len(archived) > MAX_ARCHIVE_ENTRY_BYTES:
+                        raise ArchiveSafetyError("Openlearn data exceeds safe backup limits")
+                    value.writestr(f"data/{entry.relative_path}", archived)
+                    archived_size = len(archived)
+                    archived_hash = _sha256(archived)
+                else:
+                    status = source.lstat()
+                    if stat.S_ISLNK(status.st_mode) or not stat.S_ISREG(status.st_mode):
+                        raise UnsafeHomeError(
+                            f"unsupported file type in Openlearn home: {entry.relative_path}"
+                        )
+                    if not source.resolve(strict=True).is_relative_to(inventory.home):
+                        raise UnsafeHomeError("path escapes the resolved Openlearn home")
+                    digest = hashlib.sha256()
+                    archived_size = 0
+                    with source.open("rb") as input_handle, value.open(
+                        f"data/{entry.relative_path}", "w"
+                    ) as output_handle:
+                        while chunk := input_handle.read(1024 * 1024):
+                            archived_size += len(chunk)
+                            total_candidate = total + archived_size
+                            if (
+                                archived_size > MAX_ARCHIVE_ENTRY_BYTES
+                                or total_candidate > MAX_ARCHIVE_BYTES
+                            ):
+                                raise ArchiveSafetyError(
+                                    "Openlearn data exceeds safe backup limits"
+                                )
+                            digest.update(chunk)
+                            output_handle.write(chunk)
+                    archived_hash = digest.hexdigest()
+                    if archived_size != entry.size or archived_hash != entry.sha256:
+                        raise DataManagementError(
+                            "Openlearn data changed while the backup was being created; retry the backup"
+                        )
+                total += archived_size
+                if total > MAX_ARCHIVE_BYTES:
+                    raise ArchiveSafetyError("Openlearn data exceeds safe backup limits")
+                manifest_entries.append(
+                    {
+                        "path": entry.relative_path,
+                        "category": entry.category,
+                        "size": archived_size,
+                        "sha256": archived_hash,
+                    }
+                )
+            manifest = {
+                "manifest_version": MANIFEST_VERSION,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "credentials_included": include_credentials,
+                "entries": manifest_entries,
+                "excluded_paths": list(inventory.excluded_paths),
+            }
+            value.writestr(
+                "manifest.json", json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+            )
         os.replace(temporary, archive)
         try:
             archive.chmod(0o600)
@@ -338,6 +426,7 @@ def _write_archive(archive: Path, payload: dict[str, bytes], manifest: dict[str,
             os.unlink(temporary)
         except FileNotFoundError:
             pass
+    return manifest
 
 
 def create_backup(
@@ -351,17 +440,17 @@ def create_backup(
 
     source = _assert_safe_home(home, must_exist=True)
     target = _resolved(archive)
-    if _is_relative_to(target, source):
+    if target.is_relative_to(source):
         raise UnsafeHomeError("backup archive must not be written inside the Openlearn home")
     if include_credentials and credential_confirmation != CREDENTIAL_CONFIRMATION:
         raise CredentialScopeError("including saved credentials requires explicit credential confirmation")
-    inventory, payload, manifest = _manifest(source, include_credentials=include_credentials)
+    inventory = inventory_home(source)
     try:
-        _write_archive(target, payload, manifest)
+        _write_archive(target, inventory, include_credentials=include_credentials)
     except OSError as exc:
         raise DataManagementError("backup archive could not be created") from exc
     try:
-        _read_archive(target)
+        _inspect_archive(target)
     except Exception:
         target.unlink(missing_ok=True)
         raise
@@ -380,7 +469,9 @@ def _safe_archive_name(name: str) -> PurePosixPath:
     return path
 
 
-def _read_archive(archive: Path) -> tuple[dict[str, object], dict[str, bytes]]:
+def _inspect_archive(
+    archive: Path, *, extract_to: Path | None = None
+) -> dict[str, object]:
     try:
         with zipfile.ZipFile(archive) as value:
             infos = value.infolist()
@@ -417,7 +508,6 @@ def _read_archive(archive: Path) -> tuple[dict[str, object], dict[str, bytes]]:
             raw_entries = manifest.get("entries")
             if not isinstance(raw_entries, list):
                 raise ArchiveSafetyError("archive manifest entries are invalid")
-            payload: dict[str, bytes] = {}
             manifest_paths: set[str] = set()
             for entry in raw_entries:
                 if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
@@ -430,13 +520,41 @@ def _read_archive(archive: Path) -> tuple[dict[str, object], dict[str, bytes]]:
                 member = f"data/{relative}"
                 if member not in names:
                     raise ArchiveSafetyError("archive data does not match its manifest")
-                content = value.read(member)
-                if entry.get("size") != len(content) or entry.get("sha256") != _sha256(content):
+                digest = hashlib.sha256()
+                extracted_size = 0
+                output_handle = None
+                temporary: str | None = None
+                if extract_to is not None:
+                    target = extract_to / relative
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    descriptor, temporary = tempfile.mkstemp(
+                        prefix=f".{target.name}.", dir=target.parent
+                    )
+                    output_handle = os.fdopen(descriptor, "wb")
+                try:
+                    with value.open(member) as input_handle:
+                        while chunk := input_handle.read(1024 * 1024):
+                            extracted_size += len(chunk)
+                            digest.update(chunk)
+                            if output_handle is not None:
+                                output_handle.write(chunk)
+                    if output_handle is not None:
+                        output_handle.flush()
+                        os.fsync(output_handle.fileno())
+                finally:
+                    if output_handle is not None:
+                        output_handle.close()
+                if (
+                    entry.get("size") != extracted_size
+                    or entry.get("sha256") != digest.hexdigest()
+                ):
                     raise ArchiveSafetyError("archive data does not match its manifest")
-                payload[relative] = content
+                if extract_to is not None:
+                    assert temporary is not None
+                    os.replace(temporary, extract_to / relative)
             if names != {"manifest.json", *(f"data/{path}" for path in manifest_paths)}:
                 raise ArchiveSafetyError("archive contains files outside its manifest")
-            return manifest, payload
+            return manifest
     except (OSError, zipfile.BadZipFile) as exc:
         raise ArchiveSafetyError("backup archive cannot be read safely") from exc
 
@@ -446,14 +564,17 @@ def verify_backup(home: Path, archive: Path, *, include_credentials: bool = Fals
 
     source = _assert_safe_home(home, must_exist=True)
     try:
-        manifest, _payload = _read_archive(_resolved(archive))
+        manifest = _inspect_archive(_resolved(archive))
     except DataManagementError as exc:
         if isinstance(exc, CompatibilityError):
             raise
         raise BackupVerificationError("backup verification failed; no learner data was changed") from exc
     if manifest.get("credentials_included") is not include_credentials:
         raise BackupVerificationError("backup scope does not match the requested operation")
-    inventory, _payload, expected = _manifest(source, include_credentials=include_credentials)
+    inventory = inventory_home(source)
+    expected = _manifest_for_inventory(
+        inventory, include_credentials=include_credentials
+    )
     comparable = ("manifest_version", "credentials_included", "entries", "excluded_paths")
     if any(manifest.get(key) != expected.get(key) for key in comparable):
         raise BackupVerificationError("backup is not a verified copy of the current Openlearn home")
@@ -463,24 +584,6 @@ def verify_backup(home: Path, archive: Path, *, include_credentials: bool = Fals
         include_credentials,
         "Saved credentials are included in this archive." if include_credentials else None,
     )
-
-
-def _write_payload(home: Path, payload: dict[str, bytes]) -> None:
-    for relative, content in sorted(payload.items()):
-        target = home / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        descriptor, temporary = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
-        try:
-            with os.fdopen(descriptor, "wb") as handle:
-                handle.write(content)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, target)
-        finally:
-            try:
-                os.unlink(temporary)
-            except FileNotFoundError:
-                pass
 
 
 def _staging_path(parent: Path, purpose: str) -> Path:
@@ -493,13 +596,12 @@ def restore_backup(archive: Path, home: Path) -> RestoreResult:
     target = _assert_safe_destination(home)
     if target.exists() and any(target.iterdir()):
         raise UnsafeHomeError("restore target must be absent or empty")
-    manifest, payload = _read_archive(_resolved(archive))
     parent = target.parent
     parent.mkdir(parents=True, exist_ok=True)
     staging = _staging_path(parent, "restore")
     try:
         staging.mkdir(mode=0o700)
-        _write_payload(staging, payload)
+        manifest = _inspect_archive(_resolved(archive), extract_to=staging)
         restored = inventory_home(staging)
         expected_entries = manifest["entries"]
         if [entry.as_dict() for entry in restored.entries] != expected_entries:
@@ -510,7 +612,15 @@ def restore_backup(archive: Path, home: Path) -> RestoreResult:
     except Exception:
         shutil.rmtree(staging, ignore_errors=True)
         raise
-    return RestoreResult(target, inventory_home(target))
+    return RestoreResult(
+        target,
+        HomeInventory(
+            home=target,
+            entries=restored.entries,
+            excluded_paths=restored.excluded_paths,
+            credentials_present=restored.credentials_present,
+        ),
+    )
 
 
 def _copy_regular_file(source: Path, target: Path) -> None:

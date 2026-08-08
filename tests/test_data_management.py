@@ -137,6 +137,21 @@ def test_default_restore_omits_only_saved_credentials(tmp_path: Path) -> None:
     assert _persistent_bytes(restored) == expected
 
 
+def test_backup_creation_enforces_entry_limit_without_leaving_an_archive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    _write_complete_home(home)
+    (home / "learning-topics" / "large.md").write_bytes(b"x" * 257)
+    archive = tmp_path / "oversized.olbackup"
+    monkeypatch.setattr(data_management, "MAX_ARCHIVE_ENTRY_BYTES", 256)
+
+    with pytest.raises(data_management.ArchiveSafetyError):
+        data_management.create_backup(home, archive)
+
+    assert not archive.exists()
+
+
 @pytest.mark.parametrize("member", ["../escape", "/absolute", "data/../../escape"])
 def test_restore_rejects_malicious_archive_paths_before_mutation(tmp_path: Path, member: str) -> None:
     archive = tmp_path / "malicious.olbackup"

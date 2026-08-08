@@ -30,6 +30,7 @@ from openlearn.courses import (
 from .schemas import (
     CodeToolRequest,
     CourseCreateRequest,
+    DataManagementRequest,
     ProviderSetupRequest,
     PlacementRequest,
     ReviewGradeRequest,
@@ -760,15 +761,18 @@ class OpenLearnWebServices:
 
     def data_summary(self) -> dict[str, object]:
         inventory = application.data_inventory()
-        return inventory.summary()
+        return {
+            **inventory.summary(),
+            "confirmations": data_management.confirmation_phrases(),
+        }
 
-    def manage_data(self, request: object) -> dict[str, object]:
-        action = getattr(request, "action", "")
-        archive = Path(str(getattr(request, "archive", "")))
-        destination = Path(str(getattr(request, "destination", "")))
-        include_credentials = bool(getattr(request, "include_credentials", False))
-        credential_confirmation = str(getattr(request, "credential_confirmation", ""))
-        confirmation = str(getattr(request, "confirmation", ""))
+    def manage_data(self, request: DataManagementRequest) -> dict[str, object]:
+        action = request.action
+        archive = Path(request.archive)
+        destination = Path(request.destination)
+        include_credentials = request.include_credentials
+        credential_confirmation = request.credential_confirmation
+        confirmation = request.confirmation
         home = cli.project_home()
         try:
             if action in {"backup", "export"}:
@@ -781,7 +785,7 @@ class OpenLearnWebServices:
                 return {
                     "ok": True,
                     "archive": str(result.archive),
-                    "summary": self.data_summary(),
+                    "summary": result.inventory.summary(),
                 }
             if action == "restore":
                 result = data_management.restore_backup(archive, destination)

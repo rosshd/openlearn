@@ -12,8 +12,8 @@
       <label for="data-backup-path">Backup archive path</label>
       <input id="data-backup-path" name="archive" type="text" required maxlength="4096" placeholder="/path/to/openlearn-backup.olbackup">
       <label><input name="include_credentials" type="checkbox"> Include saved API credentials</label>
-      <label for="data-credential-confirmation">Credential phrase (only when included)</label>
-      <input id="data-credential-confirmation" name="credential_confirmation" type="text" maxlength="128" placeholder="{{ 'INCLUDE SAVED CREDENTIALS' }}">
+      <label for="data-credential-confirmation">Credential phrase: type <code>{{ data.confirmations.credentials }}</code> only when included</label>
+      <input id="data-credential-confirmation" name="credential_confirmation" type="text" maxlength="128" placeholder="{{ data.confirmations.credentials }}">
       <button class="primary-action" type="submit">Create verified backup</button>
     </form>
     <details class="secondary-controls">
@@ -29,10 +29,10 @@
           <input type="hidden" name="action" value="move">
           <label>Verified backup path <input name="archive" type="text" required maxlength="4096"></label>
           <label>New Openlearn home <input name="destination" type="text" required maxlength="4096"></label>
-          <p class="field-note">Type <code>MOVE OPENLEARN HOME</code> to confirm.</p>
+          <p class="field-note">Type <code>{{ data.confirmations.move }}</code> to confirm.</p>
           <label>Confirmation <input name="confirmation" type="text" required maxlength="128"></label>
           <label><input name="include_credentials" type="checkbox"> Move saved credentials too</label>
-          <label>Credential phrase <input name="credential_confirmation" type="text" maxlength="128"></label>
+          <label>Credential phrase: type <code>{{ data.confirmations.credentials }}</code> <input name="credential_confirmation" type="text" maxlength="128"></label>
           <button type="submit">Move after verification</button>
         </form>
       </div>
@@ -43,19 +43,19 @@
         <form class="form-stack" data-data-form>
           <input type="hidden" name="action" value="reset">
           <label>Verified backup path <input name="archive" type="text" required maxlength="4096"></label>
-          <p class="field-note">Type <code>RESET OPENLEARN DATA</code> to confirm. Provider settings remain unless credentials are included.</p>
+          <p class="field-note">Type <code>{{ data.confirmations.reset }}</code> to confirm. Provider settings remain unless credentials are included.</p>
           <label>Confirmation <input name="confirmation" type="text" required maxlength="128"></label>
           <label><input name="include_credentials" type="checkbox"> Reset saved credentials too</label>
-          <label>Credential phrase <input name="credential_confirmation" type="text" maxlength="128"></label>
+          <label>Credential phrase: type <code>{{ data.confirmations.credentials }}</code> <input name="credential_confirmation" type="text" maxlength="128"></label>
           <button type="submit">Reset after verification</button>
         </form>
         <form class="form-stack" data-data-form>
           <input type="hidden" name="action" value="delete">
           <label>Verified backup path <input name="archive" type="text" required maxlength="4096"></label>
-          <p class="field-note">Type <code>DELETE OPENLEARN HOME</code> to confirm. Saved credentials need their own checked scope and phrase.</p>
+          <p class="field-note">Type <code>{{ data.confirmations.delete }}</code> to confirm. Saved credentials need their own checked scope and phrase.</p>
           <label>Confirmation <input name="confirmation" type="text" required maxlength="128"></label>
           <label><input name="include_credentials" type="checkbox"> Delete saved credentials too</label>
-          <label>Credential phrase <input name="credential_confirmation" type="text" maxlength="128"></label>
+          <label>Credential phrase: type <code>{{ data.confirmations.credentials }}</code> <input name="credential_confirmation" type="text" maxlength="128"></label>
           <button type="submit">Delete after verification</button>
         </form>
       </div>

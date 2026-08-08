@@ -111,7 +111,7 @@ class DataManagementRequest(BaseModel):
 
     @model_validator(mode="after")
     def valid_data_scope(self) -> DataManagementRequest:
-        if self.action in {"backup", "export", "restore", "move", "reset", "delete"} and not self.archive.strip():
+        if not self.archive.strip():
             raise ValueError("A backup archive path is required")
         if self.action in {"restore", "move"} and not self.destination.strip():
             raise ValueError("A destination path is required")
