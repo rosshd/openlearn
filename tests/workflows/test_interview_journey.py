@@ -23,7 +23,8 @@ def test_interview_prep_public_cli_journey(spawn_openlearn) -> None:
     try:
         first.expect("Starter courses")
         first.sendline("s")
-        first.expect(f"{template_choice}  Technical Interview Prep")
+        # Rich may insert ANSI styling between the menu number and title.
+        first.expect("Technical Interview Prep")
         first.sendline(template_choice)
         first.expect("Placement is a short offline reasoning conversation")
         first.expect("Start placement, defer it, or go back")
