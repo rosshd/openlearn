@@ -142,12 +142,37 @@ def test_real_browser_course_polling_theme_conflict_and_keyboard_submit(
                 first.get_by_role("button", name="Build the first lesson").click()
                 first.wait_for_url("**/courses/*/placement")
                 assert "/placement" in first.url
+                first.get_by_role("button", name="Start placement").click()
+                playwright.expect(
+                    first.get_by_role("heading", name="First unique window")
+                ).to_be_visible()
+                playwright.expect(first.get_by_text("Step 1 of 2", exact=True)).to_be_visible()
+                assert first.locator("#placement-draft").get_attribute("rows") == "4"
                 _assert_no_page_overflow(first)
-                first.get_by_text("Other placement options", exact=True).click()
+                first.locator("#placement-draft").fill(
+                    "Should the result use zero-based indexing, and can width be zero?"
+                )
+                first.get_by_role("button", name="Continue to approach").click()
+                playwright.expect(first.get_by_text("Step 2 of 2", exact=True)).to_be_visible()
+                playwright.expect(
+                    first.get_by_role("heading", name="Good clarification habit")
+                ).to_be_visible()
+                assert first.url.endswith("/placement")
+                first.locator("#placement-draft").fill(
+                    "Use a sliding window with a set and move the left edge past duplicates. "
+                    "Handle invalid widths and no-match input. O(n) time and O(width) space."
+                )
+                first.get_by_role("button", name="Finish placement").click()
+                playwright.expect(
+                    first.get_by_role("heading", name="Your reasoning snapshot")
+                ).to_be_visible()
+                playwright.expect(
+                    first.get_by_role("link", name="Continue to lesson")
+                ).to_be_visible()
+                assert first.url.endswith("/placement")
+                _assert_no_page_overflow(first)
                 first.emulate_media(reduced_motion="reduce")
-                first.get_by_role(
-                    "button", name="Skip placement and use baseline"
-                ).click()
+                first.get_by_role("link", name="Continue to lesson").click()
                 first.wait_for_function(
                     "() => !window.location.pathname.endsWith('/placement')"
                 )

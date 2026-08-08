@@ -846,7 +846,7 @@ placementShell?.querySelector("[data-placement-draft-form]")?.addEventListener("
   event.preventDefault();
   const stage = event.currentTarget.dataset.placementStage;
   lockPlacement(true);
-  if (placementStatus) placementStatus.textContent = "Saving your reasoning locally…";
+  if (placementStatus) placementStatus.textContent = "Saving your answer locally…";
   try {
     const saved = await requestJson(`/api/courses/${encodeURIComponent(placementShell.dataset.courseSlug)}/placement`, {
       method: "POST",
@@ -858,7 +858,7 @@ placementShell?.querySelector("[data-placement-draft-form]")?.addEventListener("
       }),
     });
     placementShell.dataset.updatedAt = saved.updated_at || placementShell.dataset.updatedAt;
-    if (placementStatus) placementStatus.textContent = "Draft saved. Submitting this section…";
+    if (placementStatus) placementStatus.textContent = "Answer saved. Preparing the next step…";
     const result = await requestJson(`/api/courses/${encodeURIComponent(placementShell.dataset.courseSlug)}/placement`, {
       method: "POST",
       body: JSON.stringify({action: "submit", stage, submission_id: crypto.randomUUID()}),

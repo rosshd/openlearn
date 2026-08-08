@@ -19,7 +19,7 @@ from openlearn import providers
 from openlearn import tutor_service
 from openlearn.web import create_app
 from openlearn.web.app import PlaceholderServices
-from openlearn.web.schemas import TutorSubmissionRequest
+from openlearn.web.schemas import PlacementRequest, TutorSubmissionRequest
 from openlearn.web.services import (
     COURSE_INITIALIZATION_PROMPT,
     OpenLearnWebServices,
@@ -39,6 +39,14 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
 def csrf(client: TestClient, path: str = "/") -> str:
     response = client.get(path, follow_redirects=False)
     return response.cookies["openlearn_csrf"]
+
+
+def test_placement_request_preserves_the_durable_draft_limit() -> None:
+    text = "x" * (interview_prep.DRAFT_MAX_LENGTH - 1)
+
+    request = PlacementRequest(action="save_draft", stage="reasoning", text=text)
+
+    assert request.text == text
 
 
 def wait_for_operation(
@@ -153,6 +161,12 @@ def test_interview_course_placement_draft_resumes_and_finishes_before_lesson(
     )
     assert started.status_code == 200
     assert started.json()["next_stage"] == "clarification"
+    started_page = client.get(body["placement_url"])
+    assert "first_unique_window(text, width)" in started_page.text
+    assert "Step 1 of 2" in started_page.text
+    assert "Keep it to 1-2 sentences" in started_page.text
+    assert 'rows="4"' in started_page.text
+    assert 'rows="10"' not in started_page.text
 
     saved = client.post(
         f"/api/courses/{body['slug']}/placement",
@@ -188,18 +202,53 @@ def test_interview_course_placement_draft_resumes_and_finishes_before_lesson(
     assert submitted.status_code == 200
     assert submitted.json()["next_stage"] == "reasoning"
     assert submitted.json()["draft"] is None
-    skipped = restarted_client.post(
+    assert submitted.json()["feedback"]["title"] == "Good clarification habit"
+    reasoning_page = restarted_client.get(body["placement_url"])
+    assert "Interviewer contract" in reasoning_page.text
+    assert "Step 2 of 2" in reasoning_page.text
+    assert "Good clarification habit" in reasoning_page.text
+    reasoning_saved = restarted_client.post(
         f"/api/courses/{body['slug']}/placement",
         headers={"x-csrf-token": restarted_token},
-        json={"action": "skip_stage", "stage": "reasoning"},
+        json={
+            "action": "save_draft",
+            "stage": "reasoning",
+            "text": (
+                "Use a sliding window with a set and test invalid widths and duplicates. "
+                "The approach takes O(n) time."
+            ),
+            "expected_updated_at": submitted.json()["updated_at"],
+        },
     )
-    assert skipped.status_code == 202
-    assert skipped.json()["status"] == "provisional"
-    assert skipped.json()["initialization_url"]
+    assert reasoning_saved.status_code == 200
+    finished = restarted_client.post(
+        f"/api/courses/{body['slug']}/placement",
+        headers={"x-csrf-token": restarted_token},
+        json={
+            "action": "submit",
+            "stage": "reasoning",
+            "submission_id": str(uuid4()),
+        },
+    )
+    assert finished.status_code == 200
+    assert finished.json()["status"] == "provisional"
+    assert "initialization_url" not in finished.json()
+    completed_page = restarted_client.get(body["placement_url"])
+    assert "Your reasoning snapshot" in completed_page.text
+    assert "Named an approach and data structure" in completed_page.text
+    assert "Improve next:" in completed_page.text
+    assert "Continue to lesson" in completed_page.text
+
+    continued = restarted_client.get(
+        f"/courses/{body['slug']}", follow_redirects=False
+    )
+    assert continued.status_code == 303
+    assert "/initializing/" in continued.headers["location"]
+    operation_id = continued.headers["location"].rsplit("/", 1)[-1]
     wait_for_operation(
         restarted_client,
         body["slug"],
-        skipped.json()["operation_id"],
+        operation_id,
         "committed",
     )
 

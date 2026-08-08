@@ -346,6 +346,8 @@ async def update_placement(request: Request, slug: str) -> JSONResponse:
     if result.get("invalid"):
         return _json_error(str(result.get("error")), 422)
     if result.get("status") == "provisional":
+        if payload.action == "submit":
+            return JSONResponse(result)
         if not await _provider_ready(request):
             result["setup_url"] = str(
                 request.url_for("setup").include_query_params(

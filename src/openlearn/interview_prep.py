@@ -94,6 +94,12 @@ PLACEMENT_RUBRICS = {
 DRAFT_MAX_LINES = 50
 DRAFT_MAX_LINE_LENGTH = 4_000
 DRAFT_MAX_LENGTH = 40_000
+PLACEMENT_V3_SIGNAL_LABELS = {
+    "named_data_structure_or_strategy": "Named an approach and data structure",
+    "covered_edges_and_tests": "Covered edge cases and expected tests",
+    "stated_time_complexity": "Explained time complexity",
+    "stated_space_complexity": "Explained space complexity",
+}
 PROFILE_FIELDS = (
     "role_family",
     "target_level",
@@ -178,13 +184,15 @@ PLACEMENT_PROBLEM = {
     ],
 }
 
-PLACEMENT_ASSUMPTION_CARD = (
-    "Interviewer assumptions:\n"
-    "- `text` is a Python string and `width` is an integer.\n"
-    "- Return the zero-based start index of the first qualifying window.\n"
-    "- Return -1 when no qualifying window exists, including nonpositive widths "
-    "and widths larger than the text.\n"
-    "- Character comparison uses Python string characters exactly as provided."
+PLACEMENT_CONTRACT = (
+    "text is a Python string and width is an integer.",
+    "Return the zero-based start index of the first qualifying window.",
+    "Return -1 when no qualifying window exists, including nonpositive widths and "
+    "widths larger than the text.",
+    "Character comparison uses Python string characters exactly as provided.",
+)
+PLACEMENT_ASSUMPTION_CARD = "Interviewer assumptions:\n" + "\n".join(
+    f"- {item}" for item in PLACEMENT_CONTRACT
 )
 PLACEMENT_EXECUTION_EVIDENCE_KIND = "openlearn-placement-execution-v1"
 
@@ -1260,7 +1268,20 @@ def _evidence_observation(
         )
     )
     signals: list[str] = []
-    if not skipped and not non_attempt and stage == "clarification" and "?" in response:
+    word_count = len(re.findall(r"\b[\w'-]+\b", normalized))
+    clarification_topic = re.search(
+        r"\b(?:input|output|text|width|index|constraint|edge|empty|zero|negative|case|"
+        r"unicode|duplicate|return)\b",
+        normalized,
+    )
+    if (
+        not skipped
+        and not non_attempt
+        and stage == "clarification"
+        and "?" in response
+        and word_count >= 3
+        and clarification_topic
+    ):
         signals.append("asked_clarifying_question")
     if (
         not skipped
@@ -1317,18 +1338,33 @@ def _evidence_observation(
     if not skipped and not non_attempt and stage == "debrief" and len(response.split()) >= 5:
         signals.append("engaged_in_debrief")
     if not skipped and not non_attempt and stage == "reasoning":
-        if re.search(
-            r"\b(?:set|dict|dictionary|map|hashmap|window|index)\b", normalized
-        ):
+        strategy = re.search(r"\b(?:sliding window|two pointers?)\b", normalized)
+        structured_storage = re.search(
+            r"\b(?:use|using|track|store|maintain)\b.{0,40}"
+            r"\b(?:set|dict|dictionary|map|hashmap)\b",
+            normalized,
+        )
+        if word_count >= 5 and (strategy or structured_storage):
             signals.append("named_data_structure_or_strategy")
-        if any(
-            term in normalized
-            for term in ("edge", "test", "empty", "invalid", "duplicate", "width one")
+        if re.search(
+            r"\b(?:edges?|edge cases?|empty|invalid|duplicate|nonpositive|no[- ]match|"
+            r"width (?:of )?(?:zero|one)|width (?:larger|greater))\b",
+            normalized,
         ):
             signals.append("covered_edges_and_tests")
-        if re.search(r"\bo\s*\([^)]{1,30}\)\s*(?:time)?", normalized):
+        if re.search(
+            r"(?:\bo\s*\([^)]{1,30}\)\s+time\b|\btime(?: complexity)?\s*(?:is|of|:)"
+            r"?\s*o\s*\([^)]{1,30}\)|\b(?:constant|linear|logarithmic|quadratic)"
+            r"\s+time\b)",
+            normalized,
+        ):
             signals.append("stated_time_complexity")
-        if re.search(r"\bo\s*\([^)]{1,30}\)\s*space", normalized):
+        if re.search(
+            r"(?:\bo\s*\([^)]{1,30}\)\s+(?:extra\s+)?space\b|\bspace(?: complexity)?"
+            r"\s*(?:is|of|:)?\s*o\s*\([^)]{1,30}\)|\b(?:constant|linear|logarithmic|"
+            r"quadratic)\s+(?:extra\s+)?space\b)",
+            normalized,
+        ):
             signals.append("stated_space_complexity")
     required_by_stage = {
         "clarification": {"asked_clarifying_question"},
@@ -1383,6 +1419,101 @@ def _observation_status(observations: Mapping[str, object], stage: str) -> str:
     }:
         return str(value["status"])
     return "uncertain"
+
+
+def placement_feedback(placement: Mapping[str, object]) -> dict[str, object] | None:
+    """Return concise learner-facing coaching from durable v3 reasoning signals."""
+    lifecycle_version, _rubric_version = _placement_versions(placement)
+    if lifecycle_version != PLACEMENT_V3 or placement.get("status") not in {
+        "in_progress",
+        "provisional",
+    }:
+        return None
+    observations = placement.get("observations")
+    if not isinstance(observations, Mapping):
+        return None
+    clarification = observations.get("clarification")
+    clarification_signals = (
+        set(str(signal) for signal in clarification.get("signals", []))
+        if isinstance(clarification, Mapping)
+        else set()
+    )
+    asked_clarification = "asked_clarifying_question" in clarification_signals
+    if placement.get("status") == "in_progress":
+        if placement.get("next_stage") != "reasoning" or clarification is None:
+            return None
+        return {
+            "title": (
+                "Good clarification habit"
+                if asked_clarification
+                else "Sharpen your clarification"
+            ),
+            "strengths": (
+                ["You asked a direct clarifying question before choosing an approach."]
+                if asked_clarification
+                else []
+            ),
+            "improvement": (
+                "Next, name the data structure, the window invariant, important edge cases, "
+                "and the expected time and space cost."
+                if asked_clarification
+                else "Ask one direct question about inputs, indexing, constraints, or edge "
+                "cases before committing to an approach."
+            ),
+            "next_step": "Explain your approach",
+        }
+
+    result = placement.get("result")
+    passport = result.get("passport") if isinstance(result, Mapping) else None
+    reasoning = observations.get("reasoning")
+    reasoning_signals = (
+        set(str(signal) for signal in reasoning.get("signals", []))
+        if isinstance(reasoning, Mapping)
+        else set()
+    )
+    strengths = [
+        label
+        for signal, label in PLACEMENT_V3_SIGNAL_LABELS.items()
+        if signal in reasoning_signals
+    ]
+    if asked_clarification:
+        strengths.insert(0, "Asked a direct clarifying question")
+    improvement_by_signal = (
+        (
+            "named_data_structure_or_strategy",
+            "Name the data structure and the invariant that keeps the window valid.",
+        ),
+        (
+            "covered_edges_and_tests",
+            "Call out invalid widths, duplicate characters, and at least one no-match test.",
+        ),
+        (
+            "stated_time_complexity",
+            "State the time complexity and explain why the window processes each character "
+            "only a bounded number of times.",
+        ),
+        (
+            "stated_space_complexity",
+            "State the space complexity in terms of the tracked window or character set.",
+        ),
+    )
+    improvement = next(
+        (message for signal, message in improvement_by_signal if signal not in reasoning_signals),
+        str(passport.get("practice_priority"))
+        if isinstance(passport, Mapping)
+        else "Turn the approach into a complete tested implementation during practice.",
+    )
+    next_step = (
+        str(passport.get("first_activity"))
+        if isinstance(passport, Mapping)
+        else "Start the baseline lesson"
+    )
+    return {
+        "title": "Your reasoning snapshot",
+        "strengths": strengths,
+        "improvement": improvement,
+        "next_step": next_step,
+    }
 
 
 def _axis_status(observations: Mapping[str, object], stages: tuple[str, ...]) -> str:
@@ -1460,20 +1591,14 @@ def _provisional_result(
     if rubric_version == PLACEMENT_V3:
         reasoning = observations.get("reasoning")
         observed_signals = list(reasoning.get("signals", [])) if isinstance(reasoning, dict) else []
-        public_signal_labels = {
-            "named_data_structure_or_strategy": "Named an approach and data structure",
-            "covered_edges_and_tests": "Covered edge cases and expected tests",
-            "stated_time_complexity": "Explained time complexity",
-            "stated_space_complexity": "Explained space complexity",
-        }
         reasoning_signals = [
-            public_signal_labels[signal]
+            PLACEMENT_V3_SIGNAL_LABELS[signal]
             for signal in observed_signals
-            if signal in public_signal_labels
+            if signal in PLACEMENT_V3_SIGNAL_LABELS
         ]
         if not reasoning_signals:
             reasoning_signals = ["Reasoning needs confirmation during guided practice"]
-        strong_reasoning = len(reasoning_signals) == len(public_signal_labels)
+        strong_reasoning = len(reasoning_signals) == len(PLACEMENT_V3_SIGNAL_LABELS)
         result["starting_level"] = (
             "developing-reasoning" if strong_reasoning else "foundational-reasoning"
         )

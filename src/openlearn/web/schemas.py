@@ -8,6 +8,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from openlearn.interview_prep import DRAFT_MAX_LENGTH
 from openlearn.data_management import (
     CREDENTIAL_CONFIRMATION,
     DELETE_CONFIRMATION,
@@ -79,7 +80,7 @@ class PlacementRequest(BaseModel):
         "start", "save_draft", "submit", "skip_stage", "skip", "defer", "restart"
     ]
     stage: str | None = Field(default=None, max_length=64)
-    text: str = Field(default="", max_length=40000)
+    text: str = Field(default="", max_length=DRAFT_MAX_LENGTH)
     submission_id: str | None = Field(default=None, max_length=64)
     expected_updated_at: str | None = Field(default=None, max_length=64)
 

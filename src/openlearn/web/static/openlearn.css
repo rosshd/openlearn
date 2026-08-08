@@ -237,6 +237,15 @@ h2 { font-size: clamp(1.35rem, 3vw, 2rem); line-height: 1.1; letter-spacing: -0.
 .prompt-block p { margin: 0; font-weight: 680; }
 .feedback-strip { padding: 1rem 1.2rem; border-left: 5px solid var(--teal); background: var(--teal-soft); }
 .feedback-strip p { margin: 0.35rem 0 0; }
+.placement-problem { padding: 1rem 1.2rem; border: 1px solid var(--line); border-left: 6px solid var(--orange); background: var(--surface-raised); }
+.placement-problem h2, .placement-feedback h2 { margin-bottom: 0.55rem; }
+.problem-prompt { max-width: 68ch; font-size: 1.05rem; }
+.placement-examples { display: flex; gap: 0.75rem 1.5rem; flex-wrap: wrap; margin-bottom: 0; padding-left: 1.2rem; }
+.placement-feedback { padding: 1rem 1.2rem; border-left: 6px solid var(--teal); background: var(--teal-soft); }
+.placement-feedback ul, .placement-feedback p:last-child { margin-bottom: 0; }
+.placement-contract { padding: 0.9rem 1rem; border: 1px solid var(--line); background: var(--surface-raised); }
+.placement-contract h3 { margin-bottom: 0.45rem; }
+.placement-contract ul { margin-bottom: 0; }
 .composer { border: 1px solid var(--line-strong); background: var(--surface); }
 .intent-picker { margin: 0; padding: 0.45rem; border: 0; border-bottom: 1px solid var(--line); display: flex; gap: 0.25rem; flex-wrap: wrap; }
 .intent-picker label { cursor: pointer; }

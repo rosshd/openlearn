@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import tempfile
 import unittest
@@ -130,6 +131,7 @@ class InterviewPrepTests(unittest.TestCase):
             activity_id="act_0123456789abcdef0123456789abcdef",
             now=lambda: NOW,
         )
+        self.assertIsNone(interview_prep.placement_feedback(started["placement"]))
 
         self.assertEqual(started["placement"]["next_stage"], "clarification")
         self.assertEqual(started["placement"]["rubric_version"], interview_prep.PLACEMENT_V3)
@@ -276,6 +278,89 @@ class InterviewPrepTests(unittest.TestCase):
         )
         self.assertEqual(result["passport"]["first_activity"], "Sliding Window Foundations")
         self.assertNotIn("Can width", json.dumps(result["passport"]))
+
+    def test_v3_feedback_uses_observed_answer_signals_for_constructive_coaching(self) -> None:
+        self.create()
+        started = interview_prep.start_placement(
+            self.path,
+            activity_id="act_0123456789abcdef0123456789abcdef",
+            now=lambda: NOW,
+        )
+        clarification_id = interview_prep.placement_evidence_id(
+            started["placement"], "clarification"
+        )
+        after_clarification = interview_prep.record_placement_evidence(
+            self.path,
+            "clarification",
+            "Can width be zero?",
+            evidence_id=clarification_id,
+            now=lambda: NOW,
+        )
+
+        interim = interview_prep.placement_feedback(after_clarification["placement"])
+
+        self.assertEqual(interim["title"], "Good clarification habit")
+        self.assertIn("direct clarifying question", interim["strengths"][0])
+        weak_clarification = copy.deepcopy(after_clarification["placement"])
+        weak_clarification["observations"]["clarification"]["signals"] = []
+        weak_feedback = interview_prep.placement_feedback(weak_clarification)
+        self.assertEqual(weak_feedback["title"], "Sharpen your clarification")
+        self.assertEqual(weak_feedback["strengths"], [])
+        reasoning_id = interview_prep.placement_evidence_id(
+            after_clarification["placement"], "reasoning"
+        )
+        completed = interview_prep.record_placement_evidence(
+            self.path,
+            "reasoning",
+            "Use a sliding window with a set and test invalid widths and duplicates.",
+            evidence_id=reasoning_id,
+            now=lambda: NOW,
+        )
+
+        feedback = interview_prep.placement_feedback(completed["placement"])
+
+        self.assertEqual(feedback["title"], "Your reasoning snapshot")
+        self.assertIn("Named an approach and data structure", feedback["strengths"])
+        self.assertIn("Covered edge cases and expected tests", feedback["strengths"])
+        self.assertEqual(
+            feedback["improvement"],
+            "State the time complexity and explain why the window processes each character only a bounded number of times.",
+        )
+        self.assertEqual(feedback["next_step"], "Sliding Window Foundations")
+
+        labels = interview_prep.PLACEMENT_V3_SIGNAL_LABELS
+        cases = (
+            (set(), "Name the data structure and the invariant"),
+            (
+                {"named_data_structure_or_strategy"},
+                "Call out invalid widths, duplicate characters",
+            ),
+            (
+                {
+                    "named_data_structure_or_strategy",
+                    "covered_edges_and_tests",
+                },
+                "State the time complexity",
+            ),
+            (
+                {
+                    "named_data_structure_or_strategy",
+                    "covered_edges_and_tests",
+                    "stated_time_complexity",
+                },
+                "State the space complexity",
+            ),
+            (
+                set(labels),
+                "Practice structuring an approach with edge cases and complexity.",
+            ),
+        )
+        for signals, expected_improvement in cases:
+            with self.subTest(signals=signals):
+                placement = copy.deepcopy(completed["placement"])
+                placement["observations"]["reasoning"]["signals"] = list(signals)
+                branch_feedback = interview_prep.placement_feedback(placement)
+                self.assertIn(expected_improvement, branch_feedback["improvement"])
 
     def test_v3_rejects_malformed_drafts_and_baseline_but_legacy_reset_survives(
         self,
@@ -712,6 +797,49 @@ class InterviewPrepTests(unittest.TestCase):
         self.assertEqual(false_positive["status"], "not_observed")
         self.assertIn("named_data_structure_or_strategy", positive["signals"])
         self.assertEqual(positive["status"], "observed")
+
+    def test_v3_reasoning_signals_require_substantive_specific_evidence(self) -> None:
+        cases = (
+            (
+                "Return the first index and test empty input.",
+                {"covered_edges_and_tests"},
+            ),
+            ("A window test with O(n) space.", {"stated_space_complexity"}),
+            (
+                "Use a sliding window with a set. Test invalid widths. "
+                "O(n) time and O(width) space.",
+                set(interview_prep.PLACEMENT_V3_SIGNAL_LABELS),
+            ),
+            (
+                "Use a sliding window and handle duplicate input. "
+                "Linear time with constant extra space.",
+                set(interview_prep.PLACEMENT_V3_SIGNAL_LABELS),
+            ),
+        )
+        for response, expected in cases:
+            with self.subTest(response=response):
+                observation = interview_prep._evidence_observation(
+                    "reasoning",
+                    response,
+                    coding_language="python",
+                    rubric_version=interview_prep.PLACEMENT_V3,
+                )
+                self.assertEqual(set(observation["signals"]), expected)
+
+        vague = interview_prep._evidence_observation(
+            "clarification",
+            "What?",
+            coding_language="python",
+            rubric_version=interview_prep.PLACEMENT_V3,
+        )
+        specific = interview_prep._evidence_observation(
+            "clarification",
+            "Should width be zero?",
+            coding_language="python",
+            rubric_version=interview_prep.PLACEMENT_V3,
+        )
+        self.assertNotIn("asked_clarifying_question", vague["signals"])
+        self.assertIn("asked_clarifying_question", specific["signals"])
 
     def test_practice_schedule_preserves_non_divisible_weekly_budget(self) -> None:
         scheduled, session, sessions = interview_prep.practice_schedule(

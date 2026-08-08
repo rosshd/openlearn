@@ -601,13 +601,27 @@ class OpenLearnWebServices:
         placement = value["placement"]
         assert isinstance(placement, dict)
         draft = placement.get("draft")
+        problem = interview_prep.PLACEMENT_PROBLEM
+        examples = problem["examples"]
+        assert isinstance(examples, list)
+        stages = interview_prep.placement_stages(placement)
+        next_stage = placement.get("next_stage")
         return {
             "slug": slug,
             "status": placement.get("status"),
-            "next_stage": placement.get("next_stage"),
+            "next_stage": next_stage,
             "updated_at": placement.get("updated_at"),
             "attempt_id": placement.get("attempt_id"),
             "draft": draft if isinstance(draft, dict) else None,
+            "step": stages.index(next_stage) + 1 if next_stage in stages else len(stages),
+            "step_count": len(stages),
+            "problem": {
+                "title": problem["title"],
+                "prompt": problem["prompt"],
+                "examples": examples,
+            },
+            "contract": list(interview_prep.PLACEMENT_CONTRACT),
+            "feedback": interview_prep.placement_feedback(placement),
         }
 
     def _interview_course(self, slug: str) -> application.CourseSnapshot | None:
