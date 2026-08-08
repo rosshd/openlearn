@@ -22,6 +22,10 @@ It publishes those exact distribution files through PyPI trusted publishing befo
 
 ## Publish
 
+Complete the five-person release-candidate gate in [`manual-tests/public-release.md`](../manual-tests/public-release.md) against the exact candidate from the successful `Tests` run.
+Do not create or push the release tag while any tester journey, required platform, recovery probe, or release blocker remains pending.
+Select the public version only after the sanitized gate record is complete and its candidate hashes still match.
+
 After all checks pass, push the new immutable tag:
 
 ```bash

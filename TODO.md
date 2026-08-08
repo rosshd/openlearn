@@ -2,8 +2,9 @@
 
 ## Active
 
-- [ ] **Quick Learn validation** - dogfood the file, folder, and public GitHub flows with real study material before release.
-- [ ] **Tag and push current release** - confirm `src/openlearn/__init__.py` version target, then push the matching `vX.Y.Z` tag to run the automated release workflow.
+- [ ] **Public release candidate dogfood** - run `manual-tests/public-release.md` with five fresh testers across macOS, Windows, and Linux; close every release blocker before selecting a tag.
+- [ ] **Quick Learn validation** - assign the local-file journey in the public gate and separately dogfood folder and public GitHub flows with non-sensitive study material.
+- [ ] **Select and publish the Community release** - after the human gate passes, choose the version, verify the exact candidate hashes, and push the matching immutable `vX.Y.Z` tag.
 
 ## Backlog
 

@@ -26,6 +26,10 @@ Files
   Set OPENLEARN=/path/to/openlearn only to select a different installed binary.
   The script needs a POSIX shell, so run it from macOS, Linux, Git Bash, or WSL.
 
+- public-release.md
+  Defines the five-person fresh-user release gate, required platform and journey
+  coverage, privacy-safe evidence, blocker triage, and the final GO/NO-GO record.
+
 Fast Workflows
 0. Shortest built-in workflow:
    openlearn test

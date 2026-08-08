@@ -168,6 +168,20 @@ class ReleaseArtifactPolicyTests(unittest.TestCase):
         self.assertIn("browser-smoke", workflow)
         self.assertIn("package-smoke", workflow)
 
+    def test_public_release_runbook_keeps_fresh_human_gate_before_tagging(self) -> None:
+        dogfood = (REPOSITORY / "manual-tests" / "public-release.md").read_text(
+            encoding="utf-8"
+        )
+        release = (REPOSITORY / "docs" / "RELEASING.md").read_text(encoding="utf-8")
+
+        self.assertIn("five fresh testers", dogfood.lower())
+        self.assertIn("macOS", dogfood)
+        self.assertIn("Windows", dogfood)
+        self.assertIn("Linux", dogfood)
+        self.assertIn("Do not record", dogfood)
+        self.assertIn("Do not create or push the release tag", release)
+        self.assertIn("manual-tests/public-release.md", release)
+
 
 def test_primary_action_colors_meet_wcag_aa() -> None:
     css = (
