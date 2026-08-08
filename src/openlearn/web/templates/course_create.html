@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="create-shell" aria-labelledby="create-title">
+  <div class="section-heading">
+    <div><p class="eyebrow">New work</p><h1 id="create-title">What do you want to understand?</h1></div>
+    <a class="quiet-link" href="{{ url_for('dashboard') }}">Back to dashboard</a>
+  </div>
+
+  <div class="starter-strip" aria-labelledby="starters-title">
+    <div class="panel-heading"><h2 id="starters-title">Starter courses</h2><span>Optional</span></div>
+    <div class="starter-grid">
+      {% for starter in course_templates %}
+      <button class="starter-tile" type="button" data-template-choice
+        data-template-id="{{ starter.id }}" data-title="{{ starter.title }}" data-goal="{{ starter.description }}">
+        <span class="starter-index">{{ "%02d"|format(loop.index) }}</span>
+        <strong>{{ starter.title }}</strong>
+        <small>{{ starter.description }}</small>
+      </button>
+      {% else %}
+      <p class="quiet-copy">Starter courses are loading. You can still create any course below.</p>
+      {% endfor %}
+    </div>
+  </div>
+
+  <form class="work-panel form-stack create-form" data-json-form data-endpoint="/api/courses" novalidate>
+    <input type="hidden" name="submission_id" data-uuid>
+    <input type="hidden" name="template_id">
+    <div class="error-summary" role="alert" tabindex="-1" data-form-error hidden></div>
+    <label for="course-title">Course name</label>
+    <input id="course-title" name="title" maxlength="160" required placeholder="Technical Interview Prep">
+    <label for="goal">Your goal</label>
+    <textarea id="goal" name="goal" rows="4" maxlength="4000" required placeholder="What should you be able to do when this course is working?"></textarea>
+    <label for="experience">What have you tried already? <span class="optional">Optional</span></label>
+    <textarea id="experience" name="experience" rows="3" maxlength="4000" placeholder="A few words is enough. This guides the first example, but does not count as mastery."></textarea>
+    <div class="form-footer">
+      <p class="field-note" data-form-status>One short prompt, then teaching starts.</p>
+      <button class="primary-action" type="submit">Build the first lesson <span aria-hidden="true">→</span></button>
+    </div>
+  </form>
+</section>
+{% endblock %}

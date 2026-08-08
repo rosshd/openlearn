@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en" data-theme="system">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="csrf-token" content="{{ csrf_token }}">
+    <meta name="openlearn-root" content="{{ app_root }}">
+    <title>{{ page_title }} · openlearn</title>
+    <link rel="icon" href="{{ url_for('static', path='/favicon.svg') }}" type="image/svg+xml">
+    <link rel="stylesheet" href="{{ url_for('static', path='/openlearn.css') }}">
+    <script src="{{ url_for('static', path='/openlearn.js') }}" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Skip to main content</a>
+    <header class="site-header">
+      <a class="wordmark" href="{{ url_for('dashboard') }}" aria-label="openlearn dashboard">
+        <span class="wordmark-mark" aria-hidden="true">ol</span>
+        <span>openlearn</span>
+      </a>
+      <div class="header-tools">
+        <span class="local-status"><span aria-hidden="true"></span> Local</span>
+        <button class="tool-button" type="button" data-theme-toggle aria-label="Change color theme">
+          Theme: <span data-theme-label>System</span>
+        </button>
+      </div>
+    </header>
+    {% block status %}{% endblock %}
+    <main id="main-content" tabindex="-1">
+      {% block content %}{% endblock %}
+    </main>
+    <div class="sr-only" role="status" aria-live="polite" aria-atomic="true" data-live-region></div>
+  </body>
+</html>

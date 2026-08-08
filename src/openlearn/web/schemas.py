@@ -1,0 +1,81 @@
+"""HTTP-boundary validation helpers."""
+
+from __future__ import annotations
+
+import re
+from typing import Any
+from uuid import UUID
+
+from pydantic import BaseModel, Field, field_validator
+
+SLUG_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$")
+
+
+def canonical_slug(value: str) -> str:
+    if not SLUG_PATTERN.fullmatch(value):
+        raise ValueError("Invalid course identifier")
+    return value
+
+
+def canonical_uuid(value: str) -> str:
+    try:
+        parsed = UUID(value)
+    except (ValueError, AttributeError) as error:
+        raise ValueError("Expected a canonical UUID") from error
+    if str(parsed) != value:
+        raise ValueError("Expected a canonical UUID")
+    return value
+
+
+class ProviderSetupRequest(BaseModel):
+    provider: str = Field(min_length=1, max_length=64)
+    api_key: str = Field(default="", max_length=4096)
+    model: str = Field(min_length=1, max_length=256)
+    base_url: str = Field(default="", max_length=2048)
+    save_unverified: bool = False
+
+
+class CourseCreateRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=160)
+    goal: str = Field(min_length=1, max_length=4000)
+    experience: str = Field(default="", max_length=4000)
+    template_id: str | None = Field(default=None, max_length=128)
+    submission_id: str = Field(min_length=1, max_length=64)
+
+    @field_validator("submission_id")
+    @classmethod
+    def valid_submission_id(cls, value: str) -> str:
+        return canonical_uuid(value)
+
+
+class TutorSubmissionRequest(BaseModel):
+    intent: str
+    text: str = Field(default="", max_length=32000)
+    submission_id: str = Field(min_length=1, max_length=64)
+    expected_revision: int = Field(ge=0)
+
+    @field_validator("intent")
+    @classmethod
+    def allowed_intent(cls, value: str) -> str:
+        if value not in {"answer", "question", "stuck", "skip", "next"}:
+            raise ValueError("Unsupported learner intent")
+        return value
+
+    @field_validator("submission_id")
+    @classmethod
+    def valid_submission_id(cls, value: str) -> str:
+        return canonical_uuid(value)
+
+
+def public_mapping(value: Any) -> dict[str, Any]:
+    """Convert an application DTO to a template-safe mapping."""
+
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    if hasattr(value, "model_dump"):
+        return value.model_dump()
+    if hasattr(value, "__dict__"):
+        return {key: item for key, item in vars(value).items() if not key.startswith("_")}
+    raise TypeError(f"Expected a structured application result, got {type(value).__name__}")

@@ -503,6 +503,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     tui_parser.set_defaults(func=cmd_tui)
 
+    web_parser = sub.add_parser("web", help="Open the local web learning workspace")
+    web_parser.add_argument("--port", type=int, default=8765, help="Loopback port (default: 8765)")
+    web_parser.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Start the server without opening a browser",
+    )
+    web_parser.set_defaults(func=cmd_web)
+
     config_parser = sub.add_parser("config", help="Manage local model configuration")
     config_sub = config_parser.add_subparsers(required=True)
 
@@ -900,6 +909,16 @@ def cmd_tui(args: argparse.Namespace) -> int:
         print("TUI requires prompt-toolkit. Install with: python -m pip install prompt-toolkit")
         return 2
     return run_tui(topic=args.topic, model=args.model)
+
+
+def cmd_web(args: argparse.Namespace) -> int:
+    try:
+        from .web.launcher import WebLaunchError, run
+
+        run(port=args.port, open_browser=not args.no_browser)
+    except WebLaunchError as exc:
+        raise OpenLearnError(str(exc)) from exc
+    return 0
 
 
 def run_menu(input_func=input, output_func=print) -> int:
@@ -8370,6 +8389,10 @@ def ask_topic(
     deferred_updates: DeferredTurnUpdates | None = None,
     pending_learner_prompt: str | None = None,
     system_prompt_sink: Callable[[str], object] | None = None,
+    allow_specialized_actions: bool = True,
+    commit_state_hook: (
+        Callable[[str, dict[str, object], dict[str, object]], None] | None
+    ) = None,
 ) -> str:
     global _LAST_RESPONSE_ANSWER_KEY, _LAST_RESPONSE_CODING_DRILL_ACTION
     topic = read_topic(
@@ -8501,6 +8524,14 @@ def ask_topic(
         cue_state = state_from_metadata(projected_metadata).get("enter_advance_cue")
         if cue_state is not None:
             state_after["enter_advance_cue"] = cue_state
+    internal = state_after.get("_openlearn_internal")
+    internal = copy.deepcopy(internal) if isinstance(internal, dict) else {}
+    revision = internal.get("course_revision")
+    internal["schema_version"] = 1
+    internal["course_revision"] = revision + 1 if isinstance(revision, int) else 1
+    state_after["_openlearn_internal"] = internal
+    if commit_state_hook is not None:
+        commit_state_hook(answer, projected_metadata, state_after)
     _commit_projected_turn(
         topic.slug,
         state_before,
@@ -8511,7 +8542,7 @@ def ask_topic(
         before_metadata=stable_metadata_for_topic(original_metadata),
         after_metadata=stable_metadata_for_topic(projected_metadata),
     )
-    if coding_drill_action is not None:
+    if allow_specialized_actions and coding_drill_action is not None:
         orchestrate_tutor_coding_drill(
             read_topic(topic.slug),
             coding_drill_action,
@@ -8811,20 +8842,21 @@ def _session_entry(
     created: str,
     mutation_id: str,
 ) -> str:
-    return textwrap.dedent(
-        f"""
-
-        <!-- openlearn-turn:{mutation_id} -->
-        ### {created} - {kind}
-
-        **Prompt**
-
-        {prompt}
-
-        **Response**
-
-        {answer}
-        """
+    # Build around model-controlled multiline text without letting its
+    # indentation affect the structural Markdown markers.
+    return "\n".join(
+        [
+            f"<!-- openlearn-turn:{mutation_id} -->",
+            f"### {created} - {kind}",
+            "",
+            "**Prompt**",
+            "",
+            prompt,
+            "",
+            "**Response**",
+            "",
+            answer,
+        ]
     ).strip()
 
 
@@ -8961,6 +8993,38 @@ def _apply_state_projection_patch(
             raise OpenLearnError("saved tutor turn journal has an invalid state operation")
 
 
+def _assert_turn_internal_preconditions(
+    state: dict[str, object], patch: list[dict[str, object]]
+) -> None:
+    """Fence revision and active-turn changes before a journal publishes anything."""
+    guarded_paths = {
+        ("_openlearn_internal", "course_revision"),
+        ("_openlearn_internal", "active_turn"),
+    }
+    missing = object()
+    for operation in patch:
+        raw_path = operation.get("path")
+        if not isinstance(raw_path, list) or tuple(raw_path) not in guarded_paths:
+            continue
+        parent, key = _lookup_patch_parent(state, raw_path, create=False)
+        current = parent.get(key, missing) if parent is not None else missing
+        op = operation.get("op")
+        if op == "set":
+            matches = (
+                current is missing
+                if operation.get("before_missing") is True
+                else current == operation.get("before")
+            )
+        elif op == "remove":
+            matches = current == operation.get("before")
+        else:
+            matches = True
+        if not matches:
+            raise TurnCommitConflictError(
+                "course changed while the tutor was preparing a response"
+            )
+
+
 def _canonical_json_bytes(value: object) -> bytes:
     try:
         return json.dumps(
@@ -9042,7 +9106,8 @@ def _validated_projection_patch(value: object, *, label: str) -> list[dict[str, 
                 "saved tutor turn journal targets unsupported topic metadata"
             )
         if label == "state" and not (
-            is_dynamic_metadata_key(top_level_key) or top_level_key == "unit_state"
+            is_dynamic_metadata_key(top_level_key)
+            or top_level_key in {"unit_state", "_openlearn_internal"}
         ):
             raise OpenLearnError("saved tutor turn journal targets unsupported state")
         if op == "increment":
@@ -9442,16 +9507,21 @@ def _apply_turn_journal(slug: str, journal: dict[str, object]) -> bool:
         _recover_activity_update_locked(slug)
         state = _load_state_unlocked(slug)
         receipts = _validated_turn_receipts(state)
-        state_after_validation = copy.deepcopy(state)
-        _apply_state_projection_patch(
-            state_after_validation, copy.deepcopy(journal["state_patch"])
-        )
+        state_patch = journal["state_patch"]
+        if not isinstance(state_patch, list):
+            raise OpenLearnError("saved tutor turn journal has an invalid state patch")
         commit_hash = str(journal["commit_sha256"])
         existing_receipt = receipts.get(mutation_id)
         if existing_receipt is not None and existing_receipt != commit_hash:
             raise OpenLearnError(
                 "saved tutor turn receipt conflicts with the pending journal; "
                 "move the journal aside and retry"
+            )
+        if existing_receipt is None:
+            _assert_turn_internal_preconditions(state, state_patch)
+            state_after_validation = copy.deepcopy(state)
+            _apply_state_projection_patch(
+                state_after_validation, copy.deepcopy(state_patch)
             )
         if marker not in topic_text:
             raw_metadata, body = parse_topic(topic_text)
@@ -9469,10 +9539,7 @@ def _apply_turn_journal(slug: str, journal: dict[str, object]) -> bool:
         _turn_commit_checkpoint("after_topic")
 
         if existing_receipt is None:
-            patch = journal["state_patch"]
-            if not isinstance(patch, list):
-                raise OpenLearnError("saved tutor turn journal has an invalid state patch")
-            _apply_state_projection_patch(state, patch)
+            _apply_state_projection_patch(state, state_patch)
             receipts[mutation_id] = commit_hash
             state["_turn_receipts"] = receipts
             state["_turn_receipts_schema"] = 2
@@ -9532,7 +9599,14 @@ def recover_turn_commit(slug: str) -> bool:
         if str(journal["mutation_id"]) in legacy_receipt_ids:
             durable_unlink(journal_path)
             return False
-    applied = _apply_turn_journal(slug, journal)
+    try:
+        applied = _apply_turn_journal(slug, journal)
+    except TurnCommitConflictError:
+        with file_lock(journal_path):
+            current = _read_turn_journal(slug)
+            if current is not None and current.get("mutation_id") == journal.get("mutation_id"):
+                durable_unlink(journal_path)
+        raise
     _turn_commit_checkpoint("before_cleanup")
     with file_lock(journal_path):
         current = _read_turn_journal(slug)
@@ -13810,6 +13884,12 @@ def read_config() -> dict[str, object]:
     return dict(data)
 
 
+def clear_config_cache() -> None:
+    """Make configuration written by another interface visible immediately."""
+    global _CONFIG_CACHE
+    _CONFIG_CACHE = None
+
+
 def write_config(config: dict[str, object]) -> None:
     global _CONFIG_CACHE
     project_home().mkdir(parents=True, exist_ok=True)
@@ -15139,7 +15219,24 @@ def save_state(slug: str, state: dict[str, object]) -> None:
         ):
             if internal_key in existing:
                 updated[internal_key] = existing[internal_key]
+        if "_openlearn_internal" in existing and "_openlearn_internal" not in updated:
+            updated["_openlearn_internal"] = existing["_openlearn_internal"]
         write_text_atomic(path, json.dumps(updated, indent=2, sort_keys=True) + "\n")
+
+
+def update_state_atomic(
+    slug: str, update: Callable[[dict[str, object]], None]
+) -> dict[str, object]:
+    """Apply one state mutation without a cross-process read/write gap."""
+    recover_turn_commit(slug)
+    path = topic_state_path(slug)
+    with file_lock(topic_path(slug)), file_lock(path):
+        raise_if_topic_tombstoned(slug)
+        _recover_activity_update_locked(slug)
+        state = _load_state_unlocked(slug)
+        update(state)
+        write_text_atomic(path, json.dumps(state, indent=2, sort_keys=True) + "\n")
+        return copy.deepcopy(state)
 
 
 def load_pending_learner_prompt(slug: str) -> str | None:
@@ -17442,6 +17539,10 @@ def today() -> str:
 
 
 class OpenLearnError(Exception):
+    pass
+
+
+class TurnCommitConflictError(OpenLearnError):
     pass
 
 

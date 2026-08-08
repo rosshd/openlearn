@@ -50,7 +50,7 @@ jobs:
         run: |
           set -euo pipefail
           python -m venv .release-venv
-          .release-venv/bin/python -m pip install dist/*.whl
+          .release-venv/bin/python -m pip install dist/*.whl "httpx>=0.27,<1"
 
           package_version=$(
             .release-venv/bin/python -c \
@@ -61,13 +61,15 @@ jobs:
 
           [[ "$cli_output" == *"$package_version"* ]]
           [[ "$package_version" == "$tag_version" ]]
+          .release-venv/bin/python -c \
+            "from fastapi.testclient import TestClient; from openlearn.web.app import PlaceholderServices, create_app; c = TestClient(create_app(PlaceholderServices(), testing=True)); assert c.get('/setup').status_code == 200; assert c.get('/static/openlearn.css').status_code == 200; assert c.get('/static/openlearn.js').status_code == 200; assert c.get('/static/favicon.svg').status_code == 200"
 
       - name: Verify sdist version
         shell: bash
         run: |
           set -euo pipefail
           python -m venv .release-sdist-venv
-          .release-sdist-venv/bin/python -m pip install dist/*.tar.gz
+          .release-sdist-venv/bin/python -m pip install dist/*.tar.gz "httpx>=0.27,<1"
 
           package_version=$(
             .release-sdist-venv/bin/python -c \
@@ -78,6 +80,8 @@ jobs:
 
           [[ "$cli_output" == *"$package_version"* ]]
           [[ "$package_version" == "$tag_version" ]]
+          .release-sdist-venv/bin/python -c \
+            "from fastapi.testclient import TestClient; from openlearn.web.app import PlaceholderServices, create_app; c = TestClient(create_app(PlaceholderServices(), testing=True)); assert c.get('/setup').status_code == 200; assert c.get('/static/openlearn.css').status_code == 200; assert c.get('/static/openlearn.js').status_code == 200; assert c.get('/static/favicon.svg').status_code == 200"
 
   publish:
     needs: verify

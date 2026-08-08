@@ -1,0 +1,293 @@
+"""Thin HTTP adapter for openlearn application services."""
+
+from __future__ import annotations
+
+import inspect
+from typing import Any
+
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from pydantic import ValidationError
+from starlette.concurrency import run_in_threadpool
+
+from .schemas import (
+    CourseCreateRequest,
+    ProviderSetupRequest,
+    TutorSubmissionRequest,
+    canonical_slug,
+    canonical_uuid,
+    public_mapping,
+)
+
+router = APIRouter()
+
+
+async def _call(request: Request, method: str, *args: Any, **kwargs: Any) -> Any:
+    operation = getattr(request.app.state.services, method, None)
+    if operation is None:
+        raise HTTPException(status_code=503, detail="This application operation is unavailable.")
+    if inspect.iscoroutinefunction(operation):
+        return await operation(*args, **kwargs)
+    return await run_in_threadpool(operation, *args, **kwargs)
+
+
+def _templates(request: Request) -> Any:
+    return request.app.state.templates
+
+
+def _context(request: Request, **values: Any) -> dict[str, Any]:
+    return {
+        "request": request,
+        "csrf_token": request.app.state.security.csrf_token,
+        "app_root": request.scope.get("root_path", ""),
+        **values,
+    }
+
+
+def _json_error(message: str, status: int = 400, **extra: Any) -> JSONResponse:
+    return JSONResponse({"ok": False, "error": message, **extra}, status_code=status)
+
+
+async def _provider_ready(request: Request) -> bool:
+    status = public_mapping(await _call(request, "provider_status"))
+    return bool(status.get("ready"))
+
+
+def _setup_redirect(request: Request) -> RedirectResponse:
+    return RedirectResponse(request.url_for("setup"), status_code=303)
+
+
+def _setup_required(request: Request) -> JSONResponse:
+    return _json_error(
+        "Validate a model provider before starting model-backed teaching.",
+        428,
+        state="setup_required",
+        setup_url=str(request.url_for("setup")),
+    )
+
+
+@router.get("/health", response_class=JSONResponse)
+async def health() -> dict[str, str]:
+    return {"status": "ok"}
+
+
+@router.get("/", response_class=HTMLResponse)
+async def home(request: Request) -> Any:
+    if not await _provider_ready(request):
+        return _setup_redirect(request)
+    return await _dashboard_response(request)
+
+
+@router.get("/setup", response_class=HTMLResponse, name="setup")
+async def setup(request: Request) -> Any:
+    status = public_mapping(await _call(request, "provider_status"))
+    response = _templates(request).TemplateResponse(
+        request,
+        "setup.html",
+        _context(request, provider=status, page_title="Set up openlearn"),
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@router.post("/api/setup", response_class=JSONResponse)
+async def save_setup(request: Request) -> JSONResponse:
+    try:
+        payload = ProviderSetupRequest.model_validate(await request.json())
+    except (ValidationError, ValueError):
+        return _json_error("Check the highlighted provider details.")
+    result = public_mapping(await _call(request, "configure_provider", payload))
+    status = 200 if result.get("ok", result.get("ready", False)) else 422
+    response = JSONResponse(result, status_code=status)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@router.get("/dashboard", response_class=HTMLResponse, name="dashboard")
+async def dashboard(request: Request) -> Any:
+    if not await _provider_ready(request):
+        return _setup_redirect(request)
+    return await _dashboard_response(request)
+
+
+async def _dashboard_response(request: Request) -> Any:
+    snapshot = public_mapping(await _call(request, "dashboard"))
+    return _templates(request).TemplateResponse(
+        request,
+        "dashboard.html",
+        _context(request, dashboard=snapshot, page_title="Your workbench"),
+    )
+
+
+@router.get("/courses/new", response_class=HTMLResponse, name="new_course")
+async def new_course(request: Request) -> Any:
+    if not await _provider_ready(request):
+        return _setup_redirect(request)
+    templates = await _call(request, "course_templates")
+    return _templates(request).TemplateResponse(
+        request,
+        "course_create.html",
+        _context(request, course_templates=templates, page_title="Start a course"),
+    )
+
+
+@router.post("/api/courses", response_class=JSONResponse)
+async def create_course(request: Request) -> JSONResponse:
+    if not await _provider_ready(request):
+        return _setup_required(request)
+    try:
+        payload = CourseCreateRequest.model_validate(await request.json())
+    except (ValidationError, ValueError) as error:
+        return _json_error("Add a title and a clear learning goal.", errors=str(error))
+    result = public_mapping(await _call(request, "create_course", payload))
+    if not result.get("ok", False):
+        return _json_error(str(result.get("error") or "Course creation failed."), 422)
+    if result.get("slug"):
+        result.setdefault(
+            "initialization_url",
+            str(
+                request.url_for(
+                    "course_initializing",
+                    slug=result["slug"],
+                    operation_id=result["operation_id"],
+                )
+            ),
+        )
+    return JSONResponse(result, status_code=202 if result.get("operation_id") else 200)
+
+
+@router.get(
+    "/courses/{slug}/initializing/{operation_id}",
+    response_class=HTMLResponse,
+    name="course_initializing",
+)
+async def course_initializing(request: Request, slug: str, operation_id: str) -> Any:
+    if not await _provider_ready(request):
+        return _setup_redirect(request)
+    try:
+        slug = canonical_slug(slug)
+        operation_id = canonical_uuid(operation_id)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail="Course initialization not found") from error
+    snapshot = public_mapping(await _call(request, "course_initialization", slug, operation_id))
+    if snapshot.get("missing"):
+        raise HTTPException(status_code=404, detail="Course initialization not found")
+    if snapshot.get("state") == "committed":
+        return RedirectResponse(request.url_for("focus", slug=slug), status_code=303)
+    response = _templates(request).TemplateResponse(
+        request,
+        "course_initializing.html",
+        _context(
+            request,
+            initialization=snapshot,
+            status_url=str(
+                request.url_for("operation_status", slug=slug, operation_id=operation_id)
+            ),
+            retry_url=str(
+                request.url_for(
+                    "retry_course_initialization",
+                    slug=slug,
+                    operation_id=operation_id,
+                )
+            ),
+            focus_url=str(request.url_for("focus", slug=slug)),
+            page_title="Preparing your first lesson",
+        ),
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@router.post(
+    "/api/courses/{slug}/initialization/{operation_id}/retry",
+    response_class=JSONResponse,
+    name="retry_course_initialization",
+)
+async def retry_course_initialization(
+    request: Request, slug: str, operation_id: str
+) -> JSONResponse:
+    if not await _provider_ready(request):
+        return _setup_required(request)
+    try:
+        slug = canonical_slug(slug)
+        operation_id = canonical_uuid(operation_id)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail="Course initialization not found") from error
+    result = public_mapping(await _call(request, "retry_course_initialization", slug, operation_id))
+    if result.get("state") == "missing":
+        raise HTTPException(status_code=404, detail="Course initialization not found")
+    status = 409 if result.get("state") == "conflict" else 202
+    return JSONResponse(result, status_code=status)
+
+
+@router.get("/courses/{slug}", response_class=HTMLResponse, name="focus")
+async def focus(request: Request, slug: str) -> Any:
+    if not await _provider_ready(request):
+        return _setup_redirect(request)
+    try:
+        slug = canonical_slug(slug)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail="Course not found") from error
+    snapshot = public_mapping(await _call(request, "focus", slug))
+    if snapshot.get("missing"):
+        raise HTTPException(status_code=404, detail="Course not found")
+    initialization = snapshot.get("initialization")
+    if isinstance(initialization, dict) and initialization.get("id"):
+        return RedirectResponse(
+            request.url_for(
+                "course_initializing",
+                slug=slug,
+                operation_id=initialization["id"],
+            ),
+            status_code=303,
+        )
+    return _templates(request).TemplateResponse(
+        request,
+        "focus.html",
+        _context(request, course=snapshot, page_title=snapshot.get("title", "Focus Bench")),
+    )
+
+
+@router.post("/api/courses/{slug}/turns", response_class=JSONResponse)
+async def submit_turn(request: Request, slug: str) -> JSONResponse:
+    if not await _provider_ready(request):
+        return _setup_required(request)
+    try:
+        slug = canonical_slug(slug)
+        payload = TutorSubmissionRequest.model_validate(await request.json())
+    except (ValidationError, ValueError) as error:
+        return _json_error("Check your response and try again.", errors=str(error))
+    result = public_mapping(await _call(request, "submit_turn", slug, payload))
+    status = 409 if result.get("state") == "conflict" else 202
+    return JSONResponse(result, status_code=status)
+
+
+@router.get("/api/courses/{slug}/operations/{operation_id}", response_class=JSONResponse)
+async def operation_status(request: Request, slug: str, operation_id: str) -> JSONResponse:
+    try:
+        slug = canonical_slug(slug)
+        operation_id = canonical_uuid(operation_id)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail="Operation not found") from error
+    result = public_mapping(await _call(request, "operation_status", slug, operation_id))
+    response = JSONResponse(result)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@router.get("/courses/{slug}/history", response_class=HTMLResponse, name="history")
+async def history(request: Request, slug: str, page: int = 1) -> Any:
+    if not await _provider_ready(request):
+        return _setup_redirect(request)
+    try:
+        slug = canonical_slug(slug)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail="Course not found") from error
+    snapshot = public_mapping(await _call(request, "history", slug, page=max(1, min(page, 100))))
+    if "application/json" in request.headers.get("accept", ""):
+        return JSONResponse(snapshot)
+    return _templates(request).TemplateResponse(
+        request,
+        "history.html",
+        _context(request, history=snapshot, course_slug=slug, page_title="Session history"),
+    )

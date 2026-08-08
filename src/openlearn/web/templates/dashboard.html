@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="dashboard-shell" aria-labelledby="dashboard-title">
+  <div class="section-heading">
+    <div>
+      <p class="eyebrow">Your workbench</p>
+      <h1 id="dashboard-title">Pick up where you left off.</h1>
+    </div>
+    <a class="primary-action compact" href="{{ url_for('new_course') }}">Start something new <span aria-hidden="true">+</span></a>
+  </div>
+
+  {% if dashboard.active_course %}
+  <article class="resume-bench">
+    <div>
+      <p class="eyebrow">Ready to resume</p>
+      <h2>{{ dashboard.active_course.title }}</h2>
+      <p>{{ dashboard.active_course.next_move or dashboard.active_course.summary }}</p>
+    </div>
+    <div class="resume-meta">
+      <span>{{ dashboard.active_course.progress or 0 }}% complete</span>
+      <a class="primary-action" href="{{ url_for('focus', slug=dashboard.active_course.slug) }}">Return to the bench <span aria-hidden="true">→</span></a>
+    </div>
+  </article>
+  {% else %}
+  <article class="empty-bench">
+    <div class="bench-grid" aria-hidden="true"></div>
+    <p class="eyebrow">Clear bench</p>
+    <h2>Start with a goal, not a syllabus.</h2>
+    <p>Choose a starter course or tell openlearn what you want to make sense of. Teaching begins after one short context prompt.</p>
+    <a class="primary-action" href="{{ url_for('new_course') }}">Choose a starting point <span aria-hidden="true">→</span></a>
+  </article>
+  {% endif %}
+
+  <div class="dashboard-grid">
+    <section class="course-list" aria-labelledby="courses-title">
+      <div class="panel-heading"><h2 id="courses-title">Courses</h2><span>{{ dashboard.courses|length }}</span></div>
+      {% for course in dashboard.courses %}
+      <a class="course-row" href="{{ url_for('focus', slug=course.slug) }}">
+        <span class="course-tool" aria-hidden="true">{{ loop.index|string }}</span>
+        <span><strong>{{ course.title }}</strong><small>{{ course.current_unit or 'Ready to learn' }}</small></span>
+        <span class="course-progress">{{ course.progress or 0 }}%</span>
+      </a>
+      {% else %}
+      <p class="quiet-copy">Your active courses will stay here, ready on this machine.</p>
+      {% endfor %}
+    </section>
+    <aside class="review-panel" aria-labelledby="review-title">
+      <p class="eyebrow">Review tray</p>
+      <h2 id="review-title">{{ dashboard.due_reviews or 0 }} due</h2>
+      <p>Reviews appear when your learning evidence says a concept is ready to revisit.</p>
+    </aside>
+  </div>
+</section>
+{% endblock %}

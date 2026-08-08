@@ -1,0 +1,14 @@
+<section class="history-list" aria-label="Earlier lesson moves">
+  {% for item in history.items %}
+  <article class="history-item">
+    <p class="eyebrow">{{ item.kind or 'Lesson step' }}</p>
+    {% if item.title %}<h3>{{ item.title }}</h3>{% endif %}
+    <p>{{ item.content }}</p>
+  </article>
+  {% else %}
+  <p class="quiet-copy">No earlier moves in this session yet.</p>
+  {% endfor %}
+  {% if history.has_more %}
+  <a class="quiet-link" href="{{ url_for('history', slug=course_slug) }}?page={{ (history.page or 1) + 1 }}">Load earlier moves</a>
+  {% endif %}
+</section>

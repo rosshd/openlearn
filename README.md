@@ -33,7 +33,18 @@ pip install -e .
 
 On Windows, activate the virtual environment with `.venv\Scripts\Activate.ps1` before installing.
 
-Run the app:
+Run the local web app:
+
+```bash
+openlearn web
+```
+
+This opens the loopback-only Maker Bench interface for provider setup, starter courses, focused tutoring, progress, and session history.
+Each launch uses a private capability stored in the local server lease, and the browser exchanges it once for an HttpOnly session cookie before the token is removed from the address bar.
+It reads and writes the same local course files as the CLI.
+Use `openlearn web --no-browser` on a headless machine or `openlearn web --port 9000` to choose another local port.
+
+Run the terminal interface:
 
 ```bash
 openlearn
@@ -205,7 +216,7 @@ If the editor cannot be launched, openLearn keeps the drill active and prints it
 | Sources | `import <topic> <file>`, `import <topic> --url <url>`, `import <topic> --scan <dir>`, `paste` |
 | Practice | `videos`, REPL `/drill`, REPL `/check` |
 | Interview prep | `interview setup`, `interview profile`, `interview edit`, `interview placement`, `interview clear` |
-| Utilities | `templates`, `test`, `tui` |
+| Utilities | `web`, `templates`, `test`, `tui` |
 
 Model-backed commands require an API key for non-local providers, but localhost OpenAI-compatible endpoints such as Ollama may be used keylessly.
 `OPENLEARN_MOCK=1` runs model-backed tests without any provider call.

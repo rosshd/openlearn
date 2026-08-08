@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="setup-layout" aria-labelledby="setup-title">
+  <div class="setup-intro">
+    <p class="eyebrow">First run</p>
+    <h1 id="setup-title">Connect your tutor</h1>
+    <p class="lede">Choose a model provider once. Your key stays in openlearn's local configuration and is never shown here again.</p>
+    <div class="bench-note">
+      <span class="bench-note-number">01</span>
+      <p>OpenRouter is the recommended low-cost starting point. You can change providers later.</p>
+    </div>
+  </div>
+
+  {% if provider.managed %}
+  <section class="work-panel form-stack" aria-labelledby="managed-provider-title">
+    <div class="form-header">
+      <p class="eyebrow">Provider setup</p>
+      <span class="state-chip">Environment managed</span>
+    </div>
+    <h2 id="managed-provider-title">Your provider is ready</h2>
+    <p class="field-note">Provider credentials are supplied by your shell environment. Change them there, then restart openlearn.</p>
+    <a class="primary-action" href="{{ url_for('dashboard') }}"><span>Continue to your workbench</span><span aria-hidden="true">→</span></a>
+  </section>
+  {% else %}
+  <form class="work-panel form-stack" data-json-form data-endpoint="/api/setup" data-success-url="/dashboard" novalidate>
+    <div class="form-header">
+      <p class="eyebrow">Provider setup</p>
+      <span class="state-chip">Local config</span>
+    </div>
+    <div class="error-summary" role="alert" tabindex="-1" data-form-error hidden></div>
+    {% if provider.reason %}<p class="field-note">{{ provider.reason }}</p>{% endif %}
+
+    <label for="provider">Provider</label>
+    <select id="provider" name="provider">
+      {% for choice in provider.providers %}
+      <option value="{{ choice.id }}"
+        data-default-base-url="{{ choice.base_url or '' }}"
+        data-default-model="{{ choice.default_model or '' }}"
+        {% if choice.id == provider.selected_provider %}selected{% endif %}>
+        {{ choice.name }}{% if choice.recommended %} - recommended{% endif %}
+      </option>
+      {% endfor %}
+    </select>
+
+    <label for="api-key">API key</label>
+    <input id="api-key" name="api_key" type="password" autocomplete="off" spellcheck="false"
+      placeholder="Paste a new key">
+    <p class="field-note">Stored values are intentionally never loaded into this page.</p>
+
+    <label for="model">Model</label>
+    <input id="model" name="model" value="{{ provider.form_model or '' }}"
+      autocomplete="off" required>
+
+    <details class="advanced-fields">
+      <summary>Advanced connection details</summary>
+      <label for="base-url">Base URL</label>
+      <input id="base-url" name="base_url" type="url" value="{{ provider.form_base_url or '' }}" autocomplete="off">
+      <label class="check-row">
+        <input type="checkbox" name="save_unverified">
+        Save during a network outage without validating
+      </label>
+    </details>
+
+    <button class="primary-action" type="submit" data-submit-label="Test and save">
+      <span>Test and save</span><span aria-hidden="true">→</span>
+    </button>
+    <p class="field-note" data-form-status>We will test the connection before teaching starts.</p>
+  </form>
+  {% endif %}
+</section>
+{% endblock %}

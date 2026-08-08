@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block status %}
+<div class="focus-status" aria-label="Lesson status">
+  <a href="{{ url_for('dashboard') }}" class="exit-link">← Dashboard</a>
+  <div class="focus-identity">
+    <strong>{{ course.title }}</strong>
+    <span>{{ course.current_unit or course.unit or 'Current lesson' }}</span>
+  </div>
+  <span class="saved-state" data-saved-state><span aria-hidden="true"></span>{{ course.saved_state or 'Saved locally' }}</span>
+</div>
+{% endblock %}
+{% block content %}
+<div class="focus-shell" data-focus-shell data-course-slug="{{ course.slug }}" data-revision="{{ course.revision or 0 }}"
+  {% if course.operation %}data-operation-id="{{ course.operation.id }}" data-operation-state="{{ course.operation.state }}" data-operation-error="{{ course.operation.error }}"{% endif %}>
+  <aside class="tool-rail" aria-label="Lesson tools">
+    <button type="button" class="rail-button" data-drawer-toggle="progress-drawer" aria-expanded="false"><span aria-hidden="true">◫</span> Progress</button>
+    <button type="button" class="rail-button" data-drawer-toggle="history-drawer" aria-expanded="false"><span aria-hidden="true">↺</span> History</button>
+  </aside>
+
+  <section class="focus-column" aria-labelledby="move-title">
+    {% if course.feedback %}
+    <aside class="feedback-strip {{ course.feedback.tone or '' }}" aria-label="Tutor feedback">
+      <strong>{{ course.feedback.label or 'Tutor note' }}</strong>
+      <p>{{ course.feedback.content }}</p>
+    </aside>
+    {% endif %}
+
+    <article class="move-surface" data-current-move>
+      <div class="move-header">
+        <p class="eyebrow">{{ course.move.kind or 'Current move' }}</p>
+        <span class="move-number">{{ course.move.position or course.position or 'Now' }}</span>
+      </div>
+      <h1 id="move-title" tabindex="-1">{{ course.move.title or 'Ready when you are' }}</h1>
+      <div class="move-content">
+        {% for block in course.move.blocks or [] %}
+          {% if block.kind == 'paragraph' %}<p>{{ block.text }}</p>
+          {% elif block.kind == 'unordered_list' %}<ul>{% for item in block['items'] %}<li>{{ item }}</li>{% endfor %}</ul>
+          {% elif block.kind == 'ordered_list' %}<ol>{% for item in block['items'] %}<li>{{ item }}</li>{% endfor %}</ol>
+          {% elif block.kind == 'code' %}<pre><code{% if block.language %} data-language="{{ block.language }}"{% endif %}>{{ block.text }}</code></pre>
+          {% endif %}
+        {% endfor %}
+        {% if course.move.content %}<p>{{ course.move.content }}</p>{% endif %}
+      </div>
+      {% if course.move.prompt %}<div class="prompt-block"><p>{{ course.move.prompt }}</p></div>{% endif %}
+    </article>
+
+    <form class="composer" data-turn-form>
+      <input type="hidden" name="submission_id" data-uuid value="{{ course.operation.id if course.operation else '' }}">
+      <input type="hidden" name="expected_revision" value="{{ course.revision or 0 }}">
+      <fieldset class="intent-picker">
+        <legend class="sr-only">Response intent</legend>
+        <label><input type="radio" name="intent" value="answer" checked><span>Answer</span></label>
+        <label><input type="radio" name="intent" value="question"><span>Ask a question</span></label>
+        <label><input type="radio" name="intent" value="stuck"><span>I am stuck</span></label>
+      </fieldset>
+      <label class="sr-only" for="learner-response">Your response</label>
+      <textarea id="learner-response" name="text" rows="5" maxlength="32000" placeholder="Work through your thinking here…">{{ course.saved_response or '' }}</textarea>
+      <div class="composer-footer">
+        <span class="intent-readout">Sending as <strong data-intent-label>Answer</strong></span>
+        <button class="primary-action" type="submit">Send response <span aria-hidden="true">⌘↵</span></button>
+      </div>
+      <div class="operation-state" data-operation-state role="status" aria-live="polite" hidden></div>
+    </form>
+
+    <nav class="secondary-actions" aria-label="Lesson navigation">
+      <button type="button" data-navigation-intent="skip">Skip for now</button>
+      <button type="button" data-navigation-intent="next">Next concept</button>
+    </nav>
+  </section>
+
+  <aside class="drawer" id="progress-drawer" aria-labelledby="progress-title" hidden>
+    <button class="drawer-close" type="button" data-drawer-close aria-label="Close progress">×</button>
+    <p class="eyebrow">Course progress</p>
+    <h2 id="progress-title">{{ course.progress.percent or course.progress or 0 }}% complete</h2>
+    {% if course.progress.summary %}<p>{{ course.progress.summary }}</p>{% endif %}
+    <progress max="100" value="{{ course.progress.percent or course.progress or 0 }}">{{ course.progress.percent or course.progress or 0 }}%</progress>
+  </aside>
+
+  <aside class="drawer" id="history-drawer" aria-labelledby="history-title" hidden data-history-url="{{ url_for('history', slug=course.slug) }}">
+    <button class="drawer-close" type="button" data-drawer-close aria-label="Close history">×</button>
+    <p class="eyebrow">Earlier in this session</p>
+    <h2 id="history-title">History</h2>
+    <div data-history-content><p class="quiet-copy">Open to load learner-facing history.</p></div>
+  </aside>
+</div>
+{% endblock %}
