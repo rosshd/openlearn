@@ -444,8 +444,6 @@ async def submit_turn(request: Request, slug: str) -> JSONResponse:
 
 @router.post("/api/courses/{slug}/tools/video", response_class=JSONResponse)
 async def prepare_video(request: Request, slug: str) -> JSONResponse:
-    if not await _provider_ready(request):
-        return _setup_required(request)
     try:
         slug = canonical_slug(slug)
         payload = VideoToolRequest.model_validate(await request.json())
@@ -461,8 +459,6 @@ async def prepare_video(request: Request, slug: str) -> JSONResponse:
 
 @router.get("/api/courses/{slug}/tools/code", response_class=JSONResponse)
 async def code_state(request: Request, slug: str) -> JSONResponse:
-    if not await _provider_ready(request):
-        return _setup_required(request)
     try:
         slug = canonical_slug(slug)
     except ValueError as error:
@@ -477,8 +473,6 @@ async def code_state(request: Request, slug: str) -> JSONResponse:
 
 @router.post("/api/courses/{slug}/tools/code", response_class=JSONResponse)
 async def update_code(request: Request, slug: str) -> JSONResponse:
-    if not await _provider_ready(request):
-        return _setup_required(request)
     try:
         slug = canonical_slug(slug)
         payload = CodeToolRequest.model_validate(await request.json())
@@ -498,8 +492,6 @@ async def update_code(request: Request, slug: str) -> JSONResponse:
 
 @router.get("/api/courses/{slug}/tools/sources", response_class=JSONResponse)
 async def course_sources(request: Request, slug: str) -> JSONResponse:
-    if not await _provider_ready(request):
-        return _setup_required(request)
     try:
         slug = canonical_slug(slug)
     except ValueError as error:
@@ -516,8 +508,6 @@ async def import_file_source(
     slug: str,
     file: UploadFile = File(...),
 ) -> JSONResponse:
-    if not await _provider_ready(request):
-        return _setup_required(request)
     try:
         slug = canonical_slug(slug)
     except ValueError as error:
@@ -546,8 +536,6 @@ async def import_file_source(
 
 @router.post("/api/courses/{slug}/tools/sources/folder", response_class=JSONResponse)
 async def import_folder_source(request: Request, slug: str) -> JSONResponse:
-    if not await _provider_ready(request):
-        return _setup_required(request)
     try:
         slug = canonical_slug(slug)
         payload = FolderSourceRequest.model_validate(await request.json())
@@ -561,8 +549,6 @@ async def import_folder_source(request: Request, slug: str) -> JSONResponse:
 
 @router.post("/api/courses/{slug}/tools/sources/github", response_class=JSONResponse)
 async def import_github_source(request: Request, slug: str) -> JSONResponse:
-    if not await _provider_ready(request):
-        return _setup_required(request)
     try:
         slug = canonical_slug(slug)
         payload = GitHubSourceRequest.model_validate(await request.json())

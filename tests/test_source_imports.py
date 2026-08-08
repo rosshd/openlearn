@@ -116,6 +116,89 @@ class CourseSourceImportTests(unittest.TestCase):
         self.assertNotIn(secret_text, repr(result))
         self.assertEqual(list(cli.topic_context_dir("python").glob("*")), [])
 
+    def test_likely_secrets_are_rejected_before_any_context_is_persisted(self) -> None:
+        source = Path(self.home.name) / "provider-notes.md"
+        secret = "sk-proj-" + "a" * 32
+        source.write_text(f"OPENAI_API_KEY={secret}\n", encoding="utf-8")
+
+        result = self.import_source(source_imports.LocalFileSource(source))
+
+        self.assertEqual(result.failed[0].label, "provider-notes.md")
+        self.assertEqual(
+            result.failed[0].message,
+            "Source may contain a credential or private key.",
+        )
+        self.assertNotIn(secret, repr(result))
+        self.assertEqual(source_imports.list_course_sources("python"), ())
+        self.assertEqual(list(cli.topic_context_dir("python").glob("*")), [])
+
+    def test_private_key_material_is_rejected_without_echoing(self) -> None:
+        source = Path(self.home.name) / "deployment.md"
+        private_key = "-----BEGIN OPENSSH PRIVATE KEY-----\nprivate-key-body\n"
+        source.write_text(private_key, encoding="utf-8")
+
+        result = self.import_source(source_imports.LocalFileSource(source))
+
+        self.assertEqual(result.failed[0].label, "deployment.md")
+        self.assertEqual(result.failed[0].message, "Source may contain a credential or private key.")
+        self.assertNotIn(private_key, repr(result))
+        self.assertEqual(list(cli.topic_context_dir("python").glob("*")), [])
+
+    def test_secret_lookalikes_remain_importable(self) -> None:
+        source = Path(self.home.name) / "example-config.md"
+        source.write_text(
+            "OPENAI_API_KEY=replace-with-your-key\n"
+            "password=test-password-used-in-documentation-only\n"
+            "access_token=fake-token-for-a-tutorial-example\n"
+            "The example token below is intentionally not a credential.\n",
+            encoding="utf-8",
+        )
+
+        result = self.import_source(source_imports.LocalFileSource(source))
+
+        self.assertEqual([item.label for item in result.imported], ["example-config.md"])
+        self.assertEqual(len(result.sources), 1)
+
+    def test_folder_and_github_secret_candidates_are_omitted_without_echoing(self) -> None:
+        secret = "ghp_" + "a" * 36
+        folder = Path(self.home.name) / "sources"
+        folder.mkdir()
+        (folder / "safe.md").write_text("A safe local source.", encoding="utf-8")
+        (folder / "token.md").write_text(f"token={secret}", encoding="utf-8")
+
+        folder_result = self.import_source(source_imports.LocalFolderSource(folder))
+
+        self.assertEqual([item.label for item in folder_result.imported], ["safe.md"])
+        self.assertEqual([item.label for item in folder_result.failed], ["token.md"])
+        self.assertNotIn(secret, repr(folder_result))
+
+        def fake_clone(command, clone_dir, env):
+            clone_dir.mkdir(parents=True)
+            (clone_dir / "README.md").write_text(f"token={secret}", encoding="utf-8")
+
+        with mock.patch.object(cli, "_bounded_git_clone", side_effect=fake_clone):
+            github_result = self.import_source(
+                source_imports.PublicGitHubSource("https://github.com/example/learning")
+            )
+
+        self.assertEqual([item.label for item in github_result.failed], ["README.md"])
+        self.assertNotIn(secret, repr(github_result))
+        saved = "\n".join(
+            path.read_text(encoding="utf-8") for path in cli.context_source_files("python")
+        )
+        self.assertNotIn(secret, saved)
+
+    def test_unsupported_archives_are_rejected_without_reading_or_persisting(self) -> None:
+        archive = Path(self.home.name) / "notes.zip"
+        archive.write_bytes(b"PK\x03\x04not an archive to unpack")
+
+        result = self.import_source(source_imports.LocalFileSource(archive))
+
+        self.assertEqual(result.failed[0].label, "notes.zip")
+        self.assertEqual(result.failed[0].message, "Archive imports are not supported.")
+        self.assertEqual(source_imports.list_course_sources("python"), ())
+        self.assertEqual(list(cli.topic_context_dir("python").glob("*")), [])
+
     def test_folder_import_uses_quick_learn_selection_boundaries(self) -> None:
         folder = Path(self.home.name) / "project"
         (folder / "build").mkdir(parents=True)

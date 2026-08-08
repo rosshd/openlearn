@@ -188,6 +188,25 @@ def test_mutation_requires_launch_csrf_token(client: TestClient) -> None:
     assert "secret" not in response.text
 
 
+@pytest.mark.parametrize(
+    "path",
+    (
+        "/api/courses/safe-course/tools/video",
+        "/api/courses/safe-course/tools/code",
+        "/api/courses/safe-course/tools/sources/file",
+        "/api/courses/safe-course/tools/sources/folder",
+        "/api/courses/safe-course/tools/sources/github",
+    ),
+)
+def test_tool_mutations_require_the_existing_csrf_boundary(path: str) -> None:
+    fresh = TestClient(create_app(WebStub(), testing=True))
+
+    response = fresh.post(path, json={"url": "https://youtu.be/dQw4w9WgXcQ"})
+
+    assert response.status_code == 403
+    assert response.json() == {"error": "invalid_csrf_token"}
+
+
 def test_same_origin_mutation_accepts_cookie_and_never_echoes_key(client: TestClient) -> None:
     setup = client.get("/setup")
     token = setup.cookies["openlearn_csrf"]

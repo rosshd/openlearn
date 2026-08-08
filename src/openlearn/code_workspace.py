@@ -22,6 +22,9 @@ DEFAULT_SOURCE = """\
 # Try a small idea here. Use Save to keep this draft locally for this course.
 print("Hello from openlearn")
 """
+RUNNER_UNAVAILABLE_MESSAGE = (
+    "Secure code execution needs Docker or Podman. Install or start one, then run openlearn doctor."
+)
 _SLUG_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 
 
@@ -177,11 +180,11 @@ class CodeWorkspace:
                     reduced_isolation=reduced_isolation,
                     preferred_runtime=preferred_runtime,
                 )
-            except code_runner.RunnerUnavailableError as exc:
+            except code_runner.RunnerUnavailableError:
                 execution = ExecutionResult(
                     status="runner_unavailable",
                     stdout="",
-                    stderr=self._bounded(str(exc)),
+                    stderr=RUNNER_UNAVAILABLE_MESSAGE,
                     timed_out=False,
                     exit_code=None,
                     signal=None,

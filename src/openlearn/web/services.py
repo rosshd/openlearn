@@ -510,7 +510,7 @@ class OpenLearnWebServices:
                 source_imports.CourseSourceImportRequest(
                     course_slug=slug,
                     source=source,
-                    model=cli.configured_model(),
+                    model=None,
                 )
             )
         except (cli.OpenLearnError, OSError):

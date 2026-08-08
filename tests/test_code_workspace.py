@@ -340,7 +340,11 @@ class CodeWorkspaceTests(unittest.TestCase):
 
         self.assertEqual(result.status, "runner_unavailable")
         self.assertEqual(result.limit_reason, "runner_unavailable")
-        self.assertIn("OCI runtime", result.stderr)
+        self.assertEqual(
+            result.stderr,
+            "Secure code execution needs Docker or Podman. Install or start one, then run openlearn doctor.",
+        )
+        self.assertNotIn("install an OCI runtime", result.stderr)
 
     def test_script_oci_command_preserves_runner_protections(self) -> None:
         command = code_runner.build_oci_script_command(

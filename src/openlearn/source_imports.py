@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, TypeAlias
@@ -12,6 +13,50 @@ SourceKind: TypeAlias = Literal["file", "folder", "github"]
 ImportStatus: TypeAlias = Literal["imported", "skipped", "failed"]
 COURSE_SOURCES_METADATA_KEY = "course_sources"
 LOCAL_EXTRACT_CHAR_LIMIT = 12000
+UNSUPPORTED_ARCHIVE_SUFFIXES = frozenset(
+    {
+        ".7z",
+        ".bz2",
+        ".gz",
+        ".rar",
+        ".tar",
+        ".tgz",
+        ".xz",
+        ".zip",
+    }
+)
+_PRIVATE_KEY_PATTERN = re.compile(
+    r"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----"
+)
+_PROVIDER_SECRET_PATTERN = re.compile(
+    r"\b(?:"
+    r"sk-(?:proj-|ant-api\d+-)?[A-Za-z0-9_-]{20,}"
+    r"|gh[pousr]_[A-Za-z0-9]{20,}"
+    r"|github_pat_[A-Za-z0-9_]{20,}"
+    r"|xox[baprs]-[A-Za-z0-9-]{20,}"
+    r"|AKIA[0-9A-Z]{16}"
+    r")\b"
+)
+_SECRET_ASSIGNMENT_PATTERN = re.compile(
+    r"\b(?:api[_-]?key|access[_-]?token|auth(?:orization)?|"
+    r"client[_-]?secret|password|private[_-]?key|secret(?:[_-]?key)?)\b"
+    r"\s*[:=]\s*(?:Bearer\s+)?[\"']?([^\s\"']{20,})",
+    re.IGNORECASE,
+)
+_SECRET_LOOKALIKE_MARKERS = (
+    "${",
+    "{{",
+    "changeme",
+    "dummy",
+    "example",
+    "placeholder",
+    "replace",
+    "sample",
+    "your-",
+    "your_",
+)
+_SECRET_LOOKALIKE_PREFIXES = ("fake-", "fake_", "test-", "test_")
+_LIKELY_SECRET_MESSAGE = "Source may contain a credential or private key."
 
 
 @dataclass(frozen=True)
@@ -96,6 +141,10 @@ def _import_file(
 ) -> CourseSourceImportResult:
     kind: SourceKind = "file"
     display_name = source.filename or source.path.name
+    if not display_name or Path(display_name).name != display_name:
+        return _failure(course_slug, kind, "Selected file", "Unsupported or unsafe file name.")
+    if Path(display_name).suffix.lower() in UNSUPPORTED_ARCHIVE_SUFFIXES:
+        return _failure(course_slug, kind, display_name, "Archive imports are not supported.")
     if not _safe_display_name(display_name):
         return _failure(course_slug, kind, "Selected file", "Unsupported or unsafe file name.")
     try:
@@ -201,6 +250,8 @@ def _import_context(
     checksum = checksum or cli._text_checksum(context.text)
     if checksum in cli.imported_checksums(cli.read_topic(course_slug).metadata):
         return ImportDetail("skipped", label, message="Already imported.")
+    if _contains_likely_secret(context.text):
+        return ImportDetail("failed", label, message=_LIKELY_SECRET_MESSAGE)
     saved: Path | None = None
     summary: Path | None = None
     try:
@@ -340,6 +391,25 @@ def _safe_display_name(value: str) -> bool:
         ".pdf",
         ".docx",
     }
+
+
+def _contains_likely_secret(text: str) -> bool:
+    """Detect high-confidence credential material without retaining the match."""
+    if _PRIVATE_KEY_PATTERN.search(text) is not None:
+        return True
+    if _PROVIDER_SECRET_PATTERN.search(text) is not None:
+        return True
+    for assignment in _SECRET_ASSIGNMENT_PATTERN.finditer(text):
+        if not _is_secret_lookalike(assignment.group(1)):
+            return True
+    return False
+
+
+def _is_secret_lookalike(value: str) -> bool:
+    normalized = value.casefold()
+    return normalized.startswith(_SECRET_LOOKALIKE_PREFIXES) or any(
+        marker in normalized for marker in _SECRET_LOOKALIKE_MARKERS
+    )
 
 
 def _failure(

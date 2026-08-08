@@ -1184,6 +1184,65 @@ def test_video_tool_validates_locally_and_returns_consent_descriptor(
     assert "private-video" not in invalid.text
 
 
+def test_local_tool_preparation_stays_available_without_a_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENLEARN_HOME", str(tmp_path))
+    for name in (
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "OPENLEARN_API_KEY",
+        "OPENLEARN_BASE_URL",
+        "OPENLEARN_MODEL",
+        "OPENLEARN_PROVIDER",
+        "OPENLEARN_PROVIDER_VERIFIED",
+        "OPENLEARN_MOCK",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    cli.clear_config_cache()
+    slug = create_tool_course()
+    offline = TestClient(create_app(testing=True))
+    token = csrf(offline, "/courses/new")
+
+    video = offline.post(
+        f"/api/courses/{slug}/tools/video",
+        headers={"x-csrf-token": token},
+        json={"url": "https://youtu.be/dQw4w9WgXcQ"},
+    )
+    code = offline.get(f"/api/courses/{slug}/tools/code")
+    saved = offline.post(
+        f"/api/courses/{slug}/tools/code",
+        headers={"x-csrf-token": token},
+        json={
+            "action": "save",
+            "source": "print('saved offline')\n",
+            "expected_revision": code.json()["revision"],
+        },
+    )
+    imported = offline.post(
+        f"/api/courses/{slug}/tools/sources/file",
+        headers={"x-csrf-token": token},
+        files={"file": ("offline.md", b"Offline source", "text/markdown")},
+    )
+    turn = offline.post(
+        f"/api/courses/{slug}/turns",
+        headers={"x-csrf-token": token},
+        json={
+            "intent": "question",
+            "text": "This model-backed action stays gated.",
+            "submission_id": str(uuid4()),
+            "expected_revision": 0,
+        },
+    )
+
+    assert video.status_code == code.status_code == saved.status_code == imported.status_code == 200
+    assert video.json()["requires_consent"] is True
+    assert saved.json()["message"] == "Draft saved locally."
+    assert [item["label"] for item in imported.json()["imported"]] == ["offline.md"]
+    assert turn.status_code == 428
+    assert turn.json()["setup_url"].endswith("/setup")
+
+
 def test_code_tool_saves_recovers_and_rejects_stale_drafts(client: TestClient) -> None:
     slug = create_tool_course()
     token = csrf(client, f"/courses/{slug}")
@@ -1308,6 +1367,38 @@ def test_source_tool_imports_uploaded_file_and_folder_with_dedupe(
         "lesson.md",
         "README.md",
     }
+
+
+def test_source_tool_rejects_likely_secrets_without_echoing_or_persisting(
+    client: TestClient,
+) -> None:
+    slug = create_tool_course()
+    token = csrf(client, f"/courses/{slug}")
+    secret = "sk-proj-" + "a" * 32
+
+    response = client.post(
+        f"/api/courses/{slug}/tools/sources/file",
+        headers={"x-csrf-token": token},
+        files={
+            "file": (
+                "provider-notes.md",
+                f"OPENAI_API_KEY={secret}\n".encode(),
+                "text/markdown",
+            )
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["failed"] == [
+        {
+            "status": "failed",
+            "label": "provider-notes.md",
+            "context_file": None,
+            "message": "Source may contain a credential or private key.",
+        }
+    ]
+    assert secret not in response.text
+    assert list(cli.context_source_files(slug)) == []
 
 
 def test_source_tool_public_github_route_is_shallow_and_inert(
