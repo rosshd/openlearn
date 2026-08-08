@@ -42,6 +42,20 @@ class CourseServiceTests(unittest.TestCase):
             ["data-science", "data-science-2", "data-science-3"],
         )
 
+    def test_recreating_deleted_course_skips_tombstoned_slug(self) -> None:
+        request = CourseCreationRequest(
+            name="Technical Interview Prep",
+            template_id="technical-interview-prep",
+        )
+        first = create_course(request)
+        cli.delete_topic_files(first.course.slug)
+
+        recreated = create_course(request)
+
+        self.assertEqual(recreated.course.slug, "technical-interview-prep-2")
+        self.assertEqual(cli.read_topic(recreated.course.slug).slug, recreated.course.slug)
+        self.assertTrue(cli.topic_deletion_tombstone_path(first.course.slug).exists())
+
     def test_repeated_submission_returns_original_course(self) -> None:
         submission_id = str(uuid4())
         request = CourseCreationRequest(

@@ -58,7 +58,10 @@ def available_course_slug(name: str) -> str:
     base = cli.slugify(name)
     candidate = base
     suffix = 2
-    while cli.topic_path(candidate).exists():
+    while (
+        cli.topic_path(candidate).exists()
+        or cli.topic_deletion_tombstone_path(candidate).exists()
+    ):
         candidate = f"{base}-{suffix}"
         suffix += 1
     return candidate
