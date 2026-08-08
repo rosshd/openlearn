@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from openlearn import cli, code_runner
 from openlearn import config
+from openlearn import interview_prep
 from openlearn import providers
 from openlearn import tutor_service
 from openlearn.web import create_app
@@ -73,10 +74,10 @@ def test_default_web_app_runs_setup_dashboard_course_and_tutor_flow(
         "/api/courses",
         headers={"origin": "http://testserver", "x-csrf-token": token},
         json={
-            "title": "Technical Interview Prep",
-            "goal": "Solve interview problems clearly and efficiently.",
+            "title": "Distributed Systems",
+            "goal": "Explain replication tradeoffs clearly.",
             "experience": "I know basic Python.",
-            "template_id": "technical-interview-prep",
+            "template_id": None,
             "submission_id": str(uuid4()),
         },
     )
@@ -117,6 +118,248 @@ def test_default_web_app_runs_setup_dashboard_course_and_tutor_flow(
     assert len(history.json()["items"]) == 2
     assert COURSE_INITIALIZATION_PROMPT not in history.text
     assert any(item["title"] == "First lesson" for item in history.json()["items"])
+
+
+def test_interview_course_placement_draft_resumes_and_finishes_before_lesson(
+    client: TestClient,
+) -> None:
+    token = csrf(client, "/courses/new")
+    created = client.post(
+        "/api/courses",
+        headers={"x-csrf-token": token},
+        json={
+            "title": "Technical Interview Prep",
+            "goal": "Practice interview reasoning.",
+            "experience": "",
+            "template_id": "technical-interview-prep",
+            "submission_id": str(uuid4()),
+        },
+    )
+
+    assert created.status_code == 200
+    body = created.json()
+    assert body["state"] == "placement_recommended"
+    assert body["placement_url"].endswith(f"/courses/{body['slug']}/placement")
+    assert tutor_service.course_revision(body["slug"]) == 0
+
+    placement = client.get(body["placement_url"])
+    assert "No editor or code execution" in placement.text
+    token = placement.cookies.get("openlearn_csrf", token)
+    started = client.post(
+        f"/api/courses/{body['slug']}/placement",
+        headers={"x-csrf-token": token},
+        json={"action": "start"},
+    )
+    assert started.status_code == 200
+    assert started.json()["next_stage"] == "clarification"
+
+    saved = client.post(
+        f"/api/courses/{body['slug']}/placement",
+        headers={"x-csrf-token": token},
+        json={
+            "action": "save_draft",
+            "stage": "clarification",
+            "text": "What are the input constraints?\nShould I discuss edge cases?",
+            "expected_updated_at": started.json()["updated_at"],
+        },
+    )
+    assert saved.status_code == 200
+    restarted_client = TestClient(create_app(testing=True))
+    resumed = restarted_client.get(body["placement_url"])
+    restarted_token = resumed.cookies["openlearn_csrf"]
+    assert "What are the input constraints?" in resumed.text
+    assert "Should I discuss edge cases?" in resumed.text
+    assert "Draft saved locally" in resumed.text
+
+    submitted = restarted_client.post(
+        f"/api/courses/{body['slug']}/placement",
+        headers={"x-csrf-token": restarted_token},
+        json={
+            "action": "submit",
+            "stage": "clarification",
+            "submission_id": str(uuid4()),
+        },
+    )
+    assert submitted.status_code == 200
+    assert submitted.json()["next_stage"] == "reasoning"
+    assert submitted.json()["draft"] is None
+    skipped = restarted_client.post(
+        f"/api/courses/{body['slug']}/placement",
+        headers={"x-csrf-token": restarted_token},
+        json={"action": "skip_stage", "stage": "reasoning"},
+    )
+    assert skipped.status_code == 202
+    assert skipped.json()["status"] == "provisional"
+    assert skipped.json()["initialization_url"]
+    wait_for_operation(
+        restarted_client,
+        body["slug"],
+        skipped.json()["operation_id"],
+        "committed",
+    )
+
+    profile = interview_prep.load_profile(cli.interview_profile_path(body["slug"]))
+    assert profile["placement"]["evidence_refs"]
+    assert profile["placement"]["draft"] is None
+
+
+def test_dashboard_groups_discoverable_learning_practice_and_settings_paths(
+    client: TestClient,
+) -> None:
+    response = client.get("/dashboard")
+
+    assert response.status_code == 200
+    assert "/courses/new" in response.text
+    assert "/quick-learn" in response.text
+    assert "/review" in response.text
+    assert "/progress" in response.text
+    assert "/setup" in response.text
+    assert "/data" in response.text
+
+
+def test_interview_placement_defer_and_restart_remain_resumable(client: TestClient) -> None:
+    token = csrf(client, "/courses/new")
+    created = client.post(
+        "/api/courses",
+        headers={"x-csrf-token": token},
+        json={
+            "title": "Technical Interview Prep",
+            "goal": "Practice interview reasoning.",
+            "experience": "",
+            "template_id": "technical-interview-prep",
+            "submission_id": str(uuid4()),
+        },
+    ).json()
+    slug = created["slug"]
+
+    deferred = client.post(
+        f"/api/courses/{slug}/placement",
+        headers={"x-csrf-token": token},
+        json={"action": "defer"},
+    )
+    assert deferred.status_code == 200
+    assert deferred.json()["status"] == "deferred"
+    assert "operation_id" not in deferred.json()
+    assert client.get(f"/courses/{slug}", follow_redirects=False).headers["location"].endswith(
+        f"/courses/{slug}/placement"
+    )
+
+    started = client.post(
+        f"/api/courses/{slug}/placement",
+        headers={"x-csrf-token": token},
+        json={"action": "start"},
+    ).json()
+    saved = client.post(
+        f"/api/courses/{slug}/placement",
+        headers={"x-csrf-token": token},
+        json={
+            "action": "save_draft",
+            "stage": started["next_stage"],
+            "text": "A draft to discard",
+            "expected_updated_at": started["updated_at"],
+        },
+    ).json()
+    restarted = client.post(
+        f"/api/courses/{slug}/placement",
+        headers={"x-csrf-token": token},
+        json={"action": "restart"},
+    )
+    assert restarted.status_code == 200
+    assert restarted.json()["attempt_id"] != saved["attempt_id"]
+    assert restarted.json()["draft"] is None
+    assert restarted.json()["next_stage"] == "clarification"
+
+
+def test_completed_placement_setup_return_starts_pending_first_lesson(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENLEARN_HOME", str(tmp_path))
+    monkeypatch.setenv("OPENLEARN_MOCK", "1")
+    cli.clear_config_cache()
+
+    class ToggleProviderServices(OpenLearnWebServices):
+        ready = False
+
+        def provider_status(self) -> dict[str, object]:
+            return {"ready": self.ready, "managed": False, "providers": []}
+
+    services = ToggleProviderServices()
+    offline = TestClient(create_app(services=services, testing=True))
+    token = csrf(offline, "/courses/new")
+    created = offline.post(
+        "/api/courses",
+        headers={"x-csrf-token": token},
+        json={
+            "title": "Technical Interview Prep",
+            "goal": "Practice interview reasoning.",
+            "experience": "",
+            "template_id": "technical-interview-prep",
+            "submission_id": str(uuid4()),
+        },
+    ).json()
+    skipped = offline.post(
+        f"/api/courses/{created['slug']}/placement",
+        headers={"x-csrf-token": token},
+        json={"action": "skip"},
+    )
+    assert skipped.status_code == 200
+    assert skipped.json()["setup_url"].endswith(
+        f"/setup?next=%2Fcourses%2F{created['slug']}"
+    )
+    assert tutor_service.course_revision(created["slug"]) == 0
+
+    services.ready = True
+    returned = offline.get(f"/courses/{created['slug']}", follow_redirects=False)
+    assert returned.status_code == 303
+    assert "/initializing/" in returned.headers["location"]
+    operation_id = returned.headers["location"].rsplit("/", 1)[-1]
+    assert wait_for_operation(offline, created["slug"], operation_id)["state"] == "committed"
+
+
+def test_review_grading_and_detailed_progress_are_actionable(client: TestClient) -> None:
+    cli.cmd_new(
+        argparse.Namespace(topic="Review Course", goal="Practice durable recall"),
+        output_func=lambda _text: None,
+    )
+    topic = cli.read_topic("review-course")
+    metadata = dict(topic.metadata)
+    metadata["current_focus"] = "Replication tradeoffs"
+    metadata["weak_spots"] = ["Leader election"]
+    metadata["review_due"] = [
+        {"concept": "Leader election", "due": "2020-01-01", "difficulty": "hard"}
+    ]
+    cli.write_topic(topic.path, metadata, topic.body)
+
+    progress = client.get("/progress")
+    review = client.get("/review")
+    assert "Replication tradeoffs" in progress.text
+    assert "uncertain" in progress.text
+    assert "Leader election" in review.text
+
+    token = review.cookies.get("openlearn_csrf", csrf(client, "/review"))
+    graded = client.post(
+        "/api/review",
+        headers={"x-csrf-token": token},
+        json={
+            "slug": "review-course",
+            "concept": "Leader election",
+            "due": "2020-01-01",
+            "result": "easy",
+        },
+    )
+    assert graded.status_code == 200
+    assert graded.json()["remaining"] == 0
+    stale = client.post(
+        "/api/review",
+        headers={"x-csrf-token": token},
+        json={
+            "slug": "review-course",
+            "concept": "Leader election",
+            "due": "2020-01-01",
+            "result": "easy",
+        },
+    )
+    assert stale.status_code == 409
 
 
 def test_mock_setup_persists_secret_without_echoing_it(client: TestClient) -> None:

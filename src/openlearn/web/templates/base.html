@@ -18,6 +18,11 @@
         <span>openlearn</span>
       </a>
       <div class="header-tools">
+        <nav class="site-nav" aria-label="Primary navigation">
+          <span><strong>Learning</strong> <a href="{{ url_for('dashboard') }}">Courses</a> <a href="{{ url_for('quick_learn') }}">Quick Learn</a></span>
+          <span><strong>Practice</strong> <a href="{{ url_for('review') }}">Review</a> <a href="{{ url_for('progress') }}">Progress</a></span>
+          <span><strong>Settings</strong> <a href="{{ url_for('setup') }}">Provider</a> <a href="{{ url_for('data') }}">Data</a></span>
+        </nav>
         <span class="local-status"><span aria-hidden="true"></span> Local</span>
         <button class="tool-button" type="button" data-theme-toggle aria-label="Change color theme">
           Theme: <span data-theme-label>System</span>

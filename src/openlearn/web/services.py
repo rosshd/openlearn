@@ -13,6 +13,7 @@ from openlearn import (
     cli,
     code_workspace,
     config,
+    interview_prep,
     providers,
     source_imports,
     tutor_service,
@@ -29,6 +30,8 @@ from .schemas import (
     CodeToolRequest,
     CourseCreateRequest,
     ProviderSetupRequest,
+    PlacementRequest,
+    ReviewGradeRequest,
     TutorSubmissionRequest,
     VideoToolRequest,
 )
@@ -375,6 +378,7 @@ class OpenLearnWebServices:
                 "title": template.name,
                 "description": template.goal,
                 "tags": list(template.tags),
+                "entry_mode": template.entry_mode,
             }
             for template in application.templates().templates
         ]
@@ -521,12 +525,26 @@ class OpenLearnWebServices:
             return {"ok": False, "error": str(error)}
         slug = result.course.slug
         initialization_id = _course_initialization_id(request.submission_id)
-        existing_operation = tutor_service.operation_status(slug, initialization_id)
-        if not result.created and existing_operation is not None:
+        if result.course.card.template_id == "technical-interview-prep":
             return {
                 "ok": True,
                 "slug": slug,
-                "created": False,
+                "created": result.created,
+                "state": "placement_recommended",
+            }
+        return self._start_course_initialization(slug, initialization_id)
+
+    def _start_course_initialization(
+        self, slug: str, initialization_id: str | None = None
+    ) -> dict[str, object]:
+        initialization_id = initialization_id or _initialization_id_for_slug(slug)
+        if initialization_id is None:
+            return {"ok": False, "error": "Course initialization is unavailable."}
+        existing_operation = tutor_service.operation_status(slug, initialization_id)
+        if existing_operation is not None:
+            return {
+                "ok": True,
+                "slug": slug,
                 "operation_id": initialization_id,
                 "state": existing_operation.status,
             }
@@ -545,10 +563,185 @@ class OpenLearnWebServices:
         return {
             "ok": True,
             "slug": slug,
-            "created": result.created,
             "operation_id": initialization_id,
             "state": state,
         }
+
+    def start_course_initialization(self, slug: str) -> dict[str, object]:
+        return self._start_course_initialization(slug)
+
+    @staticmethod
+    def _placement_view(slug: str, value: dict[str, object]) -> dict[str, object]:
+        placement = value["placement"]
+        assert isinstance(placement, dict)
+        draft = placement.get("draft")
+        return {
+            "slug": slug,
+            "status": placement.get("status"),
+            "next_stage": placement.get("next_stage"),
+            "updated_at": placement.get("updated_at"),
+            "attempt_id": placement.get("attempt_id"),
+            "draft": draft if isinstance(draft, dict) else None,
+            "recommended": placement.get("status") in {"not_started", "deferred", "in_progress"},
+            "complete": placement.get("status") == "provisional",
+            "result": placement.get("result"),
+        }
+
+    def placement(self, slug: str) -> dict[str, object]:
+        try:
+            snapshot = application.course(slug)
+        except (cli.OpenLearnError, OSError):
+            return {"slug": slug, "missing": True}
+        if snapshot.card.template_id != "technical-interview-prep":
+            return {"slug": slug, "missing": True}
+        try:
+            value = cli.sync_interview_placement(slug)
+        except cli.OpenLearnError:
+            value = interview_prep.load_profile(cli.interview_profile_path(slug))
+        return {"title": snapshot.card.title, **self._placement_view(slug, value)}
+
+    def update_placement(self, slug: str, request: PlacementRequest) -> dict[str, object]:
+        path = cli.interview_profile_path(slug)
+        value = interview_prep.load_profile(path)
+        placement = value["placement"]
+        assert isinstance(placement, dict)
+        if request.action == "start":
+            value = self._start_reasoning_placement(slug, path)
+        elif request.action == "restart":
+            if placement.get("status") == "in_progress":
+                # The CLI still owns the activity/profile reconciliation transaction.
+                # Keep that compatibility call isolated here until it moves into application.py.
+                cli._discard_interview_placement(slug, path)  # type: ignore[attr-defined]
+            value = self._start_reasoning_placement(slug, path)
+        elif request.action == "defer":
+            if placement.get("status") in {"in_progress", "deferred"}:
+                return self._placement_view(slug, value)
+            queued: list[tuple[str, dict[str, object]]] = []
+            with cli.interview_profile_write_lock(slug):
+                value = interview_prep.defer_placement(
+                    path, lambda event_type, data: queued.append((event_type, data))
+                )
+            for event_type, data in queued:
+                cli.log_event(slug, event_type, data)
+        else:
+            stage = request.stage
+            if request.action == "submit" and isinstance(stage, str):
+                try:
+                    prior_evidence_id = interview_prep.placement_evidence_id(placement, stage)
+                except ValueError:
+                    prior_evidence_id = ""
+                references = placement.get("evidence_refs")
+                if isinstance(references, list) and any(
+                    isinstance(reference, dict)
+                    and reference.get("evidence_id") == prior_evidence_id
+                    for reference in references
+                ):
+                    return self._placement_view(slug, value)
+            if not isinstance(stage, str) or stage != placement.get("next_stage"):
+                return {"state": "conflict", "error": "Placement changed elsewhere. Reload to continue."}
+            if request.action == "save_draft":
+                lines = [line.strip() for line in request.text.splitlines() if line.strip()]
+                if not lines:
+                    return {"invalid": True, "error": "Add at least one line before saving."}
+                with cli.interview_profile_write_lock(slug):
+                    locked = interview_prep.load_profile(path)["placement"]
+                    assert isinstance(locked, dict)
+                    if (
+                        request.expected_updated_at != locked.get("updated_at")
+                        or stage != locked.get("next_stage")
+                    ):
+                        return {
+                            "state": "conflict",
+                            "error": "Placement changed elsewhere. Reload to continue.",
+                        }
+                    interview_prep.clear_placement_draft(path, stage)
+                    for line in lines:
+                        value = interview_prep.append_placement_draft_line(path, stage, line)
+            elif request.action == "submit":
+                draft = placement.get("draft")
+                lines = draft.get("lines") if isinstance(draft, dict) else None
+                if not isinstance(lines, list) or not lines:
+                    return {"invalid": True, "error": "Save at least one draft line before submitting."}
+                activity = cli._current_interview_activity(slug)  # type: ignore[attr-defined]
+                if activity is None:
+                    return {"state": "conflict", "error": "Placement changed elsewhere. Reload to continue."}
+                evidence_id = interview_prep.placement_evidence_id(placement, stage)
+                cli.record_topic_activity_evidence(
+                    slug,
+                    activity,
+                    "interview_observation",
+                    {"stage": stage, "response": "\n".join(str(line) for line in lines)},
+                    evidence_id=evidence_id,
+                )
+                value = cli.sync_interview_placement(slug)
+            else:
+                with cli.interview_profile_write_lock(slug):
+                    value = interview_prep.skip_optional_placement_stage(path, stage)
+                value = cli.sync_interview_placement(slug)
+        return self._placement_view(slug, value)
+
+    @staticmethod
+    def _start_reasoning_placement(slug: str, path: Path) -> dict[str, object]:
+        """Centralize the legacy CLI activity bridge used by both start and restart."""
+        activity = cli._begin_interview_activity(  # type: ignore[attr-defined]
+            slug, lifecycle_version=interview_prep.PLACEMENT_V3
+        )
+        with cli.interview_profile_write_lock(slug):
+            return interview_prep.start_placement(
+                path,
+                activity_id=str(activity["activity_id"]),
+                lifecycle_version=interview_prep.PLACEMENT_V3,
+            )
+
+    def skip_placement(self, slug: str) -> dict[str, object]:
+        current = self.placement(slug)
+        if current.get("status") == "provisional":
+            return current
+        if current.get("status") != "in_progress":
+            current = self.update_placement(slug, PlacementRequest(action="start"))
+        while current.get("status") == "in_progress":
+            stage = str(current["next_stage"])
+            current = self.update_placement(
+                slug, PlacementRequest(action="skip_stage", stage=stage)
+            )
+        return current
+
+    def progress(self) -> dict[str, object]:
+        return {
+            "courses": [
+                {
+                    **_card(snapshot.card),
+                    "known": snapshot.card.progress.known,
+                    "total": snapshot.card.progress.total,
+                    "units": [vars(unit) for unit in snapshot.card.progress.units],
+                    "due_reviews": snapshot.card.progress.reviews.due_today,
+                }
+                for snapshot in application.dashboard().courses
+                for snapshot in [application.course(snapshot.slug)]
+            ]
+        }
+
+    def due_reviews(self) -> dict[str, object]:
+        items: list[dict[str, object]] = []
+        for card in application.dashboard().courses:
+            topic = cli.read_topic_stats(card.slug)
+            items.extend({"slug": card.slug, "course": card.title, **item} for item in cli.due_review_items(topic.metadata))
+        return {"items": items, "count": len(items)}
+
+    def grade_review(self, request: ReviewGradeRequest) -> dict[str, object]:
+        topic = cli.read_topic_stats(request.slug)
+        due = next(
+            (
+                item
+                for item in cli.due_review_items(topic.metadata)
+                if item.get("concept") == request.concept and item.get("due") == request.due
+            ),
+            None,
+        )
+        if due is None:
+            return {"state": "conflict", "error": "This review changed elsewhere. Reload to continue."}
+        cli.schedule_review_outcomes(request.slug, [(due, request.result)])
+        return {"ok": True, "remaining": self.due_reviews()["count"]}
 
     def course_initialization(
         self, slug: str, operation_id: str

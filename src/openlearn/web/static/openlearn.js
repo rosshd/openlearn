@@ -143,7 +143,7 @@ for (const form of document.querySelectorAll("[data-json-form]")) {
         return;
       }
       announce("Saved successfully.");
-      const destination = result.initialization_url || result.focus_url || result.redirect || form.dataset.successUrl;
+      const destination = result.placement_url || result.initialization_url || result.focus_url || result.redirect || form.dataset.successUrl;
       if (destination) window.location.assign(appUrl(destination));
     } catch (error) {
       if (form.elements.api_key && !error.payload?.retain_secret) form.elements.api_key.value = "";
@@ -792,3 +792,64 @@ document.addEventListener("keydown", (event) => {
   if (toolSurface && !toolSurface.hidden) closeTool();
   else closeDrawers();
 });
+
+const placementShell = document.querySelector("[data-placement-shell]");
+const placementStatus = placementShell?.querySelector("[data-placement-status]");
+
+async function runPlacementAction(action, values = {}) {
+  if (!placementShell) return;
+  for (const control of placementShell.querySelectorAll("button")) control.disabled = true;
+  if (placementStatus) placementStatus.textContent = "Saving locally…";
+  try {
+    const result = await requestJson(`/api/courses/${encodeURIComponent(placementShell.dataset.courseSlug)}/placement`, {
+      method: "POST",
+      body: JSON.stringify({action, ...values}),
+    });
+    const destination = result.initialization_url || result.setup_url;
+    if (destination) window.location.assign(appUrl(destination));
+    else window.location.reload();
+  } catch (error) {
+    if (placementStatus) placementStatus.textContent = error.message;
+    for (const control of placementShell.querySelectorAll("button")) control.disabled = false;
+  }
+}
+
+placementShell?.querySelector("[data-placement-draft-form]")?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  runPlacementAction("save_draft", {
+    stage: placementShell.querySelector("[data-placement-action][data-stage]")?.dataset.stage,
+    text: placementShell.querySelector("textarea")?.value || "",
+    expected_updated_at: placementShell.dataset.updatedAt || null,
+  });
+});
+
+for (const button of document.querySelectorAll("[data-placement-action]")) {
+  button.addEventListener("click", () => runPlacementAction(button.dataset.placementAction, {
+    stage: button.dataset.stage || null,
+    submission_id: button.dataset.placementAction === "submit" ? crypto.randomUUID() : null,
+  }));
+}
+
+for (const button of document.querySelectorAll("[data-review-grade]")) {
+  button.addEventListener("click", async () => {
+    const item = button.closest("[data-review-item]");
+    if (!item) return;
+    for (const control of item.querySelectorAll("button")) control.disabled = true;
+    try {
+      await requestJson("/api/review", {
+        method: "POST",
+        body: JSON.stringify({
+          slug: item.dataset.slug,
+          concept: item.dataset.concept,
+          due: item.dataset.due,
+          result: button.dataset.reviewGrade,
+        }),
+      });
+      item.remove();
+      announce("Review result saved and the schedule was updated.");
+    } catch (error) {
+      announce(error.message);
+      for (const control of item.querySelectorAll("button")) control.disabled = false;
+    }
+  });
+}

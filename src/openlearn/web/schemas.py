@@ -67,6 +67,33 @@ class TutorSubmissionRequest(BaseModel):
         return canonical_uuid(value)
 
 
+class PlacementRequest(BaseModel):
+    action: Literal[
+        "start", "save_draft", "submit", "skip_stage", "skip", "defer", "restart"
+    ]
+    stage: str | None = Field(default=None, max_length=64)
+    text: str = Field(default="", max_length=40000)
+    submission_id: str | None = Field(default=None, max_length=64)
+    expected_updated_at: str | None = Field(default=None, max_length=64)
+
+    @field_validator("submission_id")
+    @classmethod
+    def valid_optional_submission_id(cls, value: str | None) -> str | None:
+        return canonical_uuid(value) if value is not None else None
+
+
+class ReviewGradeRequest(BaseModel):
+    slug: str
+    concept: str = Field(min_length=1, max_length=4000)
+    due: str = Field(min_length=1, max_length=64)
+    result: Literal["easy", "hard", "missed"]
+
+    @field_validator("slug")
+    @classmethod
+    def valid_slug(cls, value: str) -> str:
+        return canonical_slug(value)
+
+
 class VideoToolRequest(BaseModel):
     url: str = Field(min_length=1, max_length=2048)
 

@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="create-shell" aria-labelledby="placement-title" data-placement-shell data-course-slug="{{ placement.slug }}" data-updated-at="{{ placement.updated_at or '' }}">
+  <div class="section-heading">
+    <div><p class="eyebrow">Optional placement</p><h1 id="placement-title">Find a useful starting point.</h1></div>
+    <a class="quiet-link" href="{{ url_for('dashboard') }}">Leave for now</a>
+  </div>
+  <article class="work-panel form-stack">
+    <p>This short reasoning conversation can tune your starting point. No editor or code execution is used, and skipping never counts against mastery.</p>
+    <p class="field-note" role="status" aria-live="polite" data-placement-status>
+      {% if placement.status == 'deferred' %}Placement is deferred and remains recommended. You can resume whenever you want.{% elif placement.status == 'provisional' %}Placement complete. Your lesson can begin.{% elif placement.draft %}Draft saved locally. Review it before submitting.{% else %}Skip to use the baseline lesson, or defer to decide later.{% endif %}
+    </p>
+    {% if placement.status in ['not_started', 'deferred'] %}
+    <div class="form-footer">
+      <button class="primary-action" type="button" data-placement-action="start">Start placement</button>
+      <button type="button" data-placement-action="skip">Skip placement and use baseline</button>
+      <button type="button" data-placement-action="defer">Defer and decide later</button>
+    </div>
+    {% elif placement.status == 'in_progress' %}
+    <p class="eyebrow">{{ placement.next_stage }}</p>
+    {% if placement.next_stage == 'clarification' %}<h2>Clarify the problem before proposing a solution.</h2><p>What inputs, outputs, constraints, or edge cases would you ask about?</p>{% else %}<h2>Explain how you would reason through the problem.</h2><p>Describe an approach, tradeoffs, and how you would validate it.</p>{% endif %}
+    <form class="form-stack" data-placement-draft-form>
+      <label for="placement-draft">Your reasoning</label>
+      <textarea id="placement-draft" rows="10" maxlength="40000">{% if placement.draft %}{{ placement.draft.lines|join('\n') }}{% endif %}</textarea>
+      <div class="form-footer">
+        <button type="submit">Save draft</button>
+        <button class="primary-action" type="button" data-placement-action="submit" data-stage="{{ placement.next_stage }}">Submit saved section</button>
+        <button type="button" data-placement-action="skip_stage" data-stage="{{ placement.next_stage }}">Skip this section</button>
+        <button type="button" data-placement-action="defer">Pause and resume later</button>
+        <button type="button" data-placement-action="restart">Discard draft and restart placement</button>
+      </div>
+    </form>
+    {% else %}
+    <a class="primary-action" href="{{ url_for('focus', slug=placement.slug) }}">Continue to lesson</a>
+    {% endif %}
+  </article>
+</section>
+{% endblock %}

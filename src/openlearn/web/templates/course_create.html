@@ -2,7 +2,7 @@
 {% block content %}
 <section class="create-shell" aria-labelledby="create-title">
   <div class="section-heading">
-    <div><p class="eyebrow">New work</p><h1 id="create-title">What do you want to understand?</h1></div>
+    <div><p class="eyebrow">{{ 'Quick Learn' if quick_learn else 'New work' }}</p><h1 id="create-title">{{ 'Learn from a source now.' if quick_learn else 'What do you want to understand?' }}</h1></div>
     <a class="quiet-link" href="{{ url_for('dashboard') }}">Back to dashboard</a>
   </div>
 
@@ -33,7 +33,7 @@
     <label for="experience">What have you tried already? <span class="optional">Optional</span></label>
     <textarea id="experience" name="experience" rows="3" maxlength="4000" placeholder="A few words is enough. This guides the first example, but does not count as mastery."></textarea>
     <div class="form-footer">
-      <p class="field-note" data-form-status>One short prompt, then teaching starts.</p>
+      <p class="field-note" data-form-status>{% if quick_learn %}Create the course, then use its Sources action to add a bounded file, folder, or public GitHub repository. No outline approval or imported code execution.{% else %}One short prompt, then teaching starts.{% endif %}</p>
       <button class="primary-action" type="submit">Build the first lesson <span aria-hidden="true">→</span></button>
     </div>
   </form>

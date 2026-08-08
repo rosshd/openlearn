@@ -14,11 +14,12 @@
     <div>
       <p class="eyebrow">Ready to resume</p>
       <h2>{{ dashboard.active_course.title }}</h2>
-      <p>{{ dashboard.active_course.next_move or dashboard.active_course.summary }}</p>
+      <p><strong>Current objective:</strong> {{ dashboard.active_course.next_move or dashboard.active_course.summary }}</p>
     </div>
     <div class="resume-meta">
       <span>{{ dashboard.active_course.progress or 0 }}% complete</span>
-      <a class="primary-action" href="{{ url_for('focus', slug=dashboard.active_course.slug) }}">Return to the bench <span aria-hidden="true">→</span></a>
+      <a class="primary-action" href="{{ url_for('focus', slug=dashboard.active_course.slug) }}">Recommended next action: return to the bench <span aria-hidden="true">→</span></a>
+      <a class="quiet-link" href="{{ url_for('progress') }}">View detailed progress</a>
     </div>
   </article>
   {% else %}
@@ -48,7 +49,12 @@
       <p class="eyebrow">Review tray</p>
       <h2 id="review-title">{{ dashboard.due_reviews or 0 }} due</h2>
       <p>Reviews appear when your learning evidence says a concept is ready to revisit.</p>
+      <a class="primary-action compact" href="{{ url_for('review') }}">Review what is due</a>
     </aside>
+  </div>
+  <div class="dashboard-grid" aria-label="Workbench entry points">
+    <a class="work-panel" href="{{ url_for('quick_learn') }}"><strong>Quick Learn</strong><br><small>Start from a bounded local source or public repository.</small></a>
+    <div class="work-panel"><strong>Settings and local data</strong><br><a href="{{ url_for('setup') }}">Provider settings</a> · <a href="{{ url_for('data') }}">Data management</a></div>
   </div>
 </section>
 {% endblock %}

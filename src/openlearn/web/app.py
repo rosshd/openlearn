@@ -53,6 +53,20 @@ class WebServices(Protocol):
 
     def focus(self, slug: str) -> Any: ...
 
+    def placement(self, slug: str) -> Any: ...
+
+    def update_placement(self, slug: str, request: Any) -> Any: ...
+
+    def skip_placement(self, slug: str) -> Any: ...
+
+    def start_course_initialization(self, slug: str) -> Any: ...
+
+    def progress(self) -> Any: ...
+
+    def due_reviews(self) -> Any: ...
+
+    def grade_review(self, request: Any) -> Any: ...
+
     def submit_turn(self, slug: str, request: Any) -> Any: ...
 
     def operation_status(self, slug: str, operation_id: str) -> Any: ...
@@ -116,6 +130,27 @@ class PlaceholderServices:
 
     def focus(self, slug: str) -> dict[str, Any]:
         return {"slug": slug, "missing": True}
+
+    def placement(self, slug: str) -> dict[str, Any]:
+        return {"slug": slug, "missing": True}
+
+    def update_placement(self, slug: str, request: Any) -> dict[str, Any]:
+        return {"ok": False, "error": "Placement services are unavailable."}
+
+    def skip_placement(self, slug: str) -> dict[str, Any]:
+        return {"ok": False, "error": "Placement services are unavailable."}
+
+    def start_course_initialization(self, slug: str) -> dict[str, Any]:
+        return {"ok": False, "error": "Course services are unavailable."}
+
+    def progress(self) -> dict[str, Any]:
+        return {"courses": []}
+
+    def due_reviews(self) -> dict[str, Any]:
+        return {"items": [], "count": 0}
+
+    def grade_review(self, request: Any) -> dict[str, Any]:
+        return {"ok": False, "error": "Review services are unavailable."}
 
     def submit_turn(self, slug: str, request: Any) -> dict[str, Any]:
         return {"ok": False, "error": "Tutor services are not available yet."}

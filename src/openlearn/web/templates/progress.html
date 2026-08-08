@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="dashboard-shell" aria-labelledby="progress-title">
+  <p class="eyebrow">Practice</p><h1 id="progress-title">Detailed progress</h1>
+  {% for course in progress.courses %}
+  <article class="work-panel">
+    <div class="panel-heading"><h2>{{ course.title }}</h2><span>{{ course.progress }}%</span></div>
+    <p><strong>Current unit:</strong> {{ course.current_unit }}</p>
+    <p>{{ course.known }} demonstrated · {{ course.total - course.known }} uncertain · {{ course.due_reviews }} due for review</p>
+    <ul>{% for unit in course.units %}<li>{{ unit.title }}: {{ unit.known }}/{{ unit.total }} demonstrated</li>{% endfor %}</ul>
+    <a class="primary-action compact" href="{{ url_for('focus', slug=course.slug) }}">Recommended next action: resume</a>
+  </article>
+  {% else %}<p class="quiet-copy">Start a course to build a local progress record.</p>{% endfor %}
+</section>
+{% endblock %}

@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="setup-layout" aria-labelledby="data-title">
+  <div><p class="eyebrow">Settings</p><h1 id="data-title">Your learning data stays local.</h1><p class="lede">Courses, progress, reviews, placement evidence, and provider configuration live in your Openlearn home.</p></div>
+  <article class="work-panel"><h2>Data management</h2><p>Whole-home inventory, backup, move, export, reset, and deletion controls are available from this settings area as release-safe operations are enabled.</p><a class="quiet-link" href="{{ url_for('dashboard') }}">Return to your courses</a></article>
+</section>
+{% endblock %}
