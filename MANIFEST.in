@@ -1,0 +1,19 @@
+include LICENSE
+include README.md
+include pyproject.toml
+
+prune .artifacts
+prune .github
+prune .gnhf
+prune .worktrees
+prune docs
+prune learning-topics
+prune manual-tests
+prune tests
+
+exclude .env
+exclude .env.*
+global-exclude *.events.jsonl
+global-exclude *.py[cod]
+global-exclude *.state.json
+global-exclude __pycache__

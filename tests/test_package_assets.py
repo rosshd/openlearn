@@ -1,104 +1,172 @@
 from __future__ import annotations
 
-import os
+import importlib.util
+import json
 from pathlib import Path
 import re
-import subprocess
-import sys
 import tempfile
+import tomllib
 import unittest
+from unittest import mock
 from zipfile import ZipFile
 
 
-@unittest.skipUnless(
-    os.environ.get("OPENLEARN_PACKAGE_SMOKE") == "1",
-    "set OPENLEARN_PACKAGE_SMOKE=1 to build and test the installed wheel",
-)
-class InstalledWheelSmokeTests(unittest.TestCase):
-    def test_installed_wheel_renders_templates_and_serves_static_assets(self) -> None:
-        repository = Path(__file__).resolve().parents[1]
-        with tempfile.TemporaryDirectory() as raw_temp:
-            temp = Path(raw_temp)
-            wheelhouse = temp / "wheelhouse"
-            target = temp / "installed"
-            wheelhouse.mkdir()
-            subprocess.run(
-                [
-                    sys.executable,
-                    "-m",
-                    "pip",
-                    "wheel",
-                    ".",
-                    "--no-deps",
-                    "--no-build-isolation",
-                    "--wheel-dir",
-                    str(wheelhouse),
-                ],
-                cwd=repository,
-                check=True,
-            )
-            wheels = list(wheelhouse.glob("openlearn-*.whl"))
-            self.assertEqual(len(wheels), 1)
-            wheel = wheels[0]
+REPOSITORY = Path(__file__).resolve().parents[1]
+RELEASE_SCRIPT = REPOSITORY / "scripts" / "release_artifacts.py"
+SPEC = importlib.util.spec_from_file_location("release_artifacts", RELEASE_SCRIPT)
+assert SPEC is not None and SPEC.loader is not None
+release_artifacts = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(release_artifacts)
 
-            with ZipFile(wheel) as archive:
-                packaged = set(archive.namelist())
-            for expected in (
-                "openlearn/web/templates/base.html",
-                "openlearn/web/templates/focus.html",
-                "openlearn/web/static/openlearn.css",
-                "openlearn/web/static/openlearn.js",
-                "openlearn/web/static/favicon.svg",
-                "openlearn/code_workspace.py",
-                "openlearn/source_imports.py",
-                "openlearn/video_tools.py",
+
+def _wheel(path: Path, *, extra: tuple[str, bytes] | None = None) -> None:
+    with ZipFile(path, "w") as archive:
+        for required in release_artifacts.REQUIRED_PACKAGE_FILES:
+            archive.writestr(required, b"safe package content")
+        archive.writestr(
+            "openlearn-0.7.0.dist-info/METADATA",
+            b"Metadata-Version: 2.1\nName: openlearn\nVersion: 0.7.0\n",
+        )
+        if extra is not None:
+            archive.writestr(*extra)
+
+
+class ReleaseArtifactPolicyTests(unittest.TestCase):
+    def test_installed_web_smoke_bootstraps_session_before_namespaced_reads(self) -> None:
+        class Response:
+            status = 200
+
+            def __init__(self, body: bytes) -> None:
+                self.body = body
+
+            def __enter__(self) -> Response:
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            def read(self) -> bytes:
+                return self.body
+
+        class Opener:
+            def __init__(self) -> None:
+                self.urls: list[str] = []
+
+            def open(self, url: str, *, timeout: int) -> Response:
+                self.urls.append(url)
+                expected = {
+                    "http://127.0.0.1:9123/?access_token=test-token": b"",
+                    "http://127.0.0.1:9123/_openlearn/test/setup": b"Connect your tutor",
+                    "http://127.0.0.1:9123/_openlearn/test/static/openlearn.css": b"--orange",
+                    "http://127.0.0.1:9123/_openlearn/test/static/openlearn.js": b"requestJson",
+                    "http://127.0.0.1:9123/_openlearn/test/static/favicon.svg": b"<svg",
+                }
+                if url not in expected:
+                    raise AssertionError(f"unexpected unauthenticated URL: {url}")
+                return Response(expected[url])
+
+        class Process:
+            stdout = None
+
+            def poll(self) -> None:
+                return None
+
+            def terminate(self) -> None:
+                return None
+
+            def wait(self, *, timeout: int) -> None:
+                return None
+
+        opener = Opener()
+        with tempfile.TemporaryDirectory() as raw:
+            home = Path(raw)
+            (home / ".web-server.json").write_text(
+                json.dumps(
+                    {
+                        "url_namespace": "/_openlearn/test",
+                        "access_token": "test-token",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with (
+                mock.patch.object(release_artifacts, "_free_loopback_port", return_value=9123),
+                mock.patch.object(release_artifacts.subprocess, "Popen", return_value=Process()),
+                mock.patch.object(release_artifacts, "build_opener", return_value=opener),
+                mock.patch.object(release_artifacts.time, "monotonic", side_effect=(0, 0, 21)),
             ):
-                self.assertIn(expected, packaged)
+                release_artifacts._smoke_web(Path("openlearn"), home)
 
-            subprocess.run(
-                [
-                    sys.executable,
-                    "-m",
-                    "pip",
-                    "install",
-                    "--no-deps",
-                    "--target",
-                    str(target),
-                    str(wheel),
-                ],
-                cwd=temp,
-                check=True,
-            )
-            smoke = """
-import pathlib
-import sys
+        self.assertEqual(
+            opener.urls[:2],
+            [
+                "http://127.0.0.1:9123/?access_token=test-token",
+                "http://127.0.0.1:9123/_openlearn/test/setup",
+            ],
+        )
 
-sys.path.insert(0, sys.argv[1])
-from fastapi.testclient import TestClient
-import openlearn
-from openlearn.web.app import PlaceholderServices, create_app
+    def test_support_contract_covers_python_and_desktop_platforms(self) -> None:
+        metadata = tomllib.loads((REPOSITORY / "pyproject.toml").read_text(encoding="utf-8"))[
+            "project"
+        ]
 
-installed = pathlib.Path(sys.argv[1]).resolve()
-assert installed in pathlib.Path(openlearn.__file__).resolve().parents
-client = TestClient(create_app(PlaceholderServices(), testing=True))
-setup = client.get('/setup')
-assert setup.status_code == 200
-assert 'Connect your tutor' in setup.text
-for path, content_type in (
-    ('/static/openlearn.css', 'text/css'),
-    ('/static/openlearn.js', 'text/javascript'),
-    ('/static/favicon.svg', 'image/svg+xml'),
-):
-    response = client.get(path)
-    assert response.status_code == 200, path
-    assert content_type in response.headers['content-type'], path
-"""
-            subprocess.run(
-                [sys.executable, "-c", smoke, str(target)],
-                cwd=temp,
-                check=True,
-                env={**os.environ, "OPENLEARN_HOME": str(temp / "home")},
-            )
+        self.assertEqual(metadata["requires-python"], ">=3.11,<3.14")
+        classifiers = set(metadata["classifiers"])
+        for version in ("3.11", "3.12", "3.13"):
+            self.assertIn(f"Programming Language :: Python :: {version}", classifiers)
+        for platform in (
+            "Operating System :: MacOS",
+            "Operating System :: Microsoft :: Windows",
+            "Operating System :: POSIX :: Linux",
+        ):
+            self.assertIn(platform, classifiers)
+
+    def test_wheel_inspection_requires_assets_and_reads_metadata_version(self) -> None:
+        with self.subTest("complete wheel"):
+            path = Path(self.id().replace(".", "-"))
+            try:
+                _wheel(path)
+                self.assertEqual(
+                    release_artifacts.inspect_artifact(path, sdist=False), "0.7.0"
+                )
+            finally:
+                path.unlink(missing_ok=True)
+
+    def test_distribution_inspection_rejects_private_paths_and_provider_secrets(self) -> None:
+        cases = (
+            ("learning-topics/private.state.json", b"private learner state"),
+            ("openlearn/accidental.py", b"token = 'sk-proj-" + b"a" * 32 + b"'"),
+            (".github/workflows/debug.yml", b"development workflow"),
+        )
+        for index, extra in enumerate(cases):
+            with self.subTest(path=extra[0]):
+                path = REPOSITORY / f".package-policy-{index}.whl"
+                try:
+                    _wheel(path, extra=extra)
+                    with self.assertRaises(release_artifacts.ReleaseArtifactError):
+                        release_artifacts.inspect_artifact(path, sdist=False)
+                finally:
+                    path.unlink(missing_ok=True)
+
+    def test_release_workflow_promotes_a_successful_exact_commit_candidate(self) -> None:
+        workflow = (REPOSITORY / ".github/workflows/release.yml").read_text(encoding="utf-8")
+
+        self.assertIn("release-candidate-${GITHUB_SHA}", workflow)
+        self.assertIn("--status success", workflow)
+        self.assertIn('workflowName == "Tests"', workflow)
+        self.assertIn("release_artifacts.py verify", workflow)
+        self.assertNotIn("python -m build", workflow)
+        self.assertIn("packages-dir: release-candidate/dist", workflow)
+
+    def test_test_workflow_builds_once_and_fans_in_required_gates(self) -> None:
+        workflow = (REPOSITORY / ".github/workflows/tests.yml").read_text(encoding="utf-8")
+
+        self.assertEqual(workflow.count("release_artifacts.py build"), 1)
+        self.assertIn('python-version: ["3.11", "3.12", "3.13"]', workflow)
+        self.assertIn("os: [ubuntu-latest, windows-latest, macos-latest]", workflow)
+        self.assertIn("security-gate", workflow)
+        self.assertIn("browser-smoke", workflow)
+        self.assertIn("package-smoke", workflow)
 
 
 def test_primary_action_colors_meet_wcag_aa() -> None:

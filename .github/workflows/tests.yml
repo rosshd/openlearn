@@ -14,102 +14,138 @@ on:
         type: boolean
 
 jobs:
-  test-matrix:
+  automated-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - run: python -m pip install -e ".[dev]"
+      - run: make check PYTHON=python OPENLEARN=openlearn
+
+  compatibility-matrix:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        python-version: ["3.11", "3.13"]
-
+        python-version: ["3.11", "3.12", "3.13"]
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v5
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
+      - run: python -m pip install -e ".[dev]"
+      - run: python -m pytest -q
 
-      - name: Install package
-        run: python -m pip install -e ".[dev]"
-
-      - name: Run tests
-        run: python -m pytest -q
-
-  package-smoke:
+  build-candidate:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v5
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
+      - run: python -m pip install build
+      - name: Build and inspect the immutable candidate once
+        run: >-
+          python scripts/release_artifacts.py build
+          --repository .
+          --candidate release-candidate
+          --expected-version "$(python -c 'import sys; sys.path.insert(0, "src"); import openlearn; print(openlearn.__version__)')"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-candidate-${{ github.sha }}
+          path: release-candidate/
+          if-no-files-found: error
+          retention-days: 30
 
-      - name: Install package and build tooling
-        run: python -m pip install -e ".[dev]" build
-
-      - name: Verify installed wheel web assets
-        env:
-          OPENLEARN_PACKAGE_SMOKE: "1"
-        run: python -m unittest tests.test_package_assets -v
+  package-smoke:
+    needs: build-candidate
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ["3.11", "3.12", "3.13"]
+        artifact-kind: [wheel, sdist]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: actions/download-artifact@v5
+        with:
+          name: release-candidate-${{ github.sha }}
+          path: release-candidate
+      - name: Verify hashes, clean-install, and launch both interfaces
+        shell: bash
+        run: >-
+          python scripts/release_artifacts.py smoke
+          --candidate release-candidate
+          --kind "${{ matrix.artifact-kind }}"
+          --expected-version "$(python -c 'import sys; sys.path.insert(0, "src"); import openlearn; print(openlearn.__version__)')"
 
   browser-smoke:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v5
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
-
-      - name: Install package
-        run: python -m pip install -e ".[dev]"
-
-      - name: Install Chromium
-        run: python -m playwright install --with-deps chromium
-
+      - run: python -m pip install -e ".[dev]"
+      - run: python -m playwright install --with-deps chromium
       - name: Run browser smoke
         env:
           OPENLEARN_BROWSER_TEST: "1"
         run: python -m pytest tests/test_web_browser.py -v
 
-  # Fan-in job so branch protection can keep requiring the single "test"
-  # status context across the whole matrix.
+  security-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - run: python -m pip install -e ".[dev]"
+      - name: Run release security regressions
+        run: >-
+          python -m pytest -q
+          tests/test_web_security.py
+          tests/test_source_imports.py
+          tests/test_data_management.py
+          tests/test_package_assets.py
+
   test:
     runs-on: ubuntu-latest
-    needs: [test-matrix, package-smoke, browser-smoke]
+    needs:
+      - automated-gate
+      - compatibility-matrix
+      - package-smoke
+      - browser-smoke
+      - security-gate
     if: always()
     steps:
-      - name: Check matrix result
+      - name: Require every public-release gate
+        shell: bash
         run: |
-          test "${{ needs.test-matrix.result }}" = "success"
+          test "${{ needs.automated-gate.result }}" = "success"
+          test "${{ needs.compatibility-matrix.result }}" = "success"
           test "${{ needs.package-smoke.result }}" = "success"
           test "${{ needs.browser-smoke.result }}" = "success"
+          test "${{ needs.security-gate.result }}" = "success"
 
   oci-live:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.oci_live }}
     runs-on: ubuntu-latest
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v5
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
-
-      - name: Install package
-        run: python -m pip install -e ".[dev]"
-
+      - run: python -m pip install -e ".[dev]"
       - name: Explicitly provision the pinned runner image
         run: >-
           docker pull
           docker.io/library/python:3.13.5-slim-bookworm@sha256:4c2cf9917bd1cbacc5e9b07320025bdb7cdf2df7b0ceaccb55e9dd7e30987419
-
-      - name: Run live OCI security fixtures without pulls
-        run: make oci-live PYTHON=python
+      - run: make oci-live PYTHON=python

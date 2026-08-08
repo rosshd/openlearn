@@ -8,7 +8,7 @@ set -euo pipefail
 # Usage: manual-tests/smoke-full.sh [--mock]
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OPENLEARN_BIN="${OPENLEARN:-$ROOT_DIR/.venv/bin/openlearn}"
+OPENLEARN_BIN="${OPENLEARN:-openlearn}"
 MOCK=0
 if [ "${1:-}" = "--mock" ]; then
   MOCK=1
@@ -17,8 +17,8 @@ elif [ -n "${1:-}" ]; then
   exit 2
 fi
 
-if [ ! -x "$OPENLEARN_BIN" ]; then
-  echo "ERROR: openlearn executable not found: $OPENLEARN_BIN" >&2
+if ! OPENLEARN_BIN="$(command -v "$OPENLEARN_BIN" 2>/dev/null)"; then
+  echo "ERROR: openlearn executable not found on PATH or at OPENLEARN" >&2
   exit 2
 fi
 
@@ -42,7 +42,6 @@ cleanup() {
 trap cleanup EXIT
 
 export OPENLEARN_HOME="$WORK_HOME"
-export PYTHONPATH="$ROOT_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
 if [ "$MOCK" = "1" ]; then
   unset OPENAI_API_KEY OPENLEARN_MODEL OPENLEARN_EXTRACTOR_MODEL OPENLEARN_BASE_URL
   export OPENLEARN_MOCK=1
@@ -85,7 +84,7 @@ echo "Checking the complete parser surface..."
 capture version --version
 assert_output version "openlearn "
 for command in \
-  init menu templates doctor test repl shell tui config new interview attempt \
+  init menu templates doctor test repl shell tui config data new interview attempt \
   delete list recent status stats summary repair active edit import quick \
   quick-learn paste chat review due videos resume next chapter
 do
@@ -94,6 +93,10 @@ done
 for command in show set-key set-model set-extractor-model clear-extractor-model set-base-url set-editor clear-key
 do
   capture "help-config-$command" config "$command" --help
+done
+for command in inventory backup export restore move reset delete
+do
+  capture "help-data-$command" data "$command" --help
 done
 for command in setup profile edit clear placement
 do
@@ -150,6 +153,8 @@ fi
 assert_output doctor "Code runner:"
 capture templates templates
 assert_output templates "Available course templates:"
+capture data-inventory data inventory
+assert_output data-inventory '"home"'
 
 echo "Creating topics and exercising local topic commands..."
 capture seed test --resume --with-lock --home "$WORK_HOME" --no-menu

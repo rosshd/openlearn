@@ -2,7 +2,7 @@
 
 [![Tests](https://github.com/rosshd/openlearn/actions/workflows/tests.yml/badge.svg)](https://github.com/rosshd/openlearn/actions/workflows/tests.yml)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
-[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](pyproject.toml)
+[![Python 3.11-3.13](https://img.shields.io/badge/python-3.11--3.13-blue.svg)](pyproject.toml)
 
 Local-first AI tutoring that keeps learning state in files you own.
 
@@ -20,15 +20,19 @@ It stores curriculum, learner state, session notes, and context files locally wh
 ## Install
 
 ```bash
-pipx install openlearn
+python -m pip install --upgrade openlearn
 ```
+
+openLearn supports Python 3.11 through 3.13 on Linux, macOS, and Windows.
+Use a virtual environment or `pipx` if you do not want to install the command into your current Python environment.
+See [installation and upgrades](docs/INSTALL.md) for platform-specific commands, supported-runtime details, and uninstall behavior.
 
 From source:
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -e .
+python -m pip install -e .
 ```
 
 On Windows, activate the virtual environment with `.venv\Scripts\Activate.ps1` before installing.
@@ -61,7 +65,7 @@ make check
 
 ### Platform support
 
-openLearn supports Linux, macOS, and Windows on Python 3.11 and newer.
+openLearn supports Linux, macOS, and Windows on Python 3.11 through 3.13.
 Topic file locking works on all supported platforms.
 Multiline paste detection requires a POSIX terminal; on Windows, the REPL accepts pasted input one line at a time.
 Secure Python drill checks require a locally running Docker or Podman runtime.
@@ -107,6 +111,7 @@ export OPENLEARN_HOME="/path/to/openlearn-data"
 The equivalent `config.json` key is `extractor_model`; when neither is set, extraction uses the tutor model.
 
 If `OPENLEARN_HOME` is unset, openLearn uses the current directory when it contains `learning-topics/`; otherwise it uses the platform data directory.
+See [data and privacy](docs/DATA_AND_PRIVACY.md) for the exact locations, backup, move, reset, and deletion procedures.
 
 ## Daily Workflow
 
@@ -219,6 +224,7 @@ If the editor cannot be launched, openLearn keeps the drill active and prints it
 | Sources | `import <topic> <file>`, `import <topic> --url <url>`, `import <topic> --scan <dir>`, `paste` |
 | Practice | `videos`, REPL `/drill`, REPL `/check` |
 | Interview prep | `interview setup`, `interview profile`, `interview edit`, `interview placement`, `interview clear` |
+| Data ownership | `data inventory`, `data backup`, `data export`, `data restore`, `data move`, `data reset`, `data delete` |
 | Utilities | `web`, `templates`, `test`, `tui` |
 
 Model-backed commands require an API key for non-local providers, but localhost OpenAI-compatible endpoints such as Ollama may be used keylessly.
@@ -242,6 +248,7 @@ Transient provider failures such as rate limits, server errors, URL errors, and 
 
 These files are ignored by Git because they may contain private notes, class material, or credentials.
 See [the shareable topic format](docs/TOPIC_FORMAT.md) for the Markdown plus JSON structure and guidance on copying a topic safely.
+See [troubleshooting and support](docs/TROUBLESHOOTING.md) for safe diagnostic information and [the security policy](SECURITY.md) for private vulnerability reporting.
 
 ## License
 

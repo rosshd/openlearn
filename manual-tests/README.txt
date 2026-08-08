@@ -19,9 +19,12 @@ Files
   Runs quick scripted checks that should not call OpenAI.
 
 - smoke-full.sh
-  Runs a strict public-interface journey in an isolated openLearn home.
-  Product actions use only the openlearn application interface; the shell only
-  creates input fixtures and checks learner-visible output.
+  Runs a strict installed-artifact public-interface journey in an isolated
+  openLearn home.
+  It resolves `openlearn` from PATH by default and does not add `src/` to
+  PYTHONPATH, so it can verify a wheel or source-distribution installation.
+  Set OPENLEARN=/path/to/openlearn only to select a different installed binary.
+  The script needs a POSIX shell, so run it from macOS, Linux, Git Bash, or WSL.
 
 Fast Workflows
 0. Shortest built-in workflow:
@@ -62,13 +65,25 @@ Fast Workflows
    Set `OPENLEARN_E2E_KEEP=1` to preserve its temporary output artifacts, or
    provide an empty `OPENLEARN_HOME` to choose and preserve the test location.
 
+6. Installed-artifact CLI and Maker Bench smoke:
+   Install the release candidate into a fresh virtual environment.
+   Run `openlearn --version`, `openlearn templates`, and
+   `OPENLEARN_MOCK=1 bash manual-tests/smoke-full.sh --mock`.
+   On macOS, Linux, Git Bash, or WSL, start Maker Bench in a separate terminal with
+   `OPENLEARN_HOME="$(mktemp -d)" openlearn web --no-browser`.
+   On Windows PowerShell, create a temporary directory and set `$env:OPENLEARN_HOME` before running `openlearn web --no-browser`.
+   Open the loopback URL printed by the command, complete the setup or starter-course screen, and verify that the page loads its styles and scripts.
+   Stop the server with Ctrl-C and remove only the temporary home you created.
+
 Useful Environment Variables
 - OPENLEARN_HOME
   Override the isolated state directory.
   Example: OPENLEARN_HOME=/tmp/openlearn-test-a bash manual-tests/run-menu-isolated.sh
 
 - PYTHONPATH
-  The scripts set this to src automatically where needed.
+  Source-only helpers set this when needed.
+  smoke-full.sh deliberately does not, so installed-package tests cannot fall
+  back to checkout code.
 
 Recommended Manual Checks
 - New course screen shows Name * and Goal *.
