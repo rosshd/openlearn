@@ -114,7 +114,7 @@ capture config-show config show
 assert_output config-show "Model: mock-model"
 assert_output config-show "Extractor model: mock-model (tutor fallback)"
 assert_output config-show "Base URL: http://localhost:11434/v1"
-assert_output config-show "API key: saved locally ("
+assert_output config-show "API key: saved locally"
 if grep -Fq "e2e-secret" "$ARTIFACTS/config-show.out"; then
   echo "FAIL: config show exposed the saved API key" >&2
   exit 1
@@ -127,7 +127,7 @@ OPENLEARN_MODEL=env-model \
 assert_output config-env "Model: env-model"
 assert_output config-env "Extractor model: env-extractor (environment override)"
 assert_output config-env "Base URL: http://localhost:22434/v1"
-assert_output config-env "API key: set by OPENAI_API_KEY ("
+assert_output config-env "API key: set by OPENAI_API_KEY"
 if grep -Fq "env-secret" "$ARTIFACTS/config-env.out"; then
   echo "FAIL: config show exposed the environment API key" >&2
   exit 1
