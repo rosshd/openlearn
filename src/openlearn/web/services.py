@@ -19,6 +19,7 @@ from openlearn import (
     tutor_service,
     video_tools,
 )
+from openlearn import data_management
 from openlearn.application import CalibrationContext, CourseCard, CourseCreationRequest
 from openlearn.course_templates import CourseTemplateError
 from openlearn.courses import (
@@ -756,6 +757,75 @@ class OpenLearnWebServices:
             return {"state": "conflict", "error": "This review changed elsewhere. Reload to continue."}
         cli.schedule_review_outcomes(request.slug, [(due, request.result)])
         return {"ok": True}
+
+    def data_summary(self) -> dict[str, object]:
+        inventory = application.data_inventory()
+        return inventory.summary()
+
+    def manage_data(self, request: object) -> dict[str, object]:
+        action = getattr(request, "action", "")
+        archive = Path(str(getattr(request, "archive", "")))
+        destination = Path(str(getattr(request, "destination", "")))
+        include_credentials = bool(getattr(request, "include_credentials", False))
+        credential_confirmation = str(getattr(request, "credential_confirmation", ""))
+        confirmation = str(getattr(request, "confirmation", ""))
+        home = cli.project_home()
+        try:
+            if action in {"backup", "export"}:
+                result = data_management.create_backup(
+                    home,
+                    archive,
+                    include_credentials=include_credentials,
+                    credential_confirmation=credential_confirmation,
+                )
+                return {
+                    "ok": True,
+                    "archive": str(result.archive),
+                    "summary": self.data_summary(),
+                }
+            if action == "restore":
+                result = data_management.restore_backup(archive, destination)
+                return {"ok": True, "home": str(result.home)}
+            if action == "move":
+                result = data_management.move_home(
+                    home,
+                    destination,
+                    archive,
+                    confirmation=confirmation,
+                    include_credentials=include_credentials,
+                    credential_confirmation=credential_confirmation,
+                )
+                return {
+                    "ok": True,
+                    "home": str(result),
+                    "message": (
+                        f"Data moved to {result}. Set OPENLEARN_HOME to this path "
+                        "before your next launch."
+                    ),
+                }
+            if action == "reset":
+                result = data_management.reset_home(
+                    home,
+                    archive,
+                    confirmation=confirmation,
+                    include_credentials=include_credentials,
+                    credential_confirmation=credential_confirmation,
+                )
+                return {"ok": True, "summary": result.summary()}
+            if action == "delete":
+                data_management.delete_home(
+                    home,
+                    archive,
+                    confirmation=confirmation,
+                    include_credentials=include_credentials,
+                    credential_confirmation=credential_confirmation,
+                )
+                return {"ok": True}
+            return {"ok": False, "error": "Unsupported data operation."}
+        except data_management.DataManagementError as error:
+            return {"ok": False, "error": str(error)}
+        except OSError:
+            return {"ok": False, "error": "The local data operation could not be completed safely."}
 
     def course_initialization(
         self, slug: str, operation_id: str

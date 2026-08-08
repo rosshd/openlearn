@@ -69,6 +69,10 @@ class WebServices(Protocol):
 
     def grade_review(self, request: Any) -> Any: ...
 
+    def data_summary(self) -> Any: ...
+
+    def manage_data(self, request: Any) -> Any: ...
+
     def submit_turn(self, slug: str, request: Any) -> Any: ...
 
     def operation_status(self, slug: str, operation_id: str) -> Any: ...
@@ -156,6 +160,12 @@ class PlaceholderServices:
 
     def grade_review(self, request: Any) -> dict[str, Any]:
         return {"ok": False, "error": "Review services are unavailable."}
+
+    def data_summary(self) -> dict[str, Any]:
+        return {"files": 0, "bytes": 0, "credentials_present": False, "excluded": []}
+
+    def manage_data(self, request: Any) -> dict[str, Any]:
+        return {"ok": False, "error": "Data services are unavailable.", "request": request}
 
     def submit_turn(self, slug: str, request: Any) -> dict[str, Any]:
         return {"ok": False, "error": "Tutor services are not available yet."}

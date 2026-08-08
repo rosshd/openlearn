@@ -6,7 +6,14 @@ import re
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from openlearn.data_management import (
+    CREDENTIAL_CONFIRMATION,
+    DELETE_CONFIRMATION,
+    MOVE_CONFIRMATION,
+    RESET_CONFIRMATION,
+)
 
 SLUG_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$")
 
@@ -92,6 +99,33 @@ class ReviewGradeRequest(BaseModel):
     @classmethod
     def valid_slug(cls, value: str) -> str:
         return canonical_slug(value)
+
+
+class DataManagementRequest(BaseModel):
+    action: Literal["backup", "export", "restore", "move", "reset", "delete"]
+    archive: str = Field(default="", max_length=4096)
+    destination: str = Field(default="", max_length=4096)
+    confirmation: str = Field(default="", max_length=128)
+    include_credentials: bool = False
+    credential_confirmation: str = Field(default="", max_length=128)
+
+    @model_validator(mode="after")
+    def valid_data_scope(self) -> DataManagementRequest:
+        if self.action in {"backup", "export", "restore", "move", "reset", "delete"} and not self.archive.strip():
+            raise ValueError("A backup archive path is required")
+        if self.action in {"restore", "move"} and not self.destination.strip():
+            raise ValueError("A destination path is required")
+        confirmations = {
+            "move": MOVE_CONFIRMATION,
+            "reset": RESET_CONFIRMATION,
+            "delete": DELETE_CONFIRMATION,
+        }
+        required_confirmation = confirmations.get(self.action)
+        if required_confirmation is not None and self.confirmation != required_confirmation:
+            raise ValueError("The exact confirmation phrase is required")
+        if self.include_credentials and self.credential_confirmation != CREDENTIAL_CONFIRMATION:
+            raise ValueError("The exact credential confirmation phrase is required")
+        return self
 
 
 class VideoToolRequest(BaseModel):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 import time
 from datetime import datetime, timezone
@@ -215,6 +216,66 @@ def test_dashboard_groups_discoverable_learning_practice_and_settings_paths(
     assert "/progress" in response.text
     assert "/setup" in response.text
     assert "/data" in response.text
+
+
+def test_data_page_is_read_only_and_data_mutations_require_csrf(client: TestClient) -> None:
+    before = cli.project_home().exists()
+    page = client.get("/data")
+
+    assert page.status_code == 200
+    assert "durable files" in page.text
+    assert cli.project_home().exists() is before
+    rejected = client.post("/api/data", json={"action": "reset"})
+    assert rejected.status_code == 403
+
+
+def test_data_controls_backup_refuse_reset_and_match_cli_summary(
+    client: TestClient, tmp_path: Path
+) -> None:
+    cli.cmd_new(
+        argparse.Namespace(topic="Data Course", goal="Keep a verified backup"),
+        output_func=lambda _text: None,
+    )
+    output: list[str] = []
+    cli.cmd_data(argparse.Namespace(data_action="inventory"), output_func=output.append)
+    cli_summary = json.loads(output[0])
+    web_summary = OpenLearnWebServices().data_summary()
+    assert cli_summary["files"] == web_summary["files"]
+    assert cli_summary["bytes"] == web_summary["bytes"]
+
+    page = client.get("/data")
+    assert "Create verified backup" in page.text
+    assert "Restore or move a verified backup" in page.text
+    assert "Reset or delete local data" in page.text
+    token = page.cookies["openlearn_csrf"]
+    archive = tmp_path.parent / f"{tmp_path.name}-web-backup.olbackup"
+    backup = client.post(
+        "/api/data",
+        headers={"x-csrf-token": token},
+        json={"action": "backup", "archive": str(archive)},
+    )
+    assert backup.status_code == 200
+    assert archive.exists()
+
+    refused = client.post(
+        "/api/data",
+        headers={"x-csrf-token": token},
+        json={"action": "reset", "archive": str(archive), "confirmation": "wrong"},
+    )
+    assert refused.status_code == 400
+    assert cli.topic_path("data-course").exists()
+
+    malformed = client.post(
+        "/api/data", headers={"x-csrf-token": token}, json={"action": "move", "archive": ""}
+    )
+    assert malformed.status_code == 400
+    missing = client.post(
+        "/api/data",
+        headers={"x-csrf-token": token},
+        json={"action": "restore", "archive": str(tmp_path / "missing.olbackup"), "destination": str(tmp_path.parent / "restore")},
+    )
+    assert missing.status_code == 422
+    assert str(tmp_path / "missing.olbackup") not in missing.text
 
 
 def test_interview_placement_defer_and_restart_remain_resumable(client: TestClient) -> None:

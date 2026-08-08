@@ -2,6 +2,65 @@
 {% block content %}
 <section class="setup-layout" aria-labelledby="data-title">
   <div><p class="eyebrow">Settings</p><h1 id="data-title">Your learning data stays local.</h1><p class="lede">Courses, progress, reviews, placement evidence, and provider configuration live in your Openlearn home.</p></div>
-  <article class="work-panel"><h2>Data management</h2><p>Whole-home inventory, backup, move, export, reset, and deletion controls are available from this settings area as release-safe operations are enabled.</p><a class="primary-action compact" href="{{ url_for('dashboard') }}">Return to your courses</a></article>
+  <article class="work-panel form-stack" data-data-management>
+    <h2>Data management</h2>
+    <p>{{ data.files }} durable files ({{ data.bytes }} bytes) are in the current inventory.</p>
+    <p>{% if data.credentials_present %}Saved credentials require separate confirmation for credential-inclusive backup, move, reset, or deletion.{% else %}No saved credentials are present in this inventory.{% endif %}</p>
+    <p class="field-note" role="status" aria-live="polite" aria-atomic="true" tabindex="-1" data-data-status>Choose a backup location before changing local data.</p>
+    <form class="form-stack" data-data-form>
+      <input type="hidden" name="action" value="backup">
+      <label for="data-backup-path">Backup archive path</label>
+      <input id="data-backup-path" name="archive" type="text" required maxlength="4096" placeholder="/path/to/openlearn-backup.olbackup">
+      <label><input name="include_credentials" type="checkbox"> Include saved API credentials</label>
+      <label for="data-credential-confirmation">Credential phrase (only when included)</label>
+      <input id="data-credential-confirmation" name="credential_confirmation" type="text" maxlength="128" placeholder="{{ 'INCLUDE SAVED CREDENTIALS' }}">
+      <button class="primary-action" type="submit">Create verified backup</button>
+    </form>
+    <details class="secondary-controls">
+      <summary>Restore or move a verified backup</summary>
+      <div class="form-stack">
+        <form class="form-stack" data-data-form>
+          <input type="hidden" name="action" value="restore">
+          <label>Archive path <input name="archive" type="text" required maxlength="4096"></label>
+          <label>Empty restore destination <input name="destination" type="text" required maxlength="4096"></label>
+          <button type="submit">Restore verified backup</button>
+        </form>
+        <form class="form-stack" data-data-form>
+          <input type="hidden" name="action" value="move">
+          <label>Verified backup path <input name="archive" type="text" required maxlength="4096"></label>
+          <label>New Openlearn home <input name="destination" type="text" required maxlength="4096"></label>
+          <p class="field-note">Type <code>MOVE OPENLEARN HOME</code> to confirm.</p>
+          <label>Confirmation <input name="confirmation" type="text" required maxlength="128"></label>
+          <label><input name="include_credentials" type="checkbox"> Move saved credentials too</label>
+          <label>Credential phrase <input name="credential_confirmation" type="text" maxlength="128"></label>
+          <button type="submit">Move after verification</button>
+        </form>
+      </div>
+    </details>
+    <details class="secondary-controls">
+      <summary>Reset or delete local data</summary>
+      <div class="form-stack">
+        <form class="form-stack" data-data-form>
+          <input type="hidden" name="action" value="reset">
+          <label>Verified backup path <input name="archive" type="text" required maxlength="4096"></label>
+          <p class="field-note">Type <code>RESET OPENLEARN DATA</code> to confirm. Provider settings remain unless credentials are included.</p>
+          <label>Confirmation <input name="confirmation" type="text" required maxlength="128"></label>
+          <label><input name="include_credentials" type="checkbox"> Reset saved credentials too</label>
+          <label>Credential phrase <input name="credential_confirmation" type="text" maxlength="128"></label>
+          <button type="submit">Reset after verification</button>
+        </form>
+        <form class="form-stack" data-data-form>
+          <input type="hidden" name="action" value="delete">
+          <label>Verified backup path <input name="archive" type="text" required maxlength="4096"></label>
+          <p class="field-note">Type <code>DELETE OPENLEARN HOME</code> to confirm. Saved credentials need their own checked scope and phrase.</p>
+          <label>Confirmation <input name="confirmation" type="text" required maxlength="128"></label>
+          <label><input name="include_credentials" type="checkbox"> Delete saved credentials too</label>
+          <label>Credential phrase <input name="credential_confirmation" type="text" maxlength="128"></label>
+          <button type="submit">Delete after verification</button>
+        </form>
+      </div>
+    </details>
+    <a class="primary-action compact" href="{{ url_for('dashboard') }}">Return to your courses</a>
+  </article>
 </section>
 {% endblock %}

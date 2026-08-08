@@ -41,6 +41,7 @@ from urllib.request import Request, urlopen
 from platformdirs import user_data_dir
 
 from openlearn import __version__, code_runner
+from openlearn import data_management
 from openlearn import interview_attempts
 from openlearn import interview_prep
 from openlearn import stats as stats_metrics
@@ -563,6 +564,44 @@ def build_parser() -> argparse.ArgumentParser:
 
     config_clear_key = config_sub.add_parser("clear-key", help="Remove the saved API key")
     config_clear_key.set_defaults(func=cmd_config_clear_key)
+
+    data_parser = sub.add_parser(
+        "data", help="Inspect, back up, restore, move, reset, or delete Openlearn home data"
+    )
+    data_sub = data_parser.add_subparsers(required=True, dest="data_action")
+    data_inventory = data_sub.add_parser(
+        "inventory", help="Show the resolved durable data inventory"
+    )
+    data_inventory.set_defaults(func=cmd_data)
+    data_backup = data_sub.add_parser(
+        "backup", aliases=["export"], help="Create a verified backup archive"
+    )
+    data_backup.add_argument("archive", type=Path)
+    data_backup.add_argument("--include-credentials", action="store_true")
+    data_backup.add_argument("--credential-confirmation")
+    data_backup.set_defaults(func=cmd_data)
+    data_restore = data_sub.add_parser(
+        "restore", help="Restore a verified archive into an empty home"
+    )
+    data_restore.add_argument("archive", type=Path)
+    data_restore.add_argument("destination", type=Path)
+    data_restore.set_defaults(func=cmd_data)
+    destructive_actions = (
+        ("move", data_management.MOVE_CONFIRMATION),
+        ("reset", data_management.RESET_CONFIRMATION),
+        ("delete", data_management.DELETE_CONFIRMATION),
+    )
+    for action, confirmation in destructive_actions:
+        command = data_sub.add_parser(
+            action, help=f"{action.title()} data only after an exact verified backup"
+        )
+        command.add_argument("backup", type=Path)
+        if action == "move":
+            command.add_argument("destination", type=Path)
+        command.add_argument("--confirmation", required=True, help=f"Type: {confirmation}")
+        command.add_argument("--include-credentials", action="store_true")
+        command.add_argument("--credential-confirmation")
+        command.set_defaults(func=cmd_data)
 
     new_parser = sub.add_parser("new", help="Create a new learning topic")
     new_parser.add_argument("topic", help="Topic name or slug")
@@ -2541,6 +2580,64 @@ def handle_repl_command(
     else:
         raise OpenLearnError(f"unknown REPL command: /{name}")
     return None
+
+
+def cmd_data(args: argparse.Namespace, output_func=print) -> int:
+    """Expose the same whole-home lifecycle service as the web data settings page."""
+    action = getattr(args, "data_action", None)
+    home = project_home()
+    try:
+        if action == "inventory":
+            output_func(
+                json.dumps(data_management.inventory_home(home).summary(), indent=2, sort_keys=True)
+            )
+        elif action in {"backup", "export"}:
+            result = data_management.create_backup(
+                home,
+                args.archive,
+                include_credentials=args.include_credentials,
+                credential_confirmation=args.credential_confirmation,
+            )
+            output_func(f"Verified backup: {result.archive}")
+            if result.warning:
+                output_func(f"Warning: {result.warning}")
+        elif action == "restore":
+            result = data_management.restore_backup(args.archive, args.destination)
+            output_func(f"Restored verified backup to {result.home}")
+        elif action == "move":
+            result = data_management.move_home(
+                home,
+                args.destination,
+                args.backup,
+                confirmation=args.confirmation,
+                include_credentials=args.include_credentials,
+                credential_confirmation=args.credential_confirmation,
+            )
+            output_func(f"Moved Openlearn home to {result}")
+            output_func(f"Set OPENLEARN_HOME={result} before your next launch.")
+        elif action == "reset":
+            result = data_management.reset_home(
+                home,
+                args.backup,
+                confirmation=args.confirmation,
+                include_credentials=args.include_credentials,
+                credential_confirmation=args.credential_confirmation,
+            )
+            output_func(json.dumps(result.summary(), indent=2, sort_keys=True))
+        elif action == "delete":
+            data_management.delete_home(
+                home,
+                args.backup,
+                confirmation=args.confirmation,
+                include_credentials=args.include_credentials,
+                credential_confirmation=args.credential_confirmation,
+            )
+            output_func("Deleted verified Openlearn data.")
+        else:
+            raise OpenLearnError("unknown data command")
+    except data_management.DataManagementError as error:
+        raise OpenLearnError(str(error)) from error
+    return 0
 
 
 def cmd_config_show(_args: argparse.Namespace) -> int:

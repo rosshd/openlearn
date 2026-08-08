@@ -893,3 +893,31 @@ for (const button of document.querySelectorAll("[data-review-grade]")) {
     }
   });
 }
+
+const dataManagement = document.querySelector("[data-data-management]");
+const dataStatus = dataManagement?.querySelector("[data-data-status]");
+
+for (const form of document.querySelectorAll("[data-data-form]")) {
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const submit = form.querySelector('[type="submit"]');
+    submit.disabled = true;
+    if (dataStatus) dataStatus.textContent = "Verifying local data…";
+    try {
+      const result = await requestJson("/api/data", {
+        method: "POST",
+        body: JSON.stringify(formPayload(form)),
+      });
+      const message = result.message || (result.archive ? `Verified backup created at ${result.archive}.` : "Local data operation completed.");
+      if (dataStatus) dataStatus.textContent = message;
+    } catch (error) {
+      if (dataStatus) {
+        dataStatus.textContent = error.message;
+        dataStatus.setAttribute("aria-live", "assertive");
+        dataStatus.focus();
+      }
+    } finally {
+      submit.disabled = false;
+    }
+  });
+}

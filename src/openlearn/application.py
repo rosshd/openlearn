@@ -11,7 +11,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from collections.abc import Mapping
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    from openlearn.data_management import HomeInventory
 
 
 @dataclass(frozen=True)
@@ -232,3 +235,11 @@ def create_course(request: CourseCreationRequest) -> CourseCreationResult:
     from openlearn.courses import create_course as create
 
     return create(request)
+
+
+def data_inventory() -> HomeInventory:
+    """Return the presentation-neutral inventory for the configured Openlearn home."""
+    from openlearn.config import project_home
+    from openlearn.data_management import inventory_home
+
+    return inventory_home(project_home())

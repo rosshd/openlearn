@@ -17,6 +17,7 @@ from openlearn.constants import QUICK_LEARN_MAX_FILE_BYTES
 from .schemas import (
     CodeToolRequest,
     CourseCreateRequest,
+    DataManagementRequest,
     FolderSourceRequest,
     GitHubSourceRequest,
     PlacementRequest,
@@ -409,11 +410,22 @@ async def grade_review(request: Request) -> JSONResponse:
 
 @router.get("/data", response_class=HTMLResponse, name="data")
 async def data_entry(request: Request) -> Any:
+    summary = public_mapping(await _call(request, "data_summary"))
     return _templates(request).TemplateResponse(
         request,
         "data.html",
-        _context(request, page_title="Local data"),
+        _context(request, data=summary, page_title="Local data"),
     )
+
+
+@router.post("/api/data", response_class=JSONResponse)
+async def manage_data(request: Request) -> JSONResponse:
+    try:
+        payload = DataManagementRequest.model_validate(await request.json())
+    except (ValidationError, ValueError):
+        return _json_error("Check the data operation and confirmation.")
+    result = public_mapping(await _call(request, "manage_data", payload))
+    return JSONResponse(result, status_code=422 if not result.get("ok", False) else 200)
 
 
 @router.post("/api/courses/{slug}/turns", response_class=JSONResponse)
