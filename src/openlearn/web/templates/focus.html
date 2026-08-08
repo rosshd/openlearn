@@ -16,8 +16,8 @@
     <button type="button" class="rail-button" data-tool-open="code" aria-expanded="false" aria-controls="learning-tool-surface"><span aria-hidden="true">{ }</span> Code</button>
     <button type="button" class="rail-button" data-tool-open="video" aria-expanded="false" aria-controls="learning-tool-surface"><span aria-hidden="true">▶</span> Video</button>
     <button type="button" class="rail-button" data-tool-open="sources" aria-expanded="false" aria-controls="learning-tool-surface"><span aria-hidden="true">＋</span> Sources</button>
-    <button type="button" class="rail-button" data-drawer-toggle="progress-drawer" aria-expanded="false"><span aria-hidden="true">◫</span> Progress</button>
-    <button type="button" class="rail-button" data-drawer-toggle="history-drawer" aria-expanded="false"><span aria-hidden="true">↺</span> History</button>
+    <button type="button" class="rail-button" data-drawer-toggle="progress-drawer" aria-expanded="false" aria-controls="progress-drawer"><span aria-hidden="true">◫</span> Progress</button>
+    <button type="button" class="rail-button" data-drawer-toggle="history-drawer" aria-expanded="false" aria-controls="history-drawer"><span aria-hidden="true">↺</span> History</button>
   </aside>
 
   <section class="focus-column" aria-labelledby="move-title">
@@ -62,7 +62,7 @@
         <span class="intent-readout">Sending as <strong data-intent-label>Answer</strong></span>
         <button class="primary-action" type="submit">Send response <span aria-hidden="true">⌘↵</span></button>
       </div>
-      <div class="operation-state" data-operation-state role="status" aria-live="polite" hidden></div>
+      <div class="operation-state" data-operation-state role="status" aria-live="polite" aria-atomic="true" tabindex="-1" hidden></div>
     </form>
 
     <nav class="secondary-actions" aria-label="Lesson navigation">
@@ -79,7 +79,7 @@
       </div>
       <button class="drawer-close" type="button" data-tool-close aria-label="Close learning tool">×</button>
     </header>
-    <p class="field-note" role="status" aria-live="polite" data-tool-status></p>
+    <p class="field-note" role="status" aria-live="polite" aria-atomic="true" tabindex="-1" data-tool-status></p>
 
     <section class="tool-panel" data-tool-panel="code" hidden aria-labelledby="code-tool-title">
       <h3 id="code-tool-title">Python workbench</h3>

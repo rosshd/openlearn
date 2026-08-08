@@ -139,7 +139,6 @@ for (const form of document.querySelectorAll("[data-json-form]")) {
         if (form.elements.save_unverified) form.elements.save_unverified.checked = false;
         const message = result.message || "Saved locally. Validate the connection before teaching starts.";
         if (status) status.textContent = message;
-        announce(message);
         return;
       }
       announce("Saved successfully.");
@@ -187,7 +186,8 @@ function toolStatus(message, isError = false) {
   if (!status) return;
   status.textContent = message;
   status.classList.toggle("error", isError);
-  announce(message);
+  status.setAttribute("aria-live", isError ? "assertive" : "polite");
+  if (isError) status.focus();
 }
 
 function toolEndpoint(suffix) {
@@ -510,9 +510,10 @@ function setInitializationState(message, retryable = false) {
   if (status) {
     status.textContent = message;
     status.classList.toggle("error", retryable);
+    status.setAttribute("aria-live", retryable ? "assertive" : "polite");
   }
   if (retry) retry.hidden = !retryable;
-  announce(message);
+  if (retryable) status?.focus();
 }
 
 async function pollInitialization() {
@@ -579,7 +580,8 @@ function setOperationState(message, isError = false) {
   state.hidden = false;
   state.textContent = message;
   state.classList.toggle("error", isError);
-  announce(message);
+  state.setAttribute("aria-live", isError ? "assertive" : "polite");
+  if (isError) state.focus();
 }
 
 function lockTurnForm(locked) {
@@ -796,31 +798,69 @@ document.addEventListener("keydown", (event) => {
 const placementShell = document.querySelector("[data-placement-shell]");
 const placementStatus = placementShell?.querySelector("[data-placement-status]");
 
+function lockPlacement(locked) {
+  for (const control of placementShell?.querySelectorAll("button") || []) {
+    control.disabled = locked;
+  }
+  placementShell?.setAttribute("aria-busy", String(locked));
+}
+
+function finishPlacementAction(result) {
+  const destination = result.initialization_url || result.setup_url;
+  if (destination) window.location.assign(appUrl(destination));
+  else window.location.reload();
+}
+
 async function runPlacementAction(action, values = {}) {
   if (!placementShell) return;
-  for (const control of placementShell.querySelectorAll("button")) control.disabled = true;
+  lockPlacement(true);
   if (placementStatus) placementStatus.textContent = "Saving locally…";
   try {
     const result = await requestJson(`/api/courses/${encodeURIComponent(placementShell.dataset.courseSlug)}/placement`, {
       method: "POST",
       body: JSON.stringify({action, ...values}),
     });
-    const destination = result.initialization_url || result.setup_url;
-    if (destination) window.location.assign(appUrl(destination));
-    else window.location.reload();
+    finishPlacementAction(result);
   } catch (error) {
-    if (placementStatus) placementStatus.textContent = error.message;
-    for (const control of placementShell.querySelectorAll("button")) control.disabled = false;
+    if (placementStatus) {
+      placementStatus.textContent = error.message;
+      placementStatus.setAttribute("aria-live", "assertive");
+      placementStatus.focus();
+    }
+    lockPlacement(false);
   }
 }
 
-placementShell?.querySelector("[data-placement-draft-form]")?.addEventListener("submit", (event) => {
+placementShell?.querySelector("[data-placement-draft-form]")?.addEventListener("submit", async (event) => {
   event.preventDefault();
-  runPlacementAction("save_draft", {
-    stage: placementShell.querySelector("[data-placement-action][data-stage]")?.dataset.stage,
-    text: placementShell.querySelector("textarea")?.value || "",
-    expected_updated_at: placementShell.dataset.updatedAt || null,
-  });
+  const stage = event.currentTarget.dataset.placementStage;
+  lockPlacement(true);
+  if (placementStatus) placementStatus.textContent = "Saving your reasoning locally…";
+  try {
+    const saved = await requestJson(`/api/courses/${encodeURIComponent(placementShell.dataset.courseSlug)}/placement`, {
+      method: "POST",
+      body: JSON.stringify({
+        action: "save_draft",
+        stage,
+        text: placementShell.querySelector("textarea")?.value || "",
+        expected_updated_at: placementShell.dataset.updatedAt || null,
+      }),
+    });
+    placementShell.dataset.updatedAt = saved.updated_at || placementShell.dataset.updatedAt;
+    if (placementStatus) placementStatus.textContent = "Draft saved. Submitting this section…";
+    const result = await requestJson(`/api/courses/${encodeURIComponent(placementShell.dataset.courseSlug)}/placement`, {
+      method: "POST",
+      body: JSON.stringify({action: "submit", stage, submission_id: crypto.randomUUID()}),
+    });
+    finishPlacementAction(result);
+  } catch (error) {
+    if (placementStatus) {
+      placementStatus.textContent = error.message;
+      placementStatus.setAttribute("aria-live", "assertive");
+      placementStatus.focus();
+    }
+    lockPlacement(false);
+  }
 });
 
 for (const button of document.querySelectorAll("[data-placement-action]")) {

@@ -12,8 +12,11 @@
   <h1 id="initializing-title">Building {{ initialization.title }}.</h1>
   <p>Your goal and experience are safe. You can leave this page and return without entering them again.</p>
   <div class="build-indicator" aria-hidden="true"><span></span><span></span><span></span></div>
-  <p role="status" aria-live="polite" data-initialization-status>Preparing a useful first move…</p>
+  <p role="status" aria-live="polite" aria-atomic="true" tabindex="-1" data-initialization-status>Preparing a useful first move…</p>
   <button class="primary-action" type="button" data-initialization-retry hidden>Retry first lesson <span aria-hidden="true">→</span></button>
-  <p class="field-note"><a href="{{ url_for('dashboard') }}">Return to your workbench</a> or <a href="{{ url_for('setup') }}">review provider setup</a>.</p>
+  <details class="secondary-controls">
+    <summary>Other options</summary>
+    <p class="field-note"><a href="{{ url_for('dashboard') }}">Return to your workbench</a> or <a href="{{ url_for('setup') }}">review provider setup</a>.</p>
+  </details>
 </section>
 {% endblock %}

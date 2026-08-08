@@ -57,6 +57,12 @@ def _wait_for_new_revision(page, previous: int) -> None:
     )
 
 
+def _assert_no_page_overflow(page) -> None:
+    assert page.evaluate(
+        "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
+    )
+
+
 def test_real_browser_course_polling_theme_conflict_and_keyboard_submit(
     tmp_path: Path,
 ) -> None:
@@ -116,6 +122,7 @@ def test_real_browser_course_polling_theme_conflict_and_keyboard_submit(
 
                 provider.select_option("custom")
                 model.fill("my-deliberate-model")
+                first.get_by_text("Advanced connection details", exact=True).click()
                 base_url_field.fill("http://localhost:9911/v1")
                 provider.select_option("openai")
                 assert model.input_value() == "gpt-4.1-mini"
@@ -124,13 +131,34 @@ def test_real_browser_course_polling_theme_conflict_and_keyboard_submit(
                 assert model.input_value() == "my-deliberate-model"
                 assert base_url_field.input_value() == "http://localhost:9911/v1"
 
+                first.set_viewport_size({"width": 320, "height": 720})
                 first.goto(f"{app_url}/courses/new")
+                _assert_no_page_overflow(first)
 
                 first.locator('[data-template-id="technical-interview-prep"]').click()
                 first.locator("#experience").fill(
                     "I know basic Python and want interview practice."
                 )
                 first.get_by_role("button", name="Build the first lesson").click()
+                first.wait_for_url("**/courses/*/placement")
+                assert "/placement" in first.url
+                _assert_no_page_overflow(first)
+                first.get_by_text("Other placement options", exact=True).click()
+                first.emulate_media(reduced_motion="reduce")
+                first.get_by_role(
+                    "button", name="Skip placement and use baseline"
+                ).click()
+                first.wait_for_function(
+                    "() => !window.location.pathname.endsWith('/placement')"
+                )
+                _assert_no_page_overflow(first)
+                if "/initializing/" in first.url:
+                    assert first.locator(".build-indicator span").first.evaluate(
+                        "dot => getComputedStyle(dot).animationName === 'none'"
+                    )
+                first.locator("[data-focus-shell]").wait_for(state="visible")
+                first.emulate_media(reduced_motion="no-preference")
+                first.set_viewport_size({"width": 1280, "height": 800})
                 initial_revision = _revision(first)
                 focus_url = first.url
 
@@ -230,9 +258,25 @@ def test_real_browser_course_polling_theme_conflict_and_keyboard_submit(
                     "browser-notes.md"
                 )
                 first.set_viewport_size({"width": 320, "height": 720})
-                assert first.evaluate("document.body.scrollWidth <= window.innerWidth")
+                _assert_no_page_overflow(first)
+                navigation = first.get_by_role("navigation", name="Primary navigation")
+                playwright.expect(navigation).to_be_visible()
+                assert navigation.get_by_text("Learning", exact=True).is_visible()
+                assert navigation.get_by_text("Practice", exact=True).is_visible()
+                assert navigation.get_by_text("Settings", exact=True).is_visible()
                 assert not first.locator(".focus-column").is_visible()
                 first.get_by_role("button", name="Close learning tool").click()
+                _assert_no_page_overflow(first)
+                progress_button = first.get_by_role("button", name="Progress", exact=True)
+                progress_button.focus()
+                progress_button.press("Enter")
+                assert progress_button.get_attribute("aria-expanded") == "true"
+                playwright.expect(first.locator("#progress-drawer")).to_be_visible()
+                first.get_by_role("button", name="Close progress").press("Enter")
+                assert progress_button.get_attribute("aria-expanded") == "false"
+                assert progress_button.evaluate(
+                    "button => button === document.activeElement"
+                )
                 first.set_viewport_size({"width": 1280, "height": 800})
 
                 stale = context.new_page()
@@ -317,14 +361,21 @@ def test_real_browser_unverified_provider_stays_in_setup(
                 page = browser.new_page()
                 page.goto(bootstrap_url)
                 page.goto(f"{app_url}/setup")
+                page.set_viewport_size({"width": 320, "height": 720})
+                _assert_no_page_overflow(page)
+                assert page.get_by_role("navigation", name="Primary navigation").is_visible()
                 page.locator("#provider").select_option("custom")
                 page.locator("#api-key").fill("browser-secret-must-clear")
                 page.locator("#model").fill("offline-model")
+                page.get_by_text("Advanced connection details", exact=True).click()
                 page.locator("#base-url").fill("http://127.0.0.1:1/v1")
                 page.get_by_role("button", name="Test and save").click()
 
                 playwright.expect(page.locator("[data-form-error]")).to_contain_text(
                     "could not be reached"
+                )
+                assert page.locator("[data-form-error]").evaluate(
+                    "summary => summary === document.activeElement"
                 )
                 assert page.url.endswith("/setup")
                 assert page.locator("#api-key").input_value() == (
@@ -346,6 +397,13 @@ def test_real_browser_unverified_provider_stays_in_setup(
                 playwright.expect(
                     page.get_by_text("Technical Interview Prep", exact=True).first
                 ).to_be_visible()
+                _assert_no_page_overflow(page)
+                for path in ("/dashboard", "/progress", "/data"):
+                    page.goto(f"{app_url}{path}")
+                    _assert_no_page_overflow(page)
+                    assert page.get_by_role(
+                        "navigation", name="Primary navigation"
+                    ).is_visible()
                 browser.close()
         finally:
             process.terminate()

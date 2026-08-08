@@ -131,5 +131,27 @@ def test_primary_action_colors_meet_wcag_aa() -> None:
         assert (light + 0.05) / (dark + 0.05) >= 4.5
 
 
+def test_web_assets_keep_accessibility_release_guards() -> None:
+    repository = Path(__file__).resolve().parents[1]
+    css = (repository / "src/openlearn/web/static/openlearn.css").read_text(
+        encoding="utf-8"
+    )
+    javascript = (repository / "src/openlearn/web/static/openlearn.js").read_text(
+        encoding="utf-8"
+    )
+    base = (repository / "src/openlearn/web/templates/base.html").read_text(
+        encoding="utf-8"
+    )
+
+    assert '@media (max-width: 390px)' in css
+    assert '@media (prefers-reduced-motion: reduce)' in css
+    assert ".site-nav-groups" in css
+    assert "min-height: 2.75rem" in css
+    assert 'aria-label="Primary navigation"' in base
+    assert 'data-nav-group' in base
+    assert "restoreFocus" in javascript
+    assert 'setAttribute("aria-expanded"' in javascript
+
+
 if __name__ == "__main__":
     unittest.main()
