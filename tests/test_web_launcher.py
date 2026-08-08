@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 import json
 import os
 import stat
@@ -423,6 +424,25 @@ def test_cmd_web_maps_arguments_to_launcher(monkeypatch: pytest.MonkeyPatch) -> 
 
     assert cli.cmd_web(Namespace(port=9123, no_browser=True)) == 0
     assert called == {"port": 9123, "open_browser": False}
+
+
+def test_cmd_web_explains_missing_web_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_import = builtins.__import__
+
+    def import_without_fastapi(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "web.launcher" and level == 1:
+            raise ModuleNotFoundError("No module named 'fastapi'", name="fastapi")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", import_without_fastapi)
+
+    with pytest.raises(
+        cli.OpenLearnError,
+        match=r"Maker Bench dependencies are missing.*python -m pip install -e \.",
+    ):
+        cli.cmd_web(Namespace(port=9123, no_browser=True))
 
 
 def test_parser_exposes_web_command() -> None:

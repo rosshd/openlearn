@@ -957,7 +957,24 @@ def cmd_tui(args: argparse.Namespace) -> int:
 def cmd_web(args: argparse.Namespace) -> int:
     try:
         from .web.launcher import WebLaunchError, run
-
+    except ModuleNotFoundError as exc:
+        dependency = (exc.name or "").partition(".")[0]
+        if dependency not in {
+            "fastapi",
+            "jinja2",
+            "multipart",
+            "pydantic",
+            "python_multipart",
+            "starlette",
+            "uvicorn",
+        }:
+            raise
+        raise OpenLearnError(
+            f"Maker Bench dependencies are missing ({dependency}). "
+            "Reinstall Openlearn in the Python environment that provides this command. "
+            "From a source checkout, run: python -m pip install -e ."
+        ) from exc
+    try:
         run(port=args.port, open_browser=not args.no_browser)
     except WebLaunchError as exc:
         raise OpenLearnError(str(exc)) from exc
