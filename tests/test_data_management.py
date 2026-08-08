@@ -2,13 +2,30 @@ from __future__ import annotations
 
 import argparse
 import json
+import multiprocessing
+import os
 import stat
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
 from openlearn import cli, data_management
+
+
+def _write_persistent_file_after_signal(
+    home: str,
+    relative: str,
+    content: str,
+    start: multiprocessing.synchronize.Event,
+    attempting: multiprocessing.synchronize.Event,
+    finished: multiprocessing.synchronize.Event,
+) -> None:
+    os.environ["OPENLEARN_HOME"] = home
+    start.wait(timeout=10)
+    attempting.set()
+    cli.write_text_atomic(Path(home) / relative, content)
+    finished.set()
 
 
 def _write_complete_home(home: Path) -> dict[str, bytes]:
@@ -152,7 +169,24 @@ def test_backup_creation_enforces_entry_limit_without_leaving_an_archive(
     assert not archive.exists()
 
 
-@pytest.mark.parametrize("member", ["../escape", "/absolute", "data/../../escape"])
+@pytest.mark.parametrize(
+    "member",
+    [
+        "../escape",
+        "/absolute",
+        "data/../../escape",
+        ".",
+        "./manifest.json",
+        "data//course.md",
+        "data/course.md/",
+        "C:/Windows/win.ini",
+        "C:relative.txt",
+        r"data\course.md",
+        r"..\escape",
+        r"\\server\share\secret",
+        "data/nul\x00suffix",
+    ],
+)
 def test_restore_rejects_malicious_archive_paths_before_mutation(tmp_path: Path, member: str) -> None:
     archive = tmp_path / "malicious.olbackup"
     with zipfile.ZipFile(archive, "w") as value:
@@ -163,6 +197,29 @@ def test_restore_rejects_malicious_archive_paths_before_mutation(tmp_path: Path,
         data_management.restore_backup(archive, target)
 
     assert not target.exists()
+
+
+def test_restore_maps_canonical_posix_members_to_native_paths(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    _write_complete_home(source)
+    archive = data_management.create_backup(source, tmp_path / "backup.olbackup").archive
+    target = tmp_path / "target"
+
+    data_management.restore_backup(archive, target)
+
+    native = target.joinpath("learning-topics", "python", "context", "notes.md")
+    assert native.is_file()
+    assert native.resolve().is_relative_to(target.resolve())
+
+
+def test_extraction_target_containment_is_enforced_independently(tmp_path: Path) -> None:
+    staging = tmp_path / "staging"
+    staging.mkdir()
+
+    with pytest.raises(data_management.ArchiveSafetyError, match="escapes staging"):
+        data_management._safe_extraction_target(
+            staging, PurePosixPath("..", "escape")
+        )
 
 
 def test_restore_rejects_symlink_duplicate_and_oversized_entries_before_mutation(
@@ -254,7 +311,9 @@ def test_move_failure_preserves_source_and_removes_staging(tmp_path: Path, monke
     assert not list(tmp_path.glob(".openlearn-move-*"))
 
 
-def test_delete_and_move_remove_only_manifest_owned_files(tmp_path: Path) -> None:
+def test_move_publishes_verified_copy_and_retains_source_for_explicit_cleanup(
+    tmp_path: Path,
+) -> None:
     home = tmp_path / "home"
     _write_complete_home(home)
     sentinel = home / "unrelated-sentinel.txt"
@@ -266,7 +325,8 @@ def test_delete_and_move_remove_only_manifest_owned_files(tmp_path: Path) -> Non
         credential_confirmation=data_management.CREDENTIAL_CONFIRMATION,
     ).archive
 
-    data_management.move_home(
+    before = _persistent_bytes(home)
+    result = data_management.move_home(
         home,
         tmp_path / "moved",
         backup,
@@ -276,8 +336,43 @@ def test_delete_and_move_remove_only_manifest_owned_files(tmp_path: Path) -> Non
     )
 
     assert sentinel.read_text(encoding="utf-8") == "keep"
-    assert not _persistent_bytes(home)
+    assert _persistent_bytes(home) == before
+    assert result.destination == (tmp_path / "moved").resolve()
+    assert result.source == home.resolve()
+    assert result.cleanup_required is True
+    assert result.source_retained is True
     assert (tmp_path / "moved" / "learning-topics" / "python.md").exists()
+
+
+def test_move_never_runs_post_promotion_source_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    _write_complete_home(home)
+    before = _persistent_bytes(home)
+    backup = data_management.create_backup(
+        home,
+        tmp_path / "backup.olbackup",
+        include_credentials=True,
+        credential_confirmation=data_management.CREDENTIAL_CONFIRMATION,
+    ).archive
+
+    def forbidden_cleanup(*_args: object, **_kwargs: object) -> None:
+        raise OSError("source cleanup must be explicit")
+
+    monkeypatch.setattr(data_management, "_remove_inventory_entries", forbidden_cleanup)
+    result = data_management.move_home(
+        home,
+        tmp_path / "moved",
+        backup,
+        confirmation=data_management.MOVE_CONFIRMATION,
+        include_credentials=True,
+        credential_confirmation=data_management.CREDENTIAL_CONFIRMATION,
+    )
+
+    assert result.cleanup_required
+    assert _persistent_bytes(home) == before
+    assert _persistent_bytes(result.destination) == before
 
 
 def test_destructive_operations_refuse_repo_root_without_touching_sentinel(tmp_path: Path) -> None:
@@ -352,6 +447,102 @@ def test_files_changed_after_backup_verification_are_never_removed(
 
     assert changed.read_text(encoding="utf-8") == "# Changed after verification\n"
     assert (home / "state.json").exists()
+
+
+def test_writer_cannot_commit_between_reset_verification_and_removal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    _write_complete_home(home)
+    backup = data_management.create_backup(home, tmp_path / "backup.olbackup").archive
+    context = multiprocessing.get_context("spawn")
+    start = context.Event()
+    attempting = context.Event()
+    finished = context.Event()
+    writer = context.Process(
+        target=_write_persistent_file_after_signal,
+        args=(
+            str(home),
+            "learning-topics/python.md",
+            "# Written after reset\n",
+            start,
+            attempting,
+            finished,
+        ),
+    )
+    original_remove = data_management._remove_inventory_entries
+
+    def checkpoint_remove(*args: object, **kwargs: object) -> None:
+        start.set()
+        assert attempting.wait(timeout=10)
+        assert not finished.wait(timeout=0.3)
+        original_remove(*args, **kwargs)
+
+    monkeypatch.setattr(data_management, "_remove_inventory_entries", checkpoint_remove)
+    writer.start()
+    try:
+        data_management.reset_home(
+            home, backup, confirmation=data_management.RESET_CONFIRMATION
+        )
+        assert finished.wait(timeout=10)
+    finally:
+        writer.join(timeout=10)
+        if writer.is_alive():
+            writer.terminate()
+            writer.join(timeout=5)
+
+    assert writer.exitcode == 0
+    assert (home / "learning-topics" / "python.md").read_text(encoding="utf-8") == (
+        "# Written after reset\n"
+    )
+
+
+def test_backup_snapshot_blocks_persistent_writer_until_archive_is_complete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    _write_complete_home(home)
+    original = (home / "learning-topics" / "python.md").read_text(encoding="utf-8")
+    context = multiprocessing.get_context("spawn")
+    start = context.Event()
+    attempting = context.Event()
+    finished = context.Event()
+    writer = context.Process(
+        target=_write_persistent_file_after_signal,
+        args=(
+            str(home),
+            "learning-topics/python.md",
+            "# New generation\n",
+            start,
+            attempting,
+            finished,
+        ),
+    )
+    original_write_archive = data_management._write_archive
+
+    def checkpoint_archive(*args: object, **kwargs: object) -> dict[str, object]:
+        start.set()
+        assert attempting.wait(timeout=10)
+        assert not finished.wait(timeout=0.3)
+        return original_write_archive(*args, **kwargs)
+
+    monkeypatch.setattr(data_management, "_write_archive", checkpoint_archive)
+    writer.start()
+    try:
+        result = data_management.create_backup(home, tmp_path / "backup.olbackup")
+        assert finished.wait(timeout=10)
+    finally:
+        writer.join(timeout=10)
+        if writer.is_alive():
+            writer.terminate()
+            writer.join(timeout=5)
+
+    assert writer.exitcode == 0
+    with zipfile.ZipFile(result.archive) as archive:
+        assert archive.read("data/learning-topics/python.md").decode("utf-8") == original
+    assert (home / "learning-topics" / "python.md").read_text(encoding="utf-8") == (
+        "# New generation\n"
+    )
 
 
 def test_cli_data_backup_executes_shared_lifecycle_service(

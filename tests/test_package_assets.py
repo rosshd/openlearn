@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import importlib.util
 import json
-from pathlib import Path
 import re
 import tempfile
 import tomllib
 import unittest
+from pathlib import Path
 from unittest import mock
 from zipfile import ZipFile
 
@@ -51,19 +51,57 @@ class ReleaseArtifactPolicyTests(unittest.TestCase):
         class Opener:
             def __init__(self) -> None:
                 self.urls: list[str] = []
+                self.posts: list[tuple[str, dict[str, object]]] = []
 
-            def open(self, url: str, *, timeout: int) -> Response:
+            def open(self, request: object, *, timeout: int) -> Response:
+                url = (
+                    request.full_url
+                    if isinstance(request, release_artifacts.Request)
+                    else str(request)
+                )
                 self.urls.append(url)
                 expected = {
                     "http://127.0.0.1:9123/?access_token=test-token": b"",
-                    "http://127.0.0.1:9123/_openlearn/test/setup": b"Connect your tutor",
+                    "http://127.0.0.1:9123/_openlearn/test/setup": (
+                        b'<meta name="csrf-token" content="test-csrf">Connect your tutor'
+                    ),
                     "http://127.0.0.1:9123/_openlearn/test/static/openlearn.css": b"--orange",
                     "http://127.0.0.1:9123/_openlearn/test/static/openlearn.js": b"requestJson",
                     "http://127.0.0.1:9123/_openlearn/test/static/favicon.svg": b"<svg",
+                    (
+                        "http://127.0.0.1:9123/_openlearn/test/api/courses/"
+                        "technical-interview-prep/operations/"
+                        "00000000-0000-0000-0000-000000000001"
+                    ): b'{"state":"committed"}',
+                    (
+                        "http://127.0.0.1:9123/_openlearn/test/courses/"
+                        "technical-interview-prep"
+                    ): b"data-focus-shell data-turn-form",
                 }
+                if isinstance(request, release_artifacts.Request):
+                    payload = json.loads(request.data or b"{}")
+                    self.posts.append((url, payload))
+                    self.assert_csrf(request)
+                    if url.endswith("/api/setup"):
+                        return Response(b'{"ready":true}')
+                    if url.endswith("/api/courses"):
+                        return Response(
+                            b'{"slug":"technical-interview-prep",'
+                            b'"state":"placement_recommended"}'
+                        )
+                    if url.endswith("/placement"):
+                        return Response(
+                            b'{"status":"provisional",'
+                            b'"operation_id":"00000000-0000-0000-0000-000000000001"}'
+                        )
                 if url not in expected:
                     raise AssertionError(f"unexpected unauthenticated URL: {url}")
                 return Response(expected[url])
+
+            @staticmethod
+            def assert_csrf(request: object) -> None:
+                if request.headers.get("X-csrf-token") != "test-csrf":
+                    raise AssertionError("missing smoke CSRF token")
 
         class Process:
             stdout = None
@@ -93,7 +131,9 @@ class ReleaseArtifactPolicyTests(unittest.TestCase):
                 mock.patch.object(release_artifacts, "_free_loopback_port", return_value=9123),
                 mock.patch.object(release_artifacts.subprocess, "Popen", return_value=Process()),
                 mock.patch.object(release_artifacts, "build_opener", return_value=opener),
-                mock.patch.object(release_artifacts.time, "monotonic", side_effect=(0, 0, 21)),
+                mock.patch.object(
+                    release_artifacts.time, "monotonic", side_effect=(0, 0, 1, 1)
+                ),
             ):
                 release_artifacts._smoke_web(Path("openlearn"), home)
 
@@ -103,6 +143,10 @@ class ReleaseArtifactPolicyTests(unittest.TestCase):
                 "http://127.0.0.1:9123/?access_token=test-token",
                 "http://127.0.0.1:9123/_openlearn/test/setup",
             ],
+        )
+        self.assertEqual(
+            [payload.get("action") for _url, payload in opener.posts],
+            [None, None, "skip"],
         )
 
     def test_support_contract_covers_python_and_desktop_platforms(self) -> None:

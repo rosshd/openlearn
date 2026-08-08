@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 
-from openlearn import application, cli
+from openlearn import application, cli, interview_prep
 
 
 class ApplicationQueryTests(unittest.TestCase):
@@ -77,6 +77,35 @@ class ApplicationQueryTests(unittest.TestCase):
 
         cleared = application.remove_provider_api_key()
         self.assertFalse(cleared.key_configured)
+
+    def test_interview_placement_lifecycle_is_available_without_a_presentation(self) -> None:
+        created = application.create_course(
+            application.CourseCreationRequest(
+                name="Technical Interview Prep",
+                template_id="technical-interview-prep",
+            )
+        )
+        slug = created.course.slug
+
+        initial = application.sync_interview_placement(slug)
+        self.assertEqual(initial["placement"]["status"], "not_started")
+
+        started = application.start_interview_placement(slug)
+        placement = started["placement"]
+        self.assertEqual(placement["status"], "in_progress")
+        evidence_id = interview_prep.placement_evidence_id(placement, "clarification")
+        recorded = application.record_interview_placement_response(
+            slug,
+            stage="clarification",
+            response="What constraints and edge cases should I cover?",
+            evidence_id=evidence_id,
+        )
+        self.assertIsNotNone(recorded)
+        assert recorded is not None
+        self.assertEqual(recorded["placement"]["next_stage"], "reasoning")
+
+        discarded = application.discard_interview_placement(slug)
+        self.assertEqual(discarded["placement"]["status"], "not_started")
 
 
 if __name__ == "__main__":

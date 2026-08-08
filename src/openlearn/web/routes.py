@@ -163,7 +163,12 @@ async def create_course(request: Request) -> JSONResponse:
         payload = CourseCreateRequest.model_validate(await request.json())
     except (ValidationError, ValueError) as error:
         return _json_error("Add a title and a clear learning goal.", errors=str(error))
-    entry_mode = await _call(request, "course_entry_mode", payload.template_id)
+    entry_mode_operation = getattr(request.app.state.services, "course_entry_mode", None)
+    entry_mode = (
+        await _call(request, "course_entry_mode", payload.template_id)
+        if callable(entry_mode_operation)
+        else None
+    )
     if entry_mode != "interview_prep" and not await _provider_ready(request):
         return _setup_required(request)
     result = public_mapping(await _call(request, "create_course", payload))
@@ -266,13 +271,15 @@ async def focus(request: Request, slug: str) -> Any:
     )
     if not placement_snapshot.get("missing") and placement_snapshot.get("status") in {
         "not_started",
-        "deferred",
         "in_progress",
     }:
         return RedirectResponse(request.url_for("placement", slug=slug), status_code=303)
     if not await _provider_ready(request):
         return _setup_redirect(request)
-    if not placement_snapshot.get("missing") and placement_snapshot.get("status") == "provisional":
+    if not placement_snapshot.get("missing") and placement_snapshot.get("status") in {
+        "deferred",
+        "provisional",
+    }:
         initialized = public_mapping(await _call(request, "start_course_initialization", slug))
         if initialized.get("operation_id") and initialized.get("state") != "committed":
             return RedirectResponse(

@@ -29,11 +29,12 @@
           <input type="hidden" name="action" value="move">
           <label>Verified backup path <input name="archive" type="text" required maxlength="4096"></label>
           <label>New Openlearn home <input name="destination" type="text" required maxlength="4096"></label>
+          <p class="field-note">Openlearn keeps the original home until you launch and verify the new copy, then delete the original explicitly.</p>
           <p class="field-note">Type <code>{{ data.confirmations.move }}</code> to confirm.</p>
           <label>Confirmation <input name="confirmation" type="text" required maxlength="128"></label>
           <label><input name="include_credentials" type="checkbox"> Move saved credentials too</label>
           <label>Credential phrase: type <code>{{ data.confirmations.credentials }}</code> <input name="credential_confirmation" type="text" maxlength="128"></label>
-          <button type="submit">Move after verification</button>
+          <button type="submit">Copy and verify new home</button>
         </form>
       </div>
     </details>

@@ -4,11 +4,9 @@
 from __future__ import annotations
 
 import argparse
-from http.cookiejar import CookieJar
 import hashlib
 import json
 import os
-from pathlib import Path, PurePosixPath
 import re
 import socket
 import subprocess
@@ -16,9 +14,12 @@ import sys
 import tarfile
 import tempfile
 import time
-from urllib.parse import urlencode
-from urllib.request import build_opener, HTTPCookieProcessor
 import venv
+from http.cookiejar import CookieJar
+from pathlib import Path, PurePosixPath
+from urllib.parse import urlencode
+from urllib.request import HTTPCookieProcessor, Request, build_opener
+from uuid import uuid4
 from zipfile import ZipFile
 
 
@@ -265,6 +266,29 @@ def _free_loopback_port() -> int:
         return int(listener.getsockname()[1])
 
 
+def _post_json(
+    opener, url: str, payload: dict[str, object], csrf_token: str
+) -> dict[str, object]:
+    request = Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "X-CSRF-Token": csrf_token,
+        },
+        method="POST",
+    )
+    with opener.open(request, timeout=5) as response:
+        if response.status not in {200, 202}:
+            raise ReleaseArtifactError(
+                f"Maker Bench installed smoke request failed: {request.full_url}"
+            )
+        value = json.loads(response.read())
+    if not isinstance(value, dict):
+        raise ReleaseArtifactError("Maker Bench installed smoke returned invalid JSON")
+    return value
+
+
 def _smoke_web(command: Path, home: Path) -> None:
     port = _free_loopback_port()
     environment = {
@@ -283,8 +307,10 @@ def _smoke_web(command: Path, home: Path) -> None:
     try:
         deadline = time.monotonic() + 20
         last_error: Exception | None = None
-        opener = build_opener(HTTPCookieProcessor(CookieJar()))
+        cookies = CookieJar()
+        opener = build_opener(HTTPCookieProcessor(cookies))
         base_url: str | None = None
+        setup_body = ""
         while time.monotonic() < deadline:
             if process.poll() is not None:
                 raise ReleaseArtifactError(
@@ -302,8 +328,8 @@ def _smoke_web(command: Path, home: Path) -> None:
                 with opener.open(bootstrap, timeout=1):
                     pass
                 with opener.open(f"{base_url}/setup", timeout=1) as response:
-                    body = response.read().decode("utf-8")
-                    if response.status == 200 and "Connect your tutor" in body:
+                    setup_body = response.read().decode("utf-8")
+                    if response.status == 200 and "Connect your tutor" in setup_body:
                         break
             except Exception as exc:  # The server is expected to refuse connections while starting.
                 last_error = exc
@@ -319,6 +345,72 @@ def _smoke_web(command: Path, home: Path) -> None:
             with opener.open(f"{base_url}{path}", timeout=2) as response:
                 if response.status != 200 or marker not in response.read():
                     raise ReleaseArtifactError(f"Maker Bench asset failed installed smoke: {path}")
+
+        csrf_match = re.search(
+            r'<meta name="csrf-token" content="([^"]+)">', setup_body
+        )
+        if csrf_match is None:
+            raise ReleaseArtifactError("Maker Bench did not establish CSRF protection")
+        csrf_token = csrf_match.group(1)
+        setup_result = _post_json(
+            opener,
+            f"{base_url}/api/setup",
+            {
+                "provider": "ollama",
+                "api_key": "",
+                "model": "qwen2.5:3b",
+                "base_url": "http://localhost:11434/v1",
+                "save_unverified": False,
+            },
+            csrf_token,
+        )
+        if not setup_result.get("ready"):
+            raise ReleaseArtifactError("Maker Bench mock provider setup did not become ready")
+        course = _post_json(
+            opener,
+            f"{base_url}/api/courses",
+            {
+                "title": "Technical Interview Prep",
+                "goal": "Practice technical interview reasoning.",
+                "experience": "",
+                "template_id": "technical-interview-prep",
+                "submission_id": str(uuid4()),
+            },
+            csrf_token,
+        )
+        slug = course.get("slug")
+        if not isinstance(slug, str) or course.get("state") != "placement_recommended":
+            raise ReleaseArtifactError(
+                "Maker Bench installed smoke could not create the baseline course"
+            )
+        placement = _post_json(
+            opener,
+            f"{base_url}/api/courses/{slug}/placement",
+            {"action": "skip"},
+            csrf_token,
+        )
+        operation_id = placement.get("operation_id")
+        if not isinstance(operation_id, str):
+            raise ReleaseArtifactError(
+                "Maker Bench installed smoke did not start the first lesson"
+            )
+        status_url = f"{base_url}/api/courses/{slug}/operations/{operation_id}"
+        operation: dict[str, object] = {}
+        operation_deadline = time.monotonic() + 20
+        while time.monotonic() < operation_deadline:
+            with opener.open(status_url, timeout=5) as response:
+                operation = json.loads(response.read())
+            if operation.get("state") in {"committed", "failed", "retryable_error"}:
+                break
+            time.sleep(0.1)
+        if operation.get("state") != "committed":
+            raise ReleaseArtifactError(
+                f"Maker Bench first lesson did not commit: {operation.get('state', 'timeout')}"
+            )
+        with opener.open(f"{base_url}/courses/{slug}", timeout=5) as response:
+            focus = response.read().decode("utf-8")
+        if "data-focus-shell" not in focus or "data-turn-form" not in focus:
+            raise ReleaseArtifactError("Maker Bench installed smoke did not reach teaching")
     finally:
         process.terminate()
         try:

@@ -7,10 +7,10 @@ without parsing one another's output.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from collections.abc import Mapping
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
@@ -235,6 +235,58 @@ def create_course(request: CourseCreationRequest) -> CourseCreationResult:
     from openlearn.courses import create_course as create
 
     return create(request)
+
+
+def sync_interview_placement(slug: str) -> dict[str, object]:
+    """Project durable placement evidence into the learner's local profile."""
+    from openlearn import cli
+
+    return cli.sync_interview_placement(slug)
+
+
+def start_interview_placement(slug: str) -> dict[str, object]:
+    """Start a reasoning-placement activity and bind it to the local profile."""
+    from openlearn import cli, interview_prep
+
+    activity = cli._begin_interview_activity(
+        slug, lifecycle_version=interview_prep.PLACEMENT_V3
+    )
+    with cli.interview_profile_write_lock(slug):
+        return interview_prep.start_placement(
+            cli.interview_profile_path(slug),
+            activity_id=str(activity["activity_id"]),
+            lifecycle_version=interview_prep.PLACEMENT_V3,
+        )
+
+
+def discard_interview_placement(slug: str) -> dict[str, object]:
+    """Discard the active placement attempt while preserving published evidence."""
+    from openlearn import cli
+
+    return cli._discard_interview_placement(slug, cli.interview_profile_path(slug))
+
+
+def record_interview_placement_response(
+    slug: str, *, stage: str, response: str, evidence_id: str
+) -> dict[str, object] | None:
+    """Record one reasoning response and return the reconciled profile.
+
+    ``None`` means the durable activity is no longer available, allowing a
+    presentation adapter to report an optimistic-concurrency conflict.
+    """
+    from openlearn import cli
+
+    activity = cli._current_interview_activity(slug)
+    if activity is None:
+        return None
+    cli.record_topic_activity_evidence(
+        slug,
+        activity,
+        "interview_observation",
+        {"stage": stage, "response": response},
+        evidence_id=evidence_id,
+    )
+    return cli.sync_interview_placement(slug)
 
 
 def data_inventory() -> HomeInventory:

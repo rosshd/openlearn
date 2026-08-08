@@ -69,6 +69,7 @@ from openlearn.course_templates import (
     available_course_templates,
     load_course_template,
 )
+from openlearn.home_lock import home_lifecycle_lock
 from openlearn.constants import (
     CONFIG_FILE,
     CONTEXT_SUMMARY_CHAR_LIMIT,
@@ -2613,8 +2614,13 @@ def cmd_data(args: argparse.Namespace, output_func=print) -> int:
                 include_credentials=args.include_credentials,
                 credential_confirmation=args.credential_confirmation,
             )
-            output_func(f"Moved Openlearn home to {result}")
-            output_func(f"Set OPENLEARN_HOME={result} before your next launch.")
+            output_func(f"Copied and verified Openlearn home at {result.destination}")
+            output_func(
+                f"The original home remains at {result.source} until you explicitly delete it."
+            )
+            output_func(
+                f"Set OPENLEARN_HOME={result.destination} and verify the new home before cleanup."
+            )
         elif action == "reset":
             result = data_management.reset_home(
                 home,
@@ -14254,13 +14260,12 @@ def _base_url_allows_keyless_requests(base_url: str) -> bool:
 
 
 def provider_is_configured(config: dict[str, object] | None = None) -> bool:
-    """Whether a model call can be attempted: a key is set, or the base URL is
-    a local/custom endpoint (for example Ollama) that may be keyless."""
+    """Whether the active provider is verified and ready for a model call."""
     if _DRY_RUN or _openlearn_mock_enabled():
         return True
-    if configured_openai_api_key():
-        return True
-    return not base_url_requires_api_key(configured_base_url(config))
+    from openlearn.config import provider_is_configured as provider_ready
+
+    return provider_ready(config, require_verified=True)
 
 
 def _configured_provider_needs_onboarding() -> bool:
@@ -16312,7 +16317,7 @@ _FILE_LOCK_DEPTHS = threading.local()
 
 
 @contextlib.contextmanager
-def file_lock(path: Path):
+def _file_lock_only(path: Path):
     if _DRY_RUN:
         # Dry-run mode never writes, so skip creating lock files on disk.
         yield
@@ -16342,25 +16347,43 @@ def file_lock(path: Path):
             _funlock(lock_file)
 
 
+def _home_lifecycle_context(path: Path):
+    home = project_home()
+    if path.expanduser().resolve(strict=False).is_relative_to(home):
+        return home_lifecycle_lock(home)
+    return contextlib.nullcontext()
+
+
+@contextlib.contextmanager
+def file_lock(path: Path):
+    """Coordinate a file write with both per-file and whole-home lifecycle work."""
+    if _DRY_RUN:
+        yield
+        return
+    with _home_lifecycle_context(path), _file_lock_only(path):
+        yield
+
+
 def write_text_atomic(path: Path, text: str) -> None:
     if _DRY_RUN:
         return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp_name = ""
-    try:
-        with tempfile.NamedTemporaryFile(
-            "w", encoding="utf-8", dir=path.parent, delete=False
-        ) as temp_file:
-            temp_name = temp_file.name
-            temp_file.write(text)
-            temp_file.flush()
-            os.fsync(temp_file.fileno())
-        os.replace(temp_name, path)
-        fsync_directory(path.parent)
-    finally:
-        if temp_name:
-            with contextlib.suppress(FileNotFoundError):
-                Path(temp_name).unlink()
+    with _home_lifecycle_context(path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp_name = ""
+        try:
+            with tempfile.NamedTemporaryFile(
+                "w", encoding="utf-8", dir=path.parent, delete=False
+            ) as temp_file:
+                temp_name = temp_file.name
+                temp_file.write(text)
+                temp_file.flush()
+                os.fsync(temp_file.fileno())
+            os.replace(temp_name, path)
+            fsync_directory(path.parent)
+        finally:
+            if temp_name:
+                with contextlib.suppress(FileNotFoundError):
+                    Path(temp_name).unlink()
 
 
 def fsync_directory(directory: Path) -> None:

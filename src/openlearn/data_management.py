@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import tempfile
@@ -19,6 +20,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
+from openlearn.home_lock import home_lifecycle_lock
 
 MANIFEST_VERSION = 1
 RESET_CONFIRMATION = "RESET OPENLEARN DATA"
@@ -116,6 +118,17 @@ class BackupResult:
 class RestoreResult:
     home: Path
     inventory: HomeInventory
+
+
+@dataclass(frozen=True)
+class MoveResult:
+    destination: Path
+    source: Path
+    cleanup_required: bool
+    source_retained: bool
+
+    def __str__(self) -> str:
+        return str(self.destination)
 
 
 def _sha256(data: bytes) -> str:
@@ -444,16 +457,17 @@ def create_backup(
         raise UnsafeHomeError("backup archive must not be written inside the Openlearn home")
     if include_credentials and credential_confirmation != CREDENTIAL_CONFIRMATION:
         raise CredentialScopeError("including saved credentials requires explicit credential confirmation")
-    inventory = inventory_home(source)
-    try:
-        _write_archive(target, inventory, include_credentials=include_credentials)
-    except OSError as exc:
-        raise DataManagementError("backup archive could not be created") from exc
-    try:
-        _inspect_archive(target)
-    except Exception:
-        target.unlink(missing_ok=True)
-        raise
+    with home_lifecycle_lock(source):
+        inventory = inventory_home(source)
+        try:
+            _write_archive(target, inventory, include_credentials=include_credentials)
+        except OSError as exc:
+            raise DataManagementError("backup archive could not be created") from exc
+        try:
+            _inspect_archive(target)
+        except Exception:
+            target.unlink(missing_ok=True)
+            raise
     return BackupResult(
         target,
         inventory,
@@ -464,9 +478,25 @@ def create_backup(
 
 def _safe_archive_name(name: str) -> PurePosixPath:
     path = PurePosixPath(name)
-    if not name or path.is_absolute() or ".." in path.parts or path.parts[0] == ".":
+    if (
+        not name
+        or "\x00" in name
+        or "\\" in name
+        or path.is_absolute()
+        or re.match(r"^[A-Za-z]:", name)
+        or name != path.as_posix()
+        or any(part in {"", ".", ".."} for part in path.parts)
+    ):
         raise ArchiveSafetyError("archive contains an unsafe path")
     return path
+
+
+def _safe_extraction_target(root: Path, relative: PurePosixPath) -> Path:
+    resolved_root = root.resolve(strict=True)
+    target = (resolved_root / Path(*relative.parts)).resolve(strict=False)
+    if not target.is_relative_to(resolved_root):
+        raise ArchiveSafetyError("archive extraction target escapes staging")
+    return target
 
 
 def _inspect_archive(
@@ -513,7 +543,7 @@ def _inspect_archive(
                 if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
                     raise ArchiveSafetyError("archive manifest entries are invalid")
                 relative = entry["path"]
-                _safe_archive_name(relative)
+                safe_relative = _safe_archive_name(relative)
                 if relative in manifest_paths:
                     raise ArchiveSafetyError("archive manifest contains duplicate paths")
                 manifest_paths.add(relative)
@@ -525,8 +555,9 @@ def _inspect_archive(
                 output_handle = None
                 temporary: str | None = None
                 if extract_to is not None:
-                    target = extract_to / relative
+                    target = _safe_extraction_target(extract_to, safe_relative)
                     target.parent.mkdir(parents=True, exist_ok=True)
+                    target = _safe_extraction_target(extract_to, safe_relative)
                     descriptor, temporary = tempfile.mkstemp(
                         prefix=f".{target.name}.", dir=target.parent
                     )
@@ -551,7 +582,8 @@ def _inspect_archive(
                     raise ArchiveSafetyError("archive data does not match its manifest")
                 if extract_to is not None:
                     assert temporary is not None
-                    os.replace(temporary, extract_to / relative)
+                    target = _safe_extraction_target(extract_to, safe_relative)
+                    os.replace(temporary, target)
             if names != {"manifest.json", *(f"data/{path}" for path in manifest_paths)}:
                 raise ArchiveSafetyError("archive contains files outside its manifest")
             return manifest
@@ -563,21 +595,22 @@ def verify_backup(home: Path, archive: Path, *, include_credentials: bool = Fals
     """Verify archive integrity and prove it exactly matches the current requested scope."""
 
     source = _assert_safe_home(home, must_exist=True)
-    try:
-        manifest = _inspect_archive(_resolved(archive))
-    except DataManagementError as exc:
-        if isinstance(exc, CompatibilityError):
-            raise
-        raise BackupVerificationError("backup verification failed; no learner data was changed") from exc
-    if manifest.get("credentials_included") is not include_credentials:
-        raise BackupVerificationError("backup scope does not match the requested operation")
-    inventory = inventory_home(source)
-    expected = _manifest_for_inventory(
-        inventory, include_credentials=include_credentials
-    )
-    comparable = ("manifest_version", "credentials_included", "entries", "excluded_paths")
-    if any(manifest.get(key) != expected.get(key) for key in comparable):
-        raise BackupVerificationError("backup is not a verified copy of the current Openlearn home")
+    with home_lifecycle_lock(source):
+        try:
+            manifest = _inspect_archive(_resolved(archive))
+        except DataManagementError as exc:
+            if isinstance(exc, CompatibilityError):
+                raise
+            raise BackupVerificationError("backup verification failed; no learner data was changed") from exc
+        if manifest.get("credentials_included") is not include_credentials:
+            raise BackupVerificationError("backup scope does not match the requested operation")
+        inventory = inventory_home(source)
+        expected = _manifest_for_inventory(
+            inventory, include_credentials=include_credentials
+        )
+        comparable = ("manifest_version", "credentials_included", "entries", "excluded_paths")
+        if any(manifest.get(key) != expected.get(key) for key in comparable):
+            raise BackupVerificationError("backup is not a verified copy of the current Openlearn home")
     return BackupResult(
         _resolved(archive),
         inventory,
@@ -594,24 +627,25 @@ def restore_backup(archive: Path, home: Path) -> RestoreResult:
     """Preflight then atomically restore a backup into an empty or absent home."""
 
     target = _assert_safe_destination(home)
-    if target.exists() and any(target.iterdir()):
-        raise UnsafeHomeError("restore target must be absent or empty")
-    parent = target.parent
-    parent.mkdir(parents=True, exist_ok=True)
-    staging = _staging_path(parent, "restore")
-    try:
-        staging.mkdir(mode=0o700)
-        manifest = _inspect_archive(_resolved(archive), extract_to=staging)
-        restored = inventory_home(staging)
-        expected_entries = manifest["entries"]
-        if [entry.as_dict() for entry in restored.entries] != expected_entries:
-            raise ArchiveSafetyError("restored data does not match the archive manifest")
-        if target.exists():
-            target.rmdir()
-        os.replace(staging, target)
-    except Exception:
-        shutil.rmtree(staging, ignore_errors=True)
-        raise
+    with home_lifecycle_lock(target):
+        if target.exists() and any(target.iterdir()):
+            raise UnsafeHomeError("restore target must be absent or empty")
+        parent = target.parent
+        parent.mkdir(parents=True, exist_ok=True)
+        staging = _staging_path(parent, "restore")
+        try:
+            staging.mkdir(mode=0o700)
+            manifest = _inspect_archive(_resolved(archive), extract_to=staging)
+            restored = inventory_home(staging)
+            expected_entries = manifest["entries"]
+            if [entry.as_dict() for entry in restored.entries] != expected_entries:
+                raise ArchiveSafetyError("restored data does not match the archive manifest")
+            if target.exists():
+                target.rmdir()
+            os.replace(staging, target)
+        except Exception:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
     return RestoreResult(
         target,
         HomeInventory(
@@ -679,11 +713,12 @@ def reset_home(
         raise DataManagementError("reset requires explicit confirmation")
     if include_credentials and credential_confirmation != CREDENTIAL_CONFIRMATION:
         raise CredentialScopeError("resetting saved credentials requires explicit credential confirmation")
-    verified = verify_backup(source, backup, include_credentials=include_credentials)
-    _remove_inventory_entries(
-        source, verified.inventory.entries, include_credentials=include_credentials
-    )
-    return inventory_home(source)
+    with home_lifecycle_lock(source):
+        verified = verify_backup(source, backup, include_credentials=include_credentials)
+        _remove_inventory_entries(
+            source, verified.inventory.entries, include_credentials=include_credentials
+        )
+        return inventory_home(source)
 
 
 def delete_home(
@@ -699,13 +734,14 @@ def delete_home(
     source = _assert_safe_home(home, must_exist=True, destructive=True)
     if confirmation != DELETE_CONFIRMATION:
         raise DataManagementError("deletion requires explicit confirmation")
-    verified = verify_backup(source, backup, include_credentials=include_credentials)
-    inventory = verified.inventory
-    if inventory.credentials_present and not include_credentials:
-        raise CredentialScopeError("full deletion with saved credentials requires separate credential scope confirmation")
-    if include_credentials and credential_confirmation != CREDENTIAL_CONFIRMATION:
-        raise CredentialScopeError("deleting saved credentials requires explicit credential confirmation")
-    _remove_inventory_entries(source, verified.inventory.entries, include_credentials=True)
+    with home_lifecycle_lock(source):
+        verified = verify_backup(source, backup, include_credentials=include_credentials)
+        inventory = verified.inventory
+        if inventory.credentials_present and not include_credentials:
+            raise CredentialScopeError("full deletion with saved credentials requires separate credential scope confirmation")
+        if include_credentials and credential_confirmation != CREDENTIAL_CONFIRMATION:
+            raise CredentialScopeError("deleting saved credentials requires explicit credential confirmation")
+        _remove_inventory_entries(source, verified.inventory.entries, include_credentials=True)
 
 
 def move_home(
@@ -716,35 +752,35 @@ def move_home(
     confirmation: str,
     include_credentials: bool = False,
     credential_confirmation: str | None = None,
-) -> Path:
-    """Stage a verified full copy, atomically switch it into place, then remove the source."""
+) -> MoveResult:
+    """Publish a verified copy while retaining the old home for explicit cleanup."""
 
     source = _assert_safe_home(home, must_exist=True, destructive=True)
     target = _assert_safe_destination(destination, source)
     if confirmation != MOVE_CONFIRMATION:
         raise DataManagementError("move requires explicit confirmation")
-    verified = verify_backup(source, backup, include_credentials=include_credentials)
-    inventory = verified.inventory
-    if inventory.credentials_present and not include_credentials:
-        raise CredentialScopeError("moving saved credentials requires separate credential scope confirmation")
-    if include_credentials and credential_confirmation != CREDENTIAL_CONFIRMATION:
-        raise CredentialScopeError("moving saved credentials requires explicit credential confirmation")
-    if target.exists():
-        raise UnsafeHomeError("move destination must not already exist")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    staging = _staging_path(target.parent, "move")
-    try:
-        staging.mkdir(mode=0o700)
-        for entry in inventory.entries:
-            _copy_regular_file(source / entry.relative_path, staging / entry.relative_path)
-        staged = inventory_home(staging)
-        if tuple(entry.as_dict() for entry in staged.entries) != tuple(
-            entry.as_dict() for entry in inventory.entries
-        ):
-            raise BackupVerificationError("staged move does not match the original Openlearn home")
-        os.replace(staging, target)
-        _remove_inventory_entries(source, verified.inventory.entries, include_credentials=True)
-    except Exception:
-        shutil.rmtree(staging, ignore_errors=True)
-        raise
-    return target
+    with home_lifecycle_lock(source):
+        verified = verify_backup(source, backup, include_credentials=include_credentials)
+        inventory = verified.inventory
+        if inventory.credentials_present and not include_credentials:
+            raise CredentialScopeError("moving saved credentials requires separate credential scope confirmation")
+        if include_credentials and credential_confirmation != CREDENTIAL_CONFIRMATION:
+            raise CredentialScopeError("moving saved credentials requires explicit credential confirmation")
+        if target.exists():
+            raise UnsafeHomeError("move destination must not already exist")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        staging = _staging_path(target.parent, "move")
+        try:
+            staging.mkdir(mode=0o700)
+            for entry in inventory.entries:
+                _copy_regular_file(source / entry.relative_path, staging / entry.relative_path)
+            staged = inventory_home(staging)
+            if tuple(entry.as_dict() for entry in staged.entries) != tuple(
+                entry.as_dict() for entry in inventory.entries
+            ):
+                raise BackupVerificationError("staged move does not match the original Openlearn home")
+            os.replace(staging, target)
+        except Exception:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+    return MoveResult(target, source, cleanup_required=True, source_retained=True)

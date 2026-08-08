@@ -2015,12 +2015,47 @@ class CliStorageTests(unittest.TestCase):
         )
         self.assertEqual(stored["placement"]["status"], "provisional")
 
-    def test_provider_preflight_accepts_mock_and_keyless_local_modes(self) -> None:
+    def test_provider_preflight_requires_verified_provider_outside_mock_mode(self) -> None:
         with mock.patch.object(cli, "_openlearn_mock_enabled", return_value=True):
             self.assertTrue(cli.provider_is_configured())
 
-        os.environ["OPENLEARN_BASE_URL"] = "http://localhost:11434/v1"
-        self.assertTrue(cli.provider_is_configured())
+        for config in (
+            {
+                "base_url": "https://openrouter.ai/api/v1",
+                "model": "google/gemini-2.5-flash-lite",
+                "openai_api_key": "sk-test-provider-key",
+                "provider_verified": False,
+            },
+            {
+                "base_url": "http://localhost:11434/v1",
+                "model": "qwen2.5:3b",
+                "provider_verified": False,
+            },
+        ):
+            with self.subTest(base_url=config["base_url"]):
+                self.assertFalse(cli.provider_is_configured(config))
+                self.assertTrue(
+                    cli.provider_is_configured({**config, "provider_verified": True})
+                )
+
+        cli.write_config(
+            {
+                "base_url": "https://openrouter.ai/api/v1",
+                "model": "google/gemini-2.5-flash-lite",
+                "openai_api_key": "sk-test-provider-key",
+                "provider_verified": False,
+            }
+        )
+        with mock.patch.object(
+            cli,
+            "call_openai",
+            side_effect=AssertionError("unverified provider must not receive a model call"),
+        ) as model_call:
+            self.assertEqual(
+                cli.infer_mastery_profile_from_goal("understand compilers"),
+                "proficient",
+            )
+        model_call.assert_not_called()
 
     def test_interview_placement_blank_text_stages_never_record_evidence(self) -> None:
         call_silent(
@@ -18830,7 +18865,13 @@ class KeylessProviderTests(unittest.TestCase):
     def write_keyless_local_config(self) -> None:
         cli.config_path().parent.mkdir(parents=True, exist_ok=True)
         cli.config_path().write_text(
-            json.dumps({"base_url": "http://localhost:11434/v1", "model": "ollama/llama3.2"}),
+            json.dumps(
+                {
+                    "base_url": "http://localhost:11434/v1",
+                    "model": "ollama/llama3.2",
+                    "provider_verified": True,
+                }
+            ),
             encoding="utf-8",
         )
         cli._CONFIG_CACHE = None

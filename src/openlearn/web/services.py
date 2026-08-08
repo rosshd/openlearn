@@ -546,22 +546,31 @@ class OpenLearnWebServices:
                 "created": result.created,
                 "state": "placement_recommended",
             }
-        return self._start_course_initialization(slug, initialization_id)
+        return self._start_course_initialization(
+            slug, initialization_id, created=result.created
+        )
 
     def _start_course_initialization(
-        self, slug: str, initialization_id: str | None = None
+        self,
+        slug: str,
+        initialization_id: str | None = None,
+        *,
+        created: bool | None = None,
     ) -> dict[str, object]:
         initialization_id = initialization_id or _initialization_id_for_slug(slug)
         if initialization_id is None:
             return {"ok": False, "error": "Course initialization is unavailable."}
         existing_operation = tutor_service.operation_status(slug, initialization_id)
         if existing_operation is not None:
-            return {
+            result: dict[str, object] = {
                 "ok": True,
                 "slug": slug,
                 "operation_id": initialization_id,
                 "state": existing_operation.status,
             }
+            if created is not None:
+                result["created"] = created
+            return result
         try:
             operation = tutor_service.start_turn(
                 slug,
@@ -574,12 +583,15 @@ class OpenLearnWebServices:
         except tutor_service.TutorOperationError:
             operation = tutor_service.operation_status(slug, initialization_id)
         state = operation.status if operation is not None else "retryable_error"
-        return {
+        result = {
             "ok": True,
             "slug": slug,
             "operation_id": initialization_id,
             "state": state,
         }
+        if created is not None:
+            result["created"] = created
+        return result
 
     def start_course_initialization(self, slug: str) -> dict[str, object]:
         return self._start_course_initialization(slug)
@@ -612,7 +624,7 @@ class OpenLearnWebServices:
         if snapshot is None:
             return {"slug": slug, "missing": True}
         try:
-            value = cli.sync_interview_placement(slug)
+            value = application.sync_interview_placement(slug)
         except cli.OpenLearnError:
             value = interview_prep.load_profile(cli.interview_profile_path(slug))
         return {"title": snapshot.card.title, **self._placement_view(slug, value)}
@@ -628,9 +640,7 @@ class OpenLearnWebServices:
             value = self._start_reasoning_placement(slug, path)
         elif request.action == "restart":
             if placement.get("status") == "in_progress":
-                # The CLI still owns the activity/profile reconciliation transaction.
-                # Keep that compatibility call isolated here until it moves into application.py.
-                cli._discard_interview_placement(slug, path)  # type: ignore[attr-defined]
+                application.discard_interview_placement(slug)
             value = self._start_reasoning_placement(slug, path)
         elif request.action == "defer":
             if placement.get("status") in {"in_progress", "deferred"}:
@@ -679,36 +689,25 @@ class OpenLearnWebServices:
                 lines = draft.get("lines") if isinstance(draft, dict) else None
                 if not isinstance(lines, list) or not lines:
                     return {"invalid": True, "error": "Save at least one draft line before submitting."}
-                activity = cli._current_interview_activity(slug)  # type: ignore[attr-defined]
-                if activity is None:
-                    return {"state": "conflict", "error": "Placement changed elsewhere. Reload to continue."}
                 evidence_id = interview_prep.placement_evidence_id(placement, stage)
-                cli.record_topic_activity_evidence(
+                value = application.record_interview_placement_response(
                     slug,
-                    activity,
-                    "interview_observation",
-                    {"stage": stage, "response": "\n".join(str(line) for line in lines)},
+                    stage=stage,
+                    response="\n".join(str(line) for line in lines),
                     evidence_id=evidence_id,
                 )
-                value = cli.sync_interview_placement(slug)
+                if value is None:
+                    return {"state": "conflict", "error": "Placement changed elsewhere. Reload to continue."}
             else:
                 with cli.interview_profile_write_lock(slug):
                     value = interview_prep.skip_optional_placement_stage(path, stage)
-                value = cli.sync_interview_placement(slug)
+                value = application.sync_interview_placement(slug)
         return self._placement_view(slug, value)
 
     @staticmethod
     def _start_reasoning_placement(slug: str, path: Path) -> dict[str, object]:
-        """Centralize the legacy CLI activity bridge used by both start and restart."""
-        activity = cli._begin_interview_activity(  # type: ignore[attr-defined]
-            slug, lifecycle_version=interview_prep.PLACEMENT_V3
-        )
-        with cli.interview_profile_write_lock(slug):
-            return interview_prep.start_placement(
-                path,
-                activity_id=str(activity["activity_id"]),
-                lifecycle_version=interview_prep.PLACEMENT_V3,
-            )
+        del path
+        return application.start_interview_placement(slug)
 
     def skip_placement(self, slug: str) -> dict[str, object]:
         current = self.placement(slug)
@@ -801,10 +800,14 @@ class OpenLearnWebServices:
                 )
                 return {
                     "ok": True,
-                    "home": str(result),
+                    "home": str(result.destination),
+                    "source": str(result.source),
+                    "cleanup_required": result.cleanup_required,
+                    "source_retained": result.source_retained,
                     "message": (
-                        f"Data moved to {result}. Set OPENLEARN_HOME to this path "
-                        "before your next launch."
+                        f"Data was copied and verified at {result.destination}. "
+                        f"The original remains at {result.source}. Set OPENLEARN_HOME "
+                        "to the new path, verify it, then explicitly delete the old home."
                     ),
                 }
             if action == "reset":

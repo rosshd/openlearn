@@ -32,7 +32,7 @@
         <summary>Other placement options</summary>
         <div>
           <button type="button" data-placement-action="skip_stage" data-stage="{{ placement.next_stage }}">Skip this section</button>
-          <button type="button" data-placement-action="defer">Pause and resume later</button>
+          <a href="{{ url_for('dashboard') }}">Pause and resume later</a>
           <button type="button" data-placement-action="restart">Discard draft and restart placement</button>
         </div>
       </details>

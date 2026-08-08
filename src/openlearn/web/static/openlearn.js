@@ -174,6 +174,7 @@ let turnInFlight = false;
 
 let activeToolOpener = null;
 let preparedVideo = null;
+let videoRequestGeneration = 0;
 let codeRevision = null;
 let codeDirty = false;
 let codeEditVersion = 0;
@@ -219,6 +220,11 @@ function clearPreparedVideo() {
   const consent = toolSurface?.querySelector("[data-video-consent]");
   if (consent) consent.hidden = true;
   toolSurface?.querySelector("[data-video-frame]")?.replaceChildren();
+}
+
+function invalidatePreparedVideo() {
+  videoRequestGeneration += 1;
+  clearPreparedVideo();
 }
 
 function renderCodeResult(result) {
@@ -424,21 +430,26 @@ toolSurface?.querySelector("[data-code-reset]")?.addEventListener("click", async
 toolSurface?.querySelector("[data-video-form]")?.addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = event.currentTarget;
-  clearPreparedVideo();
+  invalidatePreparedVideo();
+  const requestGeneration = videoRequestGeneration;
   try {
-    preparedVideo = await requestJson(toolEndpoint("video"), {
+    const descriptor = await requestJson(toolEndpoint("video"), {
       method: "POST",
       body: JSON.stringify({url: form.elements.url.value}),
     });
+    if (requestGeneration !== videoRequestGeneration) return;
+    preparedVideo = descriptor;
     const consent = toolSurface.querySelector("[data-video-consent]");
     consent.hidden = false;
     consent.querySelector("[data-video-title]").textContent = preparedVideo.label || "Video ready to load.";
     toolSurface.querySelector("[data-video-frame]").replaceChildren();
     toolStatus("Validated locally. YouTube has not been contacted.");
-  } catch (error) { toolStatus(error.message, true); }
+  } catch (error) {
+    if (requestGeneration === videoRequestGeneration) toolStatus(error.message, true);
+  }
 });
 
-toolSurface?.querySelector("#video-url")?.addEventListener("input", clearPreparedVideo);
+toolSurface?.querySelector("#video-url")?.addEventListener("input", invalidatePreparedVideo);
 
 toolSurface?.querySelector("[data-video-load]")?.addEventListener("click", () => {
   if (!preparedVideo?.embed_url) return;

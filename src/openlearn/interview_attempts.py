@@ -1078,6 +1078,10 @@ class AttemptStore:
         )
 
     def retry(self, topic: str, attempt_id: str) -> dict[str, object]:
+        with self.lock(self.topic_path(topic)):
+            return self._retry_locked(topic, attempt_id)
+
+    def _retry_locked(self, topic: str, attempt_id: str) -> dict[str, object]:
         source = self.load(topic, attempt_id)
         workspace = self.resolve_workspace(source)
         retry_id = f"attempt_{uuid4().hex}"

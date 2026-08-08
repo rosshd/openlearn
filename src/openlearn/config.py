@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 from platformdirs import user_data_dir
 
 from openlearn.constants import CONFIG_FILE, DEFAULT_BASE_URL, DEFAULT_MODEL
+from openlearn.home_lock import home_lifecycle_lock
 
 
 class ConfigError(ValueError):
@@ -54,7 +55,7 @@ _LOCK_DEPTHS = threading.local()
 
 
 @contextmanager
-def _config_lock(path: Path):
+def _config_file_lock(path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = path.with_name(f".{path.name}.lock")
     key = str(lock_path.resolve())
@@ -77,6 +78,12 @@ def _config_lock(path: Path):
         finally:
             depths.pop(key, None)
             _UNLOCK(handle)
+
+
+@contextmanager
+def _config_lock(path: Path):
+    with home_lifecycle_lock(path.parent), _config_file_lock(path):
+        yield
 
 
 @dataclass(frozen=True)

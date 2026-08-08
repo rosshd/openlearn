@@ -12,7 +12,7 @@ import pytest
 pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient
 
-from openlearn import cli, code_runner
+from openlearn import cli, code_runner, data_management
 from openlearn import config
 from openlearn import interview_prep
 from openlearn import providers
@@ -171,6 +171,10 @@ def test_interview_course_placement_draft_resumes_and_finishes_before_lesson(
     assert "What are the input constraints?" in resumed.text
     assert "Should I discuss edge cases?" in resumed.text
     assert "Draft saved locally" in resumed.text
+    assert 'href="http://testserver/dashboard">Pause and resume later</a>' in resumed.text
+    assert restarted_client.get("/dashboard").status_code == 200
+    resumed_again = restarted_client.get(body["placement_url"])
+    assert "What are the input constraints?" in resumed_again.text
 
     submitted = restarted_client.post(
         f"/api/courses/{body['slug']}/placement",
@@ -257,6 +261,25 @@ def test_data_controls_backup_refuse_reset_and_match_cli_summary(
     assert backup.status_code == 200
     assert archive.exists()
 
+    destination = tmp_path.parent / f"{tmp_path.name}-moved-home"
+    moved = client.post(
+        "/api/data",
+        headers={"x-csrf-token": token},
+        json={
+            "action": "move",
+            "archive": str(archive),
+            "destination": str(destination),
+            "confirmation": data_management.MOVE_CONFIRMATION,
+        },
+    )
+    assert moved.status_code == 200
+    assert moved.json()["home"] == str(destination)
+    assert moved.json()["source"] == str(tmp_path)
+    assert moved.json()["cleanup_required"] is True
+    assert moved.json()["source_retained"] is True
+    assert cli.topic_path("data-course").exists()
+    assert (destination / "learning-topics" / "data-course.md").exists()
+
     refused = client.post(
         "/api/data",
         headers={"x-csrf-token": token},
@@ -301,9 +324,11 @@ def test_interview_placement_defer_and_restart_remain_resumable(client: TestClie
     assert deferred.status_code == 200
     assert deferred.json()["status"] == "deferred"
     assert "operation_id" not in deferred.json()
-    assert client.get(f"/courses/{slug}", follow_redirects=False).headers["location"].endswith(
-        f"/courses/{slug}/placement"
-    )
+    continued = client.get(f"/courses/{slug}", follow_redirects=False)
+    assert continued.status_code == 303
+    assert "/initializing/" in continued.headers["location"]
+    operation_id = continued.headers["location"].rsplit("/", 1)[-1]
+    assert wait_for_operation(client, slug, operation_id)["state"] == "committed"
 
     started = client.post(
         f"/api/courses/{slug}/placement",
@@ -375,6 +400,19 @@ def test_completed_placement_setup_return_starts_pending_first_lesson(
             "submission_id": str(uuid4()),
         },
     ).json()
+    deferred = offline.post(
+        f"/api/courses/{created['slug']}/placement",
+        headers={"x-csrf-token": token},
+        json={"action": "defer"},
+    )
+    assert deferred.status_code == 200
+    setup_required = offline.get(
+        f"/courses/{created['slug']}", follow_redirects=False
+    )
+    assert setup_required.status_code == 303
+    assert setup_required.headers["location"].endswith(
+        f"/setup?next=%2Fcourses%2F{created['slug']}"
+    )
     skipped = offline.post(
         f"/api/courses/{created['slug']}/placement",
         headers={"x-csrf-token": token},
@@ -903,6 +941,8 @@ def test_course_creation_is_idempotent_across_initialization_replay(
     second = client.post("/api/courses", headers={"x-csrf-token": token}, json=payload)
 
     assert first.status_code == second.status_code == 202
+    assert first.json()["created"] is True
+    assert second.json()["created"] is False
     assert first.json()["slug"] == second.json()["slug"]
     assert first.json()["operation_id"] == second.json()["operation_id"]
     slug = first.json()["slug"]
@@ -916,6 +956,66 @@ def test_course_creation_is_idempotent_across_initialization_replay(
     assert entries[0]["prompt"] == "Start my first lesson."
     assert "Do not run a placement test" not in topic.body
     assert len(list(cli.topics_dir().glob("idempotent-initialization*.md"))) == 1
+
+
+def test_course_creation_supports_legacy_adapter_without_entry_mode() -> None:
+    class LegacyCourseServices:
+        def provider_status(self) -> dict[str, object]:
+            return {"ready": True}
+
+        def create_course(self, _request: object) -> dict[str, object]:
+            return {
+                "ok": True,
+                "slug": "legacy-course",
+                "operation_id": str(uuid4()),
+                "state": "saved",
+                "created": True,
+            }
+
+    legacy = TestClient(create_app(LegacyCourseServices(), testing=True))
+    token = csrf(legacy, "/setup")
+    response = legacy.post(
+        "/api/courses",
+        headers={"x-csrf-token": token},
+        json={
+            "title": "Legacy Course",
+            "goal": "Preserve injected adapter compatibility.",
+            "experience": "",
+            "template_id": None,
+            "submission_id": str(uuid4()),
+        },
+    )
+
+    assert response.status_code == 202
+    assert response.json()["slug"] == "legacy-course"
+
+
+def test_video_preparation_ignores_out_of_order_responses() -> None:
+    javascript = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "openlearn"
+        / "web"
+        / "static"
+        / "openlearn.js"
+    ).read_text(encoding="utf-8")
+    handler_start = javascript.index(
+        'toolSurface?.querySelector("[data-video-form]")?.addEventListener'
+    )
+    handler_end = javascript.index(
+        'toolSurface?.querySelector("[data-video-load]")', handler_start
+    )
+    handler = javascript[handler_start:handler_end]
+
+    assert "invalidatePreparedVideo();" in handler
+    assert "const requestGeneration = videoRequestGeneration;" in handler
+    assert handler.index("await requestJson") < handler.index(
+        "if (requestGeneration !== videoRequestGeneration) return;"
+    ) < handler.index("preparedVideo = descriptor;")
+    assert (
+        'querySelector("#video-url")?.addEventListener("input", invalidatePreparedVideo)'
+        in handler
+    )
 
 
 def test_initialization_failure_preserves_course_and_retries_same_operation(
