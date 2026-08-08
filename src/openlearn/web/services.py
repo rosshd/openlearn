@@ -156,7 +156,8 @@ def _plain_text(value: str) -> str:
 
 def _present_response(value: str) -> tuple[str, list[dict[str, object]]]:
     """Parse a small safe Markdown subset into explicit presentation blocks."""
-    text = re.sub(r"<!--.*?-->", "", value, flags=re.DOTALL)
+    text = cli.sanitize_model_output(value)
+    text = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
     lines = text.splitlines()
     blocks: list[dict[str, object]] = []
     index = 0
@@ -281,6 +282,38 @@ class OpenLearnWebServices:
             "form_model": form_model,
             "providers": self._provider_options(),
         }
+
+    def ensure_provider_ready(self) -> dict[str, object]:
+        """Validate complete saved credentials before asking the learner to re-enter them."""
+        status = self.provider_status()
+        if status.get("ready") or not status.get("key_configured"):
+            return status
+        try:
+            credentials = config.effective_provider_credentials()
+        except config.ConfigError:
+            return status
+        validation = providers.validate_provider(credentials.base_url, credentials.api_key)
+        if validation.status is providers.ValidationStatus.VALID:
+            validation = providers.validate_provider_model(
+                credentials.base_url,
+                credentials.api_key,
+                credentials.model,
+            )
+        if validation.status is not providers.ValidationStatus.VALID:
+            return status
+        if status.get("managed"):
+            return {**status, "ready": True, "verified": True, "reason": ""}
+        try:
+            providers.persist_validation_result(
+                base_url=credentials.base_url,
+                model=credentials.model,
+                api_key=credentials.api_key,
+                validation=validation,
+            )
+        except (providers.ProviderConfigurationError, config.ConfigError):
+            return status
+        cli.clear_config_cache()
+        return self.provider_status()
 
     @staticmethod
     def _provider_options() -> list[dict[str, object]]:

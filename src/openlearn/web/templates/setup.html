@@ -47,10 +47,12 @@
       {% endfor %}
     </select>
 
-    <label for="api-key">API key</label>
+    <label for="api-key">API key{% if provider.key_configured %} (already saved){% endif %}</label>
     <input id="api-key" name="api_key" type="password" autocomplete="off" spellcheck="false"
       placeholder="Paste a new key">
-    <p class="field-note">Stored values are intentionally never loaded into this page.</p>
+    <p class="field-note">
+      {% if provider.key_configured %}Leave this blank to test the saved key, or paste a new key to replace it.{% else %}Paste the key from your provider. Stored values are never loaded back into this page.{% endif %}
+    </p>
 
     <label for="model">Model</label>
     <input id="model" name="model" value="{{ provider.form_model or '' }}"

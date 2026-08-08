@@ -557,6 +557,98 @@ def test_mock_setup_persists_secret_without_echoing_it(client: TestClient) -> No
     assert cli.configured_openai_api_key() == "test-secret-key"
 
 
+def test_saved_provider_is_validated_before_interview_placement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENLEARN_HOME", str(tmp_path))
+    monkeypatch.delenv("OPENLEARN_MOCK", raising=False)
+    cli.clear_config_cache()
+    config.save_provider_configuration(
+        base_url="https://openrouter.ai/api/v1",
+        model="google/gemini-2.5-flash-lite",
+        api_key="already-saved-key",
+        verified=False,
+    )
+    monkeypatch.setattr(
+        providers,
+        "validate_provider",
+        lambda *_args, **_kwargs: providers.ValidationResult(
+            providers.ValidationStatus.VALID
+        ),
+    )
+    monkeypatch.setattr(
+        providers,
+        "validate_provider_model",
+        lambda *_args, **_kwargs: providers.ValidationResult(
+            providers.ValidationStatus.VALID
+        ),
+    )
+    saved_key_client = TestClient(create_app(testing=True))
+    token = csrf(saved_key_client, "/courses/new")
+
+    created = saved_key_client.post(
+        "/api/courses",
+        headers={"x-csrf-token": token},
+        json={
+            "title": "Technical Interview Prep",
+            "goal": "Practice interview reasoning.",
+            "experience": "",
+            "template_id": "technical-interview-prep",
+            "submission_id": str(uuid4()),
+        },
+    )
+
+    assert created.status_code == 200
+    assert "setup_url" not in created.json()
+    assert config.provider_status().verified is True
+    assert saved_key_client.get(created.json()["placement_url"]).status_code == 200
+
+
+def test_interview_setup_happens_before_placement_when_saved_provider_is_invalid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENLEARN_HOME", str(tmp_path))
+    monkeypatch.delenv("OPENLEARN_MOCK", raising=False)
+    cli.clear_config_cache()
+    config.save_provider_configuration(
+        base_url="https://openrouter.ai/api/v1",
+        model="google/gemini-2.5-flash-lite",
+        api_key="invalid-saved-key",
+        verified=False,
+    )
+    monkeypatch.setattr(
+        providers,
+        "validate_provider",
+        lambda *_args, **_kwargs: providers.ValidationResult(
+            providers.ValidationStatus.REJECTED
+        ),
+    )
+    invalid_key_client = TestClient(create_app(testing=True))
+    token = csrf(invalid_key_client, "/courses/new")
+
+    created = invalid_key_client.post(
+        "/api/courses",
+        headers={"x-csrf-token": token},
+        json={
+            "title": "Technical Interview Prep",
+            "goal": "Practice interview reasoning.",
+            "experience": "",
+            "template_id": "technical-interview-prep",
+            "submission_id": str(uuid4()),
+        },
+    )
+
+    body = created.json()
+    expected_suffix = f"/setup?next=%2Fcourses%2F{body['slug']}%2Fplacement"
+    assert body["setup_url"].endswith(expected_suffix)
+    blocked = invalid_key_client.get(body["placement_url"], follow_redirects=False)
+    assert blocked.status_code == 303
+    assert blocked.headers["location"].endswith(expected_suffix)
+    setup = invalid_key_client.get(blocked.headers["location"])
+    assert "API key (already saved)" in setup.text
+    assert "Leave this blank to test the saved key" in setup.text
+
+
 def test_stale_revision_returns_conflict(client: TestClient) -> None:
     token = csrf(client, "/courses/new")
     created = client.post(
@@ -1156,6 +1248,17 @@ def test_focus_renders_safe_structured_lesson_blocks() -> None:
     assert '<pre><code data-language="python">' in response.text
     assert "&lt;script&gt;" in response.text
     assert "print('<script>')" not in response.text
+
+
+def test_present_response_hides_reasoning_from_existing_lesson_history() -> None:
+    kind, blocks = _present_response(
+        "The user wants their first lesson.\n"
+        "I need to inspect the course metadata.\n</think>\n\n"
+        "Lesson: Clarify constraints before coding."
+    )
+
+    assert kind == "Lesson"
+    assert blocks == [{"kind": "paragraph", "text": "Clarify constraints before coding."}]
 
 
 def test_web_turn_uses_current_provider_model(

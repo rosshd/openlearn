@@ -54,6 +54,14 @@ def last_lines(text: str, limit: int) -> str:
 
 
 def sanitize_model_output(text: str) -> str:
+    hidden_tags = r"(?:think|analysis|reasoning)"
+    text = re.sub(rf"(?is)<{hidden_tags}\b[^>]*>.*?</{hidden_tags}>", "", text)
+    text = re.sub(
+        rf"(?is)^.*?</{hidden_tags}>\s*(?=(?:\*\*)?(?:Lesson|Feedback|Example|Check|Hint|Next)\s*:)",
+        "",
+        text,
+    )
+    text = re.sub(rf"(?is)<{hidden_tags}\b[^>]*>.*$", "", text)
     text = re.sub(r"(?is)<system-reminder>.*?</system-reminder>", "", text)
     text = re.sub(r"(?is)<!--\s*answer\s*:\s*[A-D]\s*-->", "", text)
     text = re.sub(r"(?is)<!--\s*covered\s*:\s*.*?-->", "", text)
@@ -113,6 +121,7 @@ def sanitize_stream_preview(text: str) -> str:
     """Sanitize an incomplete streamed response without exposing hidden metadata."""
     text = re.sub(r"(?is)<!--.*$", "", text)
     text = re.sub(r"(?is)<system-reminder\b.*$", "", text)
+    text = re.sub(r"(?is)<(?:think|analysis|reasoning)\b[^>]*>.*$", "", text)
     return sanitize_model_output(text)
 
 

@@ -142,7 +142,7 @@ for (const form of document.querySelectorAll("[data-json-form]")) {
         return;
       }
       announce("Saved successfully.");
-      const destination = result.placement_url || result.initialization_url || result.focus_url || result.redirect || form.dataset.successUrl;
+      const destination = result.setup_url || result.placement_url || result.initialization_url || result.focus_url || result.redirect || form.dataset.successUrl;
       if (destination) window.location.assign(appUrl(destination));
     } catch (error) {
       if (form.elements.api_key && !error.payload?.retain_secret) form.elements.api_key.value = "";
@@ -833,6 +833,10 @@ async function runPlacementAction(action, values = {}) {
     });
     finishPlacementAction(result);
   } catch (error) {
+    if (error.payload?.setup_url) {
+      window.location.assign(appUrl(error.payload.setup_url));
+      return;
+    }
     if (placementStatus) {
       placementStatus.textContent = error.message;
       placementStatus.setAttribute("aria-live", "assertive");

@@ -60,7 +60,9 @@ def _json_error(message: str, status: int = 400, **extra: Any) -> JSONResponse:
 
 
 async def _provider_ready(request: Request) -> bool:
-    status = public_mapping(await _call(request, "provider_status"))
+    operation = getattr(request.app.state.services, "ensure_provider_ready", None)
+    method = "ensure_provider_ready" if callable(operation) else "provider_status"
+    status = public_mapping(await _call(request, method))
     return bool(status.get("ready"))
 
 
@@ -84,12 +86,15 @@ def _safe_setup_destination(request: Request) -> str:
     return request.url_for("dashboard").path
 
 
-def _setup_required(request: Request) -> JSONResponse:
+def _setup_required(request: Request, *, next_path: str | None = None) -> JSONResponse:
+    setup_url = request.url_for("setup")
+    if next_path:
+        setup_url = setup_url.include_query_params(next=next_path)
     return _json_error(
         "Validate a model provider before starting model-backed teaching.",
         428,
         state="setup_required",
-        setup_url=str(request.url_for("setup")),
+        setup_url=str(setup_url),
     )
 
 
@@ -179,6 +184,12 @@ async def create_course(request: Request) -> JSONResponse:
             result["placement_url"] = str(
                 request.url_for("placement", slug=result["slug"])
             )
+            if not await _provider_ready(request):
+                result["setup_url"] = str(
+                    request.url_for("setup").include_query_params(
+                        next=request.url_for("placement", slug=result["slug"]).path
+                    )
+                )
             return JSONResponse(result)
         result.setdefault(
             "initialization_url",
@@ -319,6 +330,8 @@ async def placement(request: Request, slug: str) -> Any:
     snapshot = public_mapping(await _call(request, "placement", slug))
     if snapshot.get("missing"):
         raise HTTPException(status_code=404, detail="Placement not found")
+    if snapshot.get("status") == "not_started" and not await _provider_ready(request):
+        return _setup_redirect(request)
     response = _templates(request).TemplateResponse(
         request,
         "placement.html",
@@ -335,6 +348,11 @@ async def update_placement(request: Request, slug: str) -> JSONResponse:
         payload = PlacementRequest.model_validate(await request.json())
     except (ValidationError, ValueError):
         return _json_error("Check the placement action and try again.")
+    if payload.action == "start" and not await _provider_ready(request):
+        return _setup_required(
+            request,
+            next_path=request.url_for("placement", slug=slug).path,
+        )
     if payload.action == "skip":
         result = public_mapping(await _call(request, "skip_placement", slug))
     else:

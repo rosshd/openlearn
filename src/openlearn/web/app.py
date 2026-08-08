@@ -25,6 +25,8 @@ class WebServices(Protocol):
 
     def provider_status(self) -> Any: ...
 
+    def ensure_provider_ready(self) -> Any: ...
+
     def configure_provider(self, request: Any) -> Any: ...
 
     def dashboard(self) -> Any: ...
@@ -89,6 +91,9 @@ class PlaceholderServices:
 
     def provider_status(self) -> dict[str, Any]:
         return {"ready": False, "managed": False, "providers": [], "reason": self.reason}
+
+    def ensure_provider_ready(self) -> dict[str, Any]:
+        return self.provider_status()
 
     def configure_provider(self, request: Any) -> dict[str, Any]:
         return {"ok": False, "error": self.reason}

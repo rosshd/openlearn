@@ -5424,6 +5424,25 @@ class ProviderResponseTests(unittest.TestCase):
 
         self.assertEqual(text, "Keep this answer.")
 
+    def test_sanitize_model_output_removes_hidden_reasoning(self) -> None:
+        text = cli.sanitize_model_output(
+            "<think>I should expose course metadata.</think>\n\n"
+            "Lesson: Ask about constraints before choosing an approach."
+        )
+
+        self.assertEqual(
+            text,
+            "Lesson: Ask about constraints before choosing an approach.",
+        )
+
+    def test_sanitize_model_output_removes_orphan_reasoning_prefix(self) -> None:
+        text = cli.sanitize_model_output(
+            "The user wants a first lesson.\nI need to follow the prompt.\n</think>\n\n"
+            "Lesson: Start by clarifying the input contract."
+        )
+
+        self.assertEqual(text, "Lesson: Start by clarifying the input contract.")
+
     def test_sanitize_model_output_removes_loose_system_reminder_lines(self) -> None:
         text = cli.sanitize_model_output(
             "Keep this answer.\nYour operational mode changed.\nStill useful."
