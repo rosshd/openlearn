@@ -42,6 +42,9 @@ openlearn web
 This opens the loopback-only Maker Bench interface for provider setup, starter courses, focused tutoring, progress, and session history.
 Each launch uses a private capability stored in the local server lease, and the browser exchanges it once for an HttpOnly session cookie before the token is removed from the address bar.
 It reads and writes the same local course files as the CLI.
+Focus Bench starts text-only and opens an optional Dual Surface for three early tools: a plain Python workbench, consent-based YouTube playback, and bounded course-source imports from a file, local folder, or public GitHub repository.
+Code runs only after an explicit click and requires the existing Docker or Podman safety runtime; tool use does not award mastery.
+Source import and extraction stay local and do not contact the model provider; selected excerpts may be sent to that provider later when the tutor uses them.
 Use `openlearn web --no-browser` on a headless machine or `openlearn web --port 9000` to choose another local port.
 
 Run the terminal interface:

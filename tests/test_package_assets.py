@@ -49,6 +49,9 @@ class InstalledWheelSmokeTests(unittest.TestCase):
                 "openlearn/web/static/openlearn.css",
                 "openlearn/web/static/openlearn.js",
                 "openlearn/web/static/favicon.svg",
+                "openlearn/code_workspace.py",
+                "openlearn/source_imports.py",
+                "openlearn/video_tools.py",
             ):
                 self.assertIn(expected, packaged)
 

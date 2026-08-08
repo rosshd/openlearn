@@ -43,7 +43,7 @@ function csrfToken() {
 async function requestJson(url, options = {}) {
   const headers = new Headers(options.headers || {});
   headers.set("Accept", "application/json");
-  if (options.body) headers.set("Content-Type", "application/json");
+  if (options.body && !(options.body instanceof FormData)) headers.set("Content-Type", "application/json");
   if (options.method && options.method !== "GET") headers.set("X-CSRF-Token", csrfToken());
   const response = await fetch(appUrl(url), {...options, headers, credentials: "same-origin"});
   let body;
@@ -170,7 +170,339 @@ for (const intent of document.querySelectorAll('input[name="intent"]')) {
 const turnForm = document.querySelector("[data-turn-form]");
 const focusShell = document.querySelector("[data-focus-shell]");
 const initializationShell = document.querySelector("[data-initialization-shell]");
+const toolSurface = document.querySelector("[data-tool-surface]");
 let turnInFlight = false;
+
+let activeToolOpener = null;
+let preparedVideo = null;
+let codeRevision = null;
+let codeDirty = false;
+let codeEditVersion = 0;
+let toolOpenVersion = 0;
+
+const availableTools = new Set(["code", "video", "sources"]);
+
+function toolStatus(message, isError = false) {
+  const status = toolSurface?.querySelector("[data-tool-status]");
+  if (!status) return;
+  status.textContent = message;
+  status.classList.toggle("error", isError);
+  announce(message);
+}
+
+function toolEndpoint(suffix) {
+  return `/api/courses/${encodeURIComponent(focusShell.dataset.courseSlug)}/tools/${suffix}`;
+}
+
+function toolFromUrl() {
+  const tool = new URL(window.location.href).searchParams.get("tool");
+  return availableTools.has(tool) ? tool : null;
+}
+
+function setToolUrl(tool, {replace = false} = {}) {
+  const url = new URL(window.location.href);
+  if (tool) url.searchParams.set("tool", tool);
+  else url.searchParams.delete("tool");
+  const next = `${url.pathname}${url.search}${url.hash}`;
+  const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+  if (next === current) return;
+  window.history[replace ? "replaceState" : "pushState"]({}, "", next);
+}
+
+function confirmDiscardCodeChanges() {
+  if (!codeDirty) return true;
+  return window.confirm("Discard unsaved changes to this Python draft?");
+}
+
+function clearPreparedVideo() {
+  preparedVideo = null;
+  const consent = toolSurface?.querySelector("[data-video-consent]");
+  if (consent) consent.hidden = true;
+  toolSurface?.querySelector("[data-video-frame]")?.replaceChildren();
+}
+
+function renderCodeResult(result) {
+  const region = toolSurface?.querySelector("[data-code-result]");
+  if (!region) return;
+  region.hidden = false;
+  region.querySelector("[data-code-result-kind]").textContent = result.kind || result.status || "saved";
+  const output = [result.stdout, result.stderr].filter((value) => value !== undefined && value !== null && value !== "").join("\n");
+  region.querySelector("[data-code-output]").textContent = output.length ? output : result.message || "No output.";
+}
+
+function renderSources(result) {
+  const region = toolSurface?.querySelector("[data-source-results]");
+  if (!region) return;
+  const sources = result.sources || result.items || [];
+  region.replaceChildren();
+  if (!sources.length && !result.imported?.length && !result.skipped?.length && !result.failed?.length) {
+    const empty = document.createElement("p");
+    empty.className = "quiet-copy";
+    empty.textContent = result.message || "No imported sources yet.";
+    region.append(empty);
+  } else for (const source of sources) {
+    const item = document.createElement("article");
+    item.className = "source-result";
+    const title = document.createElement("strong");
+    title.textContent = source.label || source.name || source.path || "Imported source";
+    const detail = document.createElement("p");
+    detail.className = "field-note";
+    detail.textContent = source.detail || source.status || source.kind || "available locally";
+    item.append(title, detail);
+    region.append(item);
+  }
+  for (const group of ["imported", "skipped", "failed"]) {
+    for (const detail of result[group] || []) {
+      const item = document.createElement("p");
+      item.className = `source-result${group === "failed" ? " error" : ""}`;
+      item.textContent = `${group}: ${detail.label}${detail.message ? ` - ${detail.message}` : ""}`;
+      region.append(item);
+    }
+  }
+}
+
+async function loadToolState(tool) {
+  if (tool === "code") {
+    const result = await requestJson(toolEndpoint("code"));
+    const draft = toolSurface.querySelector("[data-code-draft]");
+    codeRevision = result.revision || null;
+    if (!codeDirty) {
+      draft.value = result.source || result.draft || "";
+      codeDirty = false;
+    }
+    if (result.result) renderCodeResult(result.result);
+    else toolSurface.querySelector("[data-code-result]").hidden = true;
+  } else if (tool === "sources") {
+    renderSources(await requestJson(toolEndpoint("sources")));
+  }
+}
+
+async function openTool(tool, opener, {updateUrl = true} = {}) {
+  if (!toolSurface || !focusShell || !availableTools.has(tool)) return false;
+  const currentTool = focusShell.dataset.toolActive;
+  if (currentTool === tool && !toolSurface.hidden) {
+    if (updateUrl) setToolUrl(tool);
+    toolSurface.querySelector("[data-tool-close]")?.focus();
+    return true;
+  }
+  if (currentTool === "code" && codeDirty && !confirmDiscardCodeChanges()) return false;
+  if (currentTool === "code" && codeDirty) codeDirty = false;
+  const openVersion = ++toolOpenVersion;
+  activeToolOpener = opener;
+  for (const button of document.querySelectorAll("[data-tool-open]")) {
+    button.setAttribute("aria-expanded", String(button === opener));
+  }
+  for (const panel of toolSurface.querySelectorAll("[data-tool-panel]")) {
+    panel.hidden = panel.dataset.toolPanel !== tool;
+  }
+  const titles = {code: "Code workbench", video: "Video player", sources: "Course sources"};
+  toolSurface.querySelector("[data-tool-title]").textContent = titles[tool] || "Learning tool";
+  focusShell.dataset.toolActive = tool;
+  toolSurface.hidden = false;
+  if (updateUrl) setToolUrl(tool);
+  toolStatus(tool === "video" ? "Video stays private until you load it." : "Loading local tool state…");
+  try {
+    await loadToolState(tool);
+    if (openVersion === toolOpenVersion && tool !== "video") toolStatus("Ready.");
+  } catch (error) {
+    if (openVersion === toolOpenVersion) toolStatus(error.message, true);
+  }
+  if (openVersion === toolOpenVersion && !toolSurface.hidden) {
+    toolSurface.querySelector("[data-tool-close]")?.focus();
+  }
+  return true;
+}
+
+function closeTool({updateUrl = true} = {}) {
+  if (!toolSurface || !focusShell) return false;
+  const currentTool = focusShell.dataset.toolActive;
+  if (currentTool === "code" && codeDirty && !confirmDiscardCodeChanges()) return false;
+  if (currentTool === "code" && codeDirty) codeDirty = false;
+  toolOpenVersion += 1;
+  toolSurface.hidden = true;
+  delete focusShell.dataset.toolActive;
+  toolSurface.querySelector("[data-video-frame]")?.replaceChildren();
+  for (const button of document.querySelectorAll("[data-tool-open]")) button.setAttribute("aria-expanded", "false");
+  if (updateUrl) setToolUrl(null, {replace: true});
+  const opener = activeToolOpener;
+  activeToolOpener = null;
+  opener?.focus();
+  return true;
+}
+
+for (const button of document.querySelectorAll("[data-tool-open]")) {
+  button.addEventListener("click", () => openTool(button.dataset.toolOpen, button));
+}
+toolSurface?.querySelector("[data-tool-close]")?.addEventListener("click", () => closeTool());
+
+toolSurface?.querySelector("[data-code-draft]")?.addEventListener("input", () => {
+  if (!codeDirty) toolStatus("Unsaved Python draft.");
+  codeDirty = true;
+  codeEditVersion += 1;
+});
+
+window.addEventListener("beforeunload", (event) => {
+  if (!codeDirty) return;
+  event.preventDefault();
+  event.returnValue = "";
+});
+
+toolSurface?.querySelector("[data-code-save]")?.addEventListener("click", async () => {
+  const draft = toolSurface.querySelector("[data-code-draft]");
+  const source = draft.value;
+  const editVersion = codeEditVersion;
+  try {
+    const result = await requestJson(toolEndpoint("code"), {
+      method: "POST",
+      body: JSON.stringify({
+        action: "save",
+        source,
+        expected_revision: codeRevision,
+      }),
+    });
+    codeRevision = result.revision || codeRevision;
+    codeDirty = editVersion !== codeEditVersion;
+    toolSurface.querySelector("[data-code-result]").hidden = true;
+    toolStatus(
+      codeDirty
+        ? "Saved the submitted draft. Newer edits remain unsaved."
+        : result.message || "Draft saved locally.",
+    );
+  } catch (error) { toolStatus(error.message, true); }
+});
+
+toolSurface?.querySelector("[data-code-run]")?.addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  const draft = toolSurface.querySelector("[data-code-draft]");
+  const source = draft.value;
+  const editVersion = codeEditVersion;
+  button.disabled = true;
+  toolStatus("Running in the bounded local workspace…");
+  try {
+    const result = await requestJson(toolEndpoint("code"), {
+      method: "POST",
+      body: JSON.stringify({
+        action: "run",
+        source,
+        expected_revision: codeRevision,
+      }),
+    });
+    codeRevision = result.revision || codeRevision;
+    codeDirty = editVersion !== codeEditVersion;
+    renderCodeResult(result.result || result);
+    toolStatus(
+      codeDirty
+        ? "Run complete for the submitted draft. Newer edits remain unsaved."
+        : result.message || "Run complete.",
+    );
+  } catch (error) { toolStatus(error.message, true); }
+  finally { button.disabled = false; }
+});
+
+toolSurface?.querySelector("[data-code-reset]")?.addEventListener("click", async () => {
+  if (!window.confirm("Reset this saved draft?")) return;
+  const editVersion = codeEditVersion;
+  try {
+    const result = await requestJson(toolEndpoint("code"), {
+      method: "POST",
+      body: JSON.stringify({action: "reset", source: "", expected_revision: codeRevision}),
+    });
+    codeRevision = result.revision || null;
+    codeDirty = editVersion !== codeEditVersion;
+    if (!codeDirty) {
+      toolSurface.querySelector("[data-code-draft]").value = result.source || result.draft || "";
+      toolSurface.querySelector("[data-code-result]").hidden = true;
+    }
+    toolStatus(
+      codeDirty
+        ? "Saved draft reset. Newer edits remain unsaved."
+        : "Draft reset.",
+    );
+  } catch (error) { toolStatus(error.message, true); }
+});
+
+toolSurface?.querySelector("[data-video-form]")?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  clearPreparedVideo();
+  try {
+    preparedVideo = await requestJson(toolEndpoint("video"), {
+      method: "POST",
+      body: JSON.stringify({url: form.elements.url.value}),
+    });
+    const consent = toolSurface.querySelector("[data-video-consent]");
+    consent.hidden = false;
+    consent.querySelector("[data-video-title]").textContent = preparedVideo.label || "Video ready to load.";
+    toolSurface.querySelector("[data-video-frame]").replaceChildren();
+    toolStatus("Validated locally. YouTube has not been contacted.");
+  } catch (error) { toolStatus(error.message, true); }
+});
+
+toolSurface?.querySelector("#video-url")?.addEventListener("input", clearPreparedVideo);
+
+toolSurface?.querySelector("[data-video-load]")?.addEventListener("click", () => {
+  if (!preparedVideo?.embed_url) return;
+  const frame = document.createElement("iframe");
+  frame.src = preparedVideo.embed_url;
+  frame.title = preparedVideo.label || "YouTube lesson video";
+  frame.loading = "lazy";
+  frame.referrerPolicy = "no-referrer";
+  frame.allow = "accelerometer; encrypted-media; picture-in-picture";
+  frame.setAttribute("sandbox", "allow-scripts allow-same-origin allow-presentation");
+  frame.setAttribute("allowfullscreen", "");
+  toolSurface.querySelector("[data-video-frame]").replaceChildren(frame);
+  toolStatus("Video loaded from YouTube's privacy-enhanced player.");
+});
+
+if (focusShell) {
+  const requestedTool = toolFromUrl();
+  const hasToolParameter = new URL(window.location.href).searchParams.has("tool");
+  if (requestedTool) {
+    const opener = document.querySelector(`[data-tool-open="${requestedTool}"]`);
+    openTool(requestedTool, opener, {updateUrl: false});
+  } else if (hasToolParameter) {
+    setToolUrl(null, {replace: true});
+  }
+
+  window.addEventListener("popstate", async () => {
+    const nextTool = toolFromUrl();
+    const currentTool = focusShell.dataset.toolActive || null;
+    if (nextTool) {
+      const opener = document.querySelector(`[data-tool-open="${nextTool}"]`);
+      const opened = await openTool(nextTool, opener, {updateUrl: false});
+      if (!opened && currentTool) setToolUrl(currentTool, {replace: true});
+    } else if (!toolSurface.hidden) {
+      const closed = closeTool({updateUrl: false});
+      if (!closed && currentTool) setToolUrl(currentTool, {replace: true});
+    }
+  });
+}
+
+async function submitSourceForm(form, suffix, body) {
+  const button = form.querySelector("button[type='submit']");
+  button.disabled = true;
+  toolStatus("Importing selected source…");
+  try {
+    const result = await requestJson(toolEndpoint(`sources/${suffix}`), {method: "POST", body});
+    renderSources(result);
+    toolStatus(result.message || "Source import complete.");
+    form.reset();
+  } catch (error) { toolStatus(error.message, true); }
+  finally { button.disabled = false; }
+}
+
+toolSurface?.querySelector("[data-source-file-form]")?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  submitSourceForm(event.currentTarget, "file", new FormData(event.currentTarget));
+});
+toolSurface?.querySelector("[data-source-folder-form]")?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  submitSourceForm(event.currentTarget, "folder", JSON.stringify({path: event.currentTarget.elements.path.value}));
+});
+toolSurface?.querySelector("[data-source-github-form]")?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  submitSourceForm(event.currentTarget, "github", JSON.stringify({url: event.currentTarget.elements.url.value}));
+});
 
 function setInitializationState(message, retryable = false) {
   const status = initializationShell?.querySelector("[data-initialization-status]");
@@ -455,4 +787,8 @@ for (const button of document.querySelectorAll("[data-drawer-toggle]")) {
 }
 
 for (const close of document.querySelectorAll("[data-drawer-close]")) close.addEventListener("click", closeDrawers);
-document.addEventListener("keydown", (event) => { if (event.key === "Escape") closeDrawers(); });
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  if (toolSurface && !toolSurface.hidden) closeTool();
+  else closeDrawers();
+});

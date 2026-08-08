@@ -140,6 +140,101 @@ def test_real_browser_course_polling_theme_conflict_and_keyboard_submit(
                 first.reload()
                 assert first.locator("html").get_attribute("data-theme") == "light"
 
+                first.locator("#learner-response").fill("Keep this unsent draft while tools open.")
+                first.get_by_role("button", name="Code").click()
+                assert "tool=code" in first.url
+                first.locator("[data-code-draft]").fill("print('browser workspace')\n")
+                with first.expect_response(
+                    lambda response: response.url.endswith("/tools/code")
+                    and response.request.method == "POST"
+                ) as code_saved:
+                    first.get_by_role("button", name="Save", exact=True).click()
+                assert code_saved.value.status == 200
+                first.locator("[data-code-draft]").fill("print('unsaved draft')\n")
+                first.once("dialog", lambda dialog: dialog.dismiss())
+                first.get_by_role("button", name="Video").click()
+                playwright.expect(first.locator('[data-tool-panel="code"]')).to_be_visible()
+                assert first.locator("[data-code-draft]").input_value() == (
+                    "print('unsaved draft')\n"
+                )
+                assert "tool=code" in first.url
+
+                first.once("dialog", lambda dialog: dialog.accept())
+                first.get_by_role("button", name="Video").click()
+                playwright.expect(first.locator('[data-tool-panel="video"]')).to_be_visible()
+                assert "tool=video" in first.url
+                first.go_back()
+                playwright.expect(first.locator('[data-tool-panel="code"]')).to_be_visible()
+                playwright.expect(first.locator("[data-code-draft]")).to_have_value(
+                    "print('browser workspace')\n"
+                )
+                first.go_forward()
+                playwright.expect(first.locator('[data-tool-panel="video"]')).to_be_visible()
+                first.go_back()
+                playwright.expect(first.locator('[data-tool-panel="code"]')).to_be_visible()
+
+                first.locator("[data-code-draft]").fill("print('close guard')\n")
+                first.once("dialog", lambda dialog: dialog.dismiss())
+                first.get_by_role("button", name="Close learning tool").click()
+                playwright.expect(first.locator('[data-tool-panel="code"]')).to_be_visible()
+                first.once("dialog", lambda dialog: dialog.accept())
+                first.get_by_role("button", name="Close learning tool").click()
+                assert "tool=" not in first.url
+                assert first.get_by_role("button", name="Code").evaluate(
+                    "button => button === document.activeElement"
+                )
+                assert first.locator("#learner-response").input_value() == (
+                    "Keep this unsent draft while tools open."
+                )
+
+                first.get_by_role("button", name="Video").click()
+                first.locator("#video-url").fill("https://youtu.be/dQw4w9WgXcQ")
+                first.get_by_role("button", name="Prepare video").click()
+                playwright.expect(first.locator("[data-video-consent]")).to_be_visible()
+                assert first.locator("[data-video-frame] iframe").count() == 0
+                first.locator("#video-url").fill("https://example.com/not-youtube")
+                playwright.expect(first.locator("[data-video-consent]")).to_be_hidden()
+                assert first.locator("[data-video-frame] iframe").count() == 0
+                first.get_by_role("button", name="Prepare video").click()
+                playwright.expect(first.locator("[data-tool-status]")).to_contain_text(
+                    "valid supported YouTube"
+                )
+                playwright.expect(first.locator("[data-video-consent]")).to_be_hidden()
+                first.locator("#video-url").fill("https://youtu.be/dQw4w9WgXcQ")
+                first.get_by_role("button", name="Prepare video").click()
+                playwright.expect(first.locator("[data-video-consent]")).to_be_visible()
+                context.route("https://www.youtube-nocookie.com/**", lambda route: route.abort())
+                first.get_by_role("button", name="Load video").click()
+                assert first.locator("[data-video-frame] iframe").count() == 1
+                first.locator("#video-url").fill("https://youtu.be/abcdefghijk")
+                playwright.expect(first.locator("[data-video-consent]")).to_be_hidden()
+                assert first.locator("[data-video-frame] iframe").count() == 0
+                first.get_by_role("button", name="Close learning tool").click()
+                assert first.get_by_role("button", name="Video").evaluate(
+                    "button => button === document.activeElement"
+                )
+
+                first.get_by_role("button", name="Sources").click()
+                assert "tool=sources" in first.url
+                first.reload()
+                playwright.expect(first.locator('[data-tool-panel="sources"]')).to_be_visible()
+                first.locator("#source-file").set_input_files(
+                    {
+                        "name": "browser-notes.md",
+                        "mimeType": "text/markdown",
+                        "buffer": b"# Browser source\n",
+                    }
+                )
+                first.get_by_role("button", name="Import file").click()
+                playwright.expect(first.locator("[data-source-results]")).to_contain_text(
+                    "browser-notes.md"
+                )
+                first.set_viewport_size({"width": 320, "height": 720})
+                assert first.evaluate("document.body.scrollWidth <= window.innerWidth")
+                assert not first.locator(".focus-column").is_visible()
+                first.get_by_role("button", name="Close learning tool").click()
+                first.set_viewport_size({"width": 1280, "height": 800})
+
                 stale = context.new_page()
                 stale.goto(focus_url)
                 assert _revision(stale) == initial_revision

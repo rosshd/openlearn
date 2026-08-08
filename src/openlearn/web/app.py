@@ -31,6 +31,20 @@ class WebServices(Protocol):
 
     def course_templates(self) -> Any: ...
 
+    def prepare_video(self, slug: str, request: Any) -> Any: ...
+
+    def code_state(self, slug: str) -> Any: ...
+
+    def update_code(self, slug: str, request: Any) -> Any: ...
+
+    def course_sources(self, slug: str) -> Any: ...
+
+    def import_file_source(self, slug: str, path: Path, filename: str) -> Any: ...
+
+    def import_folder_source(self, slug: str, path: str) -> Any: ...
+
+    def import_github_source(self, slug: str, url: str) -> Any: ...
+
     def create_course(self, request: Any) -> Any: ...
 
     def course_initialization(self, slug: str, operation_id: str) -> Any: ...
@@ -64,6 +78,27 @@ class PlaceholderServices:
 
     def course_templates(self) -> list[dict[str, Any]]:
         return []
+
+    def prepare_video(self, slug: str, request: Any) -> dict[str, Any]:
+        return {"ok": False, "error": "Video tools are not available yet."}
+
+    def code_state(self, slug: str) -> dict[str, Any]:
+        return {"ok": False, "missing": True, "error": "Code tools are unavailable."}
+
+    def update_code(self, slug: str, request: Any) -> dict[str, Any]:
+        return self.code_state(slug)
+
+    def course_sources(self, slug: str) -> dict[str, Any]:
+        return {"ok": True, "sources": []}
+
+    def import_file_source(self, slug: str, path: Path, filename: str) -> dict[str, Any]:
+        return {"ok": False, "error": "Source imports are unavailable."}
+
+    def import_folder_source(self, slug: str, path: str) -> dict[str, Any]:
+        return {"ok": False, "error": "Source imports are unavailable."}
+
+    def import_github_source(self, slug: str, url: str) -> dict[str, Any]:
+        return {"ok": False, "error": "Source imports are unavailable."}
 
     def create_course(self, request: Any) -> dict[str, Any]:
         return {"ok": False, "error": "Course services are not available yet.", "fields": request}

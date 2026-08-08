@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import os
@@ -286,6 +287,51 @@ def run_python_tests(
                 policy,
                 started,
             )
+
+
+def run_python_script(
+    source: Path,
+    *,
+    policy: ResourcePolicy | None = None,
+    reduced_isolation: bool = False,
+    preferred_runtime: str | None = None,
+    image: str = DEFAULT_RUNNER_IMAGE,
+) -> RunnerResult:
+    """Run one Python script under the same bounded isolation contract as drills."""
+    policy = policy or ResourcePolicy()
+    _validate_request(
+        source,
+        "_openlearn_validate_policy",
+        [{"input": [], "expected": None}],
+        policy,
+    )
+    started = time.monotonic()
+    diagnostic = None
+    if not reduced_isolation:
+        diagnostic = diagnose_runtime(preferred=preferred_runtime, image=image)
+        if not diagnostic.ready:
+            raise RunnerUnavailableError(runtime_setup_guidance(diagnostic))
+        assert diagnostic.executable is not None
+        assert diagnostic.runtime is not None
+    with tempfile.TemporaryDirectory(prefix="openlearn-script-") as attempt_raw:
+        attempt = Path(attempt_raw)
+        attempt.chmod(0o777)
+        copied_source = attempt / "workspace.py"
+        shutil.copyfile(source, copied_source)
+        copied_source.chmod(0o666)
+        if reduced_isolation:
+            return _run_script_reduced(copied_source, policy, started)
+        assert diagnostic is not None
+        assert diagnostic.executable is not None
+        assert diagnostic.runtime is not None
+        return _run_script_oci(
+            diagnostic.executable,
+            diagnostic.runtime,
+            image,
+            attempt,
+            policy,
+            started,
+        )
 
 
 def build_oci_create_command(
@@ -607,6 +653,408 @@ def _run_reduced(
         isolation="reduced",
         runtime=None,
         terminate=terminate,
+    )
+
+
+def build_oci_script_command(
+    executable: str,
+    runtime: str,
+    image: str,
+    attempt: Path,
+    name: str,
+    policy: ResourcePolicy,
+) -> list[str]:
+    """Build a fail-closed OCI command for an explicitly requested script run."""
+    if runtime not in SUPPORTED_RUNTIMES:
+        raise ValueError(f"unsupported OCI runtime: {runtime}")
+    if "@sha256:" not in image:
+        raise ValueError("runner image must be pinned by digest")
+    return [
+        executable,
+        "create",
+        "--name",
+        name,
+        "--pull",
+        "never",
+        "--network",
+        "none",
+        "--read-only",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges",
+        "--user",
+        "65532:65532",
+        "--workdir",
+        "/workspace",
+        "--memory",
+        str(policy.memory_bytes),
+        "--memory-swap",
+        str(policy.memory_bytes),
+        "--cpus",
+        "1",
+        "--pids-limit",
+        str(policy.process_limit),
+        "--ulimit",
+        f"cpu={policy.cpu_seconds}:{policy.cpu_seconds}",
+        "--ulimit",
+        f"fsize={policy.file_bytes}:{policy.file_bytes}",
+        "--tmpfs",
+        "/tmp:rw,noexec,nosuid,nodev,size=16777216",
+        "--mount",
+        f"type=bind,src={attempt},dst=/workspace,readonly",
+        image,
+        "/usr/bin/env",
+        "-i",
+        "HOME=/tmp",
+        "TMPDIR=/tmp",
+        "PYTHONDONTWRITEBYTECODE=1",
+        "/usr/local/bin/python",
+        "-I",
+        "/workspace/workspace.py",
+    ]
+
+
+def _run_script_oci(
+    executable: str,
+    runtime: str,
+    image: str,
+    attempt: Path,
+    policy: ResourcePolicy,
+    started: float,
+) -> RunnerResult:
+    name = f"openlearn-{uuid4().hex}"
+    command = build_oci_script_command(
+        executable,
+        runtime,
+        image,
+        attempt,
+        name,
+        policy,
+    )
+    removed = False
+    cleanup_detail = ""
+
+    def remove_container() -> bool:
+        nonlocal removed, cleanup_detail
+        if removed:
+            return True
+        try:
+            result = subprocess.run(
+                [executable, "rm", "--force", name],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            cleanup_detail = str(exc)
+            return False
+        detail = (result.stderr or result.stdout or "").strip()
+        missing = any(
+            marker in detail.casefold()
+            for marker in (
+                "no such container",
+                "no container with name or id",
+                "does not exist",
+            )
+        )
+        if result.returncode == 0 or missing:
+            removed = True
+            return True
+        cleanup_detail = detail[:500] or f"exit {result.returncode}"
+        return False
+
+    remaining = started + policy.wall_seconds - time.monotonic()
+    if remaining <= 0:
+        return _result("timeout", "", "", None, started, "wall_time", "oci", runtime)
+    try:
+        created = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=min(OCI_CREATE_TIMEOUT_SECONDS, remaining),
+        )
+    except KeyboardInterrupt:
+        cleanup_ok = remove_container()
+        return _result(
+            "cancelled" if cleanup_ok else "runner_error",
+            "",
+            cleanup_detail,
+            None,
+            started,
+            "cancelled" if cleanup_ok else "container_cleanup",
+            "oci",
+            runtime,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        cleanup_ok = remove_container()
+        detail = str(exc)
+        if not cleanup_ok:
+            detail = f"{detail}\nCould not confirm container removal: {cleanup_detail}"
+        return _result(
+            "runner_error",
+            "",
+            detail,
+            None,
+            started,
+            "container_create" if cleanup_ok else "container_cleanup",
+            "oci",
+            runtime,
+        )
+    if created.returncode != 0:
+        cleanup_ok = remove_container()
+        detail = created.stderr
+        if not cleanup_ok:
+            detail = "\n".join(
+                part
+                for part in (detail, f"Could not confirm container removal: {cleanup_detail}")
+                if part
+            )
+        return _result(
+            "runner_error",
+            created.stdout,
+            detail,
+            created.returncode,
+            started,
+            "container_create" if cleanup_ok else "container_cleanup",
+            "oci",
+            runtime,
+        )
+
+    remaining = started + policy.wall_seconds - time.monotonic()
+    if remaining <= 0:
+        cleanup_ok = remove_container()
+        return _result(
+            "timeout" if cleanup_ok else "runner_error",
+            "",
+            cleanup_detail,
+            None,
+            started,
+            "wall_time" if cleanup_ok else "container_cleanup",
+            "oci",
+            runtime,
+        )
+    try:
+        process = subprocess.Popen(
+            [executable, "start", "--attach", name],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        result = _supervise_script_process(
+            process,
+            policy,
+            started=started,
+            isolation="oci",
+            runtime=runtime,
+            terminate=remove_container,
+        )
+    except KeyboardInterrupt:
+        cleanup_ok = remove_container()
+        return _result(
+            "cancelled" if cleanup_ok else "runner_error",
+            "",
+            cleanup_detail,
+            None,
+            started,
+            "cancelled" if cleanup_ok else "container_cleanup",
+            "oci",
+            runtime,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        cleanup_ok = remove_container()
+        detail = str(exc)
+        if not cleanup_ok:
+            detail = f"{detail}\nCould not confirm container removal: {cleanup_detail}"
+        return _result(
+            "runner_error",
+            "",
+            detail,
+            None,
+            started,
+            "container_start" if cleanup_ok else "container_cleanup",
+            "oci",
+            runtime,
+        )
+    cleanup_ok = remove_container()
+    if cleanup_ok:
+        return result
+    return _result(
+        "runner_error",
+        result.stdout,
+        "\n".join(
+            part
+            for part in (result.stderr, f"Could not confirm container removal: {cleanup_detail}")
+            if part
+        ),
+        result.exit_code,
+        started,
+        "container_cleanup",
+        "oci",
+        runtime,
+    )
+
+
+def _run_script_reduced(
+    source: Path,
+    policy: ResourcePolicy,
+    started: float,
+) -> RunnerResult:
+    popen_kwargs: dict[str, object] = {
+        "cwd": str(source.parent),
+        "env": {
+            "HOME": str(source.parent),
+            "TMPDIR": str(source.parent),
+            "PATH": os.defpath,
+            "PYTHONDONTWRITEBYTECODE": "1",
+        },
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+    }
+    if os.name == "posix":
+        popen_kwargs["start_new_session"] = True
+        popen_kwargs["preexec_fn"] = _posix_limits(policy)
+    elif os.name == "nt":
+        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    process = subprocess.Popen([sys.executable, "-I", str(source)], **popen_kwargs)
+
+    def terminate() -> bool:
+        if process.poll() is not None:
+            return True
+        if os.name == "posix":
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except (PermissionError, ProcessLookupError):
+                pass
+        elif os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                capture_output=True,
+                check=False,
+            )
+        else:
+            process.kill()
+        return True
+
+    return _supervise_script_process(
+        process,
+        policy,
+        started=started,
+        isolation="reduced",
+        runtime=None,
+        terminate=terminate,
+    )
+
+
+def _supervise_script_process(
+    process: subprocess.Popen[bytes],
+    policy: ResourcePolicy,
+    *,
+    started: float,
+    isolation: Literal["oci", "reduced"],
+    runtime: str | None,
+    terminate,
+) -> RunnerResult:
+    assert process.stdout is not None
+    assert process.stderr is not None
+    # Keep host-side buffering bounded as well as the returned output.  Without
+    # backpressure, a fast child can fill an unbounded Queue before the
+    # supervisor observes the output limit.
+    events: queue.Queue[tuple[str, bytes | None]] = queue.Queue(maxsize=16)
+    output = {"stdout": bytearray(), "stderr": bytearray()}
+    total_bytes = 0
+    streams_closed = 0
+    deadline = started + policy.wall_seconds
+    stop_reading = threading.Event()
+
+    def drain(label: str, stream) -> None:
+        read = getattr(stream, "read1", stream.read)
+        while not stop_reading.is_set():
+            chunk = read(4096)
+            if not chunk:
+                while not stop_reading.is_set():
+                    try:
+                        events.put((label, None), timeout=0.05)
+                        break
+                    except queue.Full:
+                        continue
+                return
+            while not stop_reading.is_set():
+                try:
+                    events.put((label, chunk), timeout=0.05)
+                    break
+                except queue.Full:
+                    continue
+
+    readers = [
+        threading.Thread(target=drain, args=("stdout", process.stdout), daemon=True),
+        threading.Thread(target=drain, args=("stderr", process.stderr), daemon=True),
+    ]
+    for reader in readers:
+        reader.start()
+
+    kind: str | None = None
+    reason: str | None = None
+    while streams_closed < len(readers):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            kind, reason = "timeout", "wall_time"
+            break
+        try:
+            label, chunk = events.get(timeout=min(0.05, remaining))
+        except queue.Empty:
+            if process.poll() is not None and all(not reader.is_alive() for reader in readers):
+                break
+            continue
+        if chunk is None:
+            streams_closed += 1
+            continue
+        available = max(0, policy.output_bytes - total_bytes)
+        output[label].extend(chunk[:available])
+        total_bytes += len(chunk)
+        if total_bytes > policy.output_bytes:
+            kind, reason = "output_limit", "captured_output"
+            break
+
+    if kind is not None:
+        stop_reading.set()
+        terminate()
+    try:
+        process.wait(timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        stop_reading.set()
+        terminate()
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            process.wait(timeout=1)
+    stop_reading.set()
+    for reader in readers:
+        reader.join(timeout=1)
+    for stream in (process.stdout, process.stderr):
+        with contextlib.suppress(OSError):
+            stream.close()
+
+    stdout = output["stdout"].decode("utf-8", errors="replace")
+    stderr = output["stderr"].decode("utf-8", errors="replace")
+    if kind is None:
+        if process.returncode == 0:
+            kind = "success"
+        else:
+            classified, reason = _classify_process_exit(process.returncode, isolation)
+            kind = (
+                "compile_error"
+                if classified == "runtime_error" and "SyntaxError:" in stderr
+                else classified
+            )
+    return _result(
+        kind,
+        stdout,
+        stderr,
+        process.returncode,
+        started,
+        reason,
+        isolation,
+        runtime,
     )
 
 

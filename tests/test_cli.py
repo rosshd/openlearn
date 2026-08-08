@@ -6659,17 +6659,15 @@ class InteractiveTests(unittest.TestCase):
             cli.quick_source_kind_and_label("https://example.com/study-guide")
 
     def test_quick_learn_github_clone_is_shallow_and_temporary(self) -> None:
-        original_run = cli.subprocess.run
+        original_clone = cli._bounded_git_clone
         calls = []
 
-        def fake_run(command, **kwargs):
-            calls.append((command, kwargs))
-            clone_dir = Path(command[-1])
+        def fake_clone(command, clone_dir, env):
+            calls.append((command, clone_dir, env))
             clone_dir.mkdir(parents=True)
             (clone_dir / "README.md").write_text("Repository overview.", encoding="utf-8")
-            return cli.subprocess.CompletedProcess(command, 0, "", "")
 
-        cli.subprocess.run = fake_run
+        cli._bounded_git_clone = fake_clone
         try:
             contexts = cli.quick_source_contexts(
                 "https://github.com/rosshd/openlearn",
@@ -6677,17 +6675,63 @@ class InteractiveTests(unittest.TestCase):
                 output_func=lambda _text: None,
             )
         finally:
-            cli.subprocess.run = original_run
+            cli._bounded_git_clone = original_clone
 
         self.assertEqual(
             calls[0][0][:6],
             ["git", "-c", "core.hooksPath=/dev/null", "clone", "--depth", "1"],
         )
-        self.assertEqual(calls[0][1]["env"]["GIT_TERMINAL_PROMPT"], "0")
-        self.assertEqual(calls[0][1]["env"]["GIT_CONFIG_NOSYSTEM"], "1")
-        self.assertEqual(calls[0][1]["env"]["GIT_CONFIG_GLOBAL"], "/dev/null")
+        self.assertEqual(calls[0][2]["GIT_TERMINAL_PROMPT"], "0")
+        self.assertEqual(calls[0][2]["GIT_CONFIG_NOSYSTEM"], "1")
+        self.assertEqual(calls[0][2]["GIT_CONFIG_GLOBAL"], "/dev/null")
+        self.assertIn("--filter=blob:limit=200000", calls[0][0])
         self.assertIn("readme-md.txt", [context.filename for context in contexts])
         self.assertFalse(Path(calls[0][0][-1]).exists())
+
+    def test_bounded_git_clone_kills_process_group_on_budget_violation(self) -> None:
+        class RunningClone:
+            pid = 12345
+
+            def poll(self):
+                return None
+
+        process = RunningClone()
+        with (
+            mock.patch.object(cli.subprocess, "Popen", return_value=process),
+            mock.patch.object(cli, "_directory_budget_violation", return_value="clone-size"),
+            mock.patch.object(cli, "_terminate_process_tree") as terminate,
+        ):
+            with self.assertRaisesRegex(cli.OpenLearnError, "clone-size"):
+                cli._bounded_git_clone(
+                    ["git", "clone", "--", "https://github.com/example/repo", "/tmp/repo"],
+                    Path("/tmp/repo"),
+                    {},
+                )
+
+        terminate.assert_called_once_with(process)
+
+    def test_bounded_git_clone_kills_process_group_on_timeout(self) -> None:
+        class RunningClone:
+            pid = 12345
+
+            def poll(self):
+                return None
+
+        process = RunningClone()
+        with (
+            mock.patch.object(cli.subprocess, "Popen", return_value=process),
+            mock.patch.object(cli, "_directory_budget_violation", return_value=None),
+            mock.patch.object(cli, "_terminate_process_tree") as terminate,
+            mock.patch.object(cli.time, "monotonic", side_effect=[0.0, 31.0]),
+        ):
+            with self.assertRaisesRegex(cli.OpenLearnError, "timed out"):
+                cli._bounded_git_clone(
+                    ["git", "clone", "--", "https://github.com/example/repo", "/tmp/repo"],
+                    Path("/tmp/repo"),
+                    {},
+                )
+
+        terminate.assert_called_once_with(process)
 
     def test_quick_learn_existing_topic_is_not_changed(self) -> None:
         source = Path(self.home.name) / "midterm.md"

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -88,6 +89,12 @@ def test_local_reads_require_launch_capability_and_bootstrap_to_http_only_cookie
     assert allowed.status_code == 200
     assert f"{security.url_namespace}/static/openlearn.js" in allowed.text
     assert f"{security.url_namespace}/dashboard" in allowed.text
+    script = protected.get(f"{security.url_namespace}/static/openlearn.js")
+    stylesheet = protected.get(f"{security.url_namespace}/static/openlearn.css")
+    assert script.status_code == 200
+    assert script.headers["content-type"].startswith("text/javascript")
+    assert stylesheet.status_code == 200
+    assert stylesheet.headers["content-type"].startswith("text/css")
 
 
 def test_cookie_authentication_requires_unguessable_path_namespace() -> None:
@@ -121,12 +128,44 @@ def test_every_normal_response_has_browser_security_headers(client: TestClient) 
     assert response.status_code == 200
     assert "default-src 'self'" in response.headers["content-security-policy"]
     assert "frame-ancestors 'none'" in response.headers["content-security-policy"]
+    assert (
+        "frame-src https://www.youtube-nocookie.com"
+        in response.headers["content-security-policy"]
+    )
     assert response.headers["x-content-type-options"] == "nosniff"
     assert response.headers["referrer-policy"] == "no-referrer"
     assert response.headers["x-frame-options"] == "DENY"
     assert "openlearn_csrf=" in response.headers["set-cookie"]
     assert "HttpOnly" in response.headers["set-cookie"]
     assert "SameSite=Strict" in response.headers["set-cookie"]
+
+
+def test_video_embed_preserves_no_referrer_policy() -> None:
+    script = (
+        Path(__file__).parents[1]
+        / "src"
+        / "openlearn"
+        / "web"
+        / "static"
+        / "openlearn.js"
+    ).read_text(encoding="utf-8")
+
+    assert 'frame.referrerPolicy = "no-referrer"' in script
+    assert "strict-origin-when-cross-origin" not in script
+
+
+def test_code_output_rendering_preserves_whitespace() -> None:
+    script = (
+        Path(__file__).parents[1]
+        / "src"
+        / "openlearn"
+        / "web"
+        / "static"
+        / "openlearn.js"
+    ).read_text(encoding="utf-8")
+
+    assert '.join("\\n").trim()' not in script
+    assert "output.length ? output" in script
 
 
 def test_rejects_unknown_host_with_security_headers(client: TestClient) -> None:

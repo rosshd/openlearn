@@ -3,17 +3,25 @@
 from __future__ import annotations
 
 import inspect
+import tempfile
+from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import ValidationError
 from starlette.concurrency import run_in_threadpool
 
+from openlearn.constants import QUICK_LEARN_MAX_FILE_BYTES
+
 from .schemas import (
+    CodeToolRequest,
     CourseCreateRequest,
+    FolderSourceRequest,
+    GitHubSourceRequest,
     ProviderSetupRequest,
     TutorSubmissionRequest,
+    VideoToolRequest,
     canonical_slug,
     canonical_uuid,
     public_mapping,
@@ -260,6 +268,138 @@ async def submit_turn(request: Request, slug: str) -> JSONResponse:
     result = public_mapping(await _call(request, "submit_turn", slug, payload))
     status = 409 if result.get("state") == "conflict" else 202
     return JSONResponse(result, status_code=status)
+
+
+@router.post("/api/courses/{slug}/tools/video", response_class=JSONResponse)
+async def prepare_video(request: Request, slug: str) -> JSONResponse:
+    if not await _provider_ready(request):
+        return _setup_required(request)
+    try:
+        slug = canonical_slug(slug)
+        payload = VideoToolRequest.model_validate(await request.json())
+    except (ValidationError, ValueError):
+        return _json_error("Paste a valid YouTube video URL.")
+    result = public_mapping(await _call(request, "prepare_video", slug, payload))
+    if result.get("missing"):
+        raise HTTPException(status_code=404, detail="Course not found")
+    if not result.get("ok"):
+        return _json_error(str(result.get("error") or "That video URL is not supported."), 422)
+    return JSONResponse(result)
+
+
+@router.get("/api/courses/{slug}/tools/code", response_class=JSONResponse)
+async def code_state(request: Request, slug: str) -> JSONResponse:
+    if not await _provider_ready(request):
+        return _setup_required(request)
+    try:
+        slug = canonical_slug(slug)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail="Course not found") from error
+    result = public_mapping(await _call(request, "code_state", slug))
+    if result.get("missing"):
+        raise HTTPException(status_code=404, detail="Course not found")
+    if not result.get("ok"):
+        return _json_error(str(result.get("error") or "Code workspace unavailable."), 503)
+    return JSONResponse(result)
+
+
+@router.post("/api/courses/{slug}/tools/code", response_class=JSONResponse)
+async def update_code(request: Request, slug: str) -> JSONResponse:
+    if not await _provider_ready(request):
+        return _setup_required(request)
+    try:
+        slug = canonical_slug(slug)
+        payload = CodeToolRequest.model_validate(await request.json())
+    except (ValidationError, ValueError):
+        return _json_error("Check the Python draft and retry.")
+    result = public_mapping(await _call(request, "update_code", slug, payload))
+    if result.get("missing"):
+        raise HTTPException(status_code=404, detail="Course not found")
+    if result.get("conflict"):
+        return _json_error(str(result.get("error") or "Draft changed elsewhere."), 409)
+    if result.get("invalid"):
+        return _json_error(str(result.get("error") or "The Python draft is invalid."), 422)
+    if not result.get("ok"):
+        return _json_error(str(result.get("error") or "Code workspace unavailable."), 503)
+    return JSONResponse(result)
+
+
+@router.get("/api/courses/{slug}/tools/sources", response_class=JSONResponse)
+async def course_sources(request: Request, slug: str) -> JSONResponse:
+    if not await _provider_ready(request):
+        return _setup_required(request)
+    try:
+        slug = canonical_slug(slug)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail="Course not found") from error
+    result = public_mapping(await _call(request, "course_sources", slug))
+    if result.get("missing"):
+        raise HTTPException(status_code=404, detail="Course not found")
+    return JSONResponse(result)
+
+
+@router.post("/api/courses/{slug}/tools/sources/file", response_class=JSONResponse)
+async def import_file_source(
+    request: Request,
+    slug: str,
+    file: UploadFile = File(...),
+) -> JSONResponse:
+    if not await _provider_ready(request):
+        return _setup_required(request)
+    try:
+        slug = canonical_slug(slug)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail="Course not found") from error
+    filename = file.filename or "selected-file"
+    content = await file.read(QUICK_LEARN_MAX_FILE_BYTES + 1)
+    await file.close()
+    if len(content) > QUICK_LEARN_MAX_FILE_BYTES:
+        return _json_error("The selected file exceeds the import size limit.", 413)
+    suffix = Path(filename).suffix[:16]
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(prefix="openlearn-upload-", suffix=suffix, delete=False) as handle:
+            handle.write(content)
+            temporary_path = Path(handle.name)
+        result = public_mapping(
+            await _call(request, "import_file_source", slug, temporary_path, filename)
+        )
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+    if result.get("missing"):
+        raise HTTPException(status_code=404, detail="Course not found")
+    return JSONResponse(result)
+
+
+@router.post("/api/courses/{slug}/tools/sources/folder", response_class=JSONResponse)
+async def import_folder_source(request: Request, slug: str) -> JSONResponse:
+    if not await _provider_ready(request):
+        return _setup_required(request)
+    try:
+        slug = canonical_slug(slug)
+        payload = FolderSourceRequest.model_validate(await request.json())
+    except (ValidationError, ValueError):
+        return _json_error("Enter a local folder path.")
+    result = public_mapping(await _call(request, "import_folder_source", slug, payload.path))
+    if result.get("missing"):
+        raise HTTPException(status_code=404, detail="Course not found")
+    return JSONResponse(result)
+
+
+@router.post("/api/courses/{slug}/tools/sources/github", response_class=JSONResponse)
+async def import_github_source(request: Request, slug: str) -> JSONResponse:
+    if not await _provider_ready(request):
+        return _setup_required(request)
+    try:
+        slug = canonical_slug(slug)
+        payload = GitHubSourceRequest.model_validate(await request.json())
+    except (ValidationError, ValueError):
+        return _json_error("Enter a public GitHub repository URL.")
+    result = public_mapping(await _call(request, "import_github_source", slug, payload.url))
+    if result.get("missing"):
+        raise HTTPException(status_code=404, detail="Course not found")
+    return JSONResponse(result)
 
 
 @router.get("/api/courses/{slug}/operations/{operation_id}", response_class=JSONResponse)

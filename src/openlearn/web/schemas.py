@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
@@ -65,6 +65,31 @@ class TutorSubmissionRequest(BaseModel):
     @classmethod
     def valid_submission_id(cls, value: str) -> str:
         return canonical_uuid(value)
+
+
+class VideoToolRequest(BaseModel):
+    url: str = Field(min_length=1, max_length=2048)
+
+
+class CodeToolRequest(BaseModel):
+    action: Literal["save", "run", "reset"]
+    source: str = Field(default="", max_length=65536)
+    expected_revision: str | None = Field(default=None, max_length=64)
+
+    @field_validator("expected_revision")
+    @classmethod
+    def valid_revision(cls, value: str | None) -> str | None:
+        if value is not None and re.fullmatch(r"[0-9a-f]{64}", value) is None:
+            raise ValueError("Invalid draft revision")
+        return value
+
+
+class FolderSourceRequest(BaseModel):
+    path: str = Field(min_length=1, max_length=4096)
+
+
+class GitHubSourceRequest(BaseModel):
+    url: str = Field(min_length=1, max_length=2048)
 
 
 def public_mapping(value: Any) -> dict[str, Any]:

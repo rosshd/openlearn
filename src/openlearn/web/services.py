@@ -5,9 +5,19 @@ from __future__ import annotations
 import os
 import re
 from datetime import datetime, timezone
+from pathlib import Path
 from uuid import NAMESPACE_URL, uuid5
 
-from openlearn import application, cli, config, providers, tutor_service
+from openlearn import (
+    application,
+    cli,
+    code_workspace,
+    config,
+    providers,
+    source_imports,
+    tutor_service,
+    video_tools,
+)
 from openlearn.application import CalibrationContext, CourseCard, CourseCreationRequest
 from openlearn.course_templates import CourseTemplateError
 from openlearn.courses import (
@@ -15,7 +25,13 @@ from openlearn.courses import (
     CREATION_SUBMISSION_STATE_KEY,
 )
 
-from .schemas import CourseCreateRequest, ProviderSetupRequest, TutorSubmissionRequest
+from .schemas import (
+    CodeToolRequest,
+    CourseCreateRequest,
+    ProviderSetupRequest,
+    TutorSubmissionRequest,
+    VideoToolRequest,
+)
 
 
 COURSE_INITIALIZATION_PROMPT = "Start my first lesson."
@@ -52,6 +68,68 @@ def _card(card: CourseCard) -> dict[str, object]:
         "current_unit": card.current_focus or "Ready to learn",
         "next_move": card.current_focus,
         "progress": card.progress.percent,
+    }
+
+
+def _draft(snapshot: code_workspace.DraftSnapshot) -> dict[str, object]:
+    return {
+        "language": snapshot.language,
+        "source": snapshot.source,
+        "revision": snapshot.revision,
+    }
+
+
+def _execution(result: code_workspace.ExecutionResult) -> dict[str, object]:
+    return {
+        "status": result.status,
+        "kind": result.status,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+        "timed_out": result.timed_out,
+        "exit_code": result.exit_code,
+        "signal": result.signal,
+        "duration_seconds": result.duration_seconds,
+        "limit_reason": result.limit_reason,
+        "isolation": result.isolation,
+        "runtime": result.runtime,
+        "protections": list(result.protections),
+        "draft_revision": result.draft_revision,
+    }
+
+
+def _source_result(result: source_imports.CourseSourceImportResult) -> dict[str, object]:
+    def source_item(source: source_imports.CourseSource) -> dict[str, object]:
+        return {
+            "id": source.source_id,
+            "kind": source.kind,
+            "label": source.label,
+            "status": "available locally",
+        }
+
+    def details(values: tuple[source_imports.ImportDetail, ...]) -> list[dict[str, object]]:
+        return [
+            {
+                "status": value.status,
+                "label": value.label,
+                "context_file": value.context_file,
+                "message": value.message or "",
+            }
+            for value in values
+        ]
+
+    imported = details(result.imported)
+    skipped = details(result.skipped)
+    failed = details(result.failed)
+    return {
+        "ok": not failed,
+        "kind": result.kind,
+        "sources": [source_item(source) for source in result.sources],
+        "imported": imported,
+        "skipped": skipped,
+        "failed": failed,
+        "message": (
+            f"Imported {len(imported)}, skipped {len(skipped)}, failed {len(failed)}."
+        ),
     }
 
 
@@ -292,6 +370,127 @@ class OpenLearnWebServices:
             }
             for template in application.templates().templates
         ]
+
+    def prepare_video(self, slug: str, request: VideoToolRequest) -> dict[str, object]:
+        try:
+            cli.read_topic(slug)
+        except (cli.OpenLearnError, OSError):
+            return {"ok": False, "missing": True, "error": "Course not found."}
+        try:
+            descriptor = video_tools.describe_youtube_video(request.url)
+        except video_tools.VideoURLValidationError as error:
+            return {"ok": False, "error": str(error)}
+        return {
+            "ok": True,
+            "provider": descriptor.provider,
+            "video_id": descriptor.video_id,
+            "canonical_url": descriptor.canonical_url,
+            "embed_url": descriptor.embed_url,
+            "requires_consent": descriptor.requires_consent,
+            "label": "YouTube video ready to load",
+        }
+
+    @staticmethod
+    def _workspace() -> code_workspace.CodeWorkspace:
+        return code_workspace.CodeWorkspace(cli.topics_dir())
+
+    def code_state(self, slug: str) -> dict[str, object]:
+        try:
+            workspace = self._workspace()
+            state = workspace.state(slug)
+            return {
+                "ok": True,
+                **_draft(state.draft),
+                **({"result": _execution(state.result)} if state.result is not None else {}),
+            }
+        except code_workspace.CodeWorkspaceNotFoundError:
+            return {"ok": False, "missing": True, "error": "Code workspace unavailable."}
+        except code_workspace.CodeWorkspaceError:
+            return {"ok": False, "unavailable": True, "error": "Code workspace unavailable."}
+
+    def update_code(self, slug: str, request: CodeToolRequest) -> dict[str, object]:
+        workspace = self._workspace()
+        try:
+            if request.action == "reset":
+                snapshot = workspace.reset(
+                    slug,
+                    expected_revision=request.expected_revision,
+                )
+                return {"ok": True, **_draft(snapshot), "message": "Draft reset."}
+            snapshot = workspace.save(
+                slug,
+                request.source,
+                expected_revision=request.expected_revision,
+            )
+            if request.action == "save":
+                return {"ok": True, **_draft(snapshot), "message": "Draft saved locally."}
+            result = workspace.run(slug, expected_revision=snapshot.revision)
+            return {
+                "ok": True,
+                **_draft(snapshot),
+                "result": _execution(result),
+                "message": (
+                    "Secure runner setup is required before execution."
+                    if result.status == "runner_unavailable"
+                    else "Run complete."
+                ),
+            }
+        except code_workspace.CodeWorkspaceConflictError as error:
+            return {"ok": False, "conflict": True, "error": str(error)}
+        except code_workspace.CodeWorkspaceValidationError as error:
+            return {"ok": False, "invalid": True, "error": str(error)}
+        except code_workspace.CodeWorkspaceNotFoundError:
+            return {"ok": False, "missing": True, "error": "Code workspace unavailable."}
+        except code_workspace.CodeWorkspaceError:
+            return {"ok": False, "unavailable": True, "error": "Code workspace unavailable."}
+
+    def course_sources(self, slug: str) -> dict[str, object]:
+        try:
+            sources = source_imports.list_course_sources(slug)
+        except (cli.OpenLearnError, OSError):
+            return {"ok": False, "missing": True, "error": "Course not found."}
+        return {
+            "ok": True,
+            "sources": [
+                {
+                    "id": source.source_id,
+                    "kind": source.kind,
+                    "label": source.label,
+                    "status": "available locally",
+                }
+                for source in sources
+            ],
+        }
+
+    def import_file_source(
+        self, slug: str, path: Path, filename: str
+    ) -> dict[str, object]:
+        return self._import_source(
+            slug,
+            source_imports.LocalFileSource(path=path, filename=filename),
+        )
+
+    def import_folder_source(self, slug: str, path: str) -> dict[str, object]:
+        return self._import_source(slug, source_imports.LocalFolderSource(Path(path)))
+
+    def import_github_source(self, slug: str, url: str) -> dict[str, object]:
+        return self._import_source(slug, source_imports.PublicGitHubSource(url))
+
+    @staticmethod
+    def _import_source(
+        slug: str, source: source_imports.CourseSourceInput
+    ) -> dict[str, object]:
+        try:
+            result = source_imports.import_course_source(
+                source_imports.CourseSourceImportRequest(
+                    course_slug=slug,
+                    source=source,
+                    model=cli.configured_model(),
+                )
+            )
+        except (cli.OpenLearnError, OSError):
+            return {"ok": False, "missing": True, "error": "Course not found."}
+        return _source_result(result)
 
     def create_course(self, request: CourseCreateRequest) -> dict[str, object]:
         calibration = CalibrationContext(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 import time
 from datetime import datetime, timezone
@@ -10,7 +11,7 @@ import pytest
 pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient
 
-from openlearn import cli
+from openlearn import cli, code_runner
 from openlearn import config
 from openlearn import providers
 from openlearn import tutor_service
@@ -49,6 +50,14 @@ def wait_for_operation(
             return body
         time.sleep(0.01)
     raise AssertionError(f"operation {operation_id} did not reach {sorted(expected)}")
+
+
+def create_tool_course() -> str:
+    cli.cmd_new(
+        argparse.Namespace(topic="Tool Course", goal="Learn with optional tools"),
+        output_func=lambda _text: None,
+    )
+    return "tool-course"
 
 
 def test_default_web_app_runs_setup_dashboard_course_and_tutor_flow(
@@ -661,3 +670,209 @@ def test_initialization_refresh_recovers_orphaned_saved_operation(
     focus = client.get(f"/courses/{slug}", follow_redirects=False)
     assert focus.status_code == 303
     assert operation_id in focus.headers["location"]
+
+
+def test_focus_exposes_optional_dual_surface_without_opening_a_tool(
+    client: TestClient,
+) -> None:
+    slug = create_tool_course()
+
+    response = client.get(f"/courses/{slug}")
+
+    assert response.status_code == 200
+    assert 'data-tool-open="code"' in response.text
+    assert 'data-tool-open="video"' in response.text
+    assert 'data-tool-open="sources"' in response.text
+    assert 'data-tool-surface hidden' in response.text
+
+
+def test_video_tool_validates_locally_and_returns_consent_descriptor(
+    client: TestClient,
+) -> None:
+    slug = create_tool_course()
+    token = csrf(client, f"/courses/{slug}")
+
+    valid = client.post(
+        f"/api/courses/{slug}/tools/video",
+        headers={"x-csrf-token": token},
+        json={"url": "https://youtu.be/dQw4w9WgXcQ"},
+    )
+    invalid = client.post(
+        f"/api/courses/{slug}/tools/video",
+        headers={"x-csrf-token": token},
+        json={"url": "https://example.com/private-video"},
+    )
+
+    assert valid.status_code == 200
+    assert valid.json()["requires_consent"] is True
+    assert valid.json()["embed_url"] == (
+        "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ"
+    )
+    assert invalid.status_code == 422
+    assert "private-video" not in invalid.text
+
+
+def test_code_tool_saves_recovers_and_rejects_stale_drafts(client: TestClient) -> None:
+    slug = create_tool_course()
+    token = csrf(client, f"/courses/{slug}")
+    initial = client.get(f"/api/courses/{slug}/tools/code").json()
+
+    saved = client.post(
+        f"/api/courses/{slug}/tools/code",
+        headers={"x-csrf-token": token},
+        json={
+            "action": "save",
+            "source": "print('saved locally')\n",
+            "expected_revision": initial["revision"],
+        },
+    )
+    stale = client.post(
+        f"/api/courses/{slug}/tools/code",
+        headers={"x-csrf-token": token},
+        json={
+            "action": "save",
+            "source": "print('stale')\n",
+            "expected_revision": initial["revision"],
+        },
+    )
+    recovered = client.get(f"/api/courses/{slug}/tools/code")
+
+    assert saved.status_code == 200
+    assert recovered.json()["source"] == "print('saved locally')\n"
+    assert stale.status_code == 409
+    assert cli.load_state(slug).get("known", []) == []
+
+
+def test_code_tool_run_fails_closed_without_secure_runtime(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    slug = create_tool_course()
+    token = csrf(client, f"/courses/{slug}")
+    initial = client.get(f"/api/courses/{slug}/tools/code").json()
+    monkeypatch.setattr(
+        code_runner,
+        "diagnose_runtime",
+        lambda **_kwargs: code_runner.RuntimeDiagnostic(
+            None,
+            None,
+            False,
+            False,
+            code_runner.DEFAULT_RUNNER_IMAGE,
+            "runtime unavailable",
+        ),
+    )
+
+    response = client.post(
+        f"/api/courses/{slug}/tools/code",
+        headers={"x-csrf-token": token},
+        json={
+            "action": "run",
+            "source": "print('explicit run')\n",
+            "expected_revision": initial["revision"],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["result"]["status"] == "runner_unavailable"
+    assert response.json()["result"]["isolation"] is None
+    recovered = client.get(f"/api/courses/{slug}/tools/code")
+    assert recovered.status_code == 200
+    assert recovered.json()["result"]["status"] == "runner_unavailable"
+    assert cli.load_state(slug).get("known", []) == []
+
+
+def test_code_tool_rejects_multibyte_draft_as_invalid_not_missing(
+    client: TestClient,
+) -> None:
+    slug = create_tool_course()
+    token = csrf(client, f"/courses/{slug}")
+    initial = client.get(f"/api/courses/{slug}/tools/code").json()
+
+    response = client.post(
+        f"/api/courses/{slug}/tools/code",
+        headers={"x-csrf-token": token},
+        json={
+            "action": "save",
+            "source": "😀" * 20_000,
+            "expected_revision": initial["revision"],
+        },
+    )
+
+    assert response.status_code == 422
+    assert "too large" in response.json()["error"]
+    assert client.get(f"/api/courses/{slug}/tools/code").status_code == 200
+
+
+def test_source_tool_imports_uploaded_file_and_folder_with_dedupe(
+    client: TestClient, tmp_path: Path
+) -> None:
+    slug = create_tool_course()
+    token = csrf(client, f"/courses/{slug}")
+    folder = tmp_path / "notes"
+    folder.mkdir()
+    (folder / "README.md").write_text("Folder source", encoding="utf-8")
+
+    uploaded = client.post(
+        f"/api/courses/{slug}/tools/sources/file",
+        headers={"x-csrf-token": token},
+        files={"file": ("lesson.md", b"# Uploaded lesson\n", "text/markdown")},
+    )
+    duplicate = client.post(
+        f"/api/courses/{slug}/tools/sources/file",
+        headers={"x-csrf-token": token},
+        files={"file": ("lesson.md", b"# Uploaded lesson\n", "text/markdown")},
+    )
+    folder_result = client.post(
+        f"/api/courses/{slug}/tools/sources/folder",
+        headers={"x-csrf-token": token},
+        json={"path": str(folder)},
+    )
+    listed = client.get(f"/api/courses/{slug}/tools/sources")
+
+    assert uploaded.status_code == duplicate.status_code == folder_result.status_code == 200
+    assert [item["label"] for item in uploaded.json()["imported"]] == ["lesson.md"]
+    assert [item["label"] for item in duplicate.json()["skipped"]] == ["lesson.md"]
+    assert {item["label"] for item in listed.json()["sources"]} == {
+        "lesson.md",
+        "README.md",
+    }
+
+
+def test_source_tool_public_github_route_is_shallow_and_inert(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    slug = create_tool_course()
+    token = csrf(client, f"/courses/{slug}")
+    commands: list[list[str]] = []
+
+    def fake_clone(command: list[str], clone_dir: Path, _env: dict[str, str]) -> None:
+        commands.append(command)
+        clone_dir.mkdir(parents=True)
+        (clone_dir / "README.md").write_text("Public source", encoding="utf-8")
+        (clone_dir / "never-run.py").write_text(
+            "raise RuntimeError('must remain inert')",
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(cli, "_bounded_git_clone", fake_clone)
+    response = client.post(
+        f"/api/courses/{slug}/tools/sources/github",
+        headers={"x-csrf-token": token},
+        json={"url": "https://github.com/example/learning"},
+    )
+
+    assert response.status_code == 200
+    assert {item["label"] for item in response.json()["imported"]} == {
+        "README.md",
+        "never-run.py",
+    }
+    assert commands[0][:6] == [
+        "git",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "clone",
+        "--depth",
+        "1",
+    ]
+    assert "--filter=blob:limit=200000" in commands[0]
+    assert cli.load_state(slug).get("known", []) == []

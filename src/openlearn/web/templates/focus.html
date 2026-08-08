@@ -13,6 +13,9 @@
 <div class="focus-shell" data-focus-shell data-course-slug="{{ course.slug }}" data-revision="{{ course.revision or 0 }}"
   {% if course.operation %}data-operation-id="{{ course.operation.id }}" data-operation-state="{{ course.operation.state }}" data-operation-error="{{ course.operation.error }}"{% endif %}>
   <aside class="tool-rail" aria-label="Lesson tools">
+    <button type="button" class="rail-button" data-tool-open="code" aria-expanded="false" aria-controls="learning-tool-surface"><span aria-hidden="true">{ }</span> Code</button>
+    <button type="button" class="rail-button" data-tool-open="video" aria-expanded="false" aria-controls="learning-tool-surface"><span aria-hidden="true">▶</span> Video</button>
+    <button type="button" class="rail-button" data-tool-open="sources" aria-expanded="false" aria-controls="learning-tool-surface"><span aria-hidden="true">＋</span> Sources</button>
     <button type="button" class="rail-button" data-drawer-toggle="progress-drawer" aria-expanded="false"><span aria-hidden="true">◫</span> Progress</button>
     <button type="button" class="rail-button" data-drawer-toggle="history-drawer" aria-expanded="false"><span aria-hidden="true">↺</span> History</button>
   </aside>
@@ -67,6 +70,72 @@
       <button type="button" data-navigation-intent="next">Next concept</button>
     </nav>
   </section>
+
+  <aside class="learning-tool" id="learning-tool-surface" data-tool-surface hidden aria-labelledby="learning-tool-title">
+    <header class="learning-tool-header">
+      <div>
+        <p class="eyebrow">Dual Surface</p>
+        <h2 id="learning-tool-title" data-tool-title>Learning tool</h2>
+      </div>
+      <button class="drawer-close" type="button" data-tool-close aria-label="Close learning tool">×</button>
+    </header>
+    <p class="field-note" role="status" aria-live="polite" data-tool-status></p>
+
+    <section class="tool-panel" data-tool-panel="code" hidden aria-labelledby="code-tool-title">
+      <h3 id="code-tool-title">Python workbench</h3>
+      <p class="quiet-copy">A plain editor with no autocomplete. Running is explicit and does not change mastery.</p>
+      <label for="code-draft">Python draft</label>
+      <textarea id="code-draft" class="code-editor" rows="18" maxlength="50000" spellcheck="false" autocomplete="off" data-code-draft></textarea>
+      <div class="tool-actions">
+        <button class="primary-action compact" type="button" data-code-run>Run draft</button>
+        <button type="button" data-code-save>Save</button>
+        <button type="button" data-code-reset>Reset</button>
+      </div>
+      <div class="code-result" data-code-result hidden>
+        <div class="panel-heading"><h3>Run result</h3><span data-code-result-kind></span></div>
+        <pre><code data-code-output></code></pre>
+      </div>
+    </section>
+
+    <section class="tool-panel" data-tool-panel="video" hidden aria-labelledby="video-tool-title">
+      <h3 id="video-tool-title">YouTube player</h3>
+      <p class="quiet-copy">Paste a YouTube link. Nothing is sent to YouTube until you choose Load video.</p>
+      <form class="tool-form" data-video-form>
+        <label for="video-url">YouTube URL</label>
+        <input id="video-url" name="url" type="url" maxlength="2048" required placeholder="https://www.youtube.com/watch?v=…">
+        <button class="primary-action compact" type="submit">Prepare video</button>
+      </form>
+      <div class="video-consent" data-video-consent hidden>
+        <p><strong data-video-title>Ready to load this video.</strong></p>
+        <p class="field-note">Loading connects your browser to YouTube's privacy-enhanced player.</p>
+        <button type="button" class="primary-action compact" data-video-load>Load video</button>
+      </div>
+      <div class="video-frame" data-video-frame></div>
+    </section>
+
+    <section class="tool-panel" data-tool-panel="sources" hidden aria-labelledby="sources-tool-title">
+      <h3 id="sources-tool-title">Course sources</h3>
+      <p class="quiet-copy">Imports are stored and processed locally, bounded, deduplicated, and never executed. When the tutor uses a source later, selected excerpts may be sent to your configured model provider.</p>
+      <form class="tool-form" data-source-file-form>
+        <label for="source-file">File</label>
+        <input id="source-file" name="file" type="file" required>
+        <button type="submit">Import file</button>
+      </form>
+      <form class="tool-form" data-source-folder-form>
+        <label for="source-folder">Local folder path</label>
+        <input id="source-folder" name="path" maxlength="4096" required placeholder="/Users/you/notes">
+        <button type="submit">Import folder</button>
+      </form>
+      <form class="tool-form" data-source-github-form>
+        <label for="source-github">Public GitHub repository</label>
+        <input id="source-github" name="url" type="url" maxlength="2048" required placeholder="https://github.com/owner/repository">
+        <button type="submit">Import repository</button>
+      </form>
+      <div class="source-results" data-source-results>
+        <p class="quiet-copy">No course sources loaded yet.</p>
+      </div>
+    </section>
+  </aside>
 
   <aside class="drawer" id="progress-drawer" aria-labelledby="progress-title" hidden>
     <button class="drawer-close" type="button" data-drawer-close aria-label="Close progress">×</button>

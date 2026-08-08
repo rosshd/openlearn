@@ -12,7 +12,7 @@ from starlette.datastructures import Headers, MutableHeaders
 from starlette.responses import JSONResponse, RedirectResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-MAX_REQUEST_BODY = 64 * 1024
+MAX_REQUEST_BODY = 1024 * 1024
 CSRF_COOKIE = "openlearn_csrf"
 SESSION_COOKIE = "openlearn_session"
 CAPABILITY_QUERY = "access_token"
@@ -24,6 +24,7 @@ SECURITY_HEADERS = {
     "Content-Security-Policy": (
         "default-src 'self'; script-src 'self'; style-src 'self'; "
         "img-src 'self' data:; connect-src 'self'; font-src 'self'; "
+        "frame-src https://www.youtube-nocookie.com; "
         "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; "
         "form-action 'self'"
     ),
@@ -231,12 +232,9 @@ class LocalSecurityMiddleware:
     def _route_scope(self, scope: Scope) -> Scope:
         routed = dict(scope)
         namespace = self.security.url_namespace
-        path = str(scope.get("path", "/"))
-        routed["path"] = path[len(namespace) :] or "/"
-        raw_path = scope.get("raw_path")
-        if isinstance(raw_path, bytes):
-            raw_namespace = namespace.encode("ascii")
-            routed["raw_path"] = raw_path[len(raw_namespace) :] or b"/"
+        # Preserve the original path and let Starlette remove root_path while
+        # matching.  Pre-stripping works for direct APIRoutes but breaks mounted
+        # applications such as StaticFiles, which extend root_path themselves.
         existing_root = str(scope.get("root_path", "")).rstrip("/")
         routed["root_path"] = f"{existing_root}{namespace}"
         return routed  # type: ignore[return-value]

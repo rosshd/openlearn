@@ -16,6 +16,7 @@ import os
 import random
 import re
 import select
+import signal
 import shutil
 import shlex
 import stat
@@ -97,6 +98,9 @@ from openlearn.constants import (
     QUICK_LEARN_BUNDLE_CHAR_LIMIT,
     QUICK_LEARN_MAX_FILE_BYTES,
     QUICK_LEARN_MAX_FILES,
+    QUICK_LEARN_MAX_DISCOVERY_ENTRIES,
+    QUICK_LEARN_GITHUB_CLONE_TIMEOUT_SECONDS,
+    QUICK_LEARN_GITHUB_MAX_CLONE_BYTES,
     QUICK_LEARN_MAX_TOTAL_CHARS,
     ROLLING_PASS_RATE_WINDOW,
     STATE_FILE,
@@ -8047,7 +8051,8 @@ def quick_source_file_allowed(path: Path, relative: Path) -> bool:
         return False
     name = path.name.lower()
     if (
-        name in QUICK_LEARN_SECRET_NAMES
+        name.startswith(".")
+        or name in QUICK_LEARN_SECRET_NAMES
         or name.startswith(".env")
         or path.suffix.lower() in {".key", ".p12", ".pem"}
     ):
@@ -8081,8 +8086,15 @@ def quick_source_priority(relative: Path) -> tuple[int, str]:
 
 
 def quick_directory_contexts(directory: Path, output_func=print) -> list[PendingContext]:
+    directory = directory.expanduser().resolve()
+    if not directory.exists() or not directory.is_dir():
+        raise OpenLearnError(f"Quick Learn source folder not found: {directory.name}")
     candidates: list[tuple[Path, Path]] = []
+    discovered_entries = 0
     for root, directories, filenames in os.walk(directory):
+        discovered_entries += len(directories) + len(filenames)
+        if discovered_entries > QUICK_LEARN_MAX_DISCOVERY_ENTRIES:
+            raise OpenLearnError("Quick Learn source exceeds the discovery limit")
         directories[:] = sorted(
             name
             for name in directories
@@ -8104,13 +8116,14 @@ def quick_directory_contexts(directory: Path, output_func=print) -> list[Pending
             skipped.append(f"{relative.as_posix()}: file-count limit")
             continue
         try:
-            if path.stat().st_size > QUICK_LEARN_MAX_FILE_BYTES:
+            snapshot = snapshot_source_file(directory, path)
+            if len(snapshot.data) > QUICK_LEARN_MAX_FILE_BYTES:
                 skipped.append(f"{relative.as_posix()}: file-size limit")
                 continue
             if path.suffix.lower() in QUICK_LEARN_DOCUMENT_SUFFIXES:
-                text = read_pending_context(path, output_func).text
+                text = pending_context_from_snapshot(snapshot, output_func).text
             else:
-                raw = path.read_bytes()
+                raw = snapshot.data
                 if b"\x00" in raw:
                     skipped.append(f"{relative.as_posix()}: binary")
                     continue
@@ -8131,6 +8144,9 @@ def quick_directory_contexts(directory: Path, output_func=print) -> list[Pending
             PendingContext(
                 f"{slugify(relative_name)}.txt",
                 f"Source path: {relative_name}\n\n{text}\n",
+                source_path=snapshot.path,
+                source_root=directory,
+                source_checksum=snapshot.checksum,
             )
         )
         total_chars += len(text)
@@ -8180,7 +8196,7 @@ def quick_source_contexts(value: str, source_kind: str, output_func=print) -> li
         env["GIT_CONFIG_NOSYSTEM"] = "1"
         env["GIT_CONFIG_GLOBAL"] = "/dev/null"
         try:
-            subprocess.run(
+            _bounded_git_clone(
                 [
                     "git",
                     "-c",
@@ -8188,21 +8204,123 @@ def quick_source_contexts(value: str, source_kind: str, output_func=print) -> li
                     "clone",
                     "--depth",
                     "1",
+                    "--single-branch",
+                    "--no-tags",
+                    "--filter=blob:limit=200000",
                     "--",
                     value,
                     str(clone_dir),
                 ],
-                check=True,
-                capture_output=True,
-                text=True,
-                env=env,
+                clone_dir,
+                env,
             )
-        except (OSError, subprocess.CalledProcessError) as exc:
-            detail = (
-                exc.stderr.strip() if isinstance(exc, subprocess.CalledProcessError) else str(exc)
-            )
-            raise OpenLearnError(f"could not clone public GitHub repository: {detail}") from exc
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise OpenLearnError("could not clone public GitHub repository safely") from exc
         return quick_directory_contexts(clone_dir, output_func)
+
+
+def _bounded_git_clone(command: list[str], clone_dir: Path, env: dict[str, str]) -> None:
+    """Run one inert clone while enforcing time, entry, and on-disk budgets."""
+    options: dict[str, object] = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "env": env,
+    }
+    if os.name == "posix":
+        options["start_new_session"] = True
+    elif os.name == "nt":
+        options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    process = subprocess.Popen(command, **options)
+    started = time.monotonic()
+    try:
+        while True:
+            violation = _directory_budget_violation(
+                clone_dir,
+                byte_limit=QUICK_LEARN_GITHUB_MAX_CLONE_BYTES,
+                entry_limit=QUICK_LEARN_MAX_DISCOVERY_ENTRIES,
+            )
+            if violation is not None:
+                raise OpenLearnError(f"public GitHub repository exceeds the {violation} limit")
+            return_code = process.poll()
+            if return_code is not None:
+                if return_code != 0:
+                    raise OpenLearnError("could not clone public GitHub repository safely")
+                violation = _directory_budget_violation(
+                    clone_dir,
+                    byte_limit=QUICK_LEARN_GITHUB_MAX_CLONE_BYTES,
+                    entry_limit=QUICK_LEARN_MAX_DISCOVERY_ENTRIES,
+                )
+                if violation is not None:
+                    raise OpenLearnError(
+                        f"public GitHub repository exceeds the {violation} limit"
+                    )
+                return
+            if time.monotonic() - started >= QUICK_LEARN_GITHUB_CLONE_TIMEOUT_SECONDS:
+                raise OpenLearnError("public GitHub repository clone timed out")
+            time.sleep(0.02)
+    except BaseException:
+        _terminate_process_tree(process)
+        raise
+
+
+def _terminate_process_tree(process: subprocess.Popen[bytes]) -> None:
+    """Best-effort removal of git and its transport/helper descendants."""
+    if process.poll() is not None:
+        return
+    try:
+        if os.name == "posix":
+            os.killpg(process.pid, signal.SIGKILL)
+        elif os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=5,
+            )
+        else:
+            process.kill()
+    except (OSError, subprocess.SubprocessError):
+        with contextlib.suppress(OSError):
+            process.kill()
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        process.wait(timeout=5)
+
+
+def _directory_budget_violation(
+    directory: Path,
+    *,
+    byte_limit: int,
+    entry_limit: int,
+) -> str | None:
+    """Return the first exceeded budget while scanning without following links."""
+    if not directory.exists():
+        return None
+    total = 0
+    entries = 0
+    try:
+        for root, directories, filenames in os.walk(directory):
+            directories[:] = [
+                name for name in directories if not (Path(root) / name).is_symlink()
+            ]
+            entries += len(directories) + len(filenames)
+            if entries > entry_limit:
+                return "entry-count"
+            for filename in filenames:
+                path = Path(root) / filename
+                if path.is_symlink():
+                    continue
+                try:
+                    total += path.stat().st_size
+                except FileNotFoundError:
+                    continue
+                if total > byte_limit:
+                    return "clone-size"
+    except OSError as exc:
+        raise OpenLearnError("could not measure cloned repository safely") from exc
+    return None
 
 
 def save_quick_learn_metadata(slug: str, source_kind: str, source_label: str) -> None:
