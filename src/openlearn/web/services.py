@@ -224,7 +224,7 @@ class OpenLearnWebServices:
 
     def provider_status(self) -> dict[str, object]:
         try:
-            status = config.provider_status()
+            status = application.provider_status()
             saved_config = config.read_config()
         except config.ConfigError:
             selected = providers.PROVIDER_PRESETS["openrouter"]
@@ -244,12 +244,7 @@ class OpenLearnWebServices:
                 "providers": self._provider_options(),
             }
         mock_ready = os.environ.get("OPENLEARN_MOCK") in {"1", "true", "yes"}
-        environment_ready = bool(status.managed_fields) and cli.provider_is_configured()
-        ready = (
-            mock_ready
-            or environment_ready
-            or config.provider_is_configured(require_verified=True)
-        )
+        ready = mock_ready or status.ready
         reason = ""
         if not ready:
             if status.key_required and not status.key_configured:

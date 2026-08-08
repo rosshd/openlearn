@@ -66,6 +66,18 @@ class ApplicationQueryTests(unittest.TestCase):
         dashboard = application.dashboard()
         self.assertEqual(dashboard.resume.slug, second.slug)
 
+    def test_provider_lifecycle_projection_never_exposes_the_key(self) -> None:
+        application.set_provider_api_key("application-secret")
+
+        status = application.provider_status()
+
+        self.assertTrue(status.key_configured)
+        self.assertFalse(status.verified)
+        self.assertNotIn("application-secret", repr(status))
+
+        cleared = application.remove_provider_api_key()
+        self.assertFalse(cleared.key_configured)
+
 
 if __name__ == "__main__":
     unittest.main()

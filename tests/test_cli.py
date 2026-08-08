@@ -5092,18 +5092,20 @@ class CliStorageTests(unittest.TestCase):
     def test_extractor_model_falls_back_to_tutor_model(self) -> None:
         self.assertEqual(cli.configured_extractor_model("turn-model"), "turn-model")
 
-    def test_config_show_masks_environment_api_key(self) -> None:
+    def test_config_show_does_not_echo_environment_api_key(self) -> None:
         os.environ["OPENAI_API_KEY"] = "sk-or-v1-test-secret-1234"
         output = capture_stdout(cli.cmd_config_show, Namespace())
 
-        self.assertIn("API key: set by OPENAI_API_KEY (sk-...1234)", output)
+        self.assertIn("API key: set by OPENAI_API_KEY", output)
+        self.assertNotIn("1234", output)
         self.assertNotIn("test-secret", output)
 
-    def test_config_show_masks_saved_api_key(self) -> None:
+    def test_config_show_does_not_echo_saved_api_key(self) -> None:
         call_silent(cli.cmd_config_set_key, Namespace(api_key="sk-local-test-secret-5678"))
         output = capture_stdout(cli.cmd_config_show, Namespace())
 
-        self.assertIn("API key: saved locally (sk-...5678)", output)
+        self.assertIn("API key: saved locally", output)
+        self.assertNotIn("5678", output)
         self.assertNotIn("test-secret", output)
 
     def test_config_set_editor_stores_argv_and_overrides_editor_environment(self) -> None:

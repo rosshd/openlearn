@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import os
 import random
 import re
 import time
@@ -14,7 +15,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
-from openlearn import __version__
+from openlearn import __version__, config
 from openlearn.config import (
     ProviderCredentials,
     ProviderStatus,
@@ -187,6 +188,80 @@ def preset_for_base_url(base_url: str) -> ProviderPreset:
         default_model=None,
         key_required=not base_url_allows_keyless_requests(normalized),
     )
+
+
+def provider_status(*, home=None, environ=None) -> ProviderStatus:
+    """Return the canonical secret-free provider state."""
+    return config.provider_status(home=home, environ=environ)
+
+
+def _ensure_locally_managed(field: str, environ: Mapping[str, str] | None) -> None:
+    env = os.environ if environ is None else environ
+    variable = {
+        "api_key": "OPENAI_API_KEY",
+        "model": "OPENLEARN_MODEL",
+        "base_url": "OPENLEARN_BASE_URL",
+    }[field]
+    if env.get(variable):
+        raise ProviderConfigurationError(f"environment_managed_{field}")
+
+
+def _mutate_saved_provider(
+    mutation: Callable[[dict[str, object]], None], *, home=None, environ=None
+) -> ProviderStatus:
+    config.mutate_config(mutation, home=home, environ=environ)
+    return provider_status(home=home, environ=environ)
+
+
+def set_saved_api_key(api_key: str, *, home=None, environ=None) -> ProviderStatus:
+    _ensure_locally_managed("api_key", environ)
+    value = api_key.strip()
+    if not value or not _api_key_is_safe(value):
+        raise ProviderConfigurationError("invalid_api_key")
+
+    def mutation(saved: dict[str, object]) -> None:
+        saved.pop("api_key", None)
+        saved["openai_api_key"] = value
+        saved["provider_verified"] = False
+
+    return _mutate_saved_provider(mutation, home=home, environ=environ)
+
+
+def set_saved_model(model: str, *, home=None, environ=None) -> ProviderStatus:
+    _ensure_locally_managed("model", environ)
+    value = model.strip()
+    if not value or _CONTROL_CHARACTERS.search(value):
+        raise ProviderConfigurationError("invalid_model")
+
+    def mutation(saved: dict[str, object]) -> None:
+        saved["model"] = value
+        saved["provider_verified"] = False
+
+    return _mutate_saved_provider(mutation, home=home, environ=environ)
+
+
+def set_saved_base_url(base_url: str, *, home=None, environ=None) -> ProviderStatus:
+    _ensure_locally_managed("base_url", environ)
+    value = _normalized_provider_url(base_url)
+    if value is None:
+        raise ProviderConfigurationError("invalid_base_url")
+
+    def mutation(saved: dict[str, object]) -> None:
+        saved["base_url"] = value
+        saved["provider_verified"] = False
+
+    return _mutate_saved_provider(mutation, home=home, environ=environ)
+
+
+def remove_saved_api_key(*, home=None, environ=None) -> ProviderStatus:
+    _ensure_locally_managed("api_key", environ)
+
+    def mutation(saved: dict[str, object]) -> None:
+        saved.pop("openai_api_key", None)
+        saved.pop("api_key", None)
+        saved["provider_verified"] = False
+
+    return _mutate_saved_provider(mutation, home=home, environ=environ)
 
 
 def validate_provider(

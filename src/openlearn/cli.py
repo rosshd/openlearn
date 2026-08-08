@@ -40,8 +40,7 @@ from urllib.request import Request, urlopen
 
 from platformdirs import user_data_dir
 
-from openlearn import __version__
-from openlearn import code_runner
+from openlearn import __version__, application, code_runner, providers
 from openlearn import interview_attempts
 from openlearn import interview_prep
 from openlearn import stats as stats_metrics
@@ -2546,9 +2545,8 @@ def handle_repl_command(
 
 def cmd_config_show(_args: argparse.Namespace) -> int:
     config = read_config()
-    env_key = os.environ.get("OPENAI_API_KEY")
-    saved_key = config.get("openai_api_key") or config.get("api_key")
-    model = configured_model(config)
+    provider = application.provider_status()
+    model = provider.model
     extractor_model = configured_extractor_model(model, config)
     if os.environ.get("OPENLEARN_EXTRACTOR_MODEL"):
         extractor_source = "environment override"
@@ -2558,16 +2556,16 @@ def cmd_config_show(_args: argparse.Namespace) -> int:
         extractor_source = "saved dedicated"
     else:
         extractor_source = "tutor fallback"
-    base_url = configured_base_url(config)
-    print("Provider: openai")
+    base_url = provider.base_url
+    print(f"Provider: {providers.preset_for_base_url(base_url).name}")
     print(f"Model: {model}")
     print(f"Extractor model: {extractor_model} ({extractor_source})")
     print(f"Base URL: {base_url}")
     print(f"Editor: {shlex.join(configured_editor_argv(config))}")
-    if env_key:
-        print(f"API key: set by OPENAI_API_KEY ({mask_key(env_key)})")
-    elif isinstance(saved_key, str) and saved_key:
-        print(f"API key: saved locally ({mask_key(saved_key)})")
+    if "api_key" in provider.managed_fields:
+        print("API key: set by OPENAI_API_KEY")
+    elif provider.key_configured:
+        print("API key: saved locally")
     elif not base_url_requires_api_key(base_url):
         print("API key: not set (not required for this endpoint)")
     else:
@@ -2580,10 +2578,10 @@ def cmd_config_set_key(args: argparse.Namespace) -> int:
     api_key = args.api_key or getpass.getpass("OpenAI API key: ").strip()
     if not api_key:
         raise OpenLearnError("API key cannot be empty")
-    config = read_config()
-    config["openai_api_key"] = api_key
-    config["api_key"] = api_key
-    write_config(config)
+    try:
+        application.set_provider_api_key(api_key)
+    except providers.ProviderConfigurationError as exc:
+        raise OpenLearnError(str(exc)) from None
     print(f"Saved API key to {config_path()}")
     print("OPENAI_API_KEY still takes precedence when set in the shell.")
     return 0
@@ -2593,9 +2591,10 @@ def cmd_config_set_model(args: argparse.Namespace) -> int:
     model = args.model.strip()
     if not model:
         raise OpenLearnError("model cannot be empty")
-    config = read_config()
-    config["model"] = model
-    write_config(config)
+    try:
+        application.set_provider_model(model)
+    except providers.ProviderConfigurationError as exc:
+        raise OpenLearnError(str(exc)) from None
     print(f"Default model: {model}")
     return 0
 
@@ -2637,9 +2636,10 @@ def cmd_config_set_base_url(args: argparse.Namespace) -> int:
     base_url = args.base_url.strip().rstrip("/")
     if not base_url.startswith(("https://", "http://")):
         raise OpenLearnError("base URL must start with https:// or http://")
-    config = read_config()
-    config["base_url"] = base_url
-    write_config(config)
+    try:
+        application.set_provider_base_url(base_url)
+    except providers.ProviderConfigurationError as exc:
+        raise OpenLearnError(str(exc)) from None
     print(f"Base URL: {base_url}")
     return 0
 
@@ -2658,10 +2658,10 @@ def cmd_config_set_editor(args: argparse.Namespace) -> int:
 
 
 def cmd_config_clear_key(_args: argparse.Namespace) -> int:
-    config = read_config()
-    config.pop("openai_api_key", None)
-    config.pop("api_key", None)
-    write_config(config)
+    try:
+        application.remove_provider_api_key()
+    except providers.ProviderConfigurationError as exc:
+        raise OpenLearnError(str(exc)) from None
     print("Removed saved API key")
     return 0
 

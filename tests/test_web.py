@@ -252,7 +252,7 @@ def test_invalid_setup_payload_never_echoes_secret(client: TestClient) -> None:
     assert secret not in response.text
 
 
-def test_environment_managed_provider_skips_setup_dead_end(
+def test_environment_managed_provider_requires_explicit_verification(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("OPENLEARN_HOME", str(tmp_path))
@@ -263,7 +263,13 @@ def test_environment_managed_provider_skips_setup_dead_end(
     cli.clear_config_cache()
     managed_client = TestClient(create_app(testing=True))
 
-    assert managed_client.get("/", follow_redirects=False).status_code == 200
+    response = managed_client.get("/", follow_redirects=False)
+    assert response.status_code == 303
+    assert response.headers["location"].endswith("/setup")
+
+    monkeypatch.setenv("OPENLEARN_PROVIDER_VERIFIED", "1")
+    verified_client = TestClient(create_app(testing=True))
+    assert verified_client.get("/", follow_redirects=False).status_code == 200
     setup = managed_client.get("/setup")
     assert "Environment managed" in setup.text
     assert 'data-endpoint="/api/setup"' not in setup.text

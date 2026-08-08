@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
+from collections.abc import Mapping
 from typing import Literal
 
 
@@ -121,6 +123,89 @@ class CourseCreationRequest:
 class CourseCreationResult:
     course: CourseSnapshot
     created: bool
+
+
+@dataclass(frozen=True)
+class ProviderSnapshot:
+    base_url: str
+    model: str
+    key_required: bool
+    key_configured: bool
+    verified: bool
+    managed_fields: tuple[str, ...]
+
+    @property
+    def ready(self) -> bool:
+        return self.verified and (self.key_configured or not self.key_required)
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "base_url": self.base_url,
+            "model": self.model,
+            "key_required": self.key_required,
+            "key_configured": self.key_configured,
+            "verified": self.verified,
+            "managed_fields": list(self.managed_fields),
+            "ready": self.ready,
+        }
+
+
+def _provider_snapshot(status) -> ProviderSnapshot:
+    return ProviderSnapshot(
+        base_url=status.base_url,
+        model=status.model,
+        key_required=status.key_required,
+        key_configured=status.key_configured,
+        verified=status.verified,
+        managed_fields=status.managed_fields,
+    )
+
+
+def provider_status(
+    *, home: Path | None = None, environ: Mapping[str, str] | None = None
+) -> ProviderSnapshot:
+    from openlearn import providers
+
+    return _provider_snapshot(providers.provider_status(home=home, environ=environ))
+
+
+def set_provider_api_key(
+    api_key: str, *, home: Path | None = None, environ: Mapping[str, str] | None = None
+) -> ProviderSnapshot:
+    from openlearn import providers
+
+    return _provider_snapshot(
+        providers.set_saved_api_key(api_key, home=home, environ=environ)
+    )
+
+
+def set_provider_model(
+    model: str, *, home: Path | None = None, environ: Mapping[str, str] | None = None
+) -> ProviderSnapshot:
+    from openlearn import providers
+
+    return _provider_snapshot(providers.set_saved_model(model, home=home, environ=environ))
+
+
+def set_provider_base_url(
+    base_url: str,
+    *,
+    home: Path | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> ProviderSnapshot:
+    from openlearn import providers
+
+    return _provider_snapshot(
+        providers.set_saved_base_url(base_url, home=home, environ=environ)
+    )
+
+
+def remove_provider_api_key(
+    *, home: Path | None = None, environ: Mapping[str, str] | None = None
+) -> ProviderSnapshot:
+    from openlearn import providers
+
+    return _provider_snapshot(providers.remove_saved_api_key(home=home, environ=environ))
 
 
 def dashboard(*, now: datetime | None = None) -> DashboardSnapshot:

@@ -5,7 +5,7 @@ import os
 import tempfile
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -193,6 +193,27 @@ def update_config(
     with _config_lock(path):
         updated = read_config(home=home, environ=environ)
         updated.update(values)
+        write_config(updated, home=home, environ=environ)
+    return updated
+
+
+def mutate_config(
+    mutation: Callable[[dict[str, object]], None],
+    *,
+    home: Path | None = None,
+    environ: Mapping[str, str] | None = None,
+    recover_malformed: bool = False,
+) -> dict[str, object]:
+    """Apply one atomic read-modify-write operation to local configuration."""
+    path = config_path(home=home, environ=environ)
+    with _config_lock(path):
+        try:
+            updated = read_config(home=home, environ=environ)
+        except ConfigError:
+            if not recover_malformed:
+                raise
+            updated = {}
+        mutation(updated)
         write_config(updated, home=home, environ=environ)
     return updated
 

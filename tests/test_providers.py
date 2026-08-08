@@ -7,7 +7,7 @@ from urllib.request import Request
 
 import pytest
 
-from openlearn.config import ProviderCredentials
+from openlearn.config import ProviderCredentials, read_config, save_provider_configuration, write_config
 from openlearn.providers import (
     PROVIDER_PRESETS,
     ProviderError,
@@ -18,6 +18,11 @@ from openlearn.providers import (
     chat_completion,
     preset_for_base_url,
     persist_validation_result,
+    provider_status,
+    remove_saved_api_key,
+    set_saved_api_key,
+    set_saved_base_url,
+    set_saved_model,
     validate_provider,
     ValidationResult,
 )
@@ -221,6 +226,72 @@ def test_rejected_credentials_cannot_be_persisted(tmp_path) -> None:
             environ={},
         )
     assert not (tmp_path / "config.json").exists()
+
+
+def test_provider_lifecycle_mutations_invalidate_prior_verification(tmp_path) -> None:
+    save_provider_configuration(
+        base_url="https://provider.example/v1",
+        model="old-model",
+        api_key="old-secret",
+        verified=True,
+        home=tmp_path,
+        environ={},
+    )
+
+    set_saved_model("new-model", home=tmp_path, environ={})
+    assert provider_status(home=tmp_path, environ={}).verified is False
+
+    set_saved_base_url("https://other.example/v1", home=tmp_path, environ={})
+    set_saved_api_key("new-secret", home=tmp_path, environ={})
+    status = remove_saved_api_key(home=tmp_path, environ={})
+
+    assert status.base_url == "https://other.example/v1"
+    assert status.model == "new-model"
+    assert status.key_configured is False
+    assert status.verified is False
+    assert "old-secret" not in json.dumps(status.as_dict())
+    assert "new-secret" not in json.dumps(status.as_dict())
+    assert read_config(home=tmp_path) == {
+        "base_url": "https://other.example/v1",
+        "model": "new-model",
+        "provider_verified": False,
+    }
+
+
+@pytest.mark.parametrize(
+    ("operation", "environment"),
+    [
+        (lambda home, env: set_saved_api_key("saved", home=home, environ=env), {"OPENAI_API_KEY": "managed"}),
+        (lambda home, env: set_saved_model("saved", home=home, environ=env), {"OPENLEARN_MODEL": "managed"}),
+        (
+            lambda home, env: set_saved_base_url(
+                "https://saved.example/v1", home=home, environ=env
+            ),
+            {"OPENLEARN_BASE_URL": "https://managed.example/v1"},
+        ),
+        (lambda home, env: remove_saved_api_key(home=home, environ=env), {"OPENAI_API_KEY": "managed"}),
+    ],
+)
+def test_environment_managed_provider_fields_are_immutable(
+    tmp_path, operation, environment
+) -> None:
+    write_config({"editor": ["nvim"]}, home=tmp_path)
+
+    with pytest.raises(ProviderConfigurationError, match="environment_managed"):
+        operation(tmp_path, environment)
+
+    assert read_config(home=tmp_path) == {"editor": ["nvim"]}
+
+
+def test_provider_lifecycle_rejects_unsafe_values_without_mutating_config(tmp_path) -> None:
+    write_config({"editor": ["nvim"]}, home=tmp_path)
+
+    with pytest.raises(ProviderConfigurationError, match="invalid_base_url"):
+        set_saved_base_url("http://provider.example/v1", home=tmp_path, environ={})
+    with pytest.raises(ProviderConfigurationError, match="invalid_api_key"):
+        set_saved_api_key("unsafe\nkey", home=tmp_path, environ={})
+
+    assert read_config(home=tmp_path) == {"editor": ["nvim"]}
 
 
 def test_chat_completion_sends_expected_request_and_returns_text() -> None:
