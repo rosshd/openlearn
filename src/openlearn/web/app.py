@@ -31,6 +31,8 @@ class WebServices(Protocol):
 
     def course_templates(self) -> Any: ...
 
+    def course_entry_mode(self, template_id: str | None) -> str | None: ...
+
     def prepare_video(self, slug: str, request: Any) -> Any: ...
 
     def code_state(self, slug: str) -> Any: ...
@@ -92,6 +94,9 @@ class PlaceholderServices:
 
     def course_templates(self) -> list[dict[str, Any]]:
         return []
+
+    def course_entry_mode(self, template_id: str | None) -> str | None:
+        return None
 
     def prepare_video(self, slug: str, request: Any) -> dict[str, Any]:
         return {"ok": False, "error": "Video tools are not available yet."}

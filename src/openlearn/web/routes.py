@@ -162,7 +162,8 @@ async def create_course(request: Request) -> JSONResponse:
         payload = CourseCreateRequest.model_validate(await request.json())
     except (ValidationError, ValueError) as error:
         return _json_error("Add a title and a clear learning goal.", errors=str(error))
-    if payload.template_id != "technical-interview-prep" and not await _provider_ready(request):
+    entry_mode = await _call(request, "course_entry_mode", payload.template_id)
+    if entry_mode != "interview_prep" and not await _provider_ready(request):
         return _setup_required(request)
     result = public_mapping(await _call(request, "create_course", payload))
     if not result.get("ok", False):
@@ -332,6 +333,8 @@ async def update_placement(request: Request, slug: str) -> JSONResponse:
         result = public_mapping(await _call(request, "update_placement", slug, payload))
     if result.get("state") == "conflict":
         return JSONResponse(result, status_code=409)
+    if result.get("missing"):
+        raise HTTPException(status_code=404, detail="Placement not found")
     if result.get("invalid"):
         return _json_error(str(result.get("error")), 422)
     if result.get("status") == "provisional":

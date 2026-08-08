@@ -973,6 +973,37 @@ def append_placement_draft_line(
     return value
 
 
+def replace_placement_draft_lines(
+    path: Path,
+    stage: str,
+    lines: list[str],
+    *,
+    now: Clock = _utcnow,
+) -> dict[str, object]:
+    """Replace the active v3 draft with bounded lines in one durable write."""
+    value, placement = _load_v3_placement(path)
+    if placement.get("status") != "in_progress" or placement.get("next_stage") != stage:
+        raise ValueError(f"expected {placement.get('next_stage')} draft, received {stage}")
+    normalized = [line.strip() for line in lines if isinstance(line, str) and line.strip()]
+    if not normalized:
+        raise ValueError("placement draft must contain at least one line")
+    if (
+        len(normalized) > DRAFT_MAX_LINES
+        or any(len(line) > DRAFT_MAX_LINE_LENGTH for line in normalized)
+        or len("\n".join(normalized)) > DRAFT_MAX_LENGTH
+    ):
+        raise ValueError("placement draft is too large")
+    timestamp = _timestamp(now)
+    placement["draft"] = {
+        "stage": stage,
+        "lines": normalized,
+        "updated_at": timestamp,
+    }
+    placement["updated_at"] = timestamp
+    _write(path, value)
+    return value
+
+
 def undo_placement_draft_line(
     path: Path,
     stage: str,

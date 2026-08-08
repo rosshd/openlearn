@@ -383,6 +383,18 @@ class OpenLearnWebServices:
             for template in application.templates().templates
         ]
 
+    def course_entry_mode(self, template_id: str | None) -> str | None:
+        if template_id is None:
+            return None
+        return next(
+            (
+                template.entry_mode
+                for template in application.templates().templates
+                if template.template_id == template_id
+            ),
+            None,
+        )
+
     def prepare_video(self, slug: str, request: VideoToolRequest) -> dict[str, object]:
         try:
             cli.read_topic(slug)
@@ -525,7 +537,7 @@ class OpenLearnWebServices:
             return {"ok": False, "error": str(error)}
         slug = result.course.slug
         initialization_id = _course_initialization_id(request.submission_id)
-        if result.course.card.template_id == "technical-interview-prep":
+        if self.course_entry_mode(result.course.card.template_id) == "interview_prep":
             return {
                 "ok": True,
                 "slug": slug,
@@ -582,17 +594,20 @@ class OpenLearnWebServices:
             "updated_at": placement.get("updated_at"),
             "attempt_id": placement.get("attempt_id"),
             "draft": draft if isinstance(draft, dict) else None,
-            "recommended": placement.get("status") in {"not_started", "deferred", "in_progress"},
-            "complete": placement.get("status") == "provisional",
-            "result": placement.get("result"),
         }
 
-    def placement(self, slug: str) -> dict[str, object]:
+    def _interview_course(self, slug: str) -> application.CourseSnapshot | None:
         try:
             snapshot = application.course(slug)
         except (cli.OpenLearnError, OSError):
-            return {"slug": slug, "missing": True}
-        if snapshot.card.template_id != "technical-interview-prep":
+            return None
+        if self.course_entry_mode(snapshot.card.template_id) != "interview_prep":
+            return None
+        return snapshot
+
+    def placement(self, slug: str) -> dict[str, object]:
+        snapshot = self._interview_course(slug)
+        if snapshot is None:
             return {"slug": slug, "missing": True}
         try:
             value = cli.sync_interview_placement(slug)
@@ -601,6 +616,8 @@ class OpenLearnWebServices:
         return {"title": snapshot.card.title, **self._placement_view(slug, value)}
 
     def update_placement(self, slug: str, request: PlacementRequest) -> dict[str, object]:
+        if self._interview_course(slug) is None:
+            return {"slug": slug, "missing": True}
         path = cli.interview_profile_path(slug)
         value = interview_prep.load_profile(path)
         placement = value["placement"]
@@ -654,9 +671,7 @@ class OpenLearnWebServices:
                             "state": "conflict",
                             "error": "Placement changed elsewhere. Reload to continue.",
                         }
-                    interview_prep.clear_placement_draft(path, stage)
-                    for line in lines:
-                        value = interview_prep.append_placement_draft_line(path, stage, line)
+                    value = interview_prep.replace_placement_draft_lines(path, stage, lines)
             elif request.action == "submit":
                 draft = placement.get("draft")
                 lines = draft.get("lines") if isinstance(draft, dict) else None
@@ -710,14 +725,13 @@ class OpenLearnWebServices:
         return {
             "courses": [
                 {
-                    **_card(snapshot.card),
-                    "known": snapshot.card.progress.known,
-                    "total": snapshot.card.progress.total,
-                    "units": [vars(unit) for unit in snapshot.card.progress.units],
-                    "due_reviews": snapshot.card.progress.reviews.due_today,
+                    **_card(card),
+                    "known": card.progress.known,
+                    "total": card.progress.total,
+                    "units": [vars(unit) for unit in card.progress.units],
+                    "due_reviews": card.progress.reviews.due_today,
                 }
-                for snapshot in application.dashboard().courses
-                for snapshot in [application.course(snapshot.slug)]
+                for card in application.dashboard().courses
             ]
         }
 
@@ -741,7 +755,7 @@ class OpenLearnWebServices:
         if due is None:
             return {"state": "conflict", "error": "This review changed elsewhere. Reload to continue."}
         cli.schedule_review_outcomes(request.slug, [(due, request.result)])
-        return {"ok": True, "remaining": self.due_reviews()["count"]}
+        return {"ok": True}
 
     def course_initialization(
         self, slug: str, operation_id: str

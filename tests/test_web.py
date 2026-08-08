@@ -270,6 +270,23 @@ def test_interview_placement_defer_and_restart_remain_resumable(client: TestClie
     assert restarted.json()["next_stage"] == "clarification"
 
 
+def test_non_interview_course_rejects_placement_mutations(client: TestClient) -> None:
+    cli.cmd_new(
+        argparse.Namespace(topic="Systems Design", goal="Practice architecture tradeoffs"),
+        output_func=lambda _text: None,
+    )
+    token = csrf(client, "/dashboard")
+
+    response = client.post(
+        "/api/courses/systems-design/placement",
+        headers={"x-csrf-token": token},
+        json={"action": "start"},
+    )
+
+    assert response.status_code == 404
+    assert not cli.interview_profile_path("systems-design").exists()
+
+
 def test_completed_placement_setup_return_starts_pending_first_lesson(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -348,7 +365,7 @@ def test_review_grading_and_detailed_progress_are_actionable(client: TestClient)
         },
     )
     assert graded.status_code == 200
-    assert graded.json()["remaining"] == 0
+    assert graded.json() == {"ok": True}
     stale = client.post(
         "/api/review",
         headers={"x-csrf-token": token},
