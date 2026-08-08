@@ -374,7 +374,7 @@ def main(argv: list[str] | None = None) -> int:
     _DRY_RUN = bool(getattr(args, "dry_run", False))
     try:
         if (
-            not command_args
+            bool(getattr(args, "terminal_onboarding", False))
             and not _openlearn_mock_enabled()
             and _configured_provider_needs_onboarding()
         ):
@@ -441,7 +441,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="version",
         version=f"openlearn {__version__}",
     )
-    parser.set_defaults(func=cmd_menu)
+    parser.set_defaults(
+        func=cmd_web,
+        port=8765,
+        no_browser=False,
+        terminal_onboarding=False,
+    )
     sub = parser.add_subparsers()
 
     init_parser = sub.add_parser("init", help="Set up a model provider and API key")
@@ -452,7 +457,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     init_parser.set_defaults(func=cmd_init)
 
-    menu_parser = sub.add_parser("menu", help="Open a simple interactive menu")
+    cli_parser = sub.add_parser("cli", help="Open the terminal learning interface")
+    cli_parser.set_defaults(func=cmd_menu, terminal_onboarding=True)
+
+    menu_parser = sub.add_parser("menu", help="Open the terminal learning interface")
     menu_parser.set_defaults(func=cmd_menu)
 
     templates_parser = sub.add_parser("templates", help="List starter course templates")

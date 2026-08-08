@@ -288,8 +288,8 @@ capture interview-clear interview clear audit-course --yes
 assert_output interview-clear "Interview-prep profile cleared"
 
 echo "Exercising menu and deletion interfaces..."
-printf 'q\n' | run_openlearn >"$ARTIFACTS/bare-menu.out" 2>&1
-assert_output bare-menu "Local-first AI tutoring"
+printf 'q\n' | run_openlearn cli >"$ARTIFACTS/cli-menu.out" 2>&1
+assert_output cli-menu "Local-first AI tutoring"
 printf 'q\n' | run_openlearn menu >"$ARTIFACTS/menu.out" 2>&1
 assert_output menu "Local-first AI tutoring"
 capture delete-quick delete quick-audit --yes

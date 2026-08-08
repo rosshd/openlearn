@@ -19,7 +19,7 @@ def test_interview_prep_public_cli_journey(spawn_openlearn) -> None:
         for index, path in enumerate(sorted(templates_dir.glob("*.json")), start=1)
         if path.stem == "technical-interview-prep"
     )
-    first = spawn_openlearn.spawn(timeout=10)
+    first = spawn_openlearn.spawn("cli", timeout=10)
     try:
         first.expect("Starter courses")
         first.sendline("s")

@@ -32,16 +32,16 @@ If PowerShell blocks activation, follow your organization's execution-policy gui
 ## First launch
 
 ```bash
-openlearn init
-openlearn templates
-openlearn web
+openlearn
 ```
 
-`openlearn init` configures a provider only when you choose model-backed learning.
+Bare `openlearn` opens Maker Bench in the default browser.
+Run `openlearn cli` to use the terminal interface instead.
+`openlearn init` remains available when you want to configure a provider directly from the terminal.
 You can use a hosted OpenAI-compatible provider with your own account and key, or a local keyless endpoint such as Ollama.
 openLearn does not supply, bill for, or share a provider account for Community users.
 Maker Bench is loopback-only and opens in the default browser.
-Use `openlearn web --no-browser` on a headless machine, or `openlearn web --port 9000` to select a loopback port.
+Use `openlearn web --no-browser` on a headless machine, or `openlearn web --port 9000` to select a loopback port explicitly.
 
 ## Upgrade and uninstall
 

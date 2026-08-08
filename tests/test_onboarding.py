@@ -716,7 +716,25 @@ class OnboardingTriggerTests(unittest.TestCase):
         self.read_config_patcher.stop()
         cli._CONFIG_CACHE = None
 
-    def test_bare_invocation_runs_onboarding_before_menu_when_unconfigured(self) -> None:
+    def test_bare_invocation_opens_web_without_cli_onboarding(self) -> None:
+        calls: list[str] = []
+
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            patch.object(cli, "configured_openai_api_key", return_value=None),
+            patch.object(
+                onboarding,
+                "run_onboarding",
+                side_effect=lambda: calls.append("onboarding") or True,
+            ),
+            patch.object(cli, "cmd_web", side_effect=lambda _args: calls.append("web") or 0),
+        ):
+            exit_code = cli.main([])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(calls, ["web"])
+
+    def test_legacy_menu_skips_onboarding(self) -> None:
         calls: list[str] = []
 
         with (
@@ -729,10 +747,10 @@ class OnboardingTriggerTests(unittest.TestCase):
             ),
             patch.object(cli, "run_menu", side_effect=lambda: calls.append("menu") or 0),
         ):
-            exit_code = cli.main([])
+            exit_code = cli.main(["menu"])
 
         self.assertEqual(exit_code, 0)
-        self.assertEqual(calls, ["onboarding", "menu"])
+        self.assertEqual(calls, ["menu"])
 
     def test_configured_environment_skips_onboarding(self) -> None:
         with (
@@ -740,7 +758,7 @@ class OnboardingTriggerTests(unittest.TestCase):
             patch.object(onboarding, "run_onboarding") as run_onboarding,
             patch.object(cli, "run_menu", return_value=0),
         ):
-            exit_code = cli.main([])
+            exit_code = cli.main(["cli"])
 
         self.assertEqual(exit_code, 0)
         run_onboarding.assert_not_called()
@@ -760,7 +778,7 @@ class OnboardingTriggerTests(unittest.TestCase):
             ),
             patch.object(cli, "run_menu", side_effect=lambda: calls.append("menu") or 0),
         ):
-            exit_code = cli.main([])
+            exit_code = cli.main(["cli"])
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(calls, ["onboarding", "menu"])
@@ -779,7 +797,7 @@ class OnboardingTriggerTests(unittest.TestCase):
             patch.object(onboarding, "run_onboarding") as run_onboarding,
             patch.object(cli, "run_menu", return_value=0),
         ):
-            exit_code = cli.main([])
+            exit_code = cli.main(["cli"])
 
         self.assertEqual(exit_code, 0)
         run_onboarding.assert_not_called()
@@ -799,7 +817,7 @@ class OnboardingTriggerTests(unittest.TestCase):
             ),
             patch.object(cli, "run_menu", side_effect=lambda: calls.append("menu") or 0),
         ):
-            exit_code = cli.main([])
+            exit_code = cli.main(["cli"])
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(calls, ["onboarding", "menu"])
@@ -813,7 +831,7 @@ class OnboardingTriggerTests(unittest.TestCase):
             patch.object(onboarding, "run_onboarding") as run_onboarding,
             patch.object(cli, "run_menu", return_value=0),
         ):
-            exit_code = cli.main([])
+            exit_code = cli.main(["cli"])
 
         self.assertEqual(exit_code, 0)
         run_onboarding.assert_not_called()
@@ -832,7 +850,7 @@ class OnboardingTriggerTests(unittest.TestCase):
             ),
             patch.object(cli, "run_menu", side_effect=lambda: calls.append("menu") or 0),
         ):
-            exit_code = cli.main([])
+            exit_code = cli.main(["cli"])
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(calls, ["onboarding", "menu"])
@@ -848,7 +866,7 @@ class OnboardingTriggerTests(unittest.TestCase):
             patch.object(onboarding, "run_onboarding") as run_onboarding,
             patch.object(cli, "run_menu", return_value=0),
         ):
-            exit_code = cli.main([])
+            exit_code = cli.main(["cli"])
 
         self.assertEqual(exit_code, 0)
         run_onboarding.assert_not_called()
@@ -866,7 +884,7 @@ class OnboardingTriggerTests(unittest.TestCase):
             ),
             patch.object(cli, "run_menu", side_effect=lambda: calls.append("menu") or 0),
         ):
-            exit_code = cli.main([])
+            exit_code = cli.main(["cli"])
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(calls, ["onboarding", "menu"])
@@ -878,7 +896,7 @@ class OnboardingTriggerTests(unittest.TestCase):
             patch.object(onboarding, "run_onboarding", return_value=False),
             patch.object(cli, "run_menu") as run_menu,
         ):
-            exit_code = cli.main([])
+            exit_code = cli.main(["cli"])
 
         self.assertEqual(exit_code, 1)
         run_menu.assert_not_called()

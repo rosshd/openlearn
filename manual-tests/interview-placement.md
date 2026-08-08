@@ -6,7 +6,7 @@ Use an isolated home so the replay cannot read or modify personal learner state 
 ```bash
 export OPENLEARN_HOME="$(mktemp -d)"
 unset OPENAI_API_KEY OPENLEARN_BASE_URL OPENLEARN_MOCK
-openlearn
+openlearn cli
 ```
 
 Complete provider onboarding if it appears, or open the menu with an already configured provider.

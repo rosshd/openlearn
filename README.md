@@ -37,10 +37,10 @@ python -m pip install -e .
 
 On Windows, activate the virtual environment with `.venv\Scripts\Activate.ps1` before installing.
 
-Run the local web app:
+Run openLearn:
 
 ```bash
-openlearn web
+openlearn
 ```
 
 This opens the loopback-only Maker Bench interface for provider setup, starter courses, focused tutoring, progress, and session history.
@@ -49,12 +49,12 @@ It reads and writes the same local course files as the CLI.
 Focus Bench starts text-only and opens an optional Dual Surface for three early tools: a plain Python workbench, consent-based YouTube playback, and bounded course-source imports from a file, local folder, or public GitHub repository.
 Code runs only after an explicit click and requires the existing Docker or Podman safety runtime; tool use does not award mastery.
 Source import and extraction stay local and do not contact the model provider; selected excerpts may be sent to that provider later when the tutor uses them.
-Use `openlearn web --no-browser` on a headless machine or `openlearn web --port 9000` to choose another local port.
+The explicit `openlearn web` command supports `--no-browser` for a headless machine and `--port 9000` to choose another local port.
 
 Run the terminal interface:
 
 ```bash
-openlearn
+openlearn cli
 ```
 
 Run the project gate:
@@ -73,9 +73,9 @@ On macOS and Windows, the runtime may provide its normal Linux VM while openLear
 
 ## Configuration
 
-On the first bare `openlearn` run without a usable provider configuration, openLearn first offers a learning destination.
-The recommended Technical Interview Prep destination can begin its offline reasoning placement immediately and defer provider setup until course planning.
-Other destinations continue through provider selection, live key validation, and model selection before their first model-backed activity.
+The first bare `openlearn` run opens Maker Bench and keeps provider setup in its setup screen.
+The first `openlearn cli` run without a usable provider configuration uses the terminal onboarding flow.
+Technical Interview Prep can begin its offline reasoning placement immediately and defer provider setup until course planning in either interface.
 The built-in presets cover OpenAI, Anthropic-compatible APIs, Ollama, and custom OpenAI-compatible providers.
 Set `OPENAI_API_KEY` to skip this onboarding flow and use environment-based configuration; valid keyless localhost providers such as Ollama are already configured when their base URL and model are set.
 The onboarding destination menu can start the recommended Technical Interview Prep course, start Quick Learn from a file, start the Vim starter course, or open the main menu.

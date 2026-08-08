@@ -7,7 +7,8 @@ Agents should use `.claude/skills/openlearn-architecture/` for operational rules
 
 openLearn is a Python CLI with one package, `openlearn`.
 `src/openlearn/cli.py` still owns most behavior: commands, REPL, menu flow, topic storage orchestration, prompt construction, imports, and provider calls.
-First-run provider setup lives in `src/openlearn/onboarding.py` and is invoked only by bare `openlearn` when provider configuration is not yet usable.
+First-run provider setup lives in `src/openlearn/onboarding.py` and is invoked by `openlearn cli` when provider configuration is not yet usable.
+Bare `openlearn` launches the Maker Bench web interface.
 
 Supporting modules:
 
@@ -193,7 +194,7 @@ Provider calls target OpenAI-compatible chat completions at `{base_url}/chat/com
 Transient provider failures, including HTTP 429, HTTP 5xx, URL errors, and timeouts, are retried up to three attempts with bounded exponential backoff and jitter.
 Non-local provider base URLs require an API key, while localhost OpenAI-compatible endpoints may be keyless.
 When no key is configured for a keyless endpoint, requests omit the `Authorization` header; a 401 response is reported as an API-key-required endpoint.
-Bare `openlearn` skips first-run onboarding for saved keys, environment keys, `OPENLEARN_MOCK=1`, or keyless localhost providers with a configured model.
+`openlearn cli` skips first-run onboarding for saved keys, environment keys, `OPENLEARN_MOCK=1`, or keyless localhost providers with a configured model.
 For `chat`, `resume`, `next`, and `review`, `--dry-run` prints the rendered system and user messages instead of calling the provider or mutating local files.
 For an unstarted interview-prep topic, `resume` first follows the adjacent placement routing table; for a started course, it preserves normal tutor continuity after the provider preflight.
 Learner-metadata extraction can use `OPENLEARN_EXTRACTOR_MODEL` or `extractor_model`; otherwise it uses the tutor model.
@@ -209,7 +210,8 @@ Public GitHub repositories are shallow-cloned with terminal prompts, system conf
 
 ## First Run
 
-Bare `openlearn` starts onboarding when no saved key, environment key, or fully configured keyless localhost provider is available.
+Bare `openlearn` starts Maker Bench without running terminal onboarding.
+`openlearn cli` starts onboarding when no saved key, environment key, or fully configured keyless localhost provider is available.
 `OPENLEARN_MOCK=1` and already usable environment configuration skip onboarding.
 Onboarding selects a destination before provider setup.
 Technical Interview Prep can launch its offline placement immediately, while model-backed destinations validate credentials with `{base_url}/models` and persist settings through the existing config commands before launch.

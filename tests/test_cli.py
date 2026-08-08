@@ -6119,9 +6119,17 @@ class InteractiveTests(unittest.TestCase):
         )
         return cli.read_topic("algorithms"), action
 
-    def test_no_args_defaults_to_menu(self) -> None:
+    def test_no_args_defaults_to_web(self) -> None:
         parser = cli.build_parser()
         args = parser.parse_args([])
+
+        self.assertIs(args.func, cli.cmd_web)
+        self.assertEqual(args.port, 8765)
+        self.assertFalse(args.no_browser)
+
+    def test_cli_command_opens_terminal_menu(self) -> None:
+        parser = cli.build_parser()
+        args = parser.parse_args(["cli"])
 
         self.assertIs(args.func, cli.cmd_menu)
 
