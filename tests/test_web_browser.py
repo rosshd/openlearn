@@ -194,8 +194,15 @@ def test_real_browser_course_polling_theme_conflict_and_keyboard_submit(
                 assert first.locator("html").get_attribute("data-theme") == "light"
 
                 first.locator("#learner-response").fill("Keep this unsent draft while tools open.")
+                closed_lesson_x = first.locator(".focus-column").bounding_box()["x"]
                 first.get_by_role("button", name="Code").click()
                 assert "tool=code" in first.url
+                first.wait_for_timeout(40)
+                opening_lesson_x = first.locator(".focus-column").bounding_box()["x"]
+                assert abs(opening_lesson_x - closed_lesson_x) < 40
+                first.wait_for_function(
+                    "() => !document.querySelector('[data-tool-surface]').dataset.motion"
+                )
                 shell_box = first.locator("[data-focus-shell]").bounding_box()
                 lesson_box = first.locator(".focus-column").bounding_box()
                 tool_box = first.locator("[data-tool-surface]").bounding_box()
@@ -251,7 +258,11 @@ def test_real_browser_course_polling_theme_conflict_and_keyboard_submit(
                 first.get_by_role("button", name="Close learning tool").click()
                 playwright.expect(first.locator('[data-tool-panel="code"]')).to_be_visible()
                 first.once("dialog", lambda dialog: dialog.accept())
+                open_lesson_x = first.locator(".focus-column").bounding_box()["x"]
                 first.get_by_role("button", name="Close learning tool").click()
+                first.wait_for_timeout(40)
+                closing_lesson_x = first.locator(".focus-column").bounding_box()["x"]
+                assert abs(closing_lesson_x - open_lesson_x) < 40
                 assert "tool=" not in first.url
                 assert first.locator("[data-tool-surface]").get_attribute("aria-hidden") == "true"
                 assert first.locator("[data-tool-surface]").get_attribute("inert") == ""
@@ -264,7 +275,9 @@ def test_real_browser_course_polling_theme_conflict_and_keyboard_submit(
 
                 first.get_by_role("button", name="Code").click()
                 playwright.expect(first.locator('[data-tool-panel="code"]')).to_be_visible()
-                first.wait_for_timeout(300)
+                first.wait_for_function(
+                    "() => !document.querySelector('[data-tool-surface]').dataset.motion"
+                )
                 assert first.locator("[data-tool-surface]").get_attribute("aria-hidden") is None
                 assert first.locator("[data-tool-surface]").get_attribute("inert") is None
                 assert first.locator("[data-tool-surface]").get_attribute("data-motion") is None

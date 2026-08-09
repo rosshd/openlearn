@@ -297,5 +297,15 @@ def test_learning_tool_motion_opens_from_the_prompt_edge() -> None:
     assert "translateX(-1.5rem) scaleX(0.98)" in css
 
 
+def test_learning_tool_coordinates_panel_and_lesson_layout_motion() -> None:
+    repository = Path(__file__).resolve().parents[1]
+    css = (repository / "src/openlearn/web/static/openlearn.css").read_text(
+        encoding="utf-8"
+    )
+
+    assert "--surface-motion-duration: 720ms" in css
+    assert "transition: flex-grow var(--surface-motion-duration)" in css
+
+
 if __name__ == "__main__":
     unittest.main()

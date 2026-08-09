@@ -180,6 +180,7 @@ let codeDirty = false;
 let codeEditVersion = 0;
 let toolOpenVersion = 0;
 let surfaceMotionVersion = 0;
+const focusLayoutAnimations = new Map();
 
 const availableTools = new Set(["code", "video", "sources"]);
 
@@ -187,13 +188,72 @@ function reducedMotionRequested() {
   return window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
 }
 
+function compactFocusLayout() {
+  return window.matchMedia?.("(max-width: 860px)").matches ?? false;
+}
+
+function cssTimeMilliseconds(value) {
+  const time = value.trim();
+  const amount = Number.parseFloat(time);
+  if (!Number.isFinite(amount)) return 0;
+  return time.endsWith("ms") ? amount : amount * 1000;
+}
+
+function transitionFocusLayout(updateLayout) {
+  const elements = [
+    focusShell?.querySelector(".tool-rail"),
+    focusShell?.querySelector(".focus-column"),
+  ].filter(Boolean);
+  if (reducedMotionRequested() || compactFocusLayout()) {
+    for (const element of elements) {
+      focusLayoutAnimations.get(element)?.cancel();
+      focusLayoutAnimations.delete(element);
+    }
+    updateLayout();
+    return;
+  }
+  const before = new Map(
+    elements.map((element) => [element, element.getBoundingClientRect()])
+  );
+  for (const element of elements) {
+    focusLayoutAnimations.get(element)?.cancel();
+    focusLayoutAnimations.delete(element);
+  }
+  updateLayout();
+  const duration = cssTimeMilliseconds(
+    getComputedStyle(focusShell).getPropertyValue("--surface-motion-duration")
+  ) || 720;
+  for (const element of elements) {
+    if (typeof element.animate !== "function") continue;
+    const after = element.getBoundingClientRect();
+    const offsetX = before.get(element).left - after.left;
+    if (Math.abs(offsetX) < 0.5) continue;
+    const animation = element.animate(
+      [{transform: `translateX(${offsetX}px)`}, {transform: "translateX(0)"}],
+      {duration, easing: "cubic-bezier(0.4, 0, 0.2, 1)"}
+    );
+    focusLayoutAnimations.set(element, animation);
+    animation.addEventListener(
+      "finish",
+      () => {
+        if (focusLayoutAnimations.get(element) === animation) {
+          focusLayoutAnimations.delete(element);
+        }
+      },
+      {once: true}
+    );
+  }
+}
+
 function finishSurfaceMotion(surface, token, callback) {
   let finished = false;
+  let fallbackTimer = null;
   const finish = (event) => {
     if (event?.target && event.target !== surface) return;
     if (finished) return;
     finished = true;
     surface.removeEventListener("animationend", finish);
+    if (fallbackTimer !== null) window.clearTimeout(fallbackTimer);
     if (surface.dataset.motionToken === token) callback();
   };
   if (reducedMotionRequested()) {
@@ -201,15 +261,23 @@ function finishSurfaceMotion(surface, token, callback) {
     return;
   }
   surface.addEventListener("animationend", finish);
-  window.setTimeout(finish, 240);
+  const style = getComputedStyle(surface);
+  const durations = style.animationDuration.split(",").map(cssTimeMilliseconds);
+  const delays = style.animationDelay.split(",").map(cssTimeMilliseconds);
+  const fallbackDelay = durations.reduce(
+    (longest, duration, index) => Math.max(longest, duration + (delays[index] || 0)),
+    0
+  );
+  fallbackTimer = window.setTimeout(finish, fallbackDelay + 100);
 }
 
-function revealSurface(surface) {
+function revealSurface(surface, beforeMotion = () => {}) {
   const token = String(++surfaceMotionVersion);
   surface.dataset.motionToken = token;
   surface.hidden = false;
   surface.removeAttribute("inert");
   surface.removeAttribute("aria-hidden");
+  beforeMotion();
   surface.dataset.motion = "enter";
   finishSurfaceMotion(surface, token, () => {
     if (surface.dataset.motion === "enter") {
@@ -363,9 +431,12 @@ async function openTool(tool, opener, {updateUrl = true} = {}) {
   }
   const titles = {code: "Code workbench", video: "Video player", sources: "Course sources"};
   toolSurface.querySelector("[data-tool-title]").textContent = titles[tool] || "Learning tool";
-  focusShell.dataset.toolActive = tool;
   if (toolSurface.hidden || toolSurface.getAttribute("aria-hidden") === "true") {
-    revealSurface(toolSurface);
+    revealSurface(toolSurface, () => {
+      transitionFocusLayout(() => { focusShell.dataset.toolActive = tool; });
+    });
+  } else {
+    transitionFocusLayout(() => { focusShell.dataset.toolActive = tool; });
   }
   if (updateUrl) setToolUrl(tool);
   toolStatus(tool === "video" ? "Video stays private until you load it." : "Loading local tool state…");
@@ -393,9 +464,18 @@ function closeTool({updateUrl = true} = {}) {
   activeToolOpener = null;
   opener?.focus();
   toolSurface.querySelector("[data-video-frame]")?.replaceChildren();
-  hideSurface(toolSurface, () => {
-    if (focusShell.dataset.toolActive === currentTool) delete focusShell.dataset.toolActive;
-  });
+  if (compactFocusLayout()) {
+    hideSurface(toolSurface, () => {
+      if (focusShell.dataset.toolActive === currentTool) {
+        delete focusShell.dataset.toolActive;
+      }
+    });
+  } else if (focusShell.dataset.toolActive === currentTool) {
+    transitionFocusLayout(() => { delete focusShell.dataset.toolActive; });
+    hideSurface(toolSurface);
+  } else {
+    hideSurface(toolSurface);
+  }
   return true;
 }
 
