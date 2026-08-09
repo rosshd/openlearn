@@ -281,5 +281,21 @@ def test_web_assets_keep_accessibility_release_guards() -> None:
     assert "prefers-reduced-motion: reduce" in javascript
 
 
+def test_learning_tool_motion_opens_from_the_prompt_edge() -> None:
+    css = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "openlearn"
+        / "web"
+        / "static"
+        / "openlearn.css"
+    ).read_text(encoding="utf-8")
+
+    assert "transform-origin: left center" in css
+    assert "clip-path: inset(0 100% 0 0)" in css
+    assert "translateX(-2.5rem) scaleX(0.96)" in css
+    assert "translateX(-1.5rem) scaleX(0.98)" in css
+
+
 if __name__ == "__main__":
     unittest.main()
