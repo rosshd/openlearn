@@ -179,8 +179,64 @@ let codeRevision = null;
 let codeDirty = false;
 let codeEditVersion = 0;
 let toolOpenVersion = 0;
+let surfaceMotionVersion = 0;
 
 const availableTools = new Set(["code", "video", "sources"]);
+
+function reducedMotionRequested() {
+  return window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+}
+
+function finishSurfaceMotion(surface, token, callback) {
+  let finished = false;
+  const finish = (event) => {
+    if (event?.target && event.target !== surface) return;
+    if (finished) return;
+    finished = true;
+    surface.removeEventListener("animationend", finish);
+    if (surface.dataset.motionToken === token) callback();
+  };
+  if (reducedMotionRequested()) {
+    finish();
+    return;
+  }
+  surface.addEventListener("animationend", finish);
+  window.setTimeout(finish, 240);
+}
+
+function revealSurface(surface) {
+  const token = String(++surfaceMotionVersion);
+  surface.dataset.motionToken = token;
+  surface.hidden = false;
+  surface.removeAttribute("inert");
+  surface.removeAttribute("aria-hidden");
+  surface.dataset.motion = "enter";
+  finishSurfaceMotion(surface, token, () => {
+    if (surface.dataset.motion === "enter") {
+      delete surface.dataset.motion;
+      delete surface.dataset.motionToken;
+    }
+  });
+}
+
+function hideSurface(surface, onHidden = () => {}) {
+  if (surface.hidden) {
+    onHidden();
+    return;
+  }
+  if (surface.dataset.motion === "exit") return;
+  const token = String(++surfaceMotionVersion);
+  surface.dataset.motionToken = token;
+  surface.setAttribute("inert", "");
+  surface.setAttribute("aria-hidden", "true");
+  surface.dataset.motion = "exit";
+  finishSurfaceMotion(surface, token, () => {
+    surface.hidden = true;
+    delete surface.dataset.motion;
+    delete surface.dataset.motionToken;
+    onHidden();
+  });
+}
 
 function toolStatus(message, isError = false) {
   const status = toolSurface?.querySelector("[data-tool-status]");
@@ -286,7 +342,11 @@ async function loadToolState(tool) {
 async function openTool(tool, opener, {updateUrl = true} = {}) {
   if (!toolSurface || !focusShell || !availableTools.has(tool)) return false;
   const currentTool = focusShell.dataset.toolActive;
-  if (currentTool === tool && !toolSurface.hidden) {
+  if (
+    currentTool === tool
+    && !toolSurface.hidden
+    && toolSurface.getAttribute("aria-hidden") !== "true"
+  ) {
     if (updateUrl) setToolUrl(tool);
     toolSurface.querySelector("[data-tool-close]")?.focus();
     return true;
@@ -304,7 +364,9 @@ async function openTool(tool, opener, {updateUrl = true} = {}) {
   const titles = {code: "Code workbench", video: "Video player", sources: "Course sources"};
   toolSurface.querySelector("[data-tool-title]").textContent = titles[tool] || "Learning tool";
   focusShell.dataset.toolActive = tool;
-  toolSurface.hidden = false;
+  if (toolSurface.hidden || toolSurface.getAttribute("aria-hidden") === "true") {
+    revealSurface(toolSurface);
+  }
   if (updateUrl) setToolUrl(tool);
   toolStatus(tool === "video" ? "Video stays private until you load it." : "Loading local tool state…");
   try {
@@ -325,14 +387,15 @@ function closeTool({updateUrl = true} = {}) {
   if (currentTool === "code" && codeDirty && !confirmDiscardCodeChanges()) return false;
   if (currentTool === "code" && codeDirty) codeDirty = false;
   toolOpenVersion += 1;
-  toolSurface.hidden = true;
-  delete focusShell.dataset.toolActive;
-  toolSurface.querySelector("[data-video-frame]")?.replaceChildren();
   for (const button of document.querySelectorAll("[data-tool-open]")) button.setAttribute("aria-expanded", "false");
   if (updateUrl) setToolUrl(null, {replace: true});
   const opener = activeToolOpener;
   activeToolOpener = null;
   opener?.focus();
+  toolSurface.querySelector("[data-video-frame]")?.replaceChildren();
+  hideSurface(toolSurface, () => {
+    if (focusShell.dataset.toolActive === currentTool) delete focusShell.dataset.toolActive;
+  });
   return true;
 }
 
@@ -773,7 +836,7 @@ let drawerOpenVersion = 0;
 function closeDrawers({restoreFocus = true} = {}) {
   const opener = activeDrawerOpener;
   drawerOpenVersion += 1;
-  for (const drawer of document.querySelectorAll(".drawer")) drawer.hidden = true;
+  for (const drawer of document.querySelectorAll(".drawer")) hideSurface(drawer);
   for (const button of document.querySelectorAll("[data-drawer-toggle]")) button.setAttribute("aria-expanded", "false");
   activeDrawerOpener = null;
   if (restoreFocus && opener?.isConnected) opener.focus();
@@ -782,17 +845,22 @@ function closeDrawers({restoreFocus = true} = {}) {
 for (const button of document.querySelectorAll("[data-drawer-toggle]")) {
   button.addEventListener("click", async () => {
     const drawer = document.getElementById(button.dataset.drawerToggle);
-    const opening = drawer.hidden;
+    const opening = drawer.hidden || drawer.getAttribute("aria-hidden") === "true";
     closeDrawers({restoreFocus: false});
-    drawer.hidden = !opening;
     button.setAttribute("aria-expanded", String(opening));
     if (opening) {
+      revealSurface(drawer);
       activeDrawerOpener = button;
       const openVersion = drawerOpenVersion;
       if (drawer.dataset.historyUrl && !drawer.querySelector("[data-history-content]")?.dataset.loaded) {
         await loadHistory(drawer);
       }
-      if (!drawer.hidden && activeDrawerOpener === button && openVersion === drawerOpenVersion) {
+      if (
+        !drawer.hidden
+        && drawer.getAttribute("aria-hidden") !== "true"
+        && activeDrawerOpener === button
+        && openVersion === drawerOpenVersion
+      ) {
         drawer.querySelector("[data-drawer-close]")?.focus();
       }
     }
@@ -802,7 +870,11 @@ for (const button of document.querySelectorAll("[data-drawer-toggle]")) {
 for (const close of document.querySelectorAll("[data-drawer-close]")) close.addEventListener("click", closeDrawers);
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
-  if (toolSurface && !toolSurface.hidden) closeTool();
+  if (
+    toolSurface
+    && !toolSurface.hidden
+    && toolSurface.getAttribute("aria-hidden") !== "true"
+  ) closeTool();
   else closeDrawers();
 });
 

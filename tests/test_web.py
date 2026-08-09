@@ -17,12 +17,14 @@ from openlearn import config
 from openlearn import interview_prep
 from openlearn import providers
 from openlearn import tutor_service
+from openlearn.application import CourseProgress
 from openlearn.web import create_app
 from openlearn.web.app import PlaceholderServices
 from openlearn.web.schemas import PlacementRequest, TutorSubmissionRequest
 from openlearn.web.services import (
     COURSE_INITIALIZATION_PROMPT,
     OpenLearnWebServices,
+    _focus_progress,
     _present_response,
 )
 
@@ -1232,7 +1234,11 @@ def test_focus_renders_safe_structured_lesson_blocks() -> None:
                     "prompt": "Explain the plan.",
                     "position": "Step 1",
                 },
-                "progress": {"percent": 10, "summary": "One step complete."},
+                "progress": {
+                    "percent": 10,
+                    "summary": "One step complete.",
+                    "has_concepts": True,
+                },
                 "feedback": None,
                 "operation": None,
                 "saved_response": "",
@@ -1248,6 +1254,24 @@ def test_focus_renders_safe_structured_lesson_blocks() -> None:
     assert '<pre><code data-language="python">' in response.text
     assert "&lt;script&gt;" in response.text
     assert "print('<script>')" not in response.text
+    assert "10% complete" in response.text
+    assert 'value="10"' in response.text
+    assert "{'percent':" not in response.text
+
+
+def test_focus_progress_uses_an_empty_state_until_concepts_are_tracked() -> None:
+    progress = _focus_progress(CourseProgress(known=0, total=0, percent=0))
+
+    assert progress == {
+        "percent": 0,
+        "summary": "Progress will appear after your first learning check.",
+        "has_concepts": False,
+    }
+
+
+def test_focus_progress_clamps_invalid_internal_percentages() -> None:
+    assert _focus_progress(CourseProgress(known=1, total=1, percent=140))["percent"] == 100
+    assert _focus_progress(CourseProgress(known=0, total=1, percent=-20))["percent"] == 0
 
 
 def test_present_response_hides_reasoning_from_existing_lesson_history() -> None:

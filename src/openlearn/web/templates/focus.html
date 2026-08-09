@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% block main_class %}focus-main{% endblock %}
 {% block status %}
 <div class="focus-status" aria-label="Lesson status">
   <a href="{{ url_for('dashboard') }}" class="exit-link">← Dashboard</a>
@@ -140,9 +141,14 @@
   <aside class="drawer" id="progress-drawer" aria-labelledby="progress-title" hidden>
     <button class="drawer-close" type="button" data-drawer-close aria-label="Close progress">×</button>
     <p class="eyebrow">Course progress</p>
-    <h2 id="progress-title">{{ course.progress.percent or course.progress or 0 }}% complete</h2>
-    {% if course.progress.summary %}<p>{{ course.progress.summary }}</p>{% endif %}
-    <progress max="100" value="{{ course.progress.percent or course.progress or 0 }}">{{ course.progress.percent or course.progress or 0 }}%</progress>
+    {% if course.progress.has_concepts %}
+    <h2 id="progress-title">{{ course.progress.percent }}% complete</h2>
+    <p>{{ course.progress.summary }}</p>
+    <progress max="100" value="{{ course.progress.percent }}">{{ course.progress.percent }}%</progress>
+    {% else %}
+    <h2 id="progress-title">Your progress starts here</h2>
+    <p>{{ course.progress.summary }}</p>
+    {% endif %}
   </aside>
 
   <aside class="drawer" id="history-drawer" aria-labelledby="history-title" hidden data-history-url="{{ url_for('history', slug=course.slug) }}">

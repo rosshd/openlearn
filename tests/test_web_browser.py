@@ -196,6 +196,26 @@ def test_real_browser_course_polling_theme_conflict_and_keyboard_submit(
                 first.locator("#learner-response").fill("Keep this unsent draft while tools open.")
                 first.get_by_role("button", name="Code").click()
                 assert "tool=code" in first.url
+                shell_box = first.locator("[data-focus-shell]").bounding_box()
+                lesson_box = first.locator(".focus-column").bounding_box()
+                tool_box = first.locator("[data-tool-surface]").bounding_box()
+                assert shell_box and shell_box["width"] >= 1180
+                assert lesson_box and lesson_box["width"] >= 480
+                assert tool_box and tool_box["width"] >= lesson_box["width"]
+                _assert_no_page_overflow(first)
+                first.set_viewport_size({"width": 1024, "height": 800})
+                shell_box = first.locator("[data-focus-shell]").bounding_box()
+                lesson_box = first.locator(".focus-column").bounding_box()
+                tool_box = first.locator("[data-tool-surface]").bounding_box()
+                assert shell_box and shell_box["width"] >= 950
+                assert lesson_box and lesson_box["width"] >= 380
+                assert tool_box and tool_box["width"] >= lesson_box["width"]
+                _assert_no_page_overflow(first)
+                first.set_viewport_size({"width": 800, "height": 800})
+                assert not first.locator(".focus-column").is_visible()
+                assert first.locator("[data-tool-surface]").bounding_box()["width"] >= 630
+                _assert_no_page_overflow(first)
+                first.set_viewport_size({"width": 1280, "height": 800})
                 first.locator("[data-code-draft]").fill("print('browser workspace')\n")
                 with first.expect_response(
                     lambda response: response.url.endswith("/tools/code")
@@ -233,12 +253,36 @@ def test_real_browser_course_polling_theme_conflict_and_keyboard_submit(
                 first.once("dialog", lambda dialog: dialog.accept())
                 first.get_by_role("button", name="Close learning tool").click()
                 assert "tool=" not in first.url
+                assert first.locator("[data-tool-surface]").get_attribute("aria-hidden") == "true"
+                assert first.locator("[data-tool-surface]").get_attribute("inert") == ""
                 assert first.get_by_role("button", name="Code").evaluate(
                     "button => button === document.activeElement"
                 )
                 assert first.locator("#learner-response").input_value() == (
                     "Keep this unsent draft while tools open."
                 )
+
+                first.get_by_role("button", name="Code").click()
+                playwright.expect(first.locator('[data-tool-panel="code"]')).to_be_visible()
+                first.wait_for_timeout(300)
+                assert first.locator("[data-tool-surface]").get_attribute("aria-hidden") is None
+                assert first.locator("[data-tool-surface]").get_attribute("inert") is None
+                assert first.locator("[data-tool-surface]").get_attribute("data-motion") is None
+                first.get_by_role("button", name="Close learning tool").click()
+                progress_button = first.get_by_role("button", name="Progress", exact=True)
+                progress_button.click()
+                playwright.expect(first.locator("#progress-drawer")).to_be_visible()
+                first.locator("body").press("Escape")
+                playwright.expect(first.locator("#progress-drawer")).to_be_hidden()
+                assert progress_button.get_attribute("aria-expanded") == "false"
+
+                first.emulate_media(reduced_motion="reduce")
+                first.get_by_role("button", name="Code").click()
+                assert first.locator("[data-tool-surface]").get_attribute("data-motion") is None
+                first.get_by_role("button", name="Close learning tool").click()
+                assert first.locator("[data-tool-surface]").is_hidden()
+                assert first.locator("[data-tool-surface]").get_attribute("data-motion") is None
+                first.emulate_media(reduced_motion="no-preference")
 
                 first.get_by_role("button", name="Video").click()
                 first.locator("#video-url").fill("https://youtu.be/dQw4w9WgXcQ")
@@ -297,11 +341,19 @@ def test_real_browser_course_polling_theme_conflict_and_keyboard_submit(
                 progress_button.press("Enter")
                 assert progress_button.get_attribute("aria-expanded") == "true"
                 playwright.expect(first.locator("#progress-drawer")).to_be_visible()
+                playwright.expect(first.locator("#progress-drawer")).to_contain_text(
+                    "Progress will appear after your first learning check."
+                )
+                assert first.locator("#progress-drawer progress").count() == 0
+                first.emulate_media(reduced_motion="reduce")
                 first.get_by_role("button", name="Close progress").press("Enter")
                 assert progress_button.get_attribute("aria-expanded") == "false"
+                assert first.locator("#progress-drawer").is_hidden()
+                assert first.locator("#progress-drawer").get_attribute("data-motion") is None
                 assert progress_button.evaluate(
                     "button => button === document.activeElement"
                 )
+                first.emulate_media(reduced_motion="no-preference")
                 first.set_viewport_size({"width": 1280, "height": 800})
 
                 stale = context.new_page()

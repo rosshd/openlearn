@@ -277,6 +277,8 @@ def test_web_assets_keep_accessibility_release_guards() -> None:
     assert 'data-nav-group' in base
     assert "restoreFocus" in javascript
     assert 'setAttribute("aria-expanded"' in javascript
+    assert 'setAttribute("inert"' in javascript
+    assert "prefers-reduced-motion: reduce" in javascript
 
 
 if __name__ == "__main__":

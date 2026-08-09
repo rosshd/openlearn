@@ -20,7 +20,12 @@ from openlearn import (
     video_tools,
 )
 from openlearn import data_management
-from openlearn.application import CalibrationContext, CourseCard, CourseCreationRequest
+from openlearn.application import (
+    CalibrationContext,
+    CourseCard,
+    CourseCreationRequest,
+    CourseProgress,
+)
 from openlearn.course_templates import CourseTemplateError
 from openlearn.courses import (
     CREATION_SUBMISSION_METADATA_KEY,
@@ -73,6 +78,24 @@ def _card(card: CourseCard) -> dict[str, object]:
         "current_unit": card.current_focus or "Ready to learn",
         "next_move": card.current_focus,
         "progress": card.progress.percent,
+    }
+
+
+def _focus_progress(progress: CourseProgress) -> dict[str, object]:
+    """Project mastery into a stable learner-facing Focus Bench shape."""
+    total = max(0, progress.total)
+    percent = max(0, min(100, progress.percent))
+    if total == 0:
+        return {
+            "percent": 0,
+            "summary": "Progress will appear after your first learning check.",
+            "has_concepts": False,
+        }
+    known = max(0, min(total, progress.known))
+    return {
+        "percent": percent,
+        "summary": f"{known} of {total} tracked concepts are known.",
+        "has_concepts": True,
     }
 
 
@@ -1006,13 +1029,7 @@ class OpenLearnWebServices:
                 "prompt": prompt,
                 "position": f"Step {max(1, revision)}",
             },
-            "progress": {
-                "percent": snapshot.card.progress.percent,
-                "summary": (
-                    f"{snapshot.card.progress.known} of "
-                    f"{snapshot.card.progress.total} tracked concepts are known."
-                ),
-            },
+            "progress": _focus_progress(snapshot.card.progress),
             "feedback": None,
             "operation": operation,
             "initialization": initialization,

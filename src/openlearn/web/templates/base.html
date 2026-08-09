@@ -44,7 +44,7 @@
       </div>
     </header>
     {% block status %}{% endblock %}
-    <main id="main-content" tabindex="-1">
+    <main id="main-content" tabindex="-1" class="{% block main_class %}{% endblock %}">
       {% block content %}{% endblock %}
     </main>
     <div class="sr-only" role="status" aria-live="polite" aria-atomic="true" data-live-region></div>
