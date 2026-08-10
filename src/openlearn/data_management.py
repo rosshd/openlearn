@@ -269,8 +269,16 @@ def inventory_home(home: Path) -> HomeInventory:
     """Return the stable, complete inventory for a resolved Openlearn home."""
 
     resolved = _assert_safe_home(home)
-    if not resolved.exists():
+    if not resolved.exists() and not resolved.parent.exists():
         return HomeInventory(resolved, (), (), False)
+    with home_lifecycle_lock(resolved):
+        resolved = _assert_safe_home(home)
+        if not resolved.exists():
+            return HomeInventory(resolved, (), (), False)
+        return _inventory_resolved_home(resolved)
+
+
+def _inventory_resolved_home(resolved: Path) -> HomeInventory:
     entries: list[InventoryEntry] = []
     excluded: list[str] = []
     credentials_present = False
@@ -636,7 +644,7 @@ def restore_backup(archive: Path, home: Path) -> RestoreResult:
         try:
             staging.mkdir(mode=0o700)
             manifest = _inspect_archive(_resolved(archive), extract_to=staging)
-            restored = inventory_home(staging)
+            restored = _inventory_resolved_home(staging)
             expected_entries = manifest["entries"]
             if [entry.as_dict() for entry in restored.entries] != expected_entries:
                 raise ArchiveSafetyError("restored data does not match the archive manifest")
@@ -774,7 +782,7 @@ def move_home(
             staging.mkdir(mode=0o700)
             for entry in inventory.entries:
                 _copy_regular_file(source / entry.relative_path, staging / entry.relative_path)
-            staged = inventory_home(staging)
+            staged = _inventory_resolved_home(staging)
             if tuple(entry.as_dict() for entry in staged.entries) != tuple(
                 entry.as_dict() for entry in inventory.entries
             ):

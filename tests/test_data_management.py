@@ -6,11 +6,13 @@ import multiprocessing
 import os
 import stat
 import zipfile
+from multiprocessing.connection import Connection
 from pathlib import Path, PurePosixPath
 
 import pytest
 
 from openlearn import cli, data_management
+from openlearn.home_lock import home_lifecycle_lock, lifecycle_lock_path
 
 
 def _write_persistent_file_after_signal(
@@ -25,6 +27,52 @@ def _write_persistent_file_after_signal(
     start.wait(timeout=10)
     attempting.set()
     cli.write_text_atomic(Path(home) / relative, content)
+    finished.set()
+
+
+def _hold_partial_write(
+    home: str,
+    ready: multiprocessing.synchronize.Event,
+    release: multiprocessing.synchronize.Event,
+) -> None:
+    root = Path(home)
+    topics = root / "learning-topics"
+    topics.mkdir(parents=True, exist_ok=True)
+    temporary = topics / "tmp-in-flight"
+    target = topics / "concurrent.md"
+    with home_lifecycle_lock(root):
+        temporary.write_text("partial", encoding="utf-8")
+        ready.set()
+        release.wait(timeout=10)
+        os.replace(temporary, target)
+
+
+def _hold_first_write(
+    home: str,
+    ready: multiprocessing.synchronize.Event,
+    release: multiprocessing.synchronize.Event,
+) -> None:
+    root = Path(home)
+    with home_lifecycle_lock(root):
+        ready.set()
+        release.wait(timeout=10)
+        target = root / "learning-topics" / "first.md"
+        target.parent.mkdir(parents=True)
+        target.write_text("complete", encoding="utf-8")
+
+
+def _inventory_after_signal(
+    home: str,
+    start: multiprocessing.synchronize.Event,
+    attempting: multiprocessing.synchronize.Event,
+    finished: multiprocessing.synchronize.Event,
+    results: Connection,
+) -> None:
+    start.wait(timeout=10)
+    attempting.set()
+    inventory = data_management.inventory_home(Path(home))
+    results.send(tuple(entry.relative_path for entry in inventory.entries))
+    results.close()
     finished.set()
 
 
@@ -88,6 +136,100 @@ def test_inventory_classifies_complete_home_and_excludes_ephemeral_files(tmp_pat
     }
 
 
+def test_inventory_waits_for_an_atomic_writer_before_reading_the_home(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    _write_complete_home(home)
+    context = multiprocessing.get_context("spawn")
+    writer_ready = context.Event()
+    release_writer = context.Event()
+    inventory_attempting = context.Event()
+    inventory_finished = context.Event()
+    receive_results, send_results = context.Pipe(duplex=False)
+    writer = context.Process(
+        target=_hold_partial_write,
+        args=(str(home), writer_ready, release_writer),
+    )
+    inventory = context.Process(
+        target=_inventory_after_signal,
+        args=(
+            str(home),
+            writer_ready,
+            inventory_attempting,
+            inventory_finished,
+            send_results,
+        ),
+    )
+
+    writer.start()
+    inventory.start()
+    try:
+        assert writer_ready.wait(timeout=10)
+        assert inventory_attempting.wait(timeout=10)
+        assert not inventory_finished.wait(timeout=0.3)
+        release_writer.set()
+        assert inventory_finished.wait(timeout=10)
+        paths = set(receive_results.recv())
+    finally:
+        release_writer.set()
+        for process in (writer, inventory):
+            process.join(timeout=10)
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=5)
+
+    assert writer.exitcode == 0
+    assert inventory.exitcode == 0
+    assert "learning-topics/concurrent.md" in paths
+    assert "learning-topics/tmp-in-flight" not in paths
+
+
+def test_inventory_waits_for_the_first_writer_to_publish_a_missing_home(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    context = multiprocessing.get_context("spawn")
+    writer_ready = context.Event()
+    release_writer = context.Event()
+    inventory_attempting = context.Event()
+    inventory_finished = context.Event()
+    receive_results, send_results = context.Pipe(duplex=False)
+    writer = context.Process(
+        target=_hold_first_write,
+        args=(str(home), writer_ready, release_writer),
+    )
+    inventory = context.Process(
+        target=_inventory_after_signal,
+        args=(
+            str(home),
+            writer_ready,
+            inventory_attempting,
+            inventory_finished,
+            send_results,
+        ),
+    )
+
+    writer.start()
+    inventory.start()
+    try:
+        assert writer_ready.wait(timeout=10)
+        assert inventory_attempting.wait(timeout=10)
+        assert not inventory_finished.wait(timeout=0.3)
+        release_writer.set()
+        assert inventory_finished.wait(timeout=10)
+        paths = set(receive_results.recv())
+    finally:
+        release_writer.set()
+        for process in (writer, inventory):
+            process.join(timeout=10)
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=5)
+
+    assert writer.exitcode == 0
+    assert inventory.exitcode == 0
+    assert paths == {"learning-topics/first.md"}
+
+
 def test_default_backup_redacts_key_and_credential_backup_is_explicit_and_private(
     tmp_path: Path,
 ) -> None:
@@ -128,11 +270,15 @@ def test_verified_backup_restore_round_trip_is_byte_equivalent(tmp_path: Path) -
         credential_confirmation=data_management.CREDENTIAL_CONFIRMATION,
     ).archive
     restored = tmp_path / "restored"
+    locks_before = set(tmp_path.glob(".openlearn-home-*.lifecycle.lock"))
 
     result = data_management.restore_backup(archive, restored)
 
     assert result.home == restored.resolve()
     assert _persistent_bytes(restored) == before
+    assert set(tmp_path.glob(".openlearn-home-*.lifecycle.lock")) - locks_before == {
+        lifecycle_lock_path(restored)
+    }
 
 
 def test_default_restore_omits_only_saved_credentials(tmp_path: Path) -> None:
@@ -325,6 +471,7 @@ def test_move_publishes_verified_copy_and_retains_source_for_explicit_cleanup(
         include_credentials=True,
         credential_confirmation=data_management.CREDENTIAL_CONFIRMATION,
     ).archive
+    locks_before = set(tmp_path.glob(".openlearn-home-*.lifecycle.lock"))
 
     before = _persistent_bytes(home)
     result = data_management.move_home(
@@ -343,6 +490,7 @@ def test_move_publishes_verified_copy_and_retains_source_for_explicit_cleanup(
     assert result.cleanup_required is True
     assert result.source_retained is True
     assert (tmp_path / "moved" / "learning-topics" / "python.md").exists()
+    assert set(tmp_path.glob(".openlearn-home-*.lifecycle.lock")) == locks_before
 
 
 def test_move_never_runs_post_promotion_source_cleanup(
