@@ -184,12 +184,6 @@ async def create_course(request: Request) -> JSONResponse:
             result["placement_url"] = str(
                 request.url_for("placement", slug=result["slug"])
             )
-            if not await _provider_ready(request):
-                result["setup_url"] = str(
-                    request.url_for("setup").include_query_params(
-                        next=request.url_for("placement", slug=result["slug"]).path
-                    )
-                )
             return JSONResponse(result)
         result.setdefault(
             "initialization_url",
@@ -330,8 +324,6 @@ async def placement(request: Request, slug: str) -> Any:
     snapshot = public_mapping(await _call(request, "placement", slug))
     if snapshot.get("missing"):
         raise HTTPException(status_code=404, detail="Placement not found")
-    if snapshot.get("status") == "not_started" and not await _provider_ready(request):
-        return _setup_redirect(request)
     response = _templates(request).TemplateResponse(
         request,
         "placement.html",
@@ -348,11 +340,6 @@ async def update_placement(request: Request, slug: str) -> JSONResponse:
         payload = PlacementRequest.model_validate(await request.json())
     except (ValidationError, ValueError):
         return _json_error("Check the placement action and try again.")
-    if payload.action == "start" and not await _provider_ready(request):
-        return _setup_required(
-            request,
-            next_path=request.url_for("placement", slug=slug).path,
-        )
     if payload.action == "skip":
         result = public_mapping(await _call(request, "skip_placement", slug))
     else:

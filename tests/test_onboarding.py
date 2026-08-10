@@ -35,7 +35,7 @@ class ProviderPresetTests(unittest.TestCase):
                 slug="openrouter",
                 name="OpenRouter",
                 base_url="https://openrouter.ai/api/v1",
-                default_model="google/gemini-2.5-flash-lite",
+                default_model="google/gemini-3.1-flash-lite",
                 key_required=True,
                 setup_url="https://openrouter.ai/keys",
                 recommendation="recommended - inexpensive models from many providers",
@@ -89,7 +89,7 @@ class ProviderPromptTests(unittest.TestCase):
                 input_func=lambda _prompt: "",
                 output_func=output.append,
             ),
-            "google/gemini-2.5-flash-lite",
+            "google/gemini-3.1-flash-lite",
         )
 
     def test_reprompts_invalid_provider_choice(self) -> None:

@@ -18,6 +18,7 @@ PROFILE_SCHEMA_VERSION = 1
 PLACEMENT_V1 = "coding-placement-v1"
 PLACEMENT_V2 = "coding-placement-v2"
 PLACEMENT_V3 = "reasoning-placement-v3"
+PLACEMENT_V4 = "confidence-placement-v4"
 PLACEMENT_RUBRIC_VERSION = PLACEMENT_V3
 STALE_AFTER_DAYS = 90
 PLACEMENT_V1_STAGES = (
@@ -31,6 +32,7 @@ PLACEMENT_V1_STAGES = (
 )
 PLACEMENT_V2_STAGES = ("conversation", "implementation", "debrief")
 PLACEMENT_V3_STAGES = ("clarification", "reasoning")
+PLACEMENT_V4_STAGES = ("confidence", "outline")
 # Kept as the historical stage list for callers that construct v1 fixtures.
 PLACEMENT_STAGES = PLACEMENT_V1_STAGES
 PLACEMENT_LIFECYCLES = {
@@ -45,6 +47,10 @@ PLACEMENT_LIFECYCLES = {
     PLACEMENT_V3: {
         "stages": PLACEMENT_V3_STAGES,
         "optional_stages": PLACEMENT_V3_STAGES,
+    },
+    PLACEMENT_V4: {
+        "stages": PLACEMENT_V4_STAGES,
+        "optional_stages": (),
     },
 }
 PLACEMENT_RUBRICS = {
@@ -90,6 +96,20 @@ PLACEMENT_RUBRICS = {
             "interview_process": ("clarification", "reasoning"),
         },
     },
+    PLACEMENT_V4: {
+        "axes": {
+            "prerequisites": (),
+            "coding_fluency": (),
+            "reasoning": (),
+            "interview_process": (),
+        },
+        "evidence": {
+            "prerequisites": (),
+            "coding_fluency": (),
+            "reasoning": (),
+            "interview_process": (),
+        },
+    },
 }
 DRAFT_MAX_LINES = 50
 DRAFT_MAX_LINE_LENGTH = 4_000
@@ -100,6 +120,47 @@ PLACEMENT_V3_SIGNAL_LABELS = {
     "stated_time_complexity": "Explained time complexity",
     "stated_space_complexity": "Explained space complexity",
 }
+CONFIDENCE_PATTERNS = (
+    ("arrays_hashing", "Arrays & hashing"),
+    ("two_pointers", "Two pointers"),
+    ("sliding_window", "Sliding window"),
+    ("stack", "Stacks"),
+    ("binary_search", "Binary search"),
+    ("linked_lists", "Linked lists"),
+    ("trees", "Trees"),
+    ("graphs", "Graphs"),
+    ("heaps", "Heaps / priority queues"),
+    ("backtracking", "Backtracking"),
+    ("dynamic_programming", "Dynamic programming"),
+    ("intervals_greedy", "Intervals & greedy"),
+)
+CONFIDENCE_PATTERN_IDS = frozenset(pattern_id for pattern_id, _label in CONFIDENCE_PATTERNS)
+CONFIDENCE_SCALE = (
+    (1, "New"),
+    (2, "Shaky"),
+    (3, "Some practice"),
+    (4, "Confident"),
+    (5, "Could explain"),
+)
+CONFIDENCE_ROLES = (
+    ("general SWE", "General SWE"),
+    ("backend", "Backend"),
+    ("frontend", "Frontend"),
+    ("mobile", "Mobile"),
+    ("data / ML", "Data / ML"),
+)
+CONFIDENCE_LEVELS = (
+    ("intern", "Intern"),
+    ("entry", "Entry"),
+    ("mid", "Mid-level"),
+    ("senior", "Senior+"),
+)
+CONFIDENCE_FOCUSES = (
+    ("coding", "Coding interviews"),
+    ("balanced", "Coding + system design"),
+    ("system_design", "System-design heavy"),
+)
+CONFIDENCE_SURVEY_ID = "leetcode_pattern_confidence_v1"
 PROFILE_FIELDS = (
     "role_family",
     "target_level",
@@ -475,6 +536,8 @@ def _empty_placement(
     }
     if version == PLACEMENT_V3:
         placement["draft"] = None
+    if version == PLACEMENT_V4:
+        placement["survey"] = None
     return placement
 
 
@@ -503,10 +566,12 @@ def _validate_placement(placement: Mapping[str, object]) -> None:
     legacy_keys = set(_empty_placement(PLACEMENT_V1, include_lifecycle=False))
     versioned_legacy_keys = set(_empty_placement(PLACEMENT_V1))
     v3_keys = set(_empty_placement(PLACEMENT_V3))
+    v4_keys = set(_empty_placement(PLACEMENT_V4))
     if frozenset(placement) not in {
         frozenset(legacy_keys),
         frozenset(versioned_legacy_keys),
         frozenset(v3_keys),
+        frozenset(v4_keys),
     }:
         raise ValueError("interview-prep placement state is malformed")
     status = placement.get("status")
@@ -521,8 +586,12 @@ def _validate_placement(placement: Mapping[str, object]) -> None:
     lifecycle_version, rubric_version = _placement_versions(placement)
     if lifecycle_version == PLACEMENT_V3 and set(placement) != v3_keys:
         raise ValueError("interview-prep placement v3 draft state is malformed")
+    if lifecycle_version == PLACEMENT_V4 and set(placement) != v4_keys:
+        raise ValueError("interview-prep placement v4 survey state is malformed")
     if lifecycle_version != PLACEMENT_V3 and "draft" in placement:
         raise ValueError("interview-prep legacy placement draft state is malformed")
+    if lifecycle_version != PLACEMENT_V4 and "survey" in placement:
+        raise ValueError("interview-prep legacy placement survey state is malformed")
     stages = placement_stages(placement)
     activity_id = placement.get("activity_id")
     if activity_id is not None and (
@@ -545,7 +614,12 @@ def _validate_placement(placement: Mapping[str, object]) -> None:
     ):
         raise ValueError("interview-prep placement profile revision is invalid")
     problem_id = placement.get("problem_id")
-    if problem_id is not None and problem_id != PLACEMENT_PROBLEM["problem_id"]:
+    allowed_problem_id = (
+        CONFIDENCE_SURVEY_ID
+        if lifecycle_version == PLACEMENT_V4
+        else PLACEMENT_PROBLEM["problem_id"]
+    )
+    if problem_id is not None and problem_id != allowed_problem_id:
         raise ValueError("interview-prep placement problem reference is invalid")
     next_stage = placement.get("next_stage")
     if next_stage is not None and next_stage not in stages:
@@ -612,6 +686,9 @@ def _validate_placement(placement: Mapping[str, object]) -> None:
         ):
             raise ValueError("interview-prep placement draft is malformed")
         _validated_timestamp(draft.get("updated_at"), "placement draft updated_at")
+    survey = placement.get("survey")
+    if lifecycle_version == PLACEMENT_V4 and survey is not None:
+        _validate_confidence_survey(survey)
     result = placement.get("result")
     if result is not None:
         _validate_result(result, rubric_version=rubric_version)
@@ -630,7 +707,7 @@ def _validate_placement(placement: Mapping[str, object]) -> None:
     ):
         raise ValueError("interview-prep empty placement state is inconsistent")
     if status == "in_progress" and (
-        activity_id is None
+        (activity_id is None and lifecycle_version != PLACEMENT_V4)
         or attempt_id is None
         or next_stage is None
         or result is not None
@@ -638,13 +715,50 @@ def _validate_placement(placement: Mapping[str, object]) -> None:
     ):
         raise ValueError("interview-prep active placement state is inconsistent")
     if status in {"provisional", "stale"} and (
-        activity_id is None
+        (activity_id is None and lifecycle_version != PLACEMENT_V4)
         or attempt_id is None
         or next_stage is not None
         or result is None
         or not isinstance(placement.get("completed_at"), str)
     ):
         raise ValueError("interview-prep completed placement state is inconsistent")
+
+
+def _validate_confidence_survey(value: object) -> None:
+    if not isinstance(value, dict) or set(value) != {
+        "role_family",
+        "target_level",
+        "interview_focus",
+        "ratings",
+        "outline",
+    }:
+        raise ValueError("interview-prep confidence survey is malformed")
+    allowed_roles = {item for item, _label in CONFIDENCE_ROLES}
+    allowed_levels = {item for item, _label in CONFIDENCE_LEVELS}
+    allowed_focuses = {item for item, _label in CONFIDENCE_FOCUSES}
+    if value.get("role_family") not in allowed_roles:
+        raise ValueError("interview-prep confidence survey role is invalid")
+    if value.get("target_level") not in allowed_levels:
+        raise ValueError("interview-prep confidence survey level is invalid")
+    if value.get("interview_focus") not in allowed_focuses:
+        raise ValueError("interview-prep confidence survey focus is invalid")
+    ratings = value.get("ratings")
+    if (
+        not isinstance(ratings, dict)
+        or set(ratings) != CONFIDENCE_PATTERN_IDS
+        or any(
+            isinstance(rating, bool) or not isinstance(rating, int) or rating not in range(1, 6)
+            for rating in ratings.values()
+        )
+    ):
+        raise ValueError("interview-prep confidence ratings are invalid")
+    outline = value.get("outline")
+    if outline is not None and (
+        not isinstance(outline, str)
+        or not outline.strip()
+        or len(outline) > 12_000
+    ):
+        raise ValueError("interview-prep confidence outline is invalid")
 
 
 def _validate_result(result: object, *, rubric_version: str = PLACEMENT_V1) -> None:
@@ -656,7 +770,7 @@ def _validate_result(result: object, *, rubric_version: str = PLACEMENT_V1) -> N
         "gaps",
         "uncertainty",
     }
-    if rubric_version == PLACEMENT_V3:
+    if rubric_version in {PLACEMENT_V3, PLACEMENT_V4}:
         expected.add("passport")
     if not isinstance(result, dict) or set(result) != expected:
         raise ValueError("interview-prep placement result is malformed")
@@ -685,7 +799,7 @@ def _validate_result(result: object, *, rubric_version: str = PLACEMENT_V1) -> N
             or not isinstance(detail.get("note"), str)
         ):
             raise ValueError("interview-prep placement gap detail is invalid")
-    if rubric_version == PLACEMENT_V3:
+    if rubric_version in {PLACEMENT_V3, PLACEMENT_V4}:
         passport = result.get("passport")
         if (
             not isinstance(passport, dict)
@@ -892,6 +1006,348 @@ def start_placement(
         "next_stage": placement_stages(candidate)[0],
     }
     value["recommendations"] = None
+    _write(path, value)
+    return value
+
+
+_CONFIDENCE_UNIT_DEFINITIONS = (
+    (
+        "Arrays and Hashing",
+        ("arrays_hashing",),
+        "Use lookup, counting, sets, maps, and prefix techniques.",
+        ("Hash maps", "Sets", "Frequency counting", "Prefix sums"),
+    ),
+    (
+        "Two Pointers and Sliding Window",
+        ("two_pointers", "sliding_window"),
+        "Recognize boundary movement, invariants, and window state.",
+        ("Two pointers", "Sliding window", "Window invariants"),
+    ),
+    (
+        "Stacks and Binary Search",
+        ("stack", "binary_search"),
+        "Apply stack structure and monotonic search-space reduction.",
+        ("Stacks", "Monotonic stacks", "Binary search", "Boundary conditions"),
+    ),
+    (
+        "Linked Lists",
+        ("linked_lists",),
+        "Manipulate pointers safely and reason about cycles.",
+        ("Pointer updates", "Reversal", "Fast and slow pointers"),
+    ),
+    (
+        "Trees, Graphs, and Heaps",
+        ("trees", "graphs", "heaps"),
+        "Choose traversals and priority structures for connected problems.",
+        ("DFS", "BFS", "Tree recursion", "Graph traversal", "Priority queues"),
+    ),
+    (
+        "Backtracking",
+        ("backtracking",),
+        "Model choices, constraints, pruning, and state restoration.",
+        ("Decision trees", "Pruning", "State restoration"),
+    ),
+    (
+        "Dynamic Programming, Intervals, and Greedy",
+        ("dynamic_programming", "intervals_greedy"),
+        "Identify state transitions and justify locally optimal choices.",
+        ("Dynamic programming", "Memoization", "Intervals", "Greedy reasoning"),
+    ),
+)
+
+_ROLE_SPECIFIC_UNITS = {
+    "backend": (
+        "Backend Interview Foundations",
+        "Practice API, database, concurrency, and service-boundary tradeoffs.",
+        ("API design", "Data modeling", "Concurrency", "Service tradeoffs"),
+    ),
+    "frontend": (
+        "Frontend Interview Foundations",
+        "Practice browser, state, rendering, accessibility, and UI architecture tradeoffs.",
+        ("Browser runtime", "State management", "Rendering", "Accessibility"),
+    ),
+    "mobile": (
+        "Mobile Interview Foundations",
+        "Practice lifecycle, offline data, platform, and client architecture tradeoffs.",
+        ("App lifecycle", "Offline data", "Platform constraints", "Client architecture"),
+    ),
+    "data / ML": (
+        "Data and ML Interview Foundations",
+        "Practice SQL, data pipelines, model evaluation, and ML system tradeoffs.",
+        ("SQL", "Data pipelines", "Model evaluation", "ML systems"),
+    ),
+}
+
+
+def _confidence_emphasis(ratings: Mapping[str, int], patterns: tuple[str, ...]) -> str:
+    rating = min((ratings.get(pattern, 1) for pattern in patterns), default=1)
+    if rating <= 2:
+        return "Learn"
+    if rating == 3:
+        return "Practice"
+    if rating == 4:
+        return "Review"
+    return "Verify"
+
+
+def confidence_outline_items(survey: Mapping[str, object] | None) -> list[dict[str, object]]:
+    ratings_value = survey.get("ratings") if isinstance(survey, Mapping) else None
+    ratings = (
+        {str(key): int(value) for key, value in ratings_value.items()}
+        if isinstance(ratings_value, Mapping)
+        else {pattern_id: 1 for pattern_id in CONFIDENCE_PATTERN_IDS}
+    )
+    items: list[dict[str, object]] = [
+        {
+            "title": "Interview Problem Solving",
+            "emphasis": "Practice",
+            "slides": 2,
+            "difficulty": 3,
+            "outcome": "Clarify requirements, test examples, discuss edge cases, and communicate tradeoffs.",
+            "concepts": ("Clarifying requirements", "Examples", "Edge cases", "Communication"),
+        }
+    ]
+    for title, patterns, outcome, concepts in _CONFIDENCE_UNIT_DEFINITIONS:
+        emphasis = _confidence_emphasis(ratings, patterns)
+        slides = {"Learn": 5, "Practice": 4, "Review": 2, "Verify": 1}[emphasis]
+        difficulty = max(3, min(9, 3 + len(patterns) + (1 if emphasis == "Learn" else 0)))
+        items.append(
+            {
+                "title": title,
+                "emphasis": emphasis,
+                "slides": slides,
+                "difficulty": difficulty,
+                "outcome": outcome,
+                "concepts": concepts,
+            }
+        )
+    focus = str(survey.get("interview_focus") or "coding") if survey else "coding"
+    level = str(survey.get("target_level") or "entry") if survey else "entry"
+    if focus != "coding" or level == "senior":
+        items.append(
+            {
+                "title": "System Design Foundations",
+                "emphasis": "Learn" if focus == "system_design" else "Practice",
+                "slides": 4 if focus == "system_design" else 3,
+                "difficulty": 7,
+                "outcome": "Frame requirements, estimate scale, and explain component tradeoffs.",
+                "concepts": ("Requirements", "Scale estimation", "Interfaces", "Tradeoffs"),
+            }
+        )
+    role = str(survey.get("role_family") or "general SWE") if survey else "general SWE"
+    role_unit = _ROLE_SPECIFIC_UNITS.get(role)
+    if role_unit is not None:
+        title, outcome, concepts = role_unit
+        items.append(
+            {
+                "title": title,
+                "emphasis": "Practice",
+                "slides": 3,
+                "difficulty": 6 if level in {"mid", "senior"} else 4,
+                "outcome": outcome,
+                "concepts": concepts,
+            }
+        )
+    items.append(
+        {
+            "title": "Timed and Behavioral Interview Practice",
+            "emphasis": "Practice",
+            "slides": 4,
+            "difficulty": 7,
+            "outcome": "Combine pattern recognition, implementation, testing, communication, and concise stories.",
+            "concepts": ("Timed practice", "Testing", "Think-aloud communication", "Behavioral stories"),
+        }
+    )
+    return items
+
+
+def confidence_outline(survey: Mapping[str, object] | None) -> str:
+    role = str(survey.get("role_family") or "general SWE") if survey else "general SWE"
+    level = str(survey.get("target_level") or "entry") if survey else "entry"
+    focus = str(survey.get("interview_focus") or "coding") if survey else "coding"
+    lines = [
+        f"Scope: Technical interview preparation for a {level} {role} target.",
+        "Excludes: Production coding fluency claims based only on self-report.",
+        (
+            "Assumptions: Confidence ratings tune lesson depth but do not mark mastery. "
+            f"Interview focus is {focus.replace('_', ' ')}."
+        ),
+        "Units:",
+    ]
+    for index, item in enumerate(confidence_outline_items(survey), start=1):
+        lines.append(
+            f"{index}. {item['title']} ({item['slides']} slides, difficulty "
+            f"{item['difficulty']}/10) - {item['outcome']} Emphasis: {item['emphasis']}."
+        )
+        lines.append("Concepts: " + "; ".join(str(value) for value in item["concepts"]))
+    return "\n".join(lines)
+
+
+def start_confidence_placement(
+    path: Path, *, restart: bool = False, now: Clock = _utcnow
+) -> dict[str, object]:
+    value = refresh_staleness(path, now=now)
+    placement = value["placement"]
+    assert isinstance(placement, dict)
+    if (
+        placement.get("lifecycle_version") == PLACEMENT_V4
+        and placement.get("status") == "in_progress"
+        and not restart
+    ):
+        return value
+    timestamp = _timestamp(now)
+    value["placement"] = {
+        **_empty_placement(PLACEMENT_V4),
+        "status": "in_progress",
+        "attempt_id": f"interview_attempt_{uuid4().hex}",
+        "started_at": timestamp,
+        "updated_at": timestamp,
+        "profile_revision": value["profile_revision"],
+        "problem_id": CONFIDENCE_SURVEY_ID,
+        "next_stage": "confidence",
+    }
+    value["recommendations"] = None
+    _write(path, value)
+    return value
+
+
+def save_confidence_survey(
+    path: Path,
+    *,
+    role_family: str,
+    target_level: str,
+    interview_focus: str,
+    ratings: Mapping[str, int],
+    now: Clock = _utcnow,
+) -> dict[str, object]:
+    value = load_profile(path)
+    placement = value["placement"]
+    assert isinstance(placement, dict)
+    lifecycle, _rubric = _placement_versions(placement)
+    if (
+        lifecycle != PLACEMENT_V4
+        or placement.get("status") != "in_progress"
+        or placement.get("next_stage") not in {"confidence", "outline"}
+    ):
+        raise ValueError("confidence placement is not ready for answers")
+    survey: dict[str, object] = {
+        "role_family": role_family,
+        "target_level": target_level,
+        "interview_focus": interview_focus,
+        "ratings": dict(ratings),
+        "outline": None,
+    }
+    _validate_confidence_survey(survey)
+    survey["outline"] = confidence_outline(survey)
+    profile = value["profile"]
+    assert isinstance(profile, dict)
+    profile_changed = (
+        profile.get("role_family") != role_family
+        or profile.get("target_level") != target_level
+    )
+    profile["role_family"] = role_family
+    profile["target_level"] = target_level
+    if profile_changed:
+        revision = int(value["profile_revision"]) + 1
+        value["profile_revision"] = revision
+        placement["profile_revision"] = revision
+    timestamp = _timestamp(now)
+    value["updated_at"] = timestamp
+    placement["survey"] = survey
+    placement["next_stage"] = "outline"
+    placement["updated_at"] = timestamp
+    _write(path, value)
+    return value
+
+
+def _confidence_result(survey: Mapping[str, object] | None, *, skipped: bool) -> dict[str, object]:
+    ratings_value = survey.get("ratings") if isinstance(survey, Mapping) else None
+    ratings = ratings_value if isinstance(ratings_value, Mapping) else {}
+    lowest = min(
+        enumerate(CONFIDENCE_PATTERNS),
+        key=lambda indexed: (int(ratings.get(indexed[1][0], 1)), indexed[0]),
+    )[1]
+    uncertainty = [
+        "Confidence ratings guide curriculum emphasis and do not establish mastery.",
+        "Understanding will be verified through retrieval and implementation during the course.",
+    ]
+    if skipped:
+        uncertainty.insert(0, "Placement was skipped, so the baseline outline is intentionally broad.")
+    uncertain_gap = {
+        "status": "uncertain",
+        "evidence": [],
+        "note": "Self-report is planning context only and will be verified during practice.",
+    }
+    return {
+        "provisional": True,
+        "starting_level": "learner-selected-baseline" if skipped else "confidence-guided",
+        "mastery_update_applied": False,
+        "patterns_marked_known": [],
+        "gaps": {
+            "prerequisites": dict(uncertain_gap),
+            "coding_fluency": dict(uncertain_gap),
+            "reasoning": dict(uncertain_gap),
+            "interview_process": dict(uncertain_gap),
+        },
+        "uncertainty": uncertainty,
+        "passport": {
+            "starting_route": "Broad baseline" if skipped else "Confidence-guided pattern practice",
+            "first_activity": "Clarifying requirements",
+            "reasoning_signals": ["Learner confidence profile recorded" if not skipped else "Placement skipped"],
+            "practice_priority": f"Verify {lowest[1]} through guided practice.",
+            "uncertainty_to_verify": "Pattern fluency must be demonstrated in later coding practice.",
+        },
+    }
+
+
+def confirm_confidence_placement(
+    path: Path,
+    *,
+    outline: str,
+    now: Clock = _utcnow,
+) -> dict[str, object]:
+    value = load_profile(path)
+    placement = value["placement"]
+    assert isinstance(placement, dict)
+    lifecycle, _rubric = _placement_versions(placement)
+    survey = placement.get("survey")
+    if (
+        lifecycle != PLACEMENT_V4
+        or placement.get("status") != "in_progress"
+        or placement.get("next_stage") != "outline"
+        or not isinstance(survey, dict)
+    ):
+        raise ValueError("confidence placement outline is not ready")
+    normalized_outline = outline.strip()
+    survey["outline"] = normalized_outline
+    _validate_confidence_survey(survey)
+    timestamp = _timestamp(now)
+    placement["status"] = "provisional"
+    placement["next_stage"] = None
+    placement["updated_at"] = timestamp
+    placement["completed_at"] = timestamp
+    placement["result"] = _confidence_result(survey, skipped=False)
+    value["recommendations"] = _recommendations(value, current_date=now().date())
+    _write(path, value)
+    return value
+
+
+def skip_confidence_placement(path: Path, *, now: Clock = _utcnow) -> dict[str, object]:
+    value = load_profile(path)
+    timestamp = _timestamp(now)
+    placement = {
+        **_empty_placement(PLACEMENT_V4),
+        "status": "provisional",
+        "attempt_id": f"interview_attempt_{uuid4().hex}",
+        "started_at": timestamp,
+        "updated_at": timestamp,
+        "completed_at": timestamp,
+        "profile_revision": value["profile_revision"],
+        "problem_id": CONFIDENCE_SURVEY_ID,
+        "result": _confidence_result(None, skipped=True),
+    }
+    value["placement"] = placement
+    value["recommendations"] = _recommendations(value, current_date=now().date())
     _write(path, value)
     return value
 

@@ -6,9 +6,15 @@
     <a class="quiet-link" href="{{ url_for('dashboard') }}">Back to dashboard</a>
   </div>
 
-  <div class="starter-strip" aria-labelledby="starters-title">
-    <div class="panel-heading"><h2 id="starters-title">Starter courses</h2><span>Optional</span></div>
-    <div class="starter-grid">
+  <div class="starter-strip" aria-labelledby="starters-title" data-starter-strip>
+    <div class="panel-heading">
+      <h2 id="starters-title">Starter courses</h2>
+      <div class="starter-controls" aria-label="Browse starter courses">
+        <button type="button" data-starter-scroll="previous" aria-label="Previous starter courses">←</button>
+        <button type="button" data-starter-scroll="next" aria-label="More starter courses">→</button>
+      </div>
+    </div>
+    <div class="starter-grid" data-starter-track tabindex="0">
       {% for starter in course_templates %}
       <button class="starter-tile" type="button" data-template-choice
         data-template-id="{{ starter.id }}" data-title="{{ starter.title }}" data-goal="{{ starter.description }}">
@@ -22,7 +28,7 @@
     </div>
   </div>
 
-  <form class="work-panel form-stack create-form" data-json-form data-endpoint="/api/courses" novalidate>
+  <form class="work-panel form-stack create-form" data-json-form data-enter-flow data-endpoint="/api/courses" novalidate>
     <input type="hidden" name="submission_id" data-uuid>
     <input type="hidden" name="template_id">
     <div class="error-summary" role="alert" tabindex="-1" data-form-error hidden></div>

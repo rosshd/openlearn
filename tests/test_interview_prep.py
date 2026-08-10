@@ -136,6 +136,100 @@ class InterviewPrepTests(unittest.TestCase):
         self.assertEqual(started["placement"]["next_stage"], "clarification")
         self.assertEqual(started["placement"]["rubric_version"], interview_prep.PLACEMENT_V3)
 
+    def test_confidence_placement_builds_role_aware_outline_without_awarding_mastery(
+        self,
+    ) -> None:
+        self.create()
+        started = interview_prep.start_confidence_placement(self.path, now=lambda: NOW)
+        self.assertEqual(started["placement"]["next_stage"], "confidence")
+        self.assertIsNone(started["placement"]["activity_id"])
+
+        ratings = {
+            pattern_id: 3 for pattern_id in interview_prep.CONFIDENCE_PATTERN_IDS
+        }
+        ratings["sliding_window"] = 1
+        ratings["trees"] = 5
+        saved = interview_prep.save_confidence_survey(
+            self.path,
+            role_family="frontend",
+            target_level="senior",
+            interview_focus="balanced",
+            ratings=ratings,
+            now=lambda: NOW,
+        )
+
+        survey = saved["placement"]["survey"]
+        self.assertEqual(saved["placement"]["next_stage"], "outline")
+        self.assertIn("System Design Foundations", survey["outline"])
+        self.assertIn("Frontend Interview Foundations", survey["outline"])
+        self.assertIn("Two Pointers and Sliding Window", survey["outline"])
+        self.assertIn("Emphasis: Learn", survey["outline"])
+        self.assertEqual(saved["profile_revision"], 2)
+        self.assertEqual(saved["placement"]["profile_revision"], 2)
+
+        completed = interview_prep.confirm_confidence_placement(
+            self.path,
+            outline=survey["outline"],
+            now=lambda: NOW,
+        )
+        result = completed["placement"]["result"]
+        self.assertEqual(completed["placement"]["status"], "provisional")
+        self.assertFalse(result["mastery_update_applied"])
+        self.assertEqual(result["patterns_marked_known"], [])
+        self.assertIn("do not establish mastery", result["uncertainty"][0])
+        self.assertEqual(interview_prep.load_profile(self.path), completed)
+
+    def test_starting_active_confidence_placement_preserves_saved_survey(self) -> None:
+        self.create()
+        interview_prep.start_confidence_placement(self.path, now=lambda: NOW)
+        ratings = {
+            pattern_id: 3 for pattern_id in interview_prep.CONFIDENCE_PATTERN_IDS
+        }
+        saved = interview_prep.save_confidence_survey(
+            self.path,
+            role_family="backend",
+            target_level="entry",
+            interview_focus="coding",
+            ratings=ratings,
+            now=lambda: NOW,
+        )
+
+        restarted = interview_prep.start_confidence_placement(
+            self.path, now=lambda: NOW
+        )
+
+        self.assertEqual(restarted, saved)
+        self.assertEqual(restarted["placement"]["next_stage"], "outline")
+
+    def test_skipping_confidence_placement_uses_broad_unmastered_baseline(self) -> None:
+        self.create()
+
+        skipped = interview_prep.skip_confidence_placement(self.path, now=lambda: NOW)
+
+        result = skipped["placement"]["result"]
+        self.assertEqual(result["starting_level"], "learner-selected-baseline")
+        self.assertEqual(result["patterns_marked_known"], [])
+        self.assertFalse(result["mastery_update_applied"])
+        self.assertIsNone(skipped["placement"]["survey"])
+
+    def test_confidence_placement_requires_every_bounded_rating(self) -> None:
+        self.create()
+        interview_prep.start_confidence_placement(self.path, now=lambda: NOW)
+
+        with self.assertRaisesRegex(ValueError, "ratings"):
+            interview_prep.save_confidence_survey(
+                self.path,
+                role_family="backend",
+                target_level="entry",
+                interview_focus="coding",
+                ratings={"sliding_window": 5},
+                now=lambda: NOW,
+            )
+
+        placement = interview_prep.load_profile(self.path)["placement"]
+        self.assertEqual(placement["next_stage"], "confidence")
+        self.assertIsNone(placement["survey"])
+
     def test_v3_draft_is_durable_bounded_and_does_not_advance(self) -> None:
         self.create()
         started = interview_prep.start_placement(

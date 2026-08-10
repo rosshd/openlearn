@@ -82,7 +82,7 @@ The release must make those answers obvious without using a maintainer-owned Ope
 
 - R11. The Maker Bench and CLI must expose starter courses, new course creation, Quick Learn, resume, review, progress, provider settings, and data-management actions through discoverable navigation.
 - R12. Technical Interview Prep must ship as the baseline starter course with a structured algorithms and data-structures curriculum.
-- R13. Technical Interview Prep placement must be a short optional reasoning conversation with clear submission, skip, defer, resume, and completion actions.
+- R13. Technical Interview Prep placement must be a short optional 1-5 confidence survey across common interview patterns, followed by a role-aware suggested outline that the learner can accept, edit, or skip.
 - R14. Placement must not require an IDE or code execution, while later course activities may use the optional coding workbench.
 - R15. A learner must be able to create a broad custom course for a topic outside the bundled templates without losing the tutor's adaptive teaching behavior.
 - R16. Each teaching turn must present one readable learning objective, one primary learner action, and clear controls to answer, pause, or leave the session.
@@ -154,7 +154,7 @@ The release must make those answers obvious without using a maintainer-owned Ope
 - F3. **Start the baseline course**
   - **Trigger:** A1 selects Technical Interview Prep from starter courses.
   - **Actors:** A1
-  - **Steps:** Openlearn explains the course, offers the short placement, accepts completion or deferral, and starts the first appropriate lesson.
+  - **Steps:** Openlearn explains the course, offers the short confidence survey or a direct skip action, lets the learner accept or edit the suggested outline, and starts the first appropriate lesson.
   - **Outcome:** The learner reaches useful teaching without an IDE requirement or a long profile questionnaire.
   - **Covers:** R11, R12, R13, R14, R16.
 
@@ -214,13 +214,13 @@ flowchart TB
 
 - AE4. **Covers R11, R12, R13, R14.**
   - **Given:** A fresh learner selects Technical Interview Prep.
-  - **When:** The learner defers placement.
-  - **Then:** Openlearn starts an appropriate baseline lesson and makes placement available later without penalty.
+  - **When:** The learner skips placement.
+  - **Then:** Openlearn starts an appropriate broad baseline plan without claiming that any pattern has been mastered.
 
 - AE5. **Covers R13, R14, R20, R24.**
-  - **Given:** A learner starts placement and enters multiple lines of reasoning.
-  - **When:** The learner reviews and submits the section.
-  - **Then:** Openlearn clearly distinguishes saved draft state from submitted state and completes placement without opening an editor.
+  - **Given:** A learner starts placement and rates confidence across the interview patterns.
+  - **When:** The learner supplies a role, level, and interview focus.
+  - **Then:** Openlearn proposes a readable role-aware outline that gives more teaching time to lower-confidence patterns and treats every self-rating as unverified planning input.
 
 - AE6. **Covers R16, R17, R18, R20.**
   - **Given:** A learner leaves during a course and returns later.
@@ -296,6 +296,7 @@ The surrounding areas below are contextual candidates rather than a committed ro
 - Native desktop installers or application-store distribution beyond the supported Python package path.
 - Mobile applications.
 - A full interview IDE, autocomplete policy enforcement, video search, transcription, music notation, and other specialist teaching tools.
+- Community course-template search, publishing, ratings, likes, and dislikes.
 - Anonymous product analytics or remote crash reporting.
 
 **Outside this product's identity**
@@ -501,7 +502,7 @@ flowchart TB
   - A rejected credential clears the in-page secret, while a retryable network failure retains it only for the current page session.
   - A provider endpoint that responds successfully but does not expose the selected model remains not ready.
   - Covers AE3. A reachable local Ollama endpoint proceeds without a key.
-  - A learner can browse starters and complete or defer offline Technical Interview Prep placement before configuring a provider.
+  - A learner can browse starters and complete or skip offline Technical Interview Prep placement before configuring a provider.
   - Covers AE13. Provider settings show the active provider and model, allow replacement, and remove a saved key.
   - The recommended model is labeled inexpensive and replaceable without promising provider-controlled pricing.
 - **Verification:** Fresh CLI and Maker Bench journeys reach offline course entry, and model-backed teaching remains locked until valid provider readiness exists.
@@ -514,16 +515,16 @@ flowchart TB
 - **Files:** `src/openlearn/application.py`, `src/openlearn/courses.py`, `src/openlearn/tutor_service.py`, `src/openlearn/interview_prep.py`, `src/openlearn/web/app.py`, `src/openlearn/web/routes.py`, `src/openlearn/web/schemas.py`, `src/openlearn/web/services.py`, `src/openlearn/web/templates/dashboard.html`, `src/openlearn/web/templates/course_create.html`, `src/openlearn/web/templates/focus.html`, `src/openlearn/web/templates/history.html`, `src/openlearn/web/static/openlearn.js`, `tests/test_application.py`, `tests/test_courses.py`, `tests/test_interview_prep.py`, `tests/test_tutor_service.py`, `tests/test_web.py`, `tests/test_web_browser.py`.
 - **Approach:**
   1. Preserve template entry mode through the application and web projections.
-  2. Route Technical Interview Prep through placement start, draft review, submission, skip, defer, resume, and completion before model lesson initialization.
+  2. Route Technical Interview Prep through an offline confidence survey, role-aware outline generation, outline editing or acceptance, and direct skip before model lesson initialization.
   3. Add discoverable Quick Learn, due review, detailed progress, resume, settings, and data-management entry points.
   4. Extract shared operations where the current behavior exists only behind CLI handlers.
   5. Keep revision, idempotency, and conflict behavior consistent with existing course and tutor services.
 - **Execution note:** Start with end-to-end web journey tests for the baseline interview course and a generic custom course.
 - **Patterns to follow:** Course submission idempotency in `src/openlearn/courses.py`, tutor operation lifecycle in `src/openlearn/tutor_service.py`, and application DTO projection in `src/openlearn/application.py`.
 - **Test scenarios:**
-  - Covers AE4. Deferring Technical Interview Prep placement starts the baseline lesson without penalty after provider readiness.
-  - Covers AE5. Multi-line placement drafts remain distinct from submitted sections and never open an editor.
-  - Placement resumes after browser reload or process restart without duplicating submitted evidence.
+  - Covers AE4. Skipping Technical Interview Prep placement starts a broad baseline lesson without marking self-reported mastery after provider readiness.
+  - Covers AE5. The rapid survey produces a readable role-aware outline without opening an editor or asking a coding question.
+  - Placement survey and outline state resume after browser reload or process restart without duplicating events.
   - Quick Learn creates a separate course from a supported source and reaches teaching without outline approval.
   - A due-review count links to an actionable review flow and updates after grading.
   - Covers AE6. Resume shows compact continuity, current objective, progress, and one next action.
@@ -646,7 +647,7 @@ flowchart TB
 - **Test scenarios:**
   - Five fresh testers complete install, provider setup or Ollama setup, baseline course start, one teaching turn, resume, progress inspection, and data-location discovery.
   - At least one tester completes the generic custom-course path and one completes Quick Learn.
-  - At least one tester defers Technical Interview Prep placement and one completes it.
+  - At least one tester skips Technical Interview Prep placement and one completes and edits the rapid confidence outline.
   - A tester recovers from a rejected key, an unreachable provider, and an unavailable optional tool without losing course state.
   - No release evidence contains an API key, private topic content, imported source content, or raw model prompt.
   - The published package installs cleanly and reports the expected version after PyPI and GitHub release completion.

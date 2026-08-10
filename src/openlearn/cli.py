@@ -4029,6 +4029,11 @@ def sync_interview_placement(slug: str) -> dict[str, object]:
     profile_value = _load_interview_profile(slug)
     placement = profile_value["placement"]
     assert isinstance(placement, dict)
+    if placement.get("lifecycle_version") == interview_prep.PLACEMENT_V4:
+        if placement.get("status") == "provisional":
+            with interview_profile_write_lock(slug):
+                return interview_prep.refresh_staleness(interview_profile_path(slug))
+        return profile_value
     activity = _current_interview_activity(slug)
     if placement.get("status") == "in_progress" and (
         activity is None or placement.get("activity_id") != activity.get("activity_id")
@@ -5567,6 +5572,44 @@ def first_lesson_prompt(outline: str, *, first_activity: str | None = None) -> s
         "and is required for coverage tracking.\n\n"
         f"Accepted course plan:\n{outline}"
     )
+
+
+def enforce_first_lesson_response(topic: Topic, prompt: str, answer: str) -> str:
+    """Guarantee that course initialization teaches instead of emitting navigation."""
+    if not prompt.startswith("Start teaching unit 1 from this accepted course plan."):
+        return answer
+    focus = str(topic.metadata.get("current_focus") or "the first course concept")
+    concept = focus
+    valid_concepts: list[str] = []
+    units = topic.metadata.get("course_units")
+    if isinstance(units, list) and units and isinstance(units[0], dict):
+        valid_concepts = unit_concept_labels(units[0])
+        concepts = units[0].get("concepts")
+        if isinstance(concepts, list) and concepts and isinstance(concepts[0], dict):
+            concept = str(concepts[0].get("label") or focus)
+    declared = re.findall(r"<!--\s*covered:\s*(.*?)\s*-->", answer, flags=re.IGNORECASE)
+    valid_concept_keys = {label.casefold() for label in valid_concepts}
+    if re.search(r"(?m)^\s*\*\*Lesson:\*\*", answer) and (
+        not valid_concepts
+        or any(marker.casefold() in valid_concept_keys for marker in declared)
+    ):
+        return answer
+    if concept.casefold() == "clarifying requirements":
+        lesson = (
+            "Before writing code, restate the required output and ask only about ambiguities "
+            "that could change the solution. For example, confirm indexing or invalid-input "
+            "behavior when the prompt leaves it open; do not ask questions whose answers are "
+            "already stated. This prevents solving the wrong problem and makes your tradeoffs "
+            "easier to explain."
+        )
+    else:
+        lesson = (
+            f"Begin {focus} by building a clear mental model of {concept}. Identify what "
+            "information controls the result, then explain why the chosen method fits before "
+            "working through details. This gives later practice a reliable structure instead "
+            "of relying on pattern recognition alone."
+        )
+    return f"**Lesson:**\n{lesson}\n\n<!-- covered: {concept} -->"
 
 
 def parse_concept_labels(text: str) -> list[str]:
@@ -8724,6 +8767,7 @@ def ask_topic(
             system_prompt_sink=system_prompt_sink,
         )
     )
+    answer = enforce_first_lesson_response(topic, prompt, answer)
     answer_key = _LAST_RESPONSE_ANSWER_KEY
     coding_drill_action = _LAST_RESPONSE_CODING_DRILL_ACTION
     _LAST_RESPONSE_ANSWER_KEY = ""
@@ -8825,7 +8869,9 @@ def ask_topic(
             answer,
             model,
             is_review_session,
-            not needs_judgment and not is_navigation,
+            not needs_judgment
+            and not is_navigation
+            and not prompt.startswith("Start teaching unit 1 from this accepted course plan."),
             output_func,
         )
     else:
@@ -8836,7 +8882,9 @@ def ask_topic(
             answer,
             model,
             is_review_session,
-            not needs_judgment and not is_navigation,
+            not needs_judgment
+            and not is_navigation
+            and not prompt.startswith("Start teaching unit 1 from this accepted course plan."),
             deferred_updates.output_func,
         )
     return answer

@@ -1,76 +1,123 @@
 {% extends "base.html" %}
 {% block content %}
-<section class="create-shell" aria-labelledby="placement-title" data-placement-shell data-course-slug="{{ placement.slug }}" data-updated-at="{{ placement.updated_at or '' }}">
-  <div class="section-heading">
-    <div><p class="eyebrow">Optional placement</p><h1 id="placement-title">Find a useful starting point.</h1></div>
-    <a class="quiet-link" href="{{ url_for('dashboard') }}">Leave for now</a>
-  </div>
-  <article class="work-panel form-stack">
-    <p>This two-step reasoning check takes about 2 minutes. No editor or code execution is used, and skipping never counts against mastery.</p>
-    <p class="field-note" role="status" aria-live="polite" aria-atomic="true" tabindex="-1" data-placement-status>
-      {% if placement.status == 'deferred' %}Placement is deferred and remains recommended. You can resume whenever you want.{% elif placement.status == 'provisional' %}Placement complete. Your lesson can begin.{% elif placement.draft %}Draft saved locally. Review it before submitting.{% else %}Skip to use the baseline lesson, or defer to decide later.{% endif %}
-    </p>
-    <section class="placement-problem" aria-labelledby="placement-problem-title">
-      <p class="eyebrow">Problem</p>
-      <h2 id="placement-problem-title">{{ placement.problem.title }}</h2>
-      <p class="problem-prompt">{{ placement.problem.prompt }}</p>
-      <ul class="placement-examples" aria-label="Problem examples">
-        {% for example in placement.problem.examples %}
-        <li><code>{{ example.inputs.text|tojson }}, {{ example.inputs.width }}</code> <span aria-hidden="true">→</span><span class="sr-only">returns</span> <code>{{ example.expected }}</code></li>
-        {% endfor %}
-      </ul>
-    </section>
-    {% if placement.feedback %}
-    <aside class="placement-feedback" aria-labelledby="placement-feedback-title">
-      <p class="eyebrow">Tutor feedback</p>
-      <h2 id="placement-feedback-title">{{ placement.feedback.title }}</h2>
-      {% if placement.feedback.strengths %}
-      <ul>{% for strength in placement.feedback.strengths %}<li>{{ strength }}</li>{% endfor %}</ul>
-      {% endif %}
-      <p><strong>Improve next:</strong> {{ placement.feedback.improvement }}</p>
-    </aside>
-    {% endif %}
-    {% if placement.status in ['not_started', 'deferred'] %}
-    <div class="primary-flow">
-      <button class="primary-action" type="button" data-placement-action="start">Start placement</button>
-      <details class="secondary-controls">
-        <summary>Other placement options</summary>
-        <div>
-          <button type="button" data-placement-action="skip">Skip placement and use baseline</button>
-          <button type="button" data-placement-action="defer">Defer and decide later</button>
-        </div>
-      </details>
+<section class="create-shell placement-shell" aria-labelledby="placement-title" data-placement-shell data-course-slug="{{ placement.slug }}">
+  <div class="section-heading placement-heading">
+    <div>
+      <p class="eyebrow">Optional placement</p>
+      <h1 id="placement-title">Shape your interview plan.</h1>
     </div>
-    {% elif placement.status == 'in_progress' %}
-    <p class="eyebrow">Step {{ placement.step }} of {{ placement.step_count }}</p>
-    {% if placement.next_stage == 'clarification' %}
-    <h2>Ask one useful clarification question.</h2>
-    <p>Keep it to 1-2 sentences. Ask about an input, expected output, constraint, indexing detail, or edge case that could affect your solution.</p>
-    {% else %}
-    <section class="placement-contract" aria-labelledby="placement-contract-title">
-      <h3 id="placement-contract-title">Interviewer contract</h3>
-      <ul>{% for item in placement.contract %}<li>{{ item }}</li>{% endfor %}</ul>
-    </section>
-    <h2>Outline your solution before coding.</h2>
-    <p>Use 2-4 sentences. Name the approach and data structure, the key edge cases, and the expected time and space complexity.</p>
-    {% endif %}
-    <form class="form-stack" data-placement-draft-form data-placement-stage="{{ placement.next_stage }}">
-      <label for="placement-draft">Your answer</label>
-      <textarea id="placement-draft" rows="4" maxlength="2000">{% if placement.draft %}{{ placement.draft.lines|join('\n') }}{% endif %}</textarea>
-      <button class="primary-action" type="submit" data-placement-save-submit>{{ 'Continue to approach' if placement.next_stage == 'clarification' else 'Finish placement' }}</button>
-      <details class="secondary-controls">
-        <summary>Other placement options</summary>
-        <div>
-          <button type="button" data-placement-action="skip_stage" data-stage="{{ placement.next_stage }}">Skip this section</button>
-          <a href="{{ url_for('dashboard') }}">Pause and resume later</a>
-          <button type="button" data-placement-action="restart">Discard draft and restart placement</button>
+    <a class="placement-back" href="{{ url_for('dashboard') }}" aria-label="Back to dashboard">←</a>
+  </div>
+
+  <article class="work-panel form-stack placement-workbench">
+    <p class="field-note" role="status" aria-live="polite" aria-atomic="true" tabindex="-1" data-placement-status>
+      {% if placement.next_stage == 'outline' %}Your suggested outline is ready. Nothing here counts as mastery.{% elif placement.status == 'provisional' %}Your starting outline is saved locally.{% else %}Rate your confidence quickly, then review the suggested outline. This takes about a minute and works offline.{% endif %}
+    </p>
+
+    {% if placement.status in ['not_started', 'deferred'] or (placement.status == 'in_progress' and placement.lifecycle_version != 'confidence-placement-v4') %}
+    <div class="placement-intro">
+      <p>This is curriculum setup, not a test. Your ratings only decide where the course should spend more time. Later practice will verify what you can do.</p>
+      {% if placement.status == 'in_progress' %}<p class="quiet-copy">A placement draft from the older format is saved. Starting the quick placement replaces that draft.</p>{% endif %}
+    </div>
+    <div class="placement-entry-actions">
+      <button class="primary-action" type="button" data-placement-action="start">Start quick placement</button>
+      <button type="button" data-placement-action="skip">Skip placement</button>
+    </div>
+
+    {% elif placement.status == 'in_progress' and placement.next_stage == 'confidence' %}
+    <form class="form-stack confidence-form" data-confidence-form>
+      <section class="confidence-context" aria-labelledby="target-heading">
+        <div class="panel-heading"><h2 id="target-heading">What are you preparing for?</h2><span>Three quick choices</span></div>
+        <fieldset class="choice-fieldset">
+          <legend>Role</legend>
+          <div class="choice-chips">
+            {% for item in placement.roles %}
+            <label><input type="radio" name="role_family" value="{{ item.value }}" {% if loop.first %}checked{% endif %}><span>{{ item.label }}</span></label>
+            {% endfor %}
+          </div>
+        </fieldset>
+        <fieldset class="choice-fieldset">
+          <legend>Level</legend>
+          <div class="choice-chips">
+            {% for item in placement.levels %}
+            <label><input type="radio" name="target_level" value="{{ item.value }}" {% if item.value == 'entry' %}checked{% endif %}><span>{{ item.label }}</span></label>
+            {% endfor %}
+          </div>
+        </fieldset>
+        <fieldset class="choice-fieldset">
+          <legend>Interview mix</legend>
+          <div class="choice-chips">
+            {% for item in placement.focuses %}
+            <label><input type="radio" name="interview_focus" value="{{ item.value }}" {% if loop.first %}checked{% endif %}><span>{{ item.label }}</span></label>
+            {% endfor %}
+          </div>
+        </fieldset>
+      </section>
+
+      <section class="confidence-patterns" aria-labelledby="patterns-heading">
+        <div class="panel-heading">
+          <div><h2 id="patterns-heading">How confident are you with each pattern?</h2><p>Every row starts at 3. Change only what differs.</p></div>
+          <span>1-5</span>
         </div>
-      </details>
+        <div class="confidence-scale-key" aria-hidden="true">
+          {% for item in placement.scale %}<span><strong>{{ item.value }}</strong> {{ item.label }}</span>{% endfor %}
+        </div>
+        <div class="pattern-rating-list">
+          {% for pattern in placement.patterns %}
+          <fieldset class="pattern-rating">
+            <legend>{{ pattern.label }}</legend>
+            <div class="rating-buttons">
+              {% for item in placement.scale %}
+              <label title="{{ item.label }}">
+                <input type="radio" name="rating_{{ pattern.id }}" value="{{ item.value }}" {% if item.value == 3 %}checked{% endif %}>
+                <span><b>{{ item.value }}</b><small>{{ item.label }}</small></span>
+              </label>
+              {% endfor %}
+            </div>
+          </fieldset>
+          {% endfor %}
+        </div>
+      </section>
+      <div class="placement-entry-actions">
+        <button class="primary-action" type="submit">Build my outline</button>
+        <button type="button" data-placement-action="skip">Skip placement</button>
+      </div>
     </form>
+
+    {% elif placement.status == 'in_progress' and placement.next_stage == 'outline' %}
+    <section class="outline-review" aria-labelledby="outline-heading">
+      <div class="panel-heading">
+        <div><h2 id="outline-heading">Your suggested course outline</h2><p>Lower-confidence patterns get more teaching time. High-confidence patterns stay in the plan for quick verification.</p></div>
+        <span>{{ placement.outline_items|length }} units</span>
+      </div>
+      <ol class="outline-list">
+        {% for item in placement.outline_items %}
+        <li>
+          <div><strong>{{ item.title }}</strong><p>{{ item.outcome }}</p></div>
+          <span class="outline-emphasis {{ item.emphasis|lower }}">{{ item.emphasis }}</span>
+        </li>
+        {% endfor %}
+      </ol>
+      <details class="outline-workshop">
+        <summary>Workshop this outline</summary>
+        <p>Edit, reorder, or rename units directly. Keep at least four numbered units.</p>
+        <form class="form-stack" data-outline-form>
+          <label for="placement-outline">Course outline</label>
+          <textarea id="placement-outline" name="outline" rows="18" maxlength="12000">{{ placement.outline }}</textarea>
+          <button class="primary-action" type="submit">Use edited outline</button>
+        </form>
+      </details>
+      <div class="placement-entry-actions">
+        <button class="primary-action" type="button" data-confirm-outline>Use this outline</button>
+        <button type="button" data-placement-action="restart">Adjust my answers</button>
+      </div>
+    </section>
+
     {% else %}
-    <div class="primary-flow">
-      {% if placement.feedback %}<p><strong>Next:</strong> {{ placement.feedback.next_step }}</p>{% endif %}
-      <a class="primary-action" href="{{ url_for('focus', slug=placement.slug) }}">Continue to lesson</a>
+    <div class="placement-complete">
+      <h2>Your outline is ready.</h2>
+      <p>Confidence shaped the starting emphasis, but no pattern was marked mastered. The tutor will verify understanding during the course.</p>
+      <a class="primary-action" href="{{ url_for('focus', slug=placement.slug) }}">Begin course</a>
     </div>
     {% endif %}
   </article>

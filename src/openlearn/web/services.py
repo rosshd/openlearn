@@ -47,6 +47,13 @@ from .schemas import (
 COURSE_INITIALIZATION_PROMPT = "Start my first lesson."
 
 
+def _is_course_initialization_prompt(value: object) -> bool:
+    return isinstance(value, str) and (
+        value == COURSE_INITIALIZATION_PROMPT
+        or value.startswith("Start teaching unit 1 from this accepted course plan.")
+    )
+
+
 def _course_initialization_id(creation_submission_id: str) -> str:
     return str(
         uuid5(
@@ -68,6 +75,44 @@ def _initialization_id_for_slug(slug: str) -> str | None:
     if not isinstance(creation_submission_id, str):
         return None
     return _course_initialization_id(creation_submission_id)
+
+
+def _course_initialization_prompt(slug: str) -> str:
+    """Build a real first-lesson prompt when an accepted course plan exists."""
+    try:
+        topic = cli.read_topic(slug)
+    except cli.OpenLearnError:
+        return COURSE_INITIALIZATION_PROMPT
+    if topic.metadata.get("course_started") is not True:
+        return COURSE_INITIALIZATION_PROMPT
+    _context, log = cli.split_session_log(topic.body)
+    plans = [entry for entry in cli.session_entries(log) if entry.get("kind") == "course_plan"]
+    if not plans:
+        return COURSE_INITIALIZATION_PROMPT
+    first_activity: str | None = None
+    try:
+        profile = interview_prep.load_profile(cli.interview_profile_path(slug))
+        placement = profile.get("placement")
+        result = placement.get("result") if isinstance(placement, dict) else None
+        passport = result.get("passport") if isinstance(result, dict) else None
+        if isinstance(passport, dict) and passport.get("first_activity"):
+            first_activity = str(passport["first_activity"])
+    except (OSError, ValueError):
+        pass
+    return cli.first_lesson_prompt(str(plans[-1]["response"]), first_activity=first_activity)
+
+
+def _course_has_accepted_plan(slug: str, outline: str) -> bool:
+    """Return whether the topic already contains this accepted course plan."""
+    try:
+        topic = cli.read_topic(slug)
+    except cli.OpenLearnError:
+        return False
+    if topic.metadata.get("course_started") is not True:
+        return False
+    _context, log = cli.split_session_log(topic.body)
+    plans = [entry for entry in cli.session_entries(log) if entry.get("kind") == "course_plan"]
+    return bool(plans and str(plans[-1].get("response") or "").strip() == outline.strip())
 
 
 def _card(card: CourseCard) -> dict[str, object]:
@@ -340,6 +385,13 @@ class OpenLearnWebServices:
 
     @staticmethod
     def _provider_options() -> list[dict[str, object]]:
+        explanations = {
+            "openrouter": "One key for many models. Recommended for an inexpensive, flexible start.",
+            "openai": "Use an OpenAI API account and direct OpenAI billing.",
+            "anthropic-compatible": "Use a gateway that exposes an Anthropic-compatible model through an OpenAI-style endpoint.",
+            "ollama": "Run a model locally. No API key is needed.",
+            "custom": "Connect another OpenAI-compatible endpoint.",
+        }
         return [
             {
                 "id": preset.slug,
@@ -347,6 +399,9 @@ class OpenLearnWebServices:
                 "base_url": preset.base_url,
                 "default_model": preset.default_model,
                 "recommended": preset.slug == "openrouter",
+                "key_required": preset.key_required,
+                "setup_url": preset.setup_url or "",
+                "explanation": explanations[preset.slug],
             }
             for preset in providers.PROVIDER_PRESETS.values()
         ]
@@ -430,7 +485,7 @@ class OpenLearnWebServices:
         }
 
     def course_templates(self) -> list[dict[str, object]]:
-        return [
+        templates = [
             {
                 "id": template.template_id,
                 "title": template.name,
@@ -440,6 +495,18 @@ class OpenLearnWebServices:
             }
             for template in application.templates().templates
         ]
+        priority = {
+            "technical-interview-prep": 0,
+            "networking": 1,
+            "vim": 2,
+        }
+        return sorted(
+            templates,
+            key=lambda template: (
+                priority.get(str(template["id"]), len(priority)),
+                str(template["title"]).casefold(),
+            ),
+        )
 
     def course_entry_mode(self, template_id: str | None) -> str | None:
         if template_id is None:
@@ -630,7 +697,7 @@ class OpenLearnWebServices:
         try:
             operation = tutor_service.start_turn(
                 slug,
-                COURSE_INITIALIZATION_PROMPT,
+                _course_initialization_prompt(slug),
                 intent="question",
                 submission_id=initialization_id,
                 expected_revision=0,
@@ -657,6 +724,44 @@ class OpenLearnWebServices:
         placement = value["placement"]
         assert isinstance(placement, dict)
         draft = placement.get("draft")
+        lifecycle = placement.get("lifecycle_version")
+        if lifecycle == interview_prep.PLACEMENT_V4:
+            survey = placement.get("survey")
+            survey_value = survey if isinstance(survey, dict) else None
+            return {
+                "slug": slug,
+                "status": placement.get("status"),
+                "lifecycle_version": lifecycle,
+                "next_stage": placement.get("next_stage"),
+                "updated_at": placement.get("updated_at"),
+                "attempt_id": placement.get("attempt_id"),
+                "survey": survey_value,
+                "patterns": [
+                    {"id": pattern_id, "label": label}
+                    for pattern_id, label in interview_prep.CONFIDENCE_PATTERNS
+                ],
+                "scale": [
+                    {"value": value, "label": label}
+                    for value, label in interview_prep.CONFIDENCE_SCALE
+                ],
+                "roles": [
+                    {"value": value, "label": label}
+                    for value, label in interview_prep.CONFIDENCE_ROLES
+                ],
+                "levels": [
+                    {"value": value, "label": label}
+                    for value, label in interview_prep.CONFIDENCE_LEVELS
+                ],
+                "focuses": [
+                    {"value": value, "label": label}
+                    for value, label in interview_prep.CONFIDENCE_FOCUSES
+                ],
+                "outline": (
+                    str(survey_value.get("outline") or "") if survey_value else ""
+                ),
+                "outline_items": interview_prep.confidence_outline_items(survey_value),
+                "feedback": None,
+            }
         problem = interview_prep.PLACEMENT_PROBLEM
         examples = problem["examples"]
         assert isinstance(examples, list)
@@ -694,7 +799,15 @@ class OpenLearnWebServices:
         if snapshot is None:
             return {"slug": slug, "missing": True}
         try:
-            value = application.sync_interview_placement(slug)
+            saved = interview_prep.load_profile(cli.interview_profile_path(slug))
+            saved_placement = saved.get("placement")
+            if (
+                isinstance(saved_placement, dict)
+                and saved_placement.get("lifecycle_version") == interview_prep.PLACEMENT_V4
+            ):
+                value = saved
+            else:
+                value = application.sync_interview_placement(slug)
         except cli.OpenLearnError:
             value = interview_prep.load_profile(cli.interview_profile_path(slug))
         return {"title": snapshot.card.title, **self._placement_view(slug, value)}
@@ -707,22 +820,84 @@ class OpenLearnWebServices:
         placement = value["placement"]
         assert isinstance(placement, dict)
         if request.action == "start":
-            value = self._start_reasoning_placement(slug, path)
-        elif request.action == "restart":
-            if placement.get("status") == "in_progress":
+            if (
+                placement.get("status") == "in_progress"
+                and placement.get("lifecycle_version") != interview_prep.PLACEMENT_V4
+            ):
                 application.discard_interview_placement(slug)
-            value = self._start_reasoning_placement(slug, path)
-        elif request.action == "defer":
-            if placement.get("status") in {"in_progress", "deferred"}:
-                return self._placement_view(slug, value)
-            queued: list[tuple[str, dict[str, object]]] = []
             with cli.interview_profile_write_lock(slug):
-                value = interview_prep.defer_placement(
-                    path, lambda event_type, data: queued.append((event_type, data))
-                )
-            for event_type, data in queued:
-                cli.log_event(slug, event_type, data)
+                value = interview_prep.start_confidence_placement(path)
+            cli.log_event(slug, "interview_confidence_placement_started", {})
+        elif request.action == "restart":
+            if (
+                placement.get("status") == "in_progress"
+                and placement.get("lifecycle_version") != interview_prep.PLACEMENT_V4
+            ):
+                application.discard_interview_placement(slug)
+            with cli.interview_profile_write_lock(slug):
+                value = interview_prep.start_confidence_placement(path, restart=True)
+            cli.log_event(slug, "interview_confidence_placement_restarted", {})
+        elif request.action == "save_confidence":
+            try:
+                with cli.interview_profile_write_lock(slug):
+                    value = interview_prep.save_confidence_survey(
+                        path,
+                        role_family=request.role_family,
+                        target_level=request.target_level,
+                        interview_focus=request.interview_focus,
+                        ratings=request.ratings,
+                    )
+            except ValueError as error:
+                return {"invalid": True, "error": str(error)}
+            cli.log_event(
+                slug,
+                "interview_confidence_profile_saved",
+                {
+                    "role_family": request.role_family,
+                    "target_level": request.target_level,
+                    "interview_focus": request.interview_focus,
+                },
+            )
+        elif request.action == "confirm_outline":
+            outline = request.outline.strip()
+            if len(cli.parse_course_units(outline)) < 4:
+                return {
+                    "invalid": True,
+                    "error": "Keep at least four numbered units in the course outline.",
+                }
+            try:
+                with cli.interview_profile_write_lock(slug):
+                    locked = interview_prep.load_profile(path)
+                    locked_placement = locked["placement"]
+                    assert isinstance(locked_placement, dict)
+                    locked_survey = locked_placement.get("survey")
+                    if (
+                        locked_placement.get("lifecycle_version") == interview_prep.PLACEMENT_V4
+                        and locked_placement.get("status") == "provisional"
+                        and isinstance(locked_survey, dict)
+                        and str(locked_survey.get("outline") or "").strip() == outline
+                    ):
+                        value = locked
+                    else:
+                        value = interview_prep.confirm_confidence_placement(
+                            path,
+                            outline=outline,
+                        )
+                if not _course_has_accepted_plan(slug, outline):
+                    cli.save_course_started(
+                        cli.read_topic(slug),
+                        "Learner-confirmed confidence placement outline.",
+                        outline,
+                    )
+            except (ValueError, cli.OpenLearnError) as error:
+                return {"invalid": True, "error": str(error)}
+            cli.log_event(slug, "interview_confidence_outline_confirmed", {})
         else:
+            if placement.get("lifecycle_version") != interview_prep.PLACEMENT_V3:
+                return {
+                    "invalid": True,
+                    "error": "This placement uses the quick confidence format.",
+                }
             stage = request.stage
             if request.action == "submit" and isinstance(stage, str):
                 try:
@@ -774,23 +949,39 @@ class OpenLearnWebServices:
                 value = application.sync_interview_placement(slug)
         return self._placement_view(slug, value)
 
-    @staticmethod
-    def _start_reasoning_placement(slug: str, path: Path) -> dict[str, object]:
-        del path
-        return application.start_interview_placement(slug)
-
     def skip_placement(self, slug: str) -> dict[str, object]:
-        current = self.placement(slug)
-        if current.get("status") == "provisional":
-            return current
-        if current.get("status") != "in_progress":
-            current = self.update_placement(slug, PlacementRequest(action="start"))
-        while current.get("status") == "in_progress":
-            stage = str(current["next_stage"])
-            current = self.update_placement(
-                slug, PlacementRequest(action="skip_stage", stage=stage)
+        if self._interview_course(slug) is None:
+            return {"slug": slug, "missing": True}
+        path = cli.interview_profile_path(slug)
+        current = interview_prep.load_profile(path)
+        placement = current["placement"]
+        assert isinstance(placement, dict)
+        outline = interview_prep.confidence_outline(None)
+        result = placement.get("result")
+        already_skipped = (
+            placement.get("lifecycle_version") == interview_prep.PLACEMENT_V4
+            and placement.get("status") == "provisional"
+            and isinstance(result, dict)
+            and result.get("starting_level") == "learner-selected-baseline"
+        )
+        if already_skipped:
+            value = current
+        else:
+            if (
+                placement.get("status") == "in_progress"
+                and placement.get("lifecycle_version") != interview_prep.PLACEMENT_V4
+            ):
+                application.discard_interview_placement(slug)
+            with cli.interview_profile_write_lock(slug):
+                value = interview_prep.skip_confidence_placement(path)
+        if not _course_has_accepted_plan(slug, outline):
+            cli.save_course_started(
+                cli.read_topic(slug),
+                "Learner skipped placement and accepted the broad baseline outline.",
+                outline,
             )
-        return current
+        cli.log_event(slug, "interview_confidence_placement_skipped", {})
+        return self._placement_view(slug, value)
 
     def progress(self) -> dict[str, object]:
         return {
@@ -940,7 +1131,7 @@ class OpenLearnWebServices:
         try:
             result = tutor_service.start_turn(
                 slug,
-                COURSE_INITIALIZATION_PROMPT,
+                _course_initialization_prompt(slug),
                 intent="question",
                 submission_id=operation_id,
                 expected_revision=0,
@@ -973,6 +1164,11 @@ class OpenLearnWebServices:
         latest = entries[-1] if entries else None
         answer = latest["response"] if latest else "Your course is ready. Ask the tutor to begin."
         response_kind, blocks = _present_response(answer)
+        move_title = (
+            snapshot.card.current_focus or "Current lesson"
+            if response_kind == "Lesson"
+            else "Your next learning move"
+        )
         pending = topic.metadata.get("pending_question")
         prompt = ""
         if isinstance(pending, dict) and isinstance(pending.get("question"), str):
@@ -994,7 +1190,7 @@ class OpenLearnWebServices:
                         else "retryable_error"
                     ),
                 }
-        if saved_response == COURSE_INITIALIZATION_PROMPT:
+        if _is_course_initialization_prompt(saved_response):
             saved_response = ""
         operation: dict[str, object] | None = None
         internal = state.get("_openlearn_internal")
@@ -1024,7 +1220,7 @@ class OpenLearnWebServices:
             "saved_state": "Saved locally",
             "move": {
                 "kind": response_kind,
-                "title": "Your next learning move",
+                "title": move_title,
                 "blocks": blocks,
                 "prompt": prompt,
                 "position": f"Step {max(1, revision)}",
@@ -1093,7 +1289,7 @@ class OpenLearnWebServices:
         for entry in selected:
             kind, blocks = _present_response(str(entry["response"]))
             prompt = str(entry["prompt"])
-            title = "First lesson" if prompt == COURSE_INITIALIZATION_PROMPT else prompt[:100]
+            title = "First lesson" if _is_course_initialization_prompt(prompt) else prompt[:100]
             items.append(
                 {
                     "kind": kind,

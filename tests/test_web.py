@@ -43,6 +43,12 @@ def csrf(client: TestClient, path: str = "/") -> str:
     return response.cookies["openlearn_csrf"]
 
 
+def confidence_ratings(**overrides: int) -> dict[str, int]:
+    ratings = {pattern_id: 3 for pattern_id in interview_prep.CONFIDENCE_PATTERN_IDS}
+    ratings.update(overrides)
+    return ratings
+
+
 def test_placement_request_preserves_the_durable_draft_limit() -> None:
     text = "x" * (interview_prep.DRAFT_MAX_LENGTH - 1)
 
@@ -75,8 +81,8 @@ def create_tool_course() -> str:
 def test_default_web_app_runs_setup_dashboard_course_and_tutor_flow(
     client: TestClient,
 ) -> None:
-    assert "Pick up where you left off" in client.get("/").text
-    assert "Pick up where you left off" in client.get("/dashboard").text
+    assert "Make a useful starting point" in client.get("/").text
+    assert "Make a useful starting point" in client.get("/dashboard").text
 
     new_course = client.get("/courses/new")
     assert "Technical Interview Prep" in new_course.text
@@ -105,9 +111,11 @@ def test_default_web_app_runs_setup_dashboard_course_and_tutor_flow(
     assert initialized.headers["location"].endswith(f"/courses/{slug}")
     focus = client.get(f"/courses/{slug}")
     assert focus.status_code == 200
-    assert "Your next learning move" in focus.text
+    assert "Lesson" in focus.text
+    assert "Press Enter to continue" not in focus.text
     assert "placement test" not in focus.text.lower()
     assert "**Lesson:**" not in focus.text
+    assert "Pick up where you left off" in client.get("/dashboard").text
 
     revision = int(focus.text.split('data-revision="', 1)[1].split('"', 1)[0])
     turn = client.post(
@@ -131,7 +139,7 @@ def test_default_web_app_runs_setup_dashboard_course_and_tutor_flow(
     assert any(item["title"] == "First lesson" for item in history.json()["items"])
 
 
-def test_interview_course_placement_draft_resumes_and_finishes_before_lesson(
+def test_interview_course_confidence_placement_resumes_and_builds_first_lesson(
     client: TestClient,
 ) -> None:
     token = csrf(client, "/courses/new")
@@ -154,7 +162,10 @@ def test_interview_course_placement_draft_resumes_and_finishes_before_lesson(
     assert tutor_service.course_revision(body["slug"]) == 0
 
     placement = client.get(body["placement_url"])
-    assert "No editor or code execution" in placement.text
+    assert "Start quick placement" in placement.text
+    assert "Skip placement" in placement.text
+    assert "Defer and decide later" not in placement.text
+    assert "first_unique_window" not in placement.text
     token = placement.cookies.get("openlearn_csrf", token)
     started = client.post(
         f"/api/courses/{body['slug']}/placement",
@@ -162,101 +173,124 @@ def test_interview_course_placement_draft_resumes_and_finishes_before_lesson(
         json={"action": "start"},
     )
     assert started.status_code == 200
-    assert started.json()["next_stage"] == "clarification"
+    assert started.json()["next_stage"] == "confidence"
+    assert started.json()["lifecycle_version"] == interview_prep.PLACEMENT_V4
     started_page = client.get(body["placement_url"])
-    assert "first_unique_window(text, width)" in started_page.text
-    assert "Step 1 of 2" in started_page.text
-    assert "Keep it to 1-2 sentences" in started_page.text
-    assert 'rows="4"' in started_page.text
-    assert 'rows="10"' not in started_page.text
+    assert "How confident are you with each pattern?" in started_page.text
+    assert "Sliding window" in started_page.text
+    assert "Coding + system design" in started_page.text
+    assert "Every row starts at 3" in started_page.text
 
     saved = client.post(
         f"/api/courses/{body['slug']}/placement",
         headers={"x-csrf-token": token},
         json={
-            "action": "save_draft",
-            "stage": "clarification",
-            "text": "What are the input constraints?\nShould I discuss edge cases?",
-            "expected_updated_at": started.json()["updated_at"],
+            "action": "save_confidence",
+            "role_family": "backend",
+            "target_level": "senior",
+            "interview_focus": "balanced",
+            "ratings": confidence_ratings(sliding_window=1, arrays_hashing=4, trees=5),
         },
     )
     assert saved.status_code == 200
+    assert saved.json()["next_stage"] == "outline"
     restarted_client = TestClient(create_app(testing=True))
     resumed = restarted_client.get(body["placement_url"])
     restarted_token = resumed.cookies["openlearn_csrf"]
-    assert "What are the input constraints?" in resumed.text
-    assert "Should I discuss edge cases?" in resumed.text
-    assert "Draft saved locally" in resumed.text
-    assert 'href="http://testserver/dashboard">Pause and resume later</a>' in resumed.text
+    assert "Your suggested course outline" in resumed.text
+    assert "System Design Foundations" in resumed.text
+    assert "Two Pointers and Sliding Window" in resumed.text
+    assert "Workshop this outline" in resumed.text
+    assert "Tutor feedback" not in resumed.text
+    assert 'aria-label="Back to dashboard"' in resumed.text
     assert restarted_client.get("/dashboard").status_code == 200
-    resumed_again = restarted_client.get(body["placement_url"])
-    assert "What are the input constraints?" in resumed_again.text
-
-    submitted = restarted_client.post(
-        f"/api/courses/{body['slug']}/placement",
-        headers={"x-csrf-token": restarted_token},
-        json={
-            "action": "submit",
-            "stage": "clarification",
-            "submission_id": str(uuid4()),
-        },
-    )
-    assert submitted.status_code == 200
-    assert submitted.json()["next_stage"] == "reasoning"
-    assert submitted.json()["draft"] is None
-    assert submitted.json()["feedback"]["title"] == "Good clarification habit"
-    reasoning_page = restarted_client.get(body["placement_url"])
-    assert "Interviewer contract" in reasoning_page.text
-    assert "Step 2 of 2" in reasoning_page.text
-    assert "Good clarification habit" in reasoning_page.text
-    reasoning_saved = restarted_client.post(
-        f"/api/courses/{body['slug']}/placement",
-        headers={"x-csrf-token": restarted_token},
-        json={
-            "action": "save_draft",
-            "stage": "reasoning",
-            "text": (
-                "Use a sliding window with a set and test invalid widths and duplicates. "
-                "The approach takes O(n) time."
-            ),
-            "expected_updated_at": submitted.json()["updated_at"],
-        },
-    )
-    assert reasoning_saved.status_code == 200
+    outline = saved.json()["outline"]
     finished = restarted_client.post(
         f"/api/courses/{body['slug']}/placement",
         headers={"x-csrf-token": restarted_token},
         json={
-            "action": "submit",
-            "stage": "reasoning",
-            "submission_id": str(uuid4()),
+            "action": "confirm_outline",
+            "outline": outline,
         },
     )
-    assert finished.status_code == 200
+    assert finished.status_code == 202
     assert finished.json()["status"] == "provisional"
-    assert "initialization_url" not in finished.json()
-    completed_page = restarted_client.get(body["placement_url"])
-    assert "Your reasoning snapshot" in completed_page.text
-    assert "Named an approach and data structure" in completed_page.text
-    assert "Improve next:" in completed_page.text
-    assert "Continue to lesson" in completed_page.text
-
-    continued = restarted_client.get(
-        f"/courses/{body['slug']}", follow_redirects=False
-    )
-    assert continued.status_code == 303
-    assert "/initializing/" in continued.headers["location"]
-    operation_id = continued.headers["location"].rsplit("/", 1)[-1]
-    wait_for_operation(
-        restarted_client,
-        body["slug"],
-        operation_id,
-        "committed",
-    )
+    assert "/initializing/" in finished.json()["initialization_url"]
+    wait_for_operation(restarted_client, body["slug"], finished.json()["operation_id"])
+    lesson = restarted_client.get(f"/courses/{body['slug']}")
+    assert lesson.status_code == 200
+    assert "Press Enter to continue" not in lesson.text
+    assert "Before writing code" in lesson.text
+    assert "Your next learning move" not in lesson.text
 
     profile = interview_prep.load_profile(cli.interview_profile_path(body["slug"]))
-    assert profile["placement"]["evidence_refs"]
-    assert profile["placement"]["draft"] is None
+    assert profile["placement"]["survey"]["ratings"]["sliding_window"] == 1
+    assert profile["placement"]["result"]["mastery_update_applied"] is False
+    assert profile["placement"]["result"]["patterns_marked_known"] == []
+    assert cli.read_topic(body["slug"]).metadata["course_started"] is True
+    history = restarted_client.get(
+        f"/courses/{body['slug']}/history", headers={"accept": "application/json"}
+    )
+    assert history.json()["items"][0]["title"] == "First lesson"
+
+
+def test_confirmed_confidence_outline_retries_course_plan_save(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    token = csrf(client, "/courses/new")
+    created = client.post(
+        "/api/courses",
+        headers={"x-csrf-token": token},
+        json={
+            "title": "Retryable Interview Prep",
+            "goal": "Prepare for interviews.",
+            "experience": "",
+            "template_id": "technical-interview-prep",
+            "submission_id": str(uuid4()),
+        },
+    ).json()
+    slug = created["slug"]
+    client.post(
+        f"/api/courses/{slug}/placement",
+        headers={"x-csrf-token": token},
+        json={"action": "start"},
+    )
+    saved = client.post(
+        f"/api/courses/{slug}/placement",
+        headers={"x-csrf-token": token},
+        json={
+            "action": "save_confidence",
+            "role_family": "general SWE",
+            "target_level": "entry",
+            "interview_focus": "coding",
+            "ratings": confidence_ratings(),
+        },
+    ).json()
+    real_save = cli.save_course_started
+
+    def fail_course_save(*_args: object, **_kwargs: object) -> None:
+        raise cli.OpenLearnError("simulated course save interruption")
+
+    monkeypatch.setattr(cli, "save_course_started", fail_course_save)
+    first = client.post(
+        f"/api/courses/{slug}/placement",
+        headers={"x-csrf-token": token},
+        json={"action": "confirm_outline", "outline": saved["outline"]},
+    )
+    assert first.status_code == 422
+    assert interview_prep.load_profile(cli.interview_profile_path(slug))["placement"][
+        "status"
+    ] == "provisional"
+
+    monkeypatch.setattr(cli, "save_course_started", real_save)
+    retried = client.post(
+        f"/api/courses/{slug}/placement",
+        headers={"x-csrf-token": token},
+        json={"action": "confirm_outline", "outline": saved["outline"]},
+    )
+
+    assert retried.status_code == 202
+    assert cli.read_topic(slug).metadata["course_started"] is True
 
 
 def test_dashboard_groups_discoverable_learning_practice_and_settings_paths(
@@ -271,6 +305,17 @@ def test_dashboard_groups_discoverable_learning_practice_and_settings_paths(
     assert "/progress" in response.text
     assert "/setup" in response.text
     assert "/data" in response.text
+
+
+def test_starter_courses_prioritize_variety_and_use_bounded_horizontal_browsing(
+    client: TestClient,
+) -> None:
+    page = client.get("/courses/new")
+
+    assert page.text.index("Technical Interview Prep") < page.text.index("Computer Networking")
+    assert page.text.index("Computer Networking") < page.text.index(">Vim<")
+    assert 'data-starter-track tabindex="0"' in page.text
+    assert 'aria-label="More starter courses"' in page.text
 
 
 def test_data_page_is_read_only_and_data_mutations_require_csrf(client: TestClient) -> None:
@@ -352,7 +397,7 @@ def test_data_controls_backup_refuse_reset_and_match_cli_summary(
     assert str(tmp_path / "missing.olbackup") not in missing.text
 
 
-def test_interview_placement_defer_and_restart_remain_resumable(client: TestClient) -> None:
+def test_interview_placement_restart_discards_confidence_answers(client: TestClient) -> None:
     token = csrf(client, "/courses/new")
     created = client.post(
         "/api/courses",
@@ -367,21 +412,7 @@ def test_interview_placement_defer_and_restart_remain_resumable(client: TestClie
     ).json()
     slug = created["slug"]
 
-    deferred = client.post(
-        f"/api/courses/{slug}/placement",
-        headers={"x-csrf-token": token},
-        json={"action": "defer"},
-    )
-    assert deferred.status_code == 200
-    assert deferred.json()["status"] == "deferred"
-    assert "operation_id" not in deferred.json()
-    continued = client.get(f"/courses/{slug}", follow_redirects=False)
-    assert continued.status_code == 303
-    assert "/initializing/" in continued.headers["location"]
-    operation_id = continued.headers["location"].rsplit("/", 1)[-1]
-    assert wait_for_operation(client, slug, operation_id)["state"] == "committed"
-
-    started = client.post(
+    client.post(
         f"/api/courses/{slug}/placement",
         headers={"x-csrf-token": token},
         json={"action": "start"},
@@ -390,10 +421,11 @@ def test_interview_placement_defer_and_restart_remain_resumable(client: TestClie
         f"/api/courses/{slug}/placement",
         headers={"x-csrf-token": token},
         json={
-            "action": "save_draft",
-            "stage": started["next_stage"],
-            "text": "A draft to discard",
-            "expected_updated_at": started["updated_at"],
+            "action": "save_confidence",
+            "role_family": "frontend",
+            "target_level": "entry",
+            "interview_focus": "coding",
+            "ratings": confidence_ratings(graphs=1),
         },
     ).json()
     restarted = client.post(
@@ -403,8 +435,15 @@ def test_interview_placement_defer_and_restart_remain_resumable(client: TestClie
     )
     assert restarted.status_code == 200
     assert restarted.json()["attempt_id"] != saved["attempt_id"]
-    assert restarted.json()["draft"] is None
-    assert restarted.json()["next_stage"] == "clarification"
+    assert restarted.json()["survey"] is None
+    assert restarted.json()["next_stage"] == "confidence"
+
+    rejected_defer = client.post(
+        f"/api/courses/{slug}/placement",
+        headers={"x-csrf-token": token},
+        json={"action": "defer"},
+    )
+    assert rejected_defer.status_code == 400
 
 
 def test_non_interview_course_rejects_placement_mutations(client: TestClient) -> None:
@@ -451,19 +490,9 @@ def test_completed_placement_setup_return_starts_pending_first_lesson(
             "submission_id": str(uuid4()),
         },
     ).json()
-    deferred = offline.post(
-        f"/api/courses/{created['slug']}/placement",
-        headers={"x-csrf-token": token},
-        json={"action": "defer"},
-    )
-    assert deferred.status_code == 200
-    setup_required = offline.get(
-        f"/courses/{created['slug']}", follow_redirects=False
-    )
-    assert setup_required.status_code == 303
-    assert setup_required.headers["location"].endswith(
-        f"/setup?next=%2Fcourses%2F{created['slug']}"
-    )
+    placement = offline.get(f"/courses/{created['slug']}/placement")
+    assert placement.status_code == 200
+    assert "Start quick placement" in placement.text
     skipped = offline.post(
         f"/api/courses/{created['slug']}/placement",
         headers={"x-csrf-token": token},
@@ -559,7 +588,7 @@ def test_mock_setup_persists_secret_without_echoing_it(client: TestClient) -> No
     assert cli.configured_openai_api_key() == "test-secret-key"
 
 
-def test_saved_provider_is_validated_before_interview_placement(
+def test_saved_provider_is_not_validated_until_interview_teaching_begins(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("OPENLEARN_HOME", str(tmp_path))
@@ -602,11 +631,11 @@ def test_saved_provider_is_validated_before_interview_placement(
 
     assert created.status_code == 200
     assert "setup_url" not in created.json()
-    assert config.provider_status().verified is True
+    assert config.provider_status().verified is False
     assert saved_key_client.get(created.json()["placement_url"]).status_code == 200
 
 
-def test_interview_setup_happens_before_placement_when_saved_provider_is_invalid(
+def test_invalid_saved_provider_allows_offline_placement_then_routes_to_setup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("OPENLEARN_HOME", str(tmp_path))
@@ -641,12 +670,36 @@ def test_interview_setup_happens_before_placement_when_saved_provider_is_invalid
     )
 
     body = created.json()
-    expected_suffix = f"/setup?next=%2Fcourses%2F{body['slug']}%2Fplacement"
-    assert body["setup_url"].endswith(expected_suffix)
-    blocked = invalid_key_client.get(body["placement_url"], follow_redirects=False)
-    assert blocked.status_code == 303
-    assert blocked.headers["location"].endswith(expected_suffix)
-    setup = invalid_key_client.get(blocked.headers["location"])
+    assert "setup_url" not in body
+    placement = invalid_key_client.get(body["placement_url"], follow_redirects=False)
+    assert placement.status_code == 200
+    started = invalid_key_client.post(
+        f"/api/courses/{body['slug']}/placement",
+        headers={"x-csrf-token": token},
+        json={"action": "start"},
+    )
+    assert started.status_code == 200
+    saved = invalid_key_client.post(
+        f"/api/courses/{body['slug']}/placement",
+        headers={"x-csrf-token": token},
+        json={
+            "action": "save_confidence",
+            "role_family": "general SWE",
+            "target_level": "entry",
+            "interview_focus": "coding",
+            "ratings": confidence_ratings(),
+        },
+    )
+    assert saved.status_code == 200
+    confirmed = invalid_key_client.post(
+        f"/api/courses/{body['slug']}/placement",
+        headers={"x-csrf-token": token},
+        json={"action": "confirm_outline", "outline": saved.json()["outline"]},
+    )
+    expected_suffix = f"/setup?next=%2Fcourses%2F{body['slug']}"
+    assert confirmed.status_code == 200
+    assert confirmed.json()["setup_url"].endswith(expected_suffix)
+    setup = invalid_key_client.get(confirmed.json()["setup_url"])
     assert "API key (already saved)" in setup.text
     assert "Leave this blank to test the saved key" in setup.text
 
@@ -939,9 +992,9 @@ def test_fresh_setup_defaults_to_consistent_openrouter_preset(
 
     assert status["selected_provider"] == "openrouter"
     assert status["form_base_url"] == "https://openrouter.ai/api/v1"
-    assert status["form_model"] == "google/gemini-2.5-flash-lite"
+    assert status["form_model"] == "google/gemini-3.1-flash-lite"
     assert '<option value="openrouter"' in setup.text
-    assert 'value="google/gemini-2.5-flash-lite"' in setup.text
+    assert 'value="google/gemini-3.1-flash-lite"' in setup.text
     assert 'value="https://openrouter.ai/api/v1"' in setup.text
 
 

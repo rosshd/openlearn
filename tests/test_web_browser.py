@@ -107,7 +107,7 @@ def test_real_browser_course_polling_theme_conflict_and_keyboard_submit(
                 base_url_field = first.locator("#base-url")
                 expected_presets = {
                     "openrouter": (
-                        "google/gemini-2.5-flash-lite",
+                        "google/gemini-3.1-flash-lite",
                         "https://openrouter.ai/api/v1",
                     ),
                     "openai": ("gpt-4.1-mini", "https://api.openai.com/v1"),
@@ -136,43 +136,42 @@ def test_real_browser_course_polling_theme_conflict_and_keyboard_submit(
                 _assert_no_page_overflow(first)
 
                 first.locator('[data-template-id="technical-interview-prep"]').click()
+                first.locator("#course-title").focus()
+                first.locator("#course-title").press("Enter")
+                assert first.locator("#goal").evaluate("field => field === document.activeElement")
+                first.locator("#goal").press("Enter")
+                assert first.locator("#experience").evaluate("field => field === document.activeElement")
                 first.locator("#experience").fill(
                     "I know basic Python and want interview practice."
                 )
-                first.get_by_role("button", name="Build the first lesson").click()
+                first.locator("#experience").press("Enter")
                 first.wait_for_url("**/courses/*/placement")
                 assert "/placement" in first.url
-                first.get_by_role("button", name="Start placement").click()
+                first.get_by_role("button", name="Start quick placement").click()
                 playwright.expect(
-                    first.get_by_role("heading", name="First unique window")
+                    first.get_by_role("heading", name="What are you preparing for?")
                 ).to_be_visible()
-                playwright.expect(first.get_by_text("Step 1 of 2", exact=True)).to_be_visible()
-                assert first.locator("#placement-draft").get_attribute("rows") == "4"
+                playwright.expect(
+                    first.get_by_role("heading", name="How confident are you with each pattern?")
+                ).to_be_visible()
+                assert first.get_by_text("first_unique_window", exact=False).count() == 0
                 _assert_no_page_overflow(first)
-                first.locator("#placement-draft").fill(
-                    "Should the result use zero-based indexing, and can width be zero?"
-                )
-                first.get_by_role("button", name="Continue to approach").click()
-                playwright.expect(first.get_by_text("Step 2 of 2", exact=True)).to_be_visible()
+                first.locator('input[name="target_level"][value="senior"]').check()
+                first.locator('input[name="interview_focus"][value="balanced"]').check()
+                first.locator('input[name="rating_sliding_window"][value="1"]').check()
+                first.locator('input[name="rating_trees"][value="5"]').check()
+                first.get_by_role("button", name="Build my outline").click()
                 playwright.expect(
-                    first.get_by_role("heading", name="Good clarification habit")
-                ).to_be_visible()
-                assert first.url.endswith("/placement")
-                first.locator("#placement-draft").fill(
-                    "Use a sliding window with a set and move the left edge past duplicates. "
-                    "Handle invalid widths and no-match input. O(n) time and O(width) space."
-                )
-                first.get_by_role("button", name="Finish placement").click()
-                playwright.expect(
-                    first.get_by_role("heading", name="Your reasoning snapshot")
+                    first.get_by_role("heading", name="Your suggested course outline")
                 ).to_be_visible()
                 playwright.expect(
-                    first.get_by_role("link", name="Continue to lesson")
+                    first.get_by_text("System Design Foundations", exact=True)
                 ).to_be_visible()
+                playwright.expect(first.get_by_text("Tutor feedback", exact=True)).to_have_count(0)
                 assert first.url.endswith("/placement")
                 _assert_no_page_overflow(first)
                 first.emulate_media(reduced_motion="reduce")
-                first.get_by_role("link", name="Continue to lesson").click()
+                first.get_by_role("button", name="Use this outline").click()
                 first.wait_for_function(
                     "() => !window.location.pathname.endsWith('/placement')"
                 )
@@ -182,6 +181,8 @@ def test_real_browser_course_polling_theme_conflict_and_keyboard_submit(
                         "dot => getComputedStyle(dot).animationName === 'none'"
                     )
                 first.locator("[data-focus-shell]").wait_for(state="visible")
+                playwright.expect(first.get_by_text("Before writing code", exact=False)).to_be_visible()
+                playwright.expect(first.get_by_text("Press Enter to continue", exact=False)).to_have_count(0)
                 first.emulate_media(reduced_motion="no-preference")
                 first.set_viewport_size({"width": 1280, "height": 800})
                 initial_revision = _revision(first)

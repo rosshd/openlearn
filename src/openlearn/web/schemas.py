@@ -8,7 +8,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from openlearn.interview_prep import DRAFT_MAX_LENGTH
+from openlearn.interview_prep import CONFIDENCE_PATTERN_IDS, DRAFT_MAX_LENGTH
 from openlearn.data_management import (
     CREDENTIAL_CONFIRMATION,
     DELETE_CONFIRMATION,
@@ -77,17 +77,39 @@ class TutorSubmissionRequest(BaseModel):
 
 class PlacementRequest(BaseModel):
     action: Literal[
-        "start", "save_draft", "submit", "skip_stage", "skip", "defer", "restart"
+        "start",
+        "save_confidence",
+        "confirm_outline",
+        "save_draft",
+        "submit",
+        "skip_stage",
+        "skip",
+        "restart",
     ]
     stage: str | None = Field(default=None, max_length=64)
     text: str = Field(default="", max_length=DRAFT_MAX_LENGTH)
     submission_id: str | None = Field(default=None, max_length=64)
     expected_updated_at: str | None = Field(default=None, max_length=64)
+    role_family: str = Field(default="", max_length=64)
+    target_level: str = Field(default="", max_length=64)
+    interview_focus: str = Field(default="", max_length=64)
+    ratings: dict[str, int] = Field(default_factory=dict)
+    outline: str = Field(default="", max_length=12_000)
 
     @field_validator("submission_id")
     @classmethod
     def valid_optional_submission_id(cls, value: str | None) -> str | None:
         return canonical_uuid(value) if value is not None else None
+
+    @field_validator("ratings")
+    @classmethod
+    def valid_ratings(cls, value: dict[str, int]) -> dict[str, int]:
+        if value and (
+            set(value) != CONFIDENCE_PATTERN_IDS
+            or any(isinstance(rating, bool) or rating not in range(1, 6) for rating in value.values())
+        ):
+            raise ValueError("Expected one 1-5 rating for every interview pattern")
+        return value
 
 
 class ReviewGradeRequest(BaseModel):

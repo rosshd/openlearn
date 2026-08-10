@@ -11,7 +11,7 @@
 </div>
 {% endblock %}
 {% block content %}
-<div class="focus-shell" data-focus-shell data-course-slug="{{ course.slug }}" data-revision="{{ course.revision or 0 }}"
+<div class="focus-shell" data-focus-shell data-course-slug="{{ course.slug }}" data-revision="{{ course.revision or 0 }}" data-move-kind="{{ course.move.kind or '' }}"
   {% if course.operation %}data-operation-id="{{ course.operation.id }}" data-operation-state="{{ course.operation.state }}" data-operation-error="{{ course.operation.error }}"{% endif %}>
   <aside class="tool-rail" aria-label="Lesson tools">
     <button type="button" class="rail-button" data-tool-open="code" aria-expanded="false" aria-controls="learning-tool-surface"><span aria-hidden="true">{ }</span> Code</button>

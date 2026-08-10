@@ -17888,6 +17888,45 @@ class PromptInstructionTests(unittest.TestCase):
         )
         self.assertIn("required first activity is Sliding Window Foundations", interview_prompt)
 
+    def test_first_lesson_guard_replaces_navigation_and_off_topic_output(self) -> None:
+        topic = cli.Topic(
+            slug="interview-prep",
+            path=Path("interview-prep.md"),
+            metadata={
+                "current_focus": "Interview Problem Solving",
+                "course_units": [
+                    {
+                        "unit": 1,
+                        "title": "Interview Problem Solving",
+                        "concepts": [
+                            {"id": "clarifying-requirements", "label": "Clarifying requirements"}
+                        ],
+                    }
+                ],
+            },
+            body="# Interview Prep\n",
+        )
+        prompt = cli.first_lesson_prompt(
+            "Units:\n1. Interview Problem Solving\nConcepts: Clarifying requirements"
+        )
+
+        navigation = cli.enforce_first_lesson_response(
+            topic,
+            prompt,
+            "**Next:**\nPress Enter to continue, or type what you want more help with.",
+        )
+        off_topic = cli.enforce_first_lesson_response(
+            topic,
+            prompt,
+            "**Lesson:** Vim has Normal mode.\n<!-- covered: Vim modes -->",
+        )
+
+        for answer in (navigation, off_topic):
+            self.assertTrue(answer.startswith("**Lesson:**"))
+            self.assertIn("Before writing code", answer)
+            self.assertIn("<!-- covered: Clarifying requirements -->", answer)
+            self.assertNotIn("Press Enter to continue", answer)
+
     def test_trim_words_enforces_first_lesson_limit(self) -> None:
         text = " ".join(f"word{index}" for index in range(225))
 

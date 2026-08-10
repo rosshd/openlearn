@@ -75,8 +75,20 @@ for (const uuidField of document.querySelectorAll("[data-uuid]")) {
 const providerSelect = document.querySelector("#provider");
 const providerModel = document.querySelector("#model");
 const providerBaseUrl = document.querySelector("#base-url");
+const providerExplanation = document.querySelector("[data-provider-explanation]");
+const providerKeyLabel = document.querySelector("[data-api-key-label]");
 
 if (providerSelect && providerModel && providerBaseUrl) {
+  const updateProviderPresentation = () => {
+    const option = providerSelect.selectedOptions[0];
+    if (providerExplanation) providerExplanation.textContent = option?.dataset.explanation || "";
+    if (providerKeyLabel) {
+      const saved = providerKeyLabel.dataset.keyConfigured === "true";
+      providerKeyLabel.textContent = option?.dataset.keyRequired === "false"
+        ? "API key (not needed for this provider)"
+        : `API key${saved ? " (already saved)" : ""}`;
+    }
+  };
   const selectedDefaults = () => {
     const option = providerSelect.selectedOptions[0];
     return {
@@ -102,7 +114,9 @@ if (providerSelect && providerModel && providerBaseUrl) {
     delete providerModel.dataset.userEdited;
     delete providerBaseUrl.dataset.userEdited;
     previousProvider = providerSelect.value;
+    updateProviderPresentation();
   });
+  updateProviderPresentation();
 }
 
 for (const choice of document.querySelectorAll("[data-template-choice]")) {
@@ -117,6 +131,16 @@ for (const choice of document.querySelectorAll("[data-template-choice]")) {
     form.elements.experience.focus();
     announce(`${choice.dataset.title} selected.`);
   });
+}
+
+for (const strip of document.querySelectorAll("[data-starter-strip]")) {
+  const track = strip.querySelector("[data-starter-track]");
+  for (const button of strip.querySelectorAll("[data-starter-scroll]")) {
+    button.addEventListener("click", () => {
+      const direction = button.dataset.starterScroll === "previous" ? -1 : 1;
+      track?.scrollBy({left: direction * Math.max(260, track.clientWidth * 0.82), behavior: "smooth"});
+    });
+  }
 }
 
 for (const form of document.querySelectorAll("[data-json-form]")) {
@@ -156,6 +180,26 @@ for (const form of document.querySelectorAll("[data-json-form]")) {
       submit.disabled = false;
       submit.removeAttribute("aria-busy");
     }
+  });
+}
+
+for (const form of document.querySelectorAll("[data-enter-flow]")) {
+  const fields = [...form.querySelectorAll('input:not([type="hidden"]), textarea')]
+    .filter((field) => !field.disabled);
+  form.addEventListener("keydown", (event) => {
+    if (
+      event.key !== "Enter"
+      || event.shiftKey
+      || event.altKey
+      || event.ctrlKey
+      || event.metaKey
+      || event.isComposing
+    ) return;
+    const index = fields.indexOf(event.target);
+    if (index < 0) return;
+    event.preventDefault();
+    if (index < fields.length - 1) fields[index + 1].focus();
+    else form.requestSubmit();
   });
 }
 
@@ -824,6 +868,19 @@ turnForm?.addEventListener("submit", (event) => {
 });
 
 turnForm?.querySelector("textarea")?.addEventListener("keydown", (event) => {
+  if (
+    event.key === "Enter"
+    && !event.shiftKey
+    && !event.metaKey
+    && !event.ctrlKey
+    && !event.isComposing
+    && !event.currentTarget.value.trim()
+    && focusShell?.dataset.moveKind === "Next"
+  ) {
+    event.preventDefault();
+    submitTurn("next");
+    return;
+  }
   if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
     event.preventDefault();
     turnForm.requestSubmit();
@@ -1028,6 +1085,36 @@ placementShell?.querySelector("[data-placement-draft-form]")?.addEventListener("
     }
     lockPlacement(false);
   }
+});
+
+placementShell?.querySelector("[data-confidence-form]")?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const values = new FormData(form);
+  const ratings = {};
+  for (const [name, value] of values.entries()) {
+    if (name.startsWith("rating_")) ratings[name.slice(7)] = Number(value);
+  }
+  await runPlacementAction("save_confidence", {
+    role_family: values.get("role_family") || "",
+    target_level: values.get("target_level") || "",
+    interview_focus: values.get("interview_focus") || "",
+    ratings,
+  });
+});
+
+async function confirmPlacementOutline() {
+  const outline = placementShell?.querySelector("#placement-outline")?.value || "";
+  await runPlacementAction("confirm_outline", {outline});
+}
+
+placementShell?.querySelector("[data-outline-form]")?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  confirmPlacementOutline();
+});
+
+placementShell?.querySelector("[data-confirm-outline]")?.addEventListener("click", () => {
+  confirmPlacementOutline();
 });
 
 for (const button of document.querySelectorAll("[data-placement-action]")) {

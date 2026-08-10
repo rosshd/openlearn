@@ -27,7 +27,7 @@
     <a class="primary-action" href="{{ url_for('dashboard') }}"><span>Continue to your workbench</span><span aria-hidden="true">→</span></a>
   </section>
   {% else %}
-  <form class="work-panel form-stack" data-json-form data-endpoint="/api/setup" data-success-url="{{ setup_destination }}" novalidate>
+  <form class="work-panel form-stack" data-json-form data-endpoint="/api/setup" data-success-url="{{ setup_destination }}" autocomplete="off" novalidate>
     <div class="form-header">
       <p class="eyebrow">Provider setup</p>
       <span class="state-chip">Local config</span>
@@ -41,17 +41,22 @@
       <option value="{{ choice.id }}"
         data-default-base-url="{{ choice.base_url or '' }}"
         data-default-model="{{ choice.default_model or '' }}"
+        data-key-required="{{ 'true' if choice.key_required else 'false' }}"
+        data-setup-url="{{ choice.setup_url }}"
+        data-explanation="{{ choice.explanation }}"
         {% if choice.id == provider.selected_provider %}selected{% endif %}>
         {{ choice.name }}{% if choice.recommended %} - recommended{% endif %}
       </option>
       {% endfor %}
     </select>
+    <p class="field-note" data-provider-explanation>{{ provider.providers|selectattr('id', 'equalto', provider.selected_provider)|map(attribute='explanation')|first }}</p>
 
-    <label for="api-key">API key{% if provider.key_configured %} (already saved){% endif %}</label>
-    <input id="api-key" name="api_key" type="password" autocomplete="off" spellcheck="false"
+    <label for="api-key" data-api-key-label data-key-configured="{{ 'true' if provider.key_configured else 'false' }}">API key{% if provider.key_configured %} (already saved){% endif %}</label>
+    <input id="api-key" name="api_key" type="password" autocomplete="off" spellcheck="false" data-1p-ignore data-lpignore="true" data-form-type="other"
       placeholder="Paste a new key">
     <p class="field-note">
       {% if provider.key_configured %}Leave this blank to test the saved key, or paste a new key to replace it.{% else %}Paste the key from your provider. Stored values are never loaded back into this page.{% endif %}
+      Your browser may separately offer to save it; that choice only affects your browser's password store.
     </p>
 
     <label for="model">Model</label>
@@ -64,8 +69,9 @@
       <input id="base-url" name="base_url" type="url" value="{{ provider.form_base_url or '' }}" autocomplete="off">
       <label class="check-row">
         <input type="checkbox" name="save_unverified">
-        Save during a network outage without validating
+        Keep these settings if the provider is temporarily unreachable
       </label>
+      <p class="field-note">Teaching stays locked until openlearn completes a successful connection test.</p>
     </details>
 
     <button class="primary-action" type="submit" data-submit-label="Test and save">
