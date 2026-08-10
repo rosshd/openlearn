@@ -20,7 +20,7 @@ LIVE_URL_NAMESPACE = "/_openlearn/test-route-namespace-value-1234567890"
 
 def write_live_record(home: Path, *, pid: int = 4242, url: str = "http://127.0.0.1:9191/") -> Path:
     home.mkdir(parents=True, exist_ok=True)
-    (home / ".web-server.lock").write_text(LIVE_LEASE_ID, encoding="ascii")
+    (home / ".web-server.lock").write_bytes(b"\0" + LIVE_LEASE_ID.encode("ascii"))
     lease = home / ".web-server.json"
     lease.write_text(
         json.dumps(
@@ -49,7 +49,8 @@ def test_server_lease_is_exclusive_private_and_removed(tmp_path: Path) -> None:
         }
         assert record.pid == os.getpid()
         assert record.url == "http://127.0.0.1:9123/"
-        assert stat.S_IMODE(lease.stat().st_mode) == 0o600
+        if os.name != "nt":
+            assert stat.S_IMODE(lease.stat().st_mode) == 0o600
         with pytest.raises(launcher.ExistingWebServer, match="already running"):
             with launcher.server_lease(tmp_path):
                 pass
@@ -113,7 +114,7 @@ def test_server_lease_does_not_replace_invalid_record_with_live_owner(
         ),
         encoding="utf-8",
     )
-    (tmp_path / ".web-server.lock").write_text(LIVE_LEASE_ID, encoding="ascii")
+    (tmp_path / ".web-server.lock").write_bytes(b"\0" + LIVE_LEASE_ID.encode("ascii"))
     monkeypatch.setattr(launcher, "_acquire_owner_lock", lambda _handle: False)
 
     with pytest.raises(launcher.WebLaunchError, match="live owner.*invalid"):
@@ -271,7 +272,7 @@ def test_losing_launcher_waits_for_current_owner_record(
     lock_path = tmp_path / ".web-server.lock"
     lease = tmp_path / ".web-server.json"
     tmp_path.mkdir(parents=True, exist_ok=True)
-    lock_path.write_text(LIVE_LEASE_ID, encoding="ascii")
+    lock_path.write_bytes(b"\0" + LIVE_LEASE_ID.encode("ascii"))
     lease.write_text(
         json.dumps(
             {
@@ -312,6 +313,20 @@ def test_losing_launcher_waits_for_current_owner_record(
             pass
 
     assert captured.value.record.url == "http://127.0.0.1:8222/"
+
+
+def test_losing_launcher_accepts_legacy_owner_token_layout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_live_record(tmp_path)
+    (tmp_path / ".web-server.lock").write_bytes(LIVE_LEASE_ID.encode("ascii"))
+    monkeypatch.setattr(launcher, "_acquire_owner_lock", lambda _handle: False)
+
+    with pytest.raises(launcher.ExistingWebServer) as captured:
+        with launcher.server_lease(tmp_path):
+            pass
+
+    assert captured.value.record.lease_id == LIVE_LEASE_ID
 
 
 def test_run_starts_server_with_claimed_home(tmp_path: Path) -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
 from pathlib import Path
 
@@ -74,7 +75,8 @@ def test_provider_save_is_whole_atomic_private_and_preserves_unknown_values(
     assert saved["editor"] == ["nvim"]
     assert "api_key" not in saved
     assert "openai_api_key" not in saved
-    assert stat.S_IMODE((tmp_path / "config.json").stat().st_mode) == 0o600
+    if os.name != "nt":
+        assert stat.S_IMODE((tmp_path / "config.json").stat().st_mode) == 0o600
     assert not list(tmp_path.glob("tmp*"))
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -683,5 +684,6 @@ def test_run_writes_human_reviewable_nonblocking_schema(
     assert record["schema_version"] == OUTCOME_SCHEMA_VERSION
     assert "This baseline is diagnostic and does not block a release." in summary
     assert "Scenario diagnostics" in summary
-    assert (outcome.evidence_dir / "manifest.json").stat().st_mode & 0o777 == 0o600
-    assert (outcome.evidence_dir / "scenarios.jsonl").stat().st_mode & 0o777 == 0o600
+    if os.name != "nt":
+        assert (outcome.evidence_dir / "manifest.json").stat().st_mode & 0o777 == 0o600
+        assert (outcome.evidence_dir / "scenarios.jsonl").stat().st_mode & 0o777 == 0o600

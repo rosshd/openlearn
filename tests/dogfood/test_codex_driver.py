@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -446,6 +447,7 @@ def test_nonzero_exit_is_bounded_and_does_not_expose_stderr(tmp_path):
     assert "private diagnostics" not in str(raised.value)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group semantics")
 def test_timeout_terminates_and_reaps_process_group_without_stderr(tmp_path, monkeypatch):
     signals = []
 
@@ -478,6 +480,7 @@ def test_timeout_terminates_and_reaps_process_group_without_stderr(tmp_path, mon
     assert "secret" not in str(raised.value)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group semantics")
 def test_keyboard_interrupt_terminates_and_reaps_process_group(tmp_path, monkeypatch):
     signals = []
 

@@ -150,9 +150,10 @@ class ReleaseArtifactPolicyTests(unittest.TestCase):
         )
 
     def test_support_contract_covers_python_and_desktop_platforms(self) -> None:
-        metadata = tomllib.loads((REPOSITORY / "pyproject.toml").read_text(encoding="utf-8"))[
-            "project"
-        ]
+        project_config = tomllib.loads(
+            (REPOSITORY / "pyproject.toml").read_text(encoding="utf-8")
+        )
+        metadata = project_config["project"]
 
         self.assertEqual(metadata["requires-python"], ">=3.11,<3.14")
         classifiers = set(metadata["classifiers"])
@@ -164,6 +165,11 @@ class ReleaseArtifactPolicyTests(unittest.TestCase):
             "Operating System :: POSIX :: Linux",
         ):
             self.assertIn(platform, classifiers)
+
+        self.assertIn(
+            "ruff==0.15.20",
+            project_config["project"]["optional-dependencies"]["dev"],
+        )
 
     def test_wheel_inspection_requires_assets_and_reads_metadata_version(self) -> None:
         with self.subTest("complete wheel"):

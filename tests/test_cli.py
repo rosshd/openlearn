@@ -4407,6 +4407,7 @@ class CliStorageTests(unittest.TestCase):
         self.assertEqual(contexts, [])
         self.assertEqual(cli.context_files("ai"), [])
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX dir_fd symlink race")
     def test_folder_flows_reject_file_swapped_to_outside_symlink_before_open(self) -> None:
         outside = Path(self.home.name) / "private-notes.txt"
         outside.write_text("must never reach generated context", encoding="utf-8")
@@ -9760,7 +9761,8 @@ class InteractiveTests(unittest.TestCase):
         finally:
             cli._turn_commit_checkpoint = original_checkpoint
         journal_path = cli.topic_turn_journal_path(slug)
-        self.assertEqual(stat.S_IMODE(journal_path.stat().st_mode), 0o600)
+        if os.name != "nt":
+            self.assertEqual(stat.S_IMODE(journal_path.stat().st_mode), 0o600)
         journal_path.write_text('{"schema_version": 999, "private": "DO NOT LEAK"}')
         before_topic = cli.topic_path(slug).read_text(encoding="utf-8")
         with self.assertRaises(cli.OpenLearnError) as caught:

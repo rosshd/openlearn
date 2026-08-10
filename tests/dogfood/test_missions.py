@@ -9,19 +9,10 @@ import pexpect
 import pytest
 
 from tests.dogfood.missions import _isolated_mock_environment, run_mock_draft_course_mission
+from tests.dogfood.support import POSIX_PTY_ONLY, installed_openlearn
 
 
-def _installed_openlearn() -> Path:
-    root = Path(__file__).resolve().parents[2]
-    candidates = (
-        root / ".venv" / "bin" / "openlearn",
-        root.parent.parent / ".venv" / "bin" / "openlearn",
-    )
-    executable = next((path for path in candidates if path.is_file()), None)
-    assert executable is not None, "installed openlearn executable is required"
-    return executable
-
-
+@POSIX_PTY_ONLY
 def test_mock_draft_course_mission_uses_public_cli_and_persists_evidence(
     tmp_path: Path,
     monkeypatch,
@@ -32,7 +23,7 @@ def test_mock_draft_course_mission_uses_public_cli_and_persists_evidence(
 
     outcome = run_mock_draft_course_mission(
         run_root,
-        command=(_installed_openlearn(), "menu"),
+        command=(installed_openlearn(), "menu"),
     )
 
     manifest_path = run_root / "evidence" / "manifest.json"
@@ -54,7 +45,7 @@ def test_mock_draft_course_mission_uses_public_cli_and_persists_evidence(
     assert manifest["environment"] == {
         "provider_mode": "mock",
         "openlearn_home": str(run_root / "home"),
-        "command": [str(_installed_openlearn()), "menu"],
+        "command": [str(installed_openlearn()), "menu"],
     }
     assert manifest["outcome"]["achieved"] is True
     assert manifest["outcome"]["interaction_count"] == 8
@@ -89,6 +80,7 @@ def test_mock_draft_course_mission_uses_public_cli_and_persists_evidence(
     assert metadata["goal"] == "Learn how to navigate a terminal confidently."
 
 
+@POSIX_PTY_ONLY
 def test_mock_mission_records_failed_outcome_and_final_state(tmp_path: Path) -> None:
     run_root = tmp_path / "failed-mission"
 
@@ -126,6 +118,7 @@ def test_mock_environment_imports_openlearn_from_active_worktree(
     assert "AWS_ACCESS_KEY_ID" not in env
 
 
+@POSIX_PTY_ONLY
 def test_interrupted_mission_is_finalized_as_failed(
     tmp_path: Path,
     monkeypatch,
