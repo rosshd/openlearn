@@ -2055,12 +2055,25 @@ def read_repl_message(prompt: str, input_func=input) -> str:
     lines = [first_line]
     wait_seconds = REPL_PASTE_INITIAL_WAIT_SECONDS
     while stdin_has_line(wait_seconds):
-        line = sys.stdin.readline()
+        line = _read_stdin_line_unbuffered()
         if line == "":
             break
         lines.append(line.rstrip("\r\n"))
         wait_seconds = REPL_PASTE_CONTINUATION_WAIT_SECONDS
     return "\n".join(lines)
+
+
+def _read_stdin_line_unbuffered() -> str:
+    """Read one ready TTY line without buffering the next pasted line."""
+    data = bytearray()
+    while True:
+        chunk = os.read(sys.stdin.fileno(), 1)
+        if not chunk:
+            break
+        data.extend(chunk)
+        if chunk == b"\n":
+            break
+    return data.decode(sys.stdin.encoding or "utf-8", errors="replace")
 
 
 def stdin_has_line(timeout: float) -> bool:

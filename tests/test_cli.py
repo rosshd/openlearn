@@ -18863,6 +18863,22 @@ class PlatformGuardTests(unittest.TestCase):
         self.assertEqual(result, "first line")
         fake_stdin.readline.assert_not_called()
 
+    def test_unbuffered_repl_line_does_not_consume_next_pasted_line(self) -> None:
+        read_descriptor, write_descriptor = os.pipe()
+        fake_stdin = mock.Mock()
+        fake_stdin.fileno.return_value = read_descriptor
+        fake_stdin.encoding = "utf-8"
+        try:
+            os.write(write_descriptor, b"second line\nthird line\n")
+            with mock.patch.object(sys, "stdin", fake_stdin):
+                result = cli._read_stdin_line_unbuffered()
+
+            self.assertEqual(result, "second line\n")
+            self.assertEqual(os.read(read_descriptor, 11), b"third line\n")
+        finally:
+            os.close(read_descriptor)
+            os.close(write_descriptor)
+
 
 class KeylessProviderTests(unittest.TestCase):
     def setUp(self) -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import threading
 import time
+from concurrent.futures import wait
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import TestCase, mock
@@ -41,6 +42,11 @@ class TutorServiceTests(TestCase):
         )
 
     def tearDown(self) -> None:
+        with tutor_service._FUTURES_GUARD:
+            futures = tuple(tutor_service._FUTURES.values())
+        if futures:
+            _done, unfinished = wait(futures, timeout=5)
+            self.assertFalse(unfinished, "tutor workers must finish before home cleanup")
         cli._CONFIG_CACHE = None
 
     def _persist_active_turn(

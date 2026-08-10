@@ -149,6 +149,28 @@ class ReleaseArtifactPolicyTests(unittest.TestCase):
             [None, None, "skip"],
         )
 
+    def test_smoke_cleanup_retries_windows_lifecycle_lock_release(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            home = Path(raw) / "home"
+            home.mkdir()
+            with (
+                mock.patch.object(
+                    Path,
+                    "unlink",
+                    side_effect=(PermissionError("busy"), None),
+                ) as unlink,
+                mock.patch.object(
+                    release_artifacts.time,
+                    "monotonic",
+                    side_effect=(1.0, 1.1),
+                ),
+                mock.patch.object(release_artifacts.time, "sleep") as sleep,
+            ):
+                release_artifacts._remove_released_lifecycle_lock(home)
+
+        self.assertEqual(unlink.call_count, 2)
+        sleep.assert_called_once_with(0.05)
+
     def test_support_contract_covers_python_and_desktop_platforms(self) -> None:
         project_config = tomllib.loads(
             (REPOSITORY / "pyproject.toml").read_text(encoding="utf-8")
