@@ -17927,6 +17927,43 @@ class PromptInstructionTests(unittest.TestCase):
             self.assertIn("<!-- covered: Clarifying requirements -->", answer)
             self.assertNotIn("Press Enter to continue", answer)
 
+    def test_first_lesson_guard_uses_system_design_framing_for_design_course(self) -> None:
+        topic = cli.Topic(
+            slug="system-design-prep",
+            path=Path("system-design-prep.md"),
+            metadata={
+                "current_focus": "Interview Communication and Problem Framing",
+                "course_units": [
+                    {
+                        "unit": 1,
+                        "title": "Interview Communication and Problem Framing",
+                        "concepts": [
+                            {
+                                "id": "clarifying-requirements",
+                                "label": "Clarifying requirements",
+                            }
+                        ],
+                    },
+                    {
+                        "unit": 2,
+                        "title": "Coding Pattern Maintenance",
+                        "concepts": [],
+                    },
+                ],
+            },
+            body="# System Design Prep\n",
+        )
+        prompt = cli.first_lesson_prompt(
+            "Units:\n1. Interview Communication and Problem Framing\n"
+            "Concepts: Clarifying requirements"
+        )
+
+        answer = cli.enforce_first_lesson_response(topic, prompt, "**Next:** Continue")
+
+        self.assertIn("Before proposing components", answer)
+        self.assertIn("scale, latency, consistency", answer)
+        self.assertNotIn("Before writing code", answer)
+
     def test_trim_words_enforces_first_lesson_limit(self) -> None:
         text = " ".join(f"word{index}" for index in range(225))
 

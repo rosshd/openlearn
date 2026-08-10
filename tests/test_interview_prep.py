@@ -145,7 +145,10 @@ class InterviewPrepTests(unittest.TestCase):
         self.assertIsNone(started["placement"]["activity_id"])
 
         ratings = {
-            pattern_id: 3 for pattern_id in interview_prep.CONFIDENCE_PATTERN_IDS
+            topic_id: 3
+            for topic_id, _label in interview_prep.confidence_topics_for_focus(
+                "balanced"
+            )
         }
         ratings["sliding_window"] = 1
         ratings["trees"] = 5
@@ -160,10 +163,14 @@ class InterviewPrepTests(unittest.TestCase):
 
         survey = saved["placement"]["survey"]
         self.assertEqual(saved["placement"]["next_stage"], "outline")
-        self.assertIn("System Design Foundations", survey["outline"])
+        self.assertIn("Requirements, Scale, and Interfaces", survey["outline"])
+        self.assertIn("Reliability, Observability, and Tradeoffs", survey["outline"])
         self.assertIn("Frontend Interview Foundations", survey["outline"])
         self.assertIn("Two Pointers and Sliding Window", survey["outline"])
         self.assertIn("Emphasis: Learn", survey["outline"])
+        self.assertIn("Interview habit:", survey["outline"])
+        self.assertIn("Integrated Mock Interview Rounds", survey["outline"])
+        self.assertNotIn("Timed and Behavioral Interview Practice", survey["outline"])
         self.assertEqual(saved["profile_revision"], 2)
         self.assertEqual(saved["placement"]["profile_revision"], 2)
 
@@ -178,6 +185,33 @@ class InterviewPrepTests(unittest.TestCase):
         self.assertEqual(result["patterns_marked_known"], [])
         self.assertIn("do not establish mastery", result["uncertainty"][0])
         self.assertEqual(interview_prep.load_profile(self.path), completed)
+
+    def test_system_design_focus_asks_and_plans_for_system_design_topics(self) -> None:
+        self.create()
+        interview_prep.start_confidence_placement(self.path, now=lambda: NOW)
+        ratings = {
+            topic_id: 3
+            for topic_id, _label in interview_prep.confidence_topics_for_focus(
+                "system_design"
+            )
+        }
+        ratings["capacity_estimation"] = 1
+        ratings["tradeoff_communication"] = 5
+
+        saved = interview_prep.save_confidence_survey(
+            self.path,
+            role_family="backend",
+            target_level="senior",
+            interview_focus="system_design",
+            ratings=ratings,
+            now=lambda: NOW,
+        )
+
+        outline = saved["placement"]["survey"]["outline"]
+        self.assertIn("Coding Pattern Maintenance", outline)
+        self.assertIn("Requirements, Scale, and Interfaces", outline)
+        self.assertIn("Emphasis: Learn", outline)
+        self.assertNotIn("Two Pointers and Sliding Window", outline)
 
     def test_starting_active_confidence_placement_preserves_saved_survey(self) -> None:
         self.create()

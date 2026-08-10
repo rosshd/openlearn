@@ -43,8 +43,11 @@ def csrf(client: TestClient, path: str = "/") -> str:
     return response.cookies["openlearn_csrf"]
 
 
-def confidence_ratings(**overrides: int) -> dict[str, int]:
-    ratings = {pattern_id: 3 for pattern_id in interview_prep.CONFIDENCE_PATTERN_IDS}
+def confidence_ratings(focus: str = "coding", **overrides: int) -> dict[str, int]:
+    ratings = {
+        topic_id: 3
+        for topic_id, _label in interview_prep.confidence_topics_for_focus(focus)
+    }
     ratings.update(overrides)
     return ratings
 
@@ -81,8 +84,10 @@ def create_tool_course() -> str:
 def test_default_web_app_runs_setup_dashboard_course_and_tutor_flow(
     client: TestClient,
 ) -> None:
-    assert "Make a useful starting point" in client.get("/").text
-    assert "Make a useful starting point" in client.get("/dashboard").text
+    empty_dashboard = client.get("/").text
+    assert "Choose what you want to learn" in empty_dashboard
+    assert "Choose a starting point" in empty_dashboard
+    assert "Add another course" not in empty_dashboard
 
     new_course = client.get("/courses/new")
     assert "Technical Interview Prep" in new_course.text
@@ -116,6 +121,7 @@ def test_default_web_app_runs_setup_dashboard_course_and_tutor_flow(
     assert "placement test" not in focus.text.lower()
     assert "**Lesson:**" not in focus.text
     assert "Pick up where you left off" in client.get("/dashboard").text
+    assert "Add another course" in client.get("/dashboard").text
 
     revision = int(focus.text.split('data-revision="', 1)[1].split('"', 1)[0])
     turn = client.post(
@@ -176,10 +182,12 @@ def test_interview_course_confidence_placement_resumes_and_builds_first_lesson(
     assert started.json()["next_stage"] == "confidence"
     assert started.json()["lifecycle_version"] == interview_prep.PLACEMENT_V4
     started_page = client.get(body["placement_url"])
-    assert "How confident are you with each pattern?" in started_page.text
+    assert "Start rapid questions" in started_page.text
+    assert "How confident are you with sliding window?" in started_page.text
+    assert "How confident are you with capacity estimation?" in started_page.text
     assert "Sliding window" in started_page.text
     assert "Coding + system design" in started_page.text
-    assert "Every row starts at 3" in started_page.text
+    assert "Review or change your answers" in started_page.text
 
     saved = client.post(
         f"/api/courses/{body['slug']}/placement",
@@ -189,7 +197,9 @@ def test_interview_course_confidence_placement_resumes_and_builds_first_lesson(
             "role_family": "backend",
             "target_level": "senior",
             "interview_focus": "balanced",
-            "ratings": confidence_ratings(sliding_window=1, arrays_hashing=4, trees=5),
+            "ratings": confidence_ratings(
+                "balanced", sliding_window=1, arrays_hashing=4, trees=5
+            ),
         },
     )
     assert saved.status_code == 200
@@ -198,9 +208,15 @@ def test_interview_course_confidence_placement_resumes_and_builds_first_lesson(
     resumed = restarted_client.get(body["placement_url"])
     restarted_token = resumed.cookies["openlearn_csrf"]
     assert "Your suggested course outline" in resumed.text
-    assert "System Design Foundations" in resumed.text
+    assert "Requirements, Scale, and Interfaces" in resumed.text
+    assert "Reliability, Observability, and Tradeoffs" in resumed.text
     assert "Two Pointers and Sliding Window" in resumed.text
-    assert "Workshop this outline" in resumed.text
+    assert "Interview habit" in resumed.text
+    assert "Integrated Mock Interview Rounds" in resumed.text
+    assert "Timed and Behavioral Interview Practice" not in resumed.text
+    assert "Workshop this outline" not in resumed.text
+    assert "Confirm course outline" in resumed.text
+    assert "Change course outline" in resumed.text
     assert "Tutor feedback" not in resumed.text
     assert 'aria-label="Back to dashboard"' in resumed.text
     assert restarted_client.get("/dashboard").status_code == 200

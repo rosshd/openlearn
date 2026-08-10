@@ -5582,6 +5582,13 @@ def enforce_first_lesson_response(topic: Topic, prompt: str, answer: str) -> str
     concept = focus
     valid_concepts: list[str] = []
     units = topic.metadata.get("course_units")
+    unit_titles: set[str] = set()
+    if isinstance(units, list):
+        unit_titles = {
+            str(unit.get("title") or "")
+            for unit in units
+            if isinstance(unit, dict)
+        }
     if isinstance(units, list) and units and isinstance(units[0], dict):
         valid_concepts = unit_concept_labels(units[0])
         concepts = units[0].get("concepts")
@@ -5594,7 +5601,15 @@ def enforce_first_lesson_response(topic: Topic, prompt: str, answer: str) -> str
         or any(marker.casefold() in valid_concept_keys for marker in declared)
     ):
         return answer
-    if concept.casefold() == "clarifying requirements":
+    system_design_heavy = "Coding Pattern Maintenance" in unit_titles
+    if concept.casefold() == "clarifying requirements" and system_design_heavy:
+        lesson = (
+            "Before proposing components, turn the prompt into explicit functional requirements "
+            "and quality attributes. Ask about scale, latency, consistency, availability, and the "
+            "most important user path only when the prompt leaves them open. State each assumption "
+            "aloud so the interviewer can correct the design direction before details accumulate."
+        )
+    elif concept.casefold() == "clarifying requirements":
         lesson = (
             "Before writing code, restate the required output and ask only about ambiguities "
             "that could change the solution. For example, confirm indexing or invalid-input "

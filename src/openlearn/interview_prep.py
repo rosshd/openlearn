@@ -135,6 +135,21 @@ CONFIDENCE_PATTERNS = (
     ("intervals_greedy", "Intervals & greedy"),
 )
 CONFIDENCE_PATTERN_IDS = frozenset(pattern_id for pattern_id, _label in CONFIDENCE_PATTERNS)
+SYSTEM_DESIGN_TOPICS = (
+    ("requirements_scope", "Requirements and scope"),
+    ("capacity_estimation", "Capacity estimation"),
+    ("api_design", "API and interface design"),
+    ("data_modeling", "Data modeling"),
+    ("databases_partitioning", "Databases and partitioning"),
+    ("caching_delivery", "Caching and content delivery"),
+    ("messaging_async", "Messaging and asynchronous work"),
+    ("reliability_observability", "Reliability and observability"),
+    ("tradeoff_communication", "Explaining system tradeoffs"),
+)
+SYSTEM_DESIGN_TOPIC_IDS = frozenset(
+    topic_id for topic_id, _label in SYSTEM_DESIGN_TOPICS
+)
+CONFIDENCE_TOPIC_LABELS = dict((*CONFIDENCE_PATTERNS, *SYSTEM_DESIGN_TOPICS))
 CONFIDENCE_SCALE = (
     (1, "New"),
     (2, "Shaky"),
@@ -161,6 +176,16 @@ CONFIDENCE_FOCUSES = (
     ("system_design", "System-design heavy"),
 )
 CONFIDENCE_SURVEY_ID = "leetcode_pattern_confidence_v1"
+
+
+def confidence_topics_for_focus(focus: str) -> tuple[tuple[str, str], ...]:
+    if focus == "coding":
+        return CONFIDENCE_PATTERNS
+    if focus == "balanced":
+        return (*CONFIDENCE_PATTERNS, *SYSTEM_DESIGN_TOPICS)
+    if focus == "system_design":
+        return SYSTEM_DESIGN_TOPICS
+    raise ValueError("interview-prep confidence survey focus is invalid")
 PROFILE_FIELDS = (
     "role_family",
     "target_level",
@@ -740,12 +765,17 @@ def _validate_confidence_survey(value: object) -> None:
         raise ValueError("interview-prep confidence survey role is invalid")
     if value.get("target_level") not in allowed_levels:
         raise ValueError("interview-prep confidence survey level is invalid")
-    if value.get("interview_focus") not in allowed_focuses:
+    focus = value.get("interview_focus")
+    if focus not in allowed_focuses:
         raise ValueError("interview-prep confidence survey focus is invalid")
     ratings = value.get("ratings")
+    expected_ids = frozenset(
+        topic_id for topic_id, _label in confidence_topics_for_focus(str(focus))
+    )
+    accepted_id_sets = {expected_ids, CONFIDENCE_PATTERN_IDS}
     if (
         not isinstance(ratings, dict)
-        or set(ratings) != CONFIDENCE_PATTERN_IDS
+        or frozenset(ratings) not in accepted_id_sets
         or any(
             isinstance(rating, bool) or not isinstance(rating, int) or rating not in range(1, 6)
             for rating in ratings.values()
@@ -1015,43 +1045,88 @@ _CONFIDENCE_UNIT_DEFINITIONS = (
         "Arrays and Hashing",
         ("arrays_hashing",),
         "Use lookup, counting, sets, maps, and prefix techniques.",
-        ("Hash maps", "Sets", "Frequency counting", "Prefix sums"),
+        ("Hash maps", "Sets", "Frequency counting", "Prefix sums", "Narrating map tradeoffs"),
+        "State why a map or set fits before writing code.",
     ),
     (
         "Two Pointers and Sliding Window",
         ("two_pointers", "sliding_window"),
         "Recognize boundary movement, invariants, and window state.",
-        ("Two pointers", "Sliding window", "Window invariants"),
+        ("Two pointers", "Sliding window", "Window invariants", "Stating invariants aloud"),
+        "Name the invariant and explain every pointer movement.",
     ),
     (
         "Stacks and Binary Search",
         ("stack", "binary_search"),
         "Apply stack structure and monotonic search-space reduction.",
-        ("Stacks", "Monotonic stacks", "Binary search", "Boundary conditions"),
+        ("Stacks", "Monotonic stacks", "Binary search", "Boundary conditions", "Clarifying search boundaries"),
+        "Confirm boundaries and narrate why the search space shrinks.",
     ),
     (
         "Linked Lists",
         ("linked_lists",),
         "Manipulate pointers safely and reason about cycles.",
-        ("Pointer updates", "Reversal", "Fast and slow pointers"),
+        ("Pointer updates", "Reversal", "Fast and slow pointers", "Walking through pointer changes"),
+        "Walk through pointer changes on a tiny example before coding.",
     ),
     (
         "Trees, Graphs, and Heaps",
         ("trees", "graphs", "heaps"),
         "Choose traversals and priority structures for connected problems.",
-        ("DFS", "BFS", "Tree recursion", "Graph traversal", "Priority queues"),
+        ("DFS", "BFS", "Tree recursion", "Graph traversal", "Priority queues", "Choosing traversal aloud"),
+        "Explain the traversal choice and what each queue or stack entry means.",
     ),
     (
         "Backtracking",
         ("backtracking",),
         "Model choices, constraints, pruning, and state restoration.",
-        ("Decision trees", "Pruning", "State restoration"),
+        ("Decision trees", "Pruning", "State restoration", "Explaining pruning choices"),
+        "Describe the choice, constraint, and undo step before implementation.",
     ),
     (
         "Dynamic Programming, Intervals, and Greedy",
         ("dynamic_programming", "intervals_greedy"),
         "Identify state transitions and justify locally optimal choices.",
-        ("Dynamic programming", "Memoization", "Intervals", "Greedy reasoning"),
+        ("Dynamic programming", "Memoization", "Intervals", "Greedy reasoning", "Deriving recurrences aloud"),
+        "Derive the state and transition aloud instead of jumping to a formula.",
+    ),
+)
+
+_SYSTEM_DESIGN_UNIT_DEFINITIONS = (
+    (
+        "Requirements, Scale, and Interfaces",
+        ("requirements_scope", "capacity_estimation", "api_design"),
+        "Turn an open-ended prompt into explicit requirements, scale assumptions, and interfaces.",
+        ("Functional requirements", "Quality attributes", "Capacity estimation", "API contracts", "Scoping aloud"),
+        "State assumptions and ask which tradeoffs matter before drawing components.",
+    ),
+    (
+        "Data Models and Storage",
+        ("data_modeling", "databases_partitioning"),
+        "Choose data models, storage systems, indexes, and partitioning strategies from access patterns.",
+        ("Access patterns", "Data modeling", "Indexes", "Replication", "Partitioning", "Defending storage choices"),
+        "Tie every storage choice to an access pattern and name its downside.",
+    ),
+    (
+        "Caching and Content Delivery",
+        ("caching_delivery",),
+        "Place caches and delivery layers while reasoning about invalidation, freshness, and hotspots.",
+        ("Cache placement", "Invalidation", "Freshness", "CDNs", "Explaining cache tradeoffs"),
+        "Say what is cached, where it lives, and how it becomes stale.",
+    ),
+    (
+        "Messaging and Asynchronous Workflows",
+        ("messaging_async",),
+        "Use queues, streams, and workers while handling ordering, retries, and idempotency.",
+        ("Queues", "Streams", "Delivery semantics", "Idempotency", "Failure walkthroughs"),
+        "Walk one request through retries and partial failure instead of describing only the happy path.",
+    ),
+    (
+        "Reliability, Observability, and Tradeoffs",
+        ("reliability_observability", "tradeoff_communication"),
+        "Design degradation, recovery, and observability while communicating explicit tradeoffs.",
+        ("Failure modes", "Redundancy", "Backpressure", "Observability", "Tradeoff summaries"),
+        "Close each design section with the tradeoff chosen and the signal that would validate it.",
     ),
 )
 
@@ -1099,41 +1174,62 @@ def confidence_outline_items(survey: Mapping[str, object] | None) -> list[dict[s
     )
     items: list[dict[str, object]] = [
         {
-            "title": "Interview Problem Solving",
+            "title": "Interview Communication and Problem Framing",
             "emphasis": "Practice",
-            "slides": 2,
+            "slides": 3,
             "difficulty": 3,
-            "outcome": "Clarify requirements, test examples, discuss edge cases, and communicate tradeoffs.",
-            "concepts": ("Clarifying requirements", "Examples", "Edge cases", "Communication"),
+            "outcome": "Clarify requirements, think aloud, surface edge cases, and frame concise behavioral examples.",
+            "concepts": ("Clarifying requirements", "Think-aloud communication", "Edge cases", "Behavioral framing"),
+            "interview_habit": "Use a clear opening routine in every interview round.",
         }
     ]
-    for title, patterns, outcome, concepts in _CONFIDENCE_UNIT_DEFINITIONS:
-        emphasis = _confidence_emphasis(ratings, patterns)
-        slides = {"Learn": 5, "Practice": 4, "Review": 2, "Verify": 1}[emphasis]
-        difficulty = max(3, min(9, 3 + len(patterns) + (1 if emphasis == "Learn" else 0)))
-        items.append(
-            {
-                "title": title,
-                "emphasis": emphasis,
-                "slides": slides,
-                "difficulty": difficulty,
-                "outcome": outcome,
-                "concepts": concepts,
-            }
-        )
     focus = str(survey.get("interview_focus") or "coding") if survey else "coding"
     level = str(survey.get("target_level") or "entry") if survey else "entry"
-    if focus != "coding" or level == "senior":
+
+    if focus == "system_design":
         items.append(
             {
-                "title": "System Design Foundations",
-                "emphasis": "Learn" if focus == "system_design" else "Practice",
-                "slides": 4 if focus == "system_design" else 3,
-                "difficulty": 7,
-                "outcome": "Frame requirements, estimate scale, and explain component tradeoffs.",
-                "concepts": ("Requirements", "Scale estimation", "Interfaces", "Tradeoffs"),
+                "title": "Coding Pattern Maintenance",
+                "emphasis": "Review",
+                "slides": 2,
+                "difficulty": 5,
+                "outcome": "Keep core pattern recognition, complexity, and testing ready for mixed interview loops.",
+                "concepts": ("Pattern recognition", "Complexity analysis", "Testing strategy", "Concise solution narration"),
+                "interview_habit": "Give a compact approach, complexity, and test plan before implementation.",
             }
         )
+    else:
+        for title, patterns, outcome, concepts, interview_habit in _CONFIDENCE_UNIT_DEFINITIONS:
+            emphasis = _confidence_emphasis(ratings, patterns)
+            slides = {"Learn": 5, "Practice": 4, "Review": 2, "Verify": 1}[emphasis]
+            difficulty = max(3, min(9, 3 + len(patterns) + (1 if emphasis == "Learn" else 0)))
+            items.append(
+                {
+                    "title": title,
+                    "emphasis": emphasis,
+                    "slides": slides,
+                    "difficulty": difficulty,
+                    "outcome": outcome,
+                    "concepts": concepts,
+                    "interview_habit": interview_habit,
+                }
+            )
+
+    if focus in {"balanced", "system_design"}:
+        for title, topics, outcome, concepts, interview_habit in _SYSTEM_DESIGN_UNIT_DEFINITIONS:
+            emphasis = _confidence_emphasis(ratings, topics)
+            slides = {"Learn": 5, "Practice": 4, "Review": 2, "Verify": 1}[emphasis]
+            items.append(
+                {
+                    "title": title,
+                    "emphasis": emphasis,
+                    "slides": slides,
+                    "difficulty": 7 if level in {"mid", "senior"} else 5,
+                    "outcome": outcome,
+                    "concepts": concepts,
+                    "interview_habit": interview_habit,
+                }
+            )
     role = str(survey.get("role_family") or "general SWE") if survey else "general SWE"
     role_unit = _ROLE_SPECIFIC_UNITS.get(role)
     if role_unit is not None:
@@ -1145,17 +1241,19 @@ def confidence_outline_items(survey: Mapping[str, object] | None) -> list[dict[s
                 "slides": 3,
                 "difficulty": 6 if level in {"mid", "senior"} else 4,
                 "outcome": outcome,
-                "concepts": concepts,
+                "concepts": (*concepts, "Role-specific behavioral examples"),
+                "interview_habit": "Connect technical tradeoffs to role expectations and one concise experience story.",
             }
         )
     items.append(
         {
-            "title": "Timed and Behavioral Interview Practice",
+            "title": "Integrated Mock Interview Rounds",
             "emphasis": "Practice",
             "slides": 4,
             "difficulty": 7,
-            "outcome": "Combine pattern recognition, implementation, testing, communication, and concise stories.",
-            "concepts": ("Timed practice", "Testing", "Think-aloud communication", "Behavioral stories"),
+            "outcome": "Apply the technical and communication habits practiced throughout the course under realistic timing.",
+            "concepts": ("Timed practice", "Testing under pressure", "Communication under pressure", "Self-review"),
+            "interview_habit": "Use the same clarify, plan, implement, test, and summarize loop under time pressure.",
         }
     )
     return items
@@ -1180,6 +1278,7 @@ def confidence_outline(survey: Mapping[str, object] | None) -> str:
             f"{item['difficulty']}/10) - {item['outcome']} Emphasis: {item['emphasis']}."
         )
         lines.append("Concepts: " + "; ".join(str(value) for value in item["concepts"]))
+        lines.append(f"Interview habit: {item['interview_habit']}")
     return "\n".join(lines)
 
 
@@ -1263,10 +1362,12 @@ def save_confidence_survey(
 def _confidence_result(survey: Mapping[str, object] | None, *, skipped: bool) -> dict[str, object]:
     ratings_value = survey.get("ratings") if isinstance(survey, Mapping) else None
     ratings = ratings_value if isinstance(ratings_value, Mapping) else {}
-    lowest = min(
-        enumerate(CONFIDENCE_PATTERNS),
+    focus = str(survey.get("interview_focus") or "coding") if survey else "coding"
+    topics = confidence_topics_for_focus(focus)
+    _lowest_index, (_lowest_id, lowest_label) = min(
+        enumerate(topics),
         key=lambda indexed: (int(ratings.get(indexed[1][0], 1)), indexed[0]),
-    )[1]
+    )
     uncertainty = [
         "Confidence ratings guide curriculum emphasis and do not establish mastery.",
         "Understanding will be verified through retrieval and implementation during the course.",
@@ -1294,7 +1395,7 @@ def _confidence_result(survey: Mapping[str, object] | None, *, skipped: bool) ->
             "starting_route": "Broad baseline" if skipped else "Confidence-guided pattern practice",
             "first_activity": "Clarifying requirements",
             "reasoning_signals": ["Learner confidence profile recorded" if not skipped else "Placement skipped"],
-            "practice_priority": f"Verify {lowest[1]} through guided practice.",
+            "practice_priority": f"Verify {lowest_label} through guided practice.",
             "uncertainty_to_verify": "Pattern fluency must be demonstrated in later coding practice.",
         },
     }

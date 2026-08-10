@@ -11,6 +11,8 @@ from urllib.request import Request, urlopen
 
 import pytest
 
+from openlearn import interview_prep
+
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("OPENLEARN_BROWSER_TEST") != "1",
@@ -151,27 +153,38 @@ def test_real_browser_course_polling_theme_conflict_and_keyboard_submit(
                 playwright.expect(
                     first.get_by_role("heading", name="What are you preparing for?")
                 ).to_be_visible()
-                playwright.expect(
-                    first.get_by_role("heading", name="How confident are you with each pattern?")
-                ).to_be_visible()
                 assert first.get_by_text("first_unique_window", exact=False).count() == 0
                 _assert_no_page_overflow(first)
                 first.locator('input[name="target_level"][value="senior"]').check()
                 first.locator('input[name="interview_focus"][value="balanced"]').check()
-                first.locator('input[name="rating_sliding_window"][value="1"]').check()
-                first.locator('input[name="rating_trees"][value="5"]').check()
-                first.get_by_role("button", name="Build my outline").click()
+                first.emulate_media(reduced_motion="reduce")
+                first.get_by_role("button", name="Start rapid questions").click()
+                seen_topics: set[str] = set()
+                while first.locator("[data-confidence-complete]").is_hidden():
+                    question = first.locator("[data-confidence-question]:visible")
+                    topic_id = question.get_attribute("data-topic-id")
+                    seen_topics.add(topic_id)
+                    rating = 1 if topic_id == "sliding_window" else 5 if topic_id == "trees" else 3
+                    question.locator(f'[data-confidence-rating="{rating}"]').click()
+                assert "sliding_window" in seen_topics
+                assert "capacity_estimation" in seen_topics
+                first.get_by_role("button", name="Review or change answers").click()
+                assert first.locator("[data-review-topic]:visible").count() == len(
+                    interview_prep.confidence_topics_for_focus("balanced")
+                )
+                first.get_by_role("button", name="Build my course outline").click()
                 playwright.expect(
                     first.get_by_role("heading", name="Your suggested course outline")
                 ).to_be_visible()
                 playwright.expect(
-                    first.get_by_text("System Design Foundations", exact=True)
+                    first.get_by_text("Requirements, Scale, and Interfaces", exact=True)
                 ).to_be_visible()
                 playwright.expect(first.get_by_text("Tutor feedback", exact=True)).to_have_count(0)
+                playwright.expect(first.get_by_text("Workshop this outline", exact=True)).to_have_count(0)
+                playwright.expect(first.get_by_role("button", name="Change course outline")).to_be_visible()
                 assert first.url.endswith("/placement")
                 _assert_no_page_overflow(first)
-                first.emulate_media(reduced_motion="reduce")
-                first.get_by_role("button", name="Use this outline").click()
+                first.get_by_role("button", name="Confirm course outline").click()
                 first.wait_for_function(
                     "() => !window.location.pathname.endsWith('/placement')"
                 )

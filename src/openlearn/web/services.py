@@ -736,9 +736,13 @@ class OpenLearnWebServices:
                 "updated_at": placement.get("updated_at"),
                 "attempt_id": placement.get("attempt_id"),
                 "survey": survey_value,
-                "patterns": [
-                    {"id": pattern_id, "label": label}
-                    for pattern_id, label in interview_prep.CONFIDENCE_PATTERNS
+                "topics": [
+                    {"id": topic_id, "label": label, "track": "coding"}
+                    for topic_id, label in interview_prep.CONFIDENCE_PATTERNS
+                ]
+                + [
+                    {"id": topic_id, "label": label, "track": "system_design"}
+                    for topic_id, label in interview_prep.SYSTEM_DESIGN_TOPICS
                 ],
                 "scale": [
                     {"value": value, "label": label}

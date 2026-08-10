@@ -1087,21 +1087,138 @@ placementShell?.querySelector("[data-placement-draft-form]")?.addEventListener("
   }
 });
 
-placementShell?.querySelector("[data-confidence-form]")?.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const form = event.currentTarget;
-  const values = new FormData(form);
-  const ratings = {};
-  for (const [name, value] of values.entries()) {
-    if (name.startsWith("rating_")) ratings[name.slice(7)] = Number(value);
-  }
-  await runPlacementAction("save_confidence", {
-    role_family: values.get("role_family") || "",
-    target_level: values.get("target_level") || "",
-    interview_focus: values.get("interview_focus") || "",
-    ratings,
+const confidenceForm = placementShell?.querySelector("[data-confidence-form]");
+
+if (confidenceForm) {
+  const context = confidenceForm.querySelector("[data-confidence-context]");
+  const quiz = confidenceForm.querySelector("[data-confidence-quiz]");
+  const review = confidenceForm.querySelector("[data-confidence-review]");
+  const complete = confidenceForm.querySelector("[data-confidence-complete]");
+  const position = confidenceForm.querySelector("[data-confidence-position]");
+  const previous = confidenceForm.querySelector("[data-confidence-previous]");
+  const questions = [...confidenceForm.querySelectorAll("[data-confidence-question]")];
+  const reviewTopics = [...confidenceForm.querySelectorAll("[data-review-topic]")];
+  let activeQuestions = [];
+  let currentQuestion = 0;
+  let advancingQuestion = false;
+
+  const selectedFocus = () => confidenceForm.querySelector('input[name="interview_focus"]:checked')?.value || "coding";
+  const trackIsActive = (track) => selectedFocus() === "balanced" || selectedFocus() === track;
+
+  const prepareReview = () => {
+    for (const topic of reviewTopics) {
+      const active = trackIsActive(topic.dataset.topicTrack);
+      topic.hidden = !active;
+      for (const input of topic.querySelectorAll("input")) input.disabled = !active;
+    }
+  };
+
+  const showQuestion = (index) => {
+    for (const question of questions) question.hidden = true;
+    currentQuestion = Math.max(0, Math.min(index, activeQuestions.length));
+    const finished = currentQuestion >= activeQuestions.length;
+    complete.hidden = !finished;
+    previous.hidden = currentQuestion === 0;
+    if (position) {
+      position.textContent = finished
+        ? `${activeQuestions.length} answered`
+        : `Question ${currentQuestion + 1} of ${activeQuestions.length}`;
+    }
+    if (!finished) activeQuestions[currentQuestion].hidden = false;
+  };
+
+  const advanceQuestion = async (question) => {
+    if (!reducedMotionRequested()) {
+      const outgoing = question.animate(
+        [
+          {opacity: 1, transform: "translateX(0)"},
+          {opacity: 0, transform: "translateX(-2rem)"},
+        ],
+        {duration: 260, easing: "cubic-bezier(0.4, 0, 0.2, 1)"},
+      );
+      await outgoing.finished.catch(() => {});
+    }
+    showQuestion(currentQuestion + 1);
+    const incoming = activeQuestions[currentQuestion];
+    if (incoming && !reducedMotionRequested()) {
+      incoming.animate(
+        [
+          {opacity: 0, transform: "translateX(2rem)"},
+          {opacity: 1, transform: "translateX(0)"},
+        ],
+        {duration: 320, easing: "cubic-bezier(0.16, 1, 0.3, 1)"},
+      );
+    }
+  };
+
+  confidenceForm.querySelector("[data-start-confidence-quiz]")?.addEventListener("click", () => {
+    activeQuestions = questions.filter((question) => trackIsActive(question.dataset.topicTrack));
+    prepareReview();
+    context.hidden = true;
+    review.hidden = true;
+    quiz.hidden = false;
+    showQuestion(0);
+    activeQuestions[0]?.querySelector("button")?.focus();
   });
-});
+
+  for (const question of questions) {
+    for (const button of question.querySelectorAll("[data-confidence-rating]")) {
+      button.addEventListener("click", async () => {
+        if (advancingQuestion) return;
+        advancingQuestion = true;
+        previous.disabled = true;
+        const value = button.dataset.confidenceRating;
+        const topicId = question.dataset.topicId;
+        for (const option of question.querySelectorAll("[data-confidence-rating]")) {
+          option.setAttribute("aria-pressed", String(option === button));
+        }
+        const reviewInput = confidenceForm.querySelector(
+          `input[name="rating_${CSS.escape(topicId)}"][value="${CSS.escape(value)}"]`,
+        );
+        if (reviewInput) reviewInput.checked = true;
+        await advanceQuestion(question);
+        advancingQuestion = false;
+        previous.disabled = false;
+        (activeQuestions[currentQuestion]?.querySelector("button") || complete.querySelector("button"))?.focus();
+      });
+    }
+  }
+
+  previous?.addEventListener("click", () => {
+    if (advancingQuestion) return;
+    showQuestion(currentQuestion - 1);
+    const question = activeQuestions[currentQuestion];
+    (question?.querySelector('[aria-pressed="true"]') || question?.querySelector("button"))?.focus();
+  });
+
+  confidenceForm.querySelector("[data-review-confidence]")?.addEventListener("click", () => {
+    quiz.hidden = true;
+    review.hidden = false;
+    review.querySelector("input:checked")?.focus();
+  });
+
+  confidenceForm.querySelector("[data-return-confidence-summary]")?.addEventListener("click", () => {
+    review.hidden = true;
+    quiz.hidden = false;
+    showQuestion(activeQuestions.length);
+    complete.querySelector("button")?.focus();
+  });
+
+  confidenceForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const values = new FormData(confidenceForm);
+    const ratings = {};
+    for (const [name, value] of values.entries()) {
+      if (name.startsWith("rating_")) ratings[name.slice(7)] = Number(value);
+    }
+    await runPlacementAction("save_confidence", {
+      role_family: values.get("role_family") || "",
+      target_level: values.get("target_level") || "",
+      interview_focus: values.get("interview_focus") || "",
+      ratings,
+    });
+  });
+}
 
 async function confirmPlacementOutline() {
   const outline = placementShell?.querySelector("#placement-outline")?.value || "";
@@ -1115,6 +1232,21 @@ placementShell?.querySelector("[data-outline-form]")?.addEventListener("submit",
 
 placementShell?.querySelector("[data-confirm-outline]")?.addEventListener("click", () => {
   confirmPlacementOutline();
+});
+
+const outlineActions = placementShell?.querySelector("[data-outline-actions]");
+const outlineEditor = placementShell?.querySelector("[data-outline-editor]");
+
+placementShell?.querySelector("[data-change-outline]")?.addEventListener("click", () => {
+  outlineActions.hidden = true;
+  outlineEditor.hidden = false;
+  outlineEditor.querySelector("textarea")?.focus();
+});
+
+placementShell?.querySelector("[data-cancel-outline]")?.addEventListener("click", () => {
+  outlineEditor.hidden = true;
+  outlineActions.hidden = false;
+  outlineActions.querySelector("[data-change-outline]")?.focus();
 });
 
 for (const button of document.querySelectorAll("[data-placement-action]")) {

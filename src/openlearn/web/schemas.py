@@ -8,7 +8,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from openlearn.interview_prep import CONFIDENCE_PATTERN_IDS, DRAFT_MAX_LENGTH
+from openlearn.interview_prep import DRAFT_MAX_LENGTH, confidence_topics_for_focus
 from openlearn.data_management import (
     CREDENTIAL_CONFIRMATION,
     DELETE_CONFIRMATION,
@@ -101,15 +101,20 @@ class PlacementRequest(BaseModel):
     def valid_optional_submission_id(cls, value: str | None) -> str | None:
         return canonical_uuid(value) if value is not None else None
 
-    @field_validator("ratings")
-    @classmethod
-    def valid_ratings(cls, value: dict[str, int]) -> dict[str, int]:
-        if value and (
-            set(value) != CONFIDENCE_PATTERN_IDS
-            or any(isinstance(rating, bool) or rating not in range(1, 6) for rating in value.values())
+    @model_validator(mode="after")
+    def valid_confidence_survey(self) -> PlacementRequest:
+        if self.action != "save_confidence":
+            return self
+        expected = {
+            topic_id
+            for topic_id, _label in confidence_topics_for_focus(self.interview_focus)
+        }
+        if set(self.ratings) != expected or any(
+            isinstance(rating, bool) or rating not in range(1, 6)
+            for rating in self.ratings.values()
         ):
-            raise ValueError("Expected one 1-5 rating for every interview pattern")
-        return value
+            raise ValueError("Expected one 1-5 rating for every selected interview topic")
+        return self
 
 
 class ReviewGradeRequest(BaseModel):

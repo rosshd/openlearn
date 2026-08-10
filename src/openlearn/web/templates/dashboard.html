@@ -4,9 +4,9 @@
   <div class="section-heading">
     <div>
       <p class="eyebrow">Your workbench</p>
-      <h1 id="dashboard-title">{% if dashboard.courses %}Pick up where you left off.{% else %}Make a useful starting point.{% endif %}</h1>
+      <h1 id="dashboard-title">{% if dashboard.courses %}Pick up where you left off.{% else %}Choose what you want to learn.{% endif %}</h1>
     </div>
-    <a class="primary-action compact" href="{{ url_for('new_course') }}">Start something new <span aria-hidden="true">+</span></a>
+    {% if dashboard.courses %}<a class="primary-action compact" href="{{ url_for('new_course') }}">Add another course <span aria-hidden="true">+</span></a>{% endif %}
   </div>
 
   {% if dashboard.active_course %}

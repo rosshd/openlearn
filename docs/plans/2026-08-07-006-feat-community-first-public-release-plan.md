@@ -82,10 +82,10 @@ The release must make those answers obvious without using a maintainer-owned Ope
 
 - R11. The Maker Bench and CLI must expose starter courses, new course creation, Quick Learn, resume, review, progress, provider settings, and data-management actions through discoverable navigation.
 - R12. Technical Interview Prep must ship as the baseline starter course with a structured algorithms and data-structures curriculum.
-- R13. Technical Interview Prep placement must be a short optional 1-5 confidence survey across common interview patterns, followed by a role-aware suggested outline that the learner can accept, edit, or skip.
+- R13. Technical Interview Prep placement must ask one rapid 1-5 confidence question at a time, choose coding or system-design topics from the learner's interview focus, and end with a reviewable role-aware outline that the learner can confirm, change, or skip.
 - R14. Placement must not require an IDE or code execution, while later course activities may use the optional coding workbench.
 - R15. A learner must be able to create a broad custom course for a topic outside the bundled templates without losing the tutor's adaptive teaching behavior.
-- R16. Each teaching turn must present one readable learning objective, one primary learner action, and clear controls to answer, pause, or leave the session.
+- R16. Each teaching turn must present one readable learning objective, one primary learner action, and clear controls to answer, pause, or leave the session, while interview courses teach communication and interview habits alongside technical concepts rather than postponing them to a final unit.
 - R17. Resume must restore the active course and explain the next useful action without replaying an overwhelming transcript or setup sequence.
 - R18. Progress must distinguish current unit, demonstrated mastery, uncertain concepts, due review, and the recommended next action.
 - R19. Quick Learn must turn a supported local source or bounded public repository into an immediate local learning session without executing imported content.
@@ -220,7 +220,7 @@ flowchart TB
 - AE5. **Covers R13, R14, R20, R24.**
   - **Given:** A learner starts placement and rates confidence across the interview patterns.
   - **When:** The learner supplies a role, level, and interview focus.
-  - **Then:** Openlearn proposes a readable role-aware outline that gives more teaching time to lower-confidence patterns and treats every self-rating as unverified planning input.
+  - **Then:** Openlearn proposes a readable role-aware outline that gives more teaching time to lower-confidence topics, changes its system-design coverage with the selected interview focus, embeds interview habits throughout the units, and treats every self-rating as unverified planning input.
 
 - AE6. **Covers R16, R17, R18, R20.**
   - **Given:** A learner leaves during a course and returns later.
@@ -515,7 +515,7 @@ flowchart TB
 - **Files:** `src/openlearn/application.py`, `src/openlearn/courses.py`, `src/openlearn/tutor_service.py`, `src/openlearn/interview_prep.py`, `src/openlearn/web/app.py`, `src/openlearn/web/routes.py`, `src/openlearn/web/schemas.py`, `src/openlearn/web/services.py`, `src/openlearn/web/templates/dashboard.html`, `src/openlearn/web/templates/course_create.html`, `src/openlearn/web/templates/focus.html`, `src/openlearn/web/templates/history.html`, `src/openlearn/web/static/openlearn.js`, `tests/test_application.py`, `tests/test_courses.py`, `tests/test_interview_prep.py`, `tests/test_tutor_service.py`, `tests/test_web.py`, `tests/test_web_browser.py`.
 - **Approach:**
   1. Preserve template entry mode through the application and web projections.
-  2. Route Technical Interview Prep through an offline confidence survey, role-aware outline generation, outline editing or acceptance, and direct skip before model lesson initialization.
+  2. Route Technical Interview Prep through one-at-a-time offline confidence questions, focus-specific topic selection, role-aware outline generation, explicit outline confirmation or editing, and direct skip before model lesson initialization.
   3. Add discoverable Quick Learn, due review, detailed progress, resume, settings, and data-management entry points.
   4. Extract shared operations where the current behavior exists only behind CLI handlers.
   5. Keep revision, idempotency, and conflict behavior consistent with existing course and tutor services.

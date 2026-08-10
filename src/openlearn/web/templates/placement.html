@@ -26,7 +26,7 @@
 
     {% elif placement.status == 'in_progress' and placement.next_stage == 'confidence' %}
     <form class="form-stack confidence-form" data-confidence-form>
-      <section class="confidence-context" aria-labelledby="target-heading">
+      <section class="confidence-context" aria-labelledby="target-heading" data-confidence-context>
         <div class="panel-heading"><h2 id="target-heading">What are you preparing for?</h2><span>Three quick choices</span></div>
         <fieldset class="choice-fieldset">
           <legend>Role</legend>
@@ -52,24 +52,55 @@
             {% endfor %}
           </div>
         </fieldset>
+        <div class="placement-entry-actions">
+          <button class="primary-action" type="button" data-start-confidence-quiz>Start rapid questions</button>
+          <button type="button" data-placement-action="skip">Skip placement</button>
+        </div>
       </section>
 
-      <section class="confidence-patterns" aria-labelledby="patterns-heading">
+      <section class="confidence-rapid" aria-labelledby="rapid-heading" data-confidence-quiz hidden>
         <div class="panel-heading">
-          <div><h2 id="patterns-heading">How confident are you with each pattern?</h2><p>Every row starts at 3. Change only what differs.</p></div>
-          <span>1-5</span>
+          <div><p class="eyebrow">Rapid placement</p><h2 id="rapid-heading">Choose the number that fits.</h2></div>
+          <span data-confidence-position>Question 1</span>
         </div>
+        <div class="confidence-question-stage" aria-live="polite">
+          {% for topic in placement.topics %}
+          <fieldset class="confidence-question" data-confidence-question data-topic-id="{{ topic.id }}" data-topic-track="{{ topic.track }}" hidden>
+            <p class="eyebrow">{{ 'Coding pattern' if topic.track == 'coding' else 'System design' }}</p>
+            <legend>How confident are you with {{ topic.label|lower }}?</legend>
+            <div class="rapid-rating-buttons" aria-label="Confidence from 1 to 5">
+              {% for item in placement.scale %}
+              <button type="button" data-confidence-rating="{{ item.value }}" aria-label="{{ item.value }}, {{ item.label }}" aria-pressed="false"><b>{{ item.value }}</b><small>{{ item.label }}</small></button>
+              {% endfor %}
+            </div>
+          </fieldset>
+          {% endfor %}
+          <div class="confidence-complete" data-confidence-complete hidden>
+            <p class="eyebrow">Placement complete</p>
+            <h2>Your answers are ready.</h2>
+            <p>Build the suggested course outline now, or review every answer in one list.</p>
+            <div class="placement-entry-actions">
+              <button class="primary-action" type="submit">Build my course outline</button>
+              <button type="button" data-review-confidence>Review or change answers</button>
+            </div>
+          </div>
+        </div>
+        <button class="quiet-link confidence-previous" type="button" data-confidence-previous hidden>← Previous question</button>
+      </section>
+
+      <section class="confidence-review" aria-labelledby="review-answers-heading" data-confidence-review hidden>
+        <div class="panel-heading"><div><p class="eyebrow">Review placement</p><h2 id="review-answers-heading">Review or change your answers.</h2></div><span>1-5</span></div>
         <div class="confidence-scale-key" aria-hidden="true">
           {% for item in placement.scale %}<span><strong>{{ item.value }}</strong> {{ item.label }}</span>{% endfor %}
         </div>
         <div class="pattern-rating-list">
-          {% for pattern in placement.patterns %}
-          <fieldset class="pattern-rating">
-            <legend>{{ pattern.label }}</legend>
+          {% for topic in placement.topics %}
+          <fieldset class="pattern-rating" data-review-topic data-topic-track="{{ topic.track }}">
+            <legend>{{ topic.label }}</legend>
             <div class="rating-buttons">
               {% for item in placement.scale %}
               <label title="{{ item.label }}">
-                <input type="radio" name="rating_{{ pattern.id }}" value="{{ item.value }}" {% if item.value == 3 %}checked{% endif %}>
+                <input type="radio" name="rating_{{ topic.id }}" value="{{ item.value }}">
                 <span><b>{{ item.value }}</b><small>{{ item.label }}</small></span>
               </label>
               {% endfor %}
@@ -77,11 +108,11 @@
           </fieldset>
           {% endfor %}
         </div>
+        <div class="placement-entry-actions">
+          <button class="primary-action" type="submit">Build my course outline</button>
+          <button type="button" data-return-confidence-summary>Back</button>
+        </div>
       </section>
-      <div class="placement-entry-actions">
-        <button class="primary-action" type="submit">Build my outline</button>
-        <button type="button" data-placement-action="skip">Skip placement</button>
-      </div>
     </form>
 
     {% elif placement.status == 'in_progress' and placement.next_stage == 'outline' %}
@@ -93,24 +124,27 @@
       <ol class="outline-list">
         {% for item in placement.outline_items %}
         <li>
-          <div><strong>{{ item.title }}</strong><p>{{ item.outcome }}</p></div>
+          <div><strong>{{ item.title }}</strong><p>{{ item.outcome }}</p><p class="outline-habit"><span>Interview habit</span> {{ item.interview_habit }}</p></div>
           <span class="outline-emphasis {{ item.emphasis|lower }}">{{ item.emphasis }}</span>
         </li>
         {% endfor %}
       </ol>
-      <details class="outline-workshop">
-        <summary>Workshop this outline</summary>
-        <p>Edit, reorder, or rename units directly. Keep at least four numbered units.</p>
+      <div class="placement-entry-actions" data-outline-actions>
+        <button class="primary-action" type="button" data-confirm-outline>Confirm course outline</button>
+        <button type="button" data-change-outline>Change course outline</button>
+      </div>
+      <section class="outline-editor" data-outline-editor hidden aria-labelledby="outline-editor-heading">
+        <h3 id="outline-editor-heading">Change course outline</h3>
+        <p>Tell openlearn what to add, remove, reorder, or emphasize by editing the outline prompt below. Keep at least four numbered units.</p>
         <form class="form-stack" data-outline-form>
           <label for="placement-outline">Course outline</label>
           <textarea id="placement-outline" name="outline" rows="18" maxlength="12000">{{ placement.outline }}</textarea>
-          <button class="primary-action" type="submit">Use edited outline</button>
+          <div class="placement-entry-actions">
+            <button class="primary-action" type="submit">Save changes and continue</button>
+            <button type="button" data-cancel-outline>Cancel</button>
+          </div>
         </form>
-      </details>
-      <div class="placement-entry-actions">
-        <button class="primary-action" type="button" data-confirm-outline>Use this outline</button>
-        <button type="button" data-placement-action="restart">Adjust my answers</button>
-      </div>
+      </section>
     </section>
 
     {% else %}

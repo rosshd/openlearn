@@ -294,7 +294,7 @@ h2 { font-size: clamp(1.35rem, 3vw, 2rem); line-height: 1.1; letter-spacing: -0.
   background: transparent;
   cursor: pointer;
 }
-.confidence-context, .confidence-patterns, .outline-review { display: grid; gap: 1.25rem; }
+.confidence-context, .confidence-rapid, .confidence-review, .outline-review { display: grid; gap: 1.25rem; }
 .choice-fieldset, .pattern-rating { margin: 0; padding: 0; border: 0; }
 .choice-fieldset > legend, .pattern-rating > legend { margin-bottom: 0.55rem; font-weight: 750; }
 .choice-chips { display: flex; flex-wrap: wrap; gap: 0.5rem; }
@@ -314,6 +314,24 @@ h2 { font-size: clamp(1.35rem, 3vw, 2rem); line-height: 1.1; letter-spacing: -0.
   box-shadow: inset 0 -3px var(--orange);
 }
 .choice-chips input:focus-visible + span, .rating-buttons input:focus-visible + span { outline: 3px solid var(--orange); outline-offset: 2px; }
+.confidence-question-stage { min-height: 21rem; display: grid; align-items: center; }
+.confidence-question, .confidence-complete {
+  width: min(100%, 50rem);
+  margin-inline: auto;
+  padding: clamp(1.25rem, 4vw, 3rem);
+  border: 1px solid var(--line-strong);
+  border-top: 7px solid var(--orange);
+  background: var(--surface-raised);
+}
+.confidence-question { min-width: 0; }
+.confidence-question legend { max-width: 24ch; margin: 0 0 2rem; font-size: clamp(1.5rem, 4vw, 2.6rem); font-weight: 780; line-height: 1.08; letter-spacing: -0.025em; }
+.rapid-rating-buttons { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: clamp(0.35rem, 1vw, 0.75rem); }
+.rapid-rating-buttons button { min-width: 0; min-height: 6rem; padding: 0.75rem 0.25rem; border: 1px solid var(--line); display: grid; place-items: center; gap: 0.35rem; background: var(--surface); cursor: pointer; }
+.rapid-rating-buttons button:hover, .rapid-rating-buttons button:focus-visible, .rapid-rating-buttons button[aria-pressed="true"] { border-color: var(--orange); background: color-mix(in srgb, var(--orange) 10%, var(--surface)); transform: translateY(-2px); }
+.rapid-rating-buttons b { font: 800 clamp(1.25rem, 3vw, 2rem)/1 ui-monospace, monospace; }
+.rapid-rating-buttons small { color: var(--graphite-soft); font-size: clamp(0.6rem, 1.2vw, 0.78rem); }
+.confidence-complete { border-top-color: var(--teal); }
+.confidence-previous { justify-self: start; border: 0; background: transparent; cursor: pointer; }
 .confidence-scale-key { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 0.4rem; padding-left: min(18rem, 28vw); color: var(--graphite-soft); font-size: 0.72rem; }
 .confidence-scale-key span { text-align: center; }
 .pattern-rating-list { border-top: 1px solid var(--line); }
@@ -333,12 +351,12 @@ h2 { font-size: clamp(1.35rem, 3vw, 2rem); line-height: 1.1; letter-spacing: -0.
 .outline-list { margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--line); }
 .outline-list li { padding: 1rem 0; border-bottom: 1px solid var(--line); display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 1rem; align-items: start; }
 .outline-list p { margin: 0.3rem 0 0; color: var(--graphite-soft); }
+.outline-list .outline-habit { margin-top: 0.65rem; padding-left: 0.65rem; border-left: 3px solid var(--teal); color: var(--graphite); }
+.outline-habit span { margin-right: 0.35rem; color: var(--teal); font: 750 0.7rem/1 ui-monospace, monospace; text-transform: uppercase; }
 .outline-emphasis { min-width: 5.5rem; padding: 0.35rem 0.5rem; border: 1px solid var(--line); color: var(--graphite-soft); text-align: center; font: 750 0.72rem/1 ui-monospace, monospace; text-transform: uppercase; }
 .outline-emphasis.learn { border-color: var(--orange); color: var(--orange-ink); }
 .outline-emphasis.practice { border-color: var(--teal); color: var(--teal); }
-.outline-workshop { padding-block: 0.75rem; border-block: 1px solid var(--line); }
-.outline-workshop > summary { min-height: 2.75rem; padding-top: 0.55rem; font-weight: 750; cursor: pointer; }
-.outline-workshop[open] { display: grid; gap: 0.75rem; }
+.outline-editor { padding: 1rem; border: 1px solid var(--line-strong); background: var(--surface-raised); }
 .placement-complete { max-width: 46rem; }
 .composer { border: 1px solid var(--line-strong); background: var(--surface); }
 .intent-picker { margin: 0; padding: 0.45rem; border: 0; border-bottom: 1px solid var(--line); display: flex; gap: 0.25rem; flex-wrap: wrap; }
@@ -470,6 +488,10 @@ h2 { font-size: clamp(1.35rem, 3vw, 2rem); line-height: 1.1; letter-spacing: -0.
   .pattern-rating > legend, .rating-buttons { grid-column: 1; }
   .confidence-scale-key { display: none; }
   .rating-buttons small { display: block; font-size: 0.58rem; }
+  .confidence-question-stage { min-height: 18rem; }
+  .confidence-question, .confidence-complete { padding: 1rem; }
+  .rapid-rating-buttons button { min-height: 5rem; }
+  .rapid-rating-buttons small { font-size: 0.55rem; overflow-wrap: anywhere; }
 }
 
 @media (max-width: 390px) {
