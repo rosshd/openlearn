@@ -20,6 +20,7 @@ from tests.dogfood.codex_missions import (
     verify_single_matching_draft,
 )
 from tests.dogfood.explorer import ExplorerResult
+from tests.dogfood.support import POSIX_PTY_ONLY, installed_openlearn
 
 
 class FakeDecisionSource:
@@ -45,17 +46,6 @@ class FakeDecisionSource:
         if isinstance(value, BaseException):
             raise value
         return value
-
-
-def _installed_openlearn() -> Path:
-    root = Path(__file__).resolve().parents[2]
-    candidates = (
-        root / ".venv" / "bin" / "openlearn",
-        root.parent.parent / ".venv" / "bin" / "openlearn",
-    )
-    executable = next((path for path in candidates if path.is_file()), None)
-    assert executable is not None, "installed openlearn executable is required"
-    return executable
 
 
 def _direct_decisions() -> list[CodexDecision]:
@@ -96,6 +86,7 @@ def _topic_text(name: str, slug: str, goal: str) -> str:
         (CodexMissionVariant.ERROR_PRONE, ["99"], 8),
     ],
 )
+@POSIX_PTY_ONLY
 def test_fake_source_composes_public_pty_mission_and_preserves_route(
     tmp_path: Path,
     variant: CodexMissionVariant,
@@ -109,7 +100,7 @@ def test_fake_source_composes_public_pty_mission_and_preserves_route(
 
     outcome = run_codex_draft_course_mission(
         tmp_path / variant.value,
-        command=(_installed_openlearn(), "menu"),
+        command=(installed_openlearn(), "menu"),
         decision_source=source,
         variant=variant,
     )
@@ -153,6 +144,7 @@ def test_fake_source_composes_public_pty_mission_and_preserves_route(
         (CodexMissionVariant.ERROR_PRONE, []),
     ],
 )
+@POSIX_PTY_ONLY
 def test_goal_completion_is_not_rejected_by_unexpected_route_variation(
     tmp_path: Path,
     variant: CodexMissionVariant,
@@ -165,7 +157,7 @@ def test_goal_completion_is_not_rejected_by_unexpected_route_variation(
 
     outcome = run_codex_draft_course_mission(
         tmp_path / variant.value,
-        command=(_installed_openlearn(), "menu"),
+        command=(installed_openlearn(), "menu"),
         decision_source=source,
         variant=variant,
     )
@@ -225,6 +217,7 @@ def test_hidden_verifier_rejects_each_mismatched_public_field(
     assert verify_single_matching_draft(tmp_path / "home") is False
 
 
+@POSIX_PTY_ONLY
 def test_mission_refuses_existing_root_and_uses_private_directories(tmp_path: Path) -> None:
     existing = tmp_path / "existing"
     existing.mkdir()
@@ -244,7 +237,7 @@ def test_mission_refuses_existing_root_and_uses_private_directories(tmp_path: Pa
 
     outcome = run_codex_draft_course_mission(
         tmp_path / "private-run",
-        command=(_installed_openlearn(), "menu"),
+        command=(installed_openlearn(), "menu"),
         decision_source=FakeDecisionSource(_direct_decisions()),
         variant=CodexMissionVariant.DIRECT,
     )
@@ -309,6 +302,7 @@ def test_live_wrapper_composes_both_isolated_variants_without_starting_codex(
     assert all(call["model"] == "gpt-test" for call in source_calls)
 
 
+@POSIX_PTY_ONLY
 def test_codex_failure_is_finalized_with_actionable_summary(tmp_path: Path) -> None:
     source = FakeDecisionSource(
         [CodexDecisionError("Codex decision process exited with status 1")]

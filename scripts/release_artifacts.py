@@ -289,6 +289,27 @@ def _post_json(
     return value
 
 
+def _remove_released_lifecycle_lock(home: Path) -> None:
+    resolved = home.expanduser().resolve(strict=False)
+    identity = hashlib.sha256(
+        os.fsencode(os.path.normcase(str(resolved)))
+    ).hexdigest()[:16]
+    lock_path = resolved.parent / f".openlearn-home-{identity}.lifecycle.lock"
+    deadline: float | None = None
+    while True:
+        try:
+            lock_path.unlink(missing_ok=True)
+            return
+        except PermissionError:
+            now = time.monotonic()
+            deadline = now + 2 if deadline is None else deadline
+            if now >= deadline:
+                raise ReleaseArtifactError(
+                    "Maker Bench did not release its home lifecycle lock"
+                )
+            time.sleep(0.05)
+
+
 def _smoke_web(command: Path, home: Path) -> None:
     port = _free_loopback_port()
     environment = {
@@ -412,12 +433,16 @@ def _smoke_web(command: Path, home: Path) -> None:
         if "data-focus-shell" not in focus or "data-turn-form" not in focus:
             raise ReleaseArtifactError("Maker Bench installed smoke did not reach teaching")
     finally:
-        process.terminate()
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=5)
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+        if process.stdout is not None:
+            process.stdout.close()
+        _remove_released_lifecycle_lock(home)
 
 
 def smoke_candidate(candidate: Path, *, kind: str, expected_version: str) -> None:

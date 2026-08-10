@@ -1048,7 +1048,11 @@ def _normalize_replay_value(
         return value
     normalized = value
     if home is not None:
-        normalized = normalized.replace(str(home), "<SCENARIO_HOME>")
+        native_home = str(home)
+        normalized = normalized.replace(native_home, "<SCENARIO_HOME>")
+        portable_home = native_home.replace("\\", "/")
+        if portable_home != native_home:
+            normalized = normalized.replace(portable_home, "<SCENARIO_HOME>")
     return normalized
 
 

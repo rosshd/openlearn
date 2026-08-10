@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import mimetypes
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
@@ -13,6 +14,9 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from .routes import router
 from .security import BrowserSecurity, LocalSecurityMiddleware
+
+
+mimetypes.add_type("text/javascript", ".js", strict=True)
 
 
 @runtime_checkable

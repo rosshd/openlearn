@@ -141,6 +141,7 @@ class PtyMissionRunner:
         started_at = self._clock()
         settled_by = "timeout"
         saw_output = False
+        quiet_windows = 0
         while True:
             remaining = timeout - max(0.0, self._clock() - started_at)
             if remaining <= 0:
@@ -149,10 +150,15 @@ class PtyMissionRunner:
             try:
                 child.read_nonblocking(size=4096, timeout=read_timeout)
                 saw_output = True
+                quiet_windows = 0
             except pexpect.TIMEOUT:
                 if saw_output:
-                    settled_by = "quiet" if read_timeout == quiet_interval else "timeout"
-                    break
+                    quiet_windows += 1
+                    if quiet_windows >= 2:
+                        settled_by = "quiet"
+                        break
+                    if read_timeout < quiet_interval:
+                        break
             except pexpect.EOF:
                 settled_by = "eof"
                 break

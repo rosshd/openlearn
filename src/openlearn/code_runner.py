@@ -1350,14 +1350,18 @@ def _classify_process_exit(
     exit_code: int | None,
     isolation: Literal["oci", "reduced"],
 ) -> tuple[str, str]:
-    resource_exit_codes = {
-        128 + signal.SIGKILL,
-        128 + getattr(signal, "SIGXCPU", signal.SIGKILL),
-        128 + getattr(signal, "SIGXFSZ", signal.SIGKILL),
-        -signal.SIGKILL,
-        -getattr(signal, "SIGXCPU", signal.SIGKILL),
-        -getattr(signal, "SIGXFSZ", signal.SIGKILL),
+    resource_signals = {
+        value
+        for name in ("SIGKILL", "SIGXCPU", "SIGXFSZ")
+        if (value := getattr(signal, name, None)) is not None
     }
+    resource_exit_codes = {
+        code
+        for value in resource_signals
+        for code in (128 + value, -value)
+    }
+    if isolation == "oci":
+        resource_exit_codes.add(137)
     if exit_code in resource_exit_codes:
         return "resource_limit", "memory_or_process"
     if isolation == "oci" and exit_code == 125:

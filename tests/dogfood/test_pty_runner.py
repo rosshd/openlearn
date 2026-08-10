@@ -9,12 +9,14 @@ import pexpect
 
 from tests.dogfood.evidence import EvidenceRecorder
 from tests.dogfood.pty_runner import PtyMissionRunner, _EvidenceLog
+from tests.dogfood.support import POSIX_PTY_ONLY
 
 
 def read_events(path: Path) -> list[dict[str, object]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
+@POSIX_PTY_ONLY
 def test_runner_drives_real_pty_and_persists_sanitized_interactions(
     tmp_path: Path,
 ) -> None:
@@ -79,6 +81,7 @@ def test_output_redaction_crosses_pty_read_boundaries(tmp_path: Path) -> None:
     assert read_events(evidence_path)[0]["text"] == "credential=[REDACTED]"
 
 
+@POSIX_PTY_ONLY
 def test_observe_settles_after_chunked_output_without_screen_pattern(
     tmp_path: Path,
 ) -> None:
@@ -107,6 +110,7 @@ def test_observe_settles_after_chunked_output_without_screen_pattern(
     assert observation.has_unsupported_controls is False
 
 
+@POSIX_PTY_ONLY
 def test_observe_distinguishes_eof_and_hard_timeout(tmp_path: Path) -> None:
     recorder = EvidenceRecorder(tmp_path / "eof.jsonl", sensitive_values=())
     eof_runner = PtyMissionRunner(
@@ -139,6 +143,7 @@ def test_observe_distinguishes_eof_and_hard_timeout(tmp_path: Path) -> None:
     assert timeout_observation.settled_by == "timeout"
 
 
+@POSIX_PTY_ONLY
 def test_observe_marks_cursor_addressing_and_rewrite_controls(tmp_path: Path) -> None:
     recorder = EvidenceRecorder(tmp_path / "events.jsonl", sensitive_values=())
     program = "import sys; sys.stdout.write('safe\\x1b[2Jrewrite\\runsafe'); sys.stdout.flush()"

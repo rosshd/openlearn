@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -169,8 +170,9 @@ def test_run_evaluation_uses_isolated_homes_and_writes_reviewable_evidence(
         ).read_text(encoding="utf-8")
     )
     assert first_metadata["course_started"] is True
-    assert (outcome.evidence_dir / "manifest.json").stat().st_mode & 0o777 == 0o600
-    assert (outcome.evidence_dir / "turns.jsonl").stat().st_mode & 0o777 == 0o600
+    if os.name != "nt":
+        assert (outcome.evidence_dir / "manifest.json").stat().st_mode & 0o777 == 0o600
+        assert (outcome.evidence_dir / "turns.jsonl").stat().st_mode & 0o777 == 0o600
     assert "tutor-model" in mocked_providers["models"]
     assert "judge-model" in mocked_providers["models"]
     assert any(
@@ -468,7 +470,7 @@ def test_provider_failure_is_preserved_as_failed_evidence(
         },
         "hard_failures": {key: False for key in HARD_FAILURE_KEYS},
     }
-    assert record["provenance"]["openlearn_home"].endswith(
+    assert record["provenance"]["openlearn_home"].replace("\\", "/").endswith(
         "/homes/correct_brief_answer"
     )
 

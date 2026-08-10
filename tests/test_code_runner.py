@@ -4,6 +4,7 @@ import _thread
 import io
 import json
 import math
+import signal
 import subprocess
 import tempfile
 import threading
@@ -631,6 +632,16 @@ def solve(value):
 
         self.assertEqual(kind, "resource_limit")
         self.assertEqual(reason, "memory_or_process")
+
+    def test_process_exit_classification_tolerates_platforms_without_sigkill(self) -> None:
+        with mock.patch.object(signal, "SIGKILL", None, create=True):
+            kind, reason = code_runner._classify_process_exit(1, "reduced")
+            reduced_137 = code_runner._classify_process_exit(137, "reduced")
+            oci_137 = code_runner._classify_process_exit(137, "oci")
+
+        self.assertEqual((kind, reason), ("runtime_error", "abrupt_learner_exit"))
+        self.assertEqual(reduced_137, ("runtime_error", "abrupt_learner_exit"))
+        self.assertEqual(oci_137, ("resource_limit", "memory_or_process"))
 
     def test_resource_policy_rejects_wrong_nonfinite_and_oversized_values(self) -> None:
         invalid = {

@@ -17,7 +17,7 @@ import re
 import stat
 import sys
 import urllib.parse
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from importlib.resources.abc import Traversable
@@ -1157,6 +1157,13 @@ def _read_private_entry_path(
             lstat_entry=lambda candidate: os.lstat(candidate),
             nofollow_flag=flag,
         )
+    if os.name == "nt":
+        return _verified_private_open(
+            path,
+            opener=os.open,
+            lstat_entry=os.lstat,
+            nofollow_flag=flag,
+        )
     if (
         not hasattr(os, "O_DIRECTORY")
         or os.open not in os.supports_dir_fd
@@ -1207,16 +1214,53 @@ def read_private_entry(path: Path) -> dict[str, object]:
     return _read_private_entry_path(path)
 
 
+def _private_entry_names(names: Iterable[object]) -> tuple[str, ...]:
+    return tuple(
+        sorted(
+            name
+            for name in names
+            if isinstance(name, str)
+            and name.endswith(".json")
+            and Path(name).name == name
+        )
+    )
+
+
 def load_private_entries(
     directory: Path,
     *,
     _list_directory: Callable[[int], list[str]] | None = None,
+    _platform: str | None = None,
 ) -> tuple[dict[str, object], ...]:
     directory = Path(directory)
-    if not directory.exists():
+    try:
+        directory_before = os.lstat(directory)
+    except FileNotFoundError:
         return ()
-    if not directory.is_dir() or directory.is_symlink():
+    except OSError as exc:
+        raise CatalogValidationError("private catalog directory is unsafe") from exc
+    if stat.S_ISLNK(directory_before.st_mode) or not stat.S_ISDIR(
+        directory_before.st_mode
+    ):
         raise CatalogValidationError("private catalog path must be a real directory")
+    if (_platform or os.name) == "nt":
+        try:
+            names = os.listdir(directory)
+            entries = tuple(
+                _read_private_entry_path(directory / name)
+                for name in _private_entry_names(names)
+            )
+            after = os.lstat(directory)
+        except CatalogValidationError:
+            raise
+        except OSError as exc:
+            raise CatalogValidationError("private catalog directory is unsafe") from exc
+        if (directory_before.st_dev, directory_before.st_ino) != (
+            after.st_dev,
+            after.st_ino,
+        ):
+            raise CatalogValidationError("private catalog directory changed during read")
+        return entries
     if (
         not hasattr(os, "O_DIRECTORY")
         or os.open not in os.supports_dir_fd
@@ -1228,11 +1272,6 @@ def load_private_entries(
         )
     directory_descriptor = -1
     try:
-        directory_before = os.lstat(directory)
-        if stat.S_ISLNK(directory_before.st_mode) or not stat.S_ISDIR(
-            directory_before.st_mode
-        ):
-            raise CatalogValidationError("private catalog path must be a real directory")
         directory_descriptor = os.open(
             directory,
             os.O_RDONLY
@@ -1260,13 +1299,7 @@ def load_private_entries(
                 ),
                 nofollow_flag=getattr(os, "O_NOFOLLOW", 0),
             )
-            for name in sorted(
-                name
-                for name in names
-                if isinstance(name, str)
-                and name.endswith(".json")
-                and Path(name).name == name
-            )
+            for name in _private_entry_names(names)
         ]
         return tuple(entries)
     except CatalogValidationError:

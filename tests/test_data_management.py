@@ -113,7 +113,8 @@ def test_default_backup_redacts_key_and_credential_backup_is_explicit_and_privat
     )
     with zipfile.ZipFile(credential_backup.archive) as archive:
         assert b"secret-key" in archive.read("data/config.json")
-    assert stat.S_IMODE(credential_backup.archive.stat().st_mode) == 0o600
+    if os.name != "nt":
+        assert stat.S_IMODE(credential_backup.archive.stat().st_mode) == 0o600
 
 
 def test_verified_backup_restore_round_trip_is_byte_equivalent(tmp_path: Path) -> None:

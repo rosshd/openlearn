@@ -160,7 +160,7 @@ def _write_text_atomic(path: Path, text: str) -> None:
     temporary = ""
     try:
         with tempfile.NamedTemporaryFile(
-            "w", encoding="utf-8", dir=path.parent, delete=False
+            "w", encoding="utf-8", newline="\n", dir=path.parent, delete=False
         ) as handle:
             temporary = handle.name
             handle.write(text)

@@ -4407,6 +4407,7 @@ class CliStorageTests(unittest.TestCase):
         self.assertEqual(contexts, [])
         self.assertEqual(cli.context_files("ai"), [])
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX dir_fd symlink race")
     def test_folder_flows_reject_file_swapped_to_outside_symlink_before_open(self) -> None:
         outside = Path(self.home.name) / "private-notes.txt"
         outside.write_text("must never reach generated context", encoding="utf-8")
@@ -9760,7 +9761,8 @@ class InteractiveTests(unittest.TestCase):
         finally:
             cli._turn_commit_checkpoint = original_checkpoint
         journal_path = cli.topic_turn_journal_path(slug)
-        self.assertEqual(stat.S_IMODE(journal_path.stat().st_mode), 0o600)
+        if os.name != "nt":
+            self.assertEqual(stat.S_IMODE(journal_path.stat().st_mode), 0o600)
         journal_path.write_text('{"schema_version": 999, "private": "DO NOT LEAK"}')
         before_topic = cli.topic_path(slug).read_text(encoding="utf-8")
         with self.assertRaises(cli.OpenLearnError) as caught:
@@ -18860,6 +18862,22 @@ class PlatformGuardTests(unittest.TestCase):
             result = cli.read_repl_message("> ", input_func=fake_input)
         self.assertEqual(result, "first line")
         fake_stdin.readline.assert_not_called()
+
+    def test_unbuffered_repl_line_does_not_consume_next_pasted_line(self) -> None:
+        read_descriptor, write_descriptor = os.pipe()
+        fake_stdin = mock.Mock()
+        fake_stdin.fileno.return_value = read_descriptor
+        fake_stdin.encoding = "utf-8"
+        try:
+            os.write(write_descriptor, b"second line\nthird line\n")
+            with mock.patch.object(sys, "stdin", fake_stdin):
+                result = cli._read_stdin_line_unbuffered()
+
+            self.assertEqual(result, "second line\n")
+            self.assertEqual(os.read(read_descriptor, 11), b"third line\n")
+        finally:
+            os.close(read_descriptor)
+            os.close(write_descriptor)
 
 
 class KeylessProviderTests(unittest.TestCase):

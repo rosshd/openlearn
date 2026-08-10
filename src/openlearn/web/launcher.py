@@ -44,6 +44,7 @@ class ServerRecord:
 OWNER_RECORD_TIMEOUT_SECONDS = 1.0
 OWNER_HEALTH_TIMEOUT_SECONDS = 3.0
 BROWSER_READY_TIMEOUT_SECONDS = 10.0
+LOCK_TOKEN_OFFSET = 1
 
 
 class ExistingWebServer(WebLaunchError):
@@ -126,7 +127,12 @@ def _write_candidate(root: Path, record: ServerRecord) -> Path:
     path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", prefix=".web-server.", dir=root, delete=False
+            mode="w",
+            encoding="utf-8",
+            newline="\n",
+            prefix=".web-server.",
+            dir=root,
+            delete=False,
         ) as handle:
             path = Path(handle.name)
             os.chmod(path, 0o600)
@@ -183,19 +189,20 @@ def _release_owner_lock(handle: BinaryIO) -> None:
 
 
 def _write_owner_token(handle: BinaryIO, lease_id: str) -> None:
-    handle.seek(0)
+    handle.seek(LOCK_TOKEN_OFFSET)
     handle.truncate()
     handle.write(lease_id.encode("ascii"))
     handle.flush()
     os.fsync(handle.fileno())
 
 
-def _read_owner_token(handle: BinaryIO) -> str | None:
-    handle.seek(0)
-    value = handle.read(64).decode("ascii", errors="ignore").strip()
-    if len(value) != 32 or any(character not in "0123456789abcdef" for character in value):
-        return None
-    return value
+def _owner_token_matches(handle: BinaryIO, lease_id: str) -> bool:
+    try:
+        handle.seek(LOCK_TOKEN_OFFSET)
+        value = handle.read(64).decode("ascii", errors="ignore").strip()
+    except OSError:
+        return False
+    return value == lease_id or value == lease_id[LOCK_TOKEN_OFFSET:]
 
 
 def _wait_for_owner_record(
@@ -206,9 +213,8 @@ def _wait_for_owner_record(
 ) -> ServerRecord | None:
     deadline = time.monotonic() + timeout
     while True:
-        owner_token = _read_owner_token(lock_handle)
         _owner_pid, current = _read_record(path)
-        if current is not None and owner_token == current.lease_id:
+        if current is not None and _owner_token_matches(lock_handle, current.lease_id):
             return current
         if time.monotonic() >= deadline:
             return None
@@ -311,13 +317,16 @@ def _wait_for_healthy_owner(
     while True:
         if probe(current):
             return current
+        _owner_pid, refreshed = _read_record(record_path)
         try:
             with lock_path.open("rb") as handle:
-                owner_token = _read_owner_token(handle)
+                owner_matches = (
+                    refreshed is not None
+                    and _owner_token_matches(handle, refreshed.lease_id)
+                )
         except OSError:
-            owner_token = None
-        _owner_pid, refreshed = _read_record(record_path)
-        if refreshed is not None and refreshed.lease_id == owner_token:
+            owner_matches = False
+        if refreshed is not None and owner_matches:
             current = refreshed
         if time.monotonic() >= deadline:
             return None

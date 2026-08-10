@@ -89,7 +89,7 @@ def run_codex_draft_course_mission(
             max_turns=12 if variant is CodexMissionVariant.DIRECT else 14,
             max_elapsed_seconds=300,
             observation_chars=12_000,
-            quiet_interval=0.08,
+            quiet_interval=0.15,
             observation_timeout=2,
         ),
     )

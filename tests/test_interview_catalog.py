@@ -443,8 +443,9 @@ def test_official_link_workspace_contains_only_link_metadata_and_scaffold(
     assert "Open the official page" in readme
     assert "statement" not in readme.lower()
     assert "def solve" in solution
-    assert stat.S_IMODE(created.stat().st_mode) == 0o700
-    assert stat.S_IMODE((created / "README.md").stat().st_mode) == 0o600
+    if os.name != "nt":
+        assert stat.S_IMODE(created.stat().st_mode) == 0o700
+        assert stat.S_IMODE((created / "README.md").stat().st_mode) == 0o600
     with pytest.raises(FileExistsError):
         interview_catalog.create_official_link_workspace(
             problem, workspace, learner_confirmed=True
@@ -468,6 +469,35 @@ def test_private_entries_load_separately_and_never_change_packaged_catalog(
 
     assert loaded == (entry,)
     assert all(problem.problem_id != entry["id"] for problem in packaged.problems)
+
+
+def test_windows_private_loader_rejects_directory_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private = tmp_path / "private"
+    private.mkdir()
+    real_lstat = os.lstat
+    original = real_lstat(private)
+    changed_values = list(original)
+    changed_values[1] += 1
+    changed = os.stat_result(changed_values)
+    directory_reads = 0
+
+    def replaced_directory(path: str | os.PathLike[str]) -> os.stat_result:
+        nonlocal directory_reads
+        if os.fspath(path) == os.fspath(private):
+            directory_reads += 1
+            return original if directory_reads == 1 else changed
+        return real_lstat(path)
+
+    monkeypatch.setattr(interview_catalog.os, "lstat", replaced_directory)
+
+    with pytest.raises(
+        interview_catalog.CatalogValidationError,
+        match="directory changed during read",
+    ):
+        interview_catalog.load_private_entries(private, _platform="nt")
 
 
 def test_private_loader_rejects_symlinks_directories_and_oversize(
@@ -506,6 +536,7 @@ def test_private_loader_rejects_symlinks_directories_and_oversize(
         interview_catalog.load_private_entries(private)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX opened-descriptor replacement semantics")
 def test_private_entry_read_uses_opened_descriptor_when_path_is_replaced(
     tmp_path: Path,
 ) -> None:
@@ -537,6 +568,7 @@ def test_private_entry_forced_no_nofollow_rejects_symlink(tmp_path: Path) -> Non
         interview_catalog._read_private_entry_path(linked, nofollow_flag=0)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory-descriptor replacement semantics")
 def test_private_directory_replacement_cannot_redirect_opened_directory(
     tmp_path: Path,
 ) -> None:

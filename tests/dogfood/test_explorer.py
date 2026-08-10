@@ -13,6 +13,10 @@ from tests.dogfood.artifacts import EvidenceBundle, MissionMetadata
 from tests.dogfood.codex_driver import CodexDecision, CodexDecisionError, DecisionContext
 from tests.dogfood.explorer import Explorer, ExplorerLimits
 from tests.dogfood.pty_runner import PtyMissionRunner
+from tests.dogfood.support import POSIX_PTY_ONLY
+
+
+pytestmark = POSIX_PTY_ONLY
 
 
 class FakeSource:
