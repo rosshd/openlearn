@@ -11,7 +11,7 @@
 </div>
 {% endblock %}
 {% block content %}
-<div class="focus-shell" data-focus-shell data-course-slug="{{ course.slug }}" data-revision="{{ course.revision or 0 }}" data-move-kind="{{ course.move.kind or '' }}"
+<div class="focus-shell" data-focus-shell data-course-slug="{{ course.slug }}" data-revision="{{ course.revision or 0 }}"
   {% if course.operation %}data-operation-id="{{ course.operation.id }}" data-operation-state="{{ course.operation.state }}" data-operation-error="{{ course.operation.error }}"{% endif %}>
   <aside class="tool-rail" aria-label="Lesson tools">
     <button type="button" class="rail-button" data-tool-open="code" aria-expanded="false" aria-controls="learning-tool-surface"><span aria-hidden="true">{ }</span> Code</button>
@@ -58,10 +58,10 @@
         <label><input type="radio" name="intent" value="stuck"><span>I am stuck</span></label>
       </fieldset>
       <label class="sr-only" for="learner-response">Your response</label>
-      <textarea id="learner-response" name="text" rows="5" maxlength="32000" placeholder="Work through your thinking here…">{{ course.saved_response or '' }}</textarea>
+      <textarea id="learner-response" name="text" rows="5" maxlength="32000" autocomplete="off" placeholder="Work through your thinking here…">{{ course.saved_response or '' }}</textarea>
       <div class="composer-footer">
         <span class="intent-readout">Sending as <strong data-intent-label>Answer</strong></span>
-        <button class="primary-action" type="submit">Send response <span aria-hidden="true">⌘↵</span></button>
+        <button class="primary-action" type="submit" data-composer-submit><span data-composer-submit-label>Continue</span> <span aria-hidden="true" data-composer-submit-hint>→</span></button>
       </div>
       <div class="operation-state" data-operation-state role="status" aria-live="polite" aria-atomic="true" tabindex="-1" hidden></div>
     </form>

@@ -8061,6 +8061,8 @@ class InteractiveTests(unittest.TestCase):
         )
         self.assertEqual(cli.classify_ungraded_learner_message("my notes"), "other")
         self.assertTrue(cli.learner_requests_advance("move on"))
+        self.assertFalse(cli.learner_requests_advance("Okay"))
+        self.assertTrue(cli.learner_acknowledges("Okay"))
 
     def test_ask_topic_navigation_bypasses_answer_judge(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Python", goal="Learn functions"))
@@ -8086,6 +8088,7 @@ class InteractiveTests(unittest.TestCase):
             cli.ask_topic("python", "move on", "test-model", output_func=lambda _text: None)
 
         judge.assert_not_called()
+        self.assertNotIn("pending_question", cli.read_topic("python").metadata)
 
     def test_ask_topic_judge_failure_preserves_pending_question_and_stops_generation(
         self,
@@ -17876,7 +17879,8 @@ class PromptInstructionTests(unittest.TestCase):
 
         self.assertIn("Teach exactly one concept", prompt)
         self.assertIn("exactly one **Lesson:** section", prompt)
-        self.assertIn("One short concrete example may support", prompt)
+        self.assertIn("Use two short paragraphs", prompt)
+        self.assertIn("without relying on an algorithm", prompt)
         self.assertIn("Do not append a check, question, continuation cue", prompt)
         self.assertNotIn("one Example section", prompt)
         self.assertNotIn("Check section", prompt)
@@ -17920,10 +17924,17 @@ class PromptInstructionTests(unittest.TestCase):
             prompt,
             "**Lesson:** Vim has Normal mode.\n<!-- covered: Vim modes -->",
         )
+        dense = cli.enforce_first_lesson_response(
+            topic,
+            prompt,
+            "**Lesson:**\nClarify requirements before coding.\n"
+            "<!-- covered: Clarifying requirements -->",
+        )
 
-        for answer in (navigation, off_topic):
+        for answer in (navigation, off_topic, dense):
             self.assertTrue(answer.startswith("**Lesson:**"))
             self.assertIn("Before writing code", answer)
+            self.assertIn("\n\nFor example,", answer)
             self.assertIn("<!-- covered: Clarifying requirements -->", answer)
             self.assertNotIn("Press Enter to continue", answer)
 

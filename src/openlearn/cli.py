@@ -353,6 +353,11 @@ Question mechanics:
 - If a check depends on imagined cursor position, hidden assumptions, wording
   nuance, or any scenario with multiple reasonable answers, make the scenario
   explicit or choose a different check.
+- A check may use only the current focus and technical concepts already taught
+  in the visible lesson context. Never introduce an unseen algorithm, data
+  structure, or system component merely as the wrapper for an interview habit.
+  When checking clarification or communication, use a simple self-contained
+  programming contract that requires no specialized technique.
 - If Topic metadata contains pending_question with an answer_key, evaluate the
   learner's selected letter against that key before giving feedback. Never mark
   the stored correct letter as wrong.
@@ -2270,6 +2275,18 @@ def learner_requests_advance(prompt: str) -> bool:
     return any(re.search(pattern, value) for pattern in patterns)
 
 
+def learner_acknowledges(prompt: str) -> bool:
+    return one_line(prompt).lower() in {
+        "ok",
+        "okay",
+        "got it",
+        "makes sense",
+        "understood",
+        "thanks",
+        "thank you",
+    }
+
+
 def learner_preference_from_advance(prompt: str) -> str:
     value = one_line(prompt)
     if not re.search(
@@ -2303,23 +2320,15 @@ def clear_learning_gate(metadata: dict[str, object]) -> None:
         metadata.pop(key, None)
 
 
-def save_learner_navigation_preference(topic: Topic, prompt: str) -> None:
+def apply_navigation_metadata(
+    metadata: dict[str, object], prompt: str
+) -> tuple[dict[str, object] | None, dict[str, object] | None]:
     preference = learner_preference_from_advance(prompt)
-    if not preference:
-        return
-    previous_pending_question: dict[str, object] | None = None
-    skipped_remediation: dict[str, object] | None = None
-    with file_lock(topic.path):
-        raw_metadata, body = parse_topic(topic.path.read_text(encoding="utf-8"))
-        metadata = merge_topic_state(
-            normalize_topic_metadata(raw_metadata, topic.slug), load_state(topic.slug)
-        )
-        pending = metadata.get("pending_question")
-        if isinstance(pending, dict):
-            previous_pending_question = dict(pending)
-        remediation = metadata.get("pending_remediation")
-        if isinstance(remediation, dict):
-            skipped_remediation = dict(remediation)
+    pending = metadata.get("pending_question")
+    previous_pending_question = dict(pending) if isinstance(pending, dict) else None
+    remediation = metadata.get("pending_remediation")
+    skipped_remediation = dict(remediation) if isinstance(remediation, dict) else None
+    if preference:
         preferences = metadata.get("learner_preferences")
         values = (
             [item for item in preferences if isinstance(item, str) and item.strip()]
@@ -2329,7 +2338,20 @@ def save_learner_navigation_preference(topic: Topic, prompt: str) -> None:
         if preference not in values:
             values.append(preference)
         metadata["learner_preferences"] = values[-20:]
-        clear_learning_gate(metadata)
+    clear_learning_gate(metadata)
+    return previous_pending_question, skipped_remediation
+
+
+def save_learner_navigation_preference(topic: Topic, prompt: str) -> None:
+    preference = learner_preference_from_advance(prompt)
+    with file_lock(topic.path):
+        raw_metadata, body = parse_topic(topic.path.read_text(encoding="utf-8"))
+        metadata = merge_topic_state(
+            normalize_topic_metadata(raw_metadata, topic.slug), load_state(topic.slug)
+        )
+        previous_pending_question, skipped_remediation = apply_navigation_metadata(
+            metadata, prompt
+        )
         save_state(topic.slug, state_from_metadata(metadata))
         write_text_atomic(
             topic.path,
@@ -2339,7 +2361,7 @@ def save_learner_navigation_preference(topic: Topic, prompt: str) -> None:
         topic.slug,
         previous_pending_question,
         None,
-        reason="navigation_preference",
+        reason="navigation_preference" if preference else "explicit_navigation",
     )
     if skipped_remediation is not None:
         log_remediation_event(
@@ -5563,8 +5585,10 @@ def first_lesson_prompt(outline: str, *, first_activity: str | None = None) -> s
         f"{required_activity}"
         "Do not repeat the whole plan. Teach exactly one concept. "
         "Use exactly one **Lesson:** section and no other primary label. "
-        "Explain the concept in 2-4 sentences. One short concrete example may "
-        "support that same concept inside the Lesson section. Do not append a "
+        "Use two short paragraphs: explain the concept first, then start the "
+        "second paragraph with 'For example,' and make it concrete. Keep the "
+        "example accessible without relying on an algorithm, data structure, or "
+        "system component that has not been introduced. Use 2-4 sentences total. Do not append a "
         "check, question, continuation cue, or learner action. "
         f"Hard limit: {FIRST_LESSON_WORD_LIMIT} words.\n"
         "Append <!-- covered: Exact concept label --> using one exact label from "
@@ -5596,7 +5620,7 @@ def enforce_first_lesson_response(topic: Topic, prompt: str, answer: str) -> str
             concept = str(concepts[0].get("label") or focus)
     declared = re.findall(r"<!--\s*covered:\s*(.*?)\s*-->", answer, flags=re.IGNORECASE)
     valid_concept_keys = {label.casefold() for label in valid_concepts}
-    if re.search(r"(?m)^\s*\*\*Lesson:\*\*", answer) and (
+    if first_lesson_response_is_valid(answer) and (
         not valid_concepts
         or any(marker.casefold() in valid_concept_keys for marker in declared)
     ):
@@ -5605,26 +5629,43 @@ def enforce_first_lesson_response(topic: Topic, prompt: str, answer: str) -> str
     if concept.casefold() == "clarifying requirements" and system_design_heavy:
         lesson = (
             "Before proposing components, turn the prompt into explicit functional requirements "
-            "and quality attributes. Ask about scale, latency, consistency, availability, and the "
-            "most important user path only when the prompt leaves them open. State each assumption "
-            "aloud so the interviewer can correct the design direction before details accumulate."
+            "and quality attributes. Ask about scale, latency, consistency, and availability only "
+            "when the prompt leaves them open, then state important assumptions aloud.\n\n"
+            "For example, for a link-sharing service, clarify expected traffic, whether reads or "
+            "writes dominate, and whether availability or strict freshness matters most before "
+            "choosing any components."
         )
     elif concept.casefold() == "clarifying requirements":
         lesson = (
             "Before writing code, restate the required output and ask only about ambiguities "
-            "that could change the solution. For example, confirm indexing or invalid-input "
-            "behavior when the prompt leaves it open; do not ask questions whose answers are "
-            "already stated. This prevents solving the wrong problem and makes your tradeoffs "
-            "easier to explain."
+            "that could change the solution. This prevents solving the wrong problem and makes "
+            "your tradeoffs easier to explain.\n\n"
+            "For example, for 'return the first repeated value in a list,' clarify whether to "
+            "return the value or its index and what to return when no repeat exists."
         )
     else:
         lesson = (
             f"Begin {focus} by building a clear mental model of {concept}. Identify what "
-            "information controls the result, then explain why the chosen method fits before "
-            "working through details. This gives later practice a reliable structure instead "
-            "of relying on pattern recognition alone."
+            "information controls the result before working through details.\n\n"
+            "For example, write down the input, required output, and one reason your chosen "
+            "method fits before you commit to the implementation."
         )
     return f"**Lesson:**\n{lesson}\n\n<!-- covered: {concept} -->"
+
+
+def first_lesson_response_is_valid(answer: str) -> bool:
+    visible = re.sub(r"<!--.*?-->", "", answer, flags=re.DOTALL).strip()
+    labels = re.findall(
+        r"(?im)^\s*(?:\*\*)?(Lesson|Feedback|Example|Check|Hint|Next|Action):(?:\*\*)?",
+        visible,
+    )
+    if labels != ["Lesson"] or "?" in visible:
+        return False
+    paragraphs = [part.strip() for part in re.split(r"\n\s*\n", visible) if part.strip()]
+    if len(paragraphs) != 2 or not paragraphs[1].casefold().startswith("for example,"):
+        return False
+    sentence_count = len(re.findall(r"[.!](?=\s|$)", visible))
+    return 2 <= sentence_count <= 4 and len(visible.split()) <= FIRST_LESSON_WORD_LIMIT
 
 
 def parse_concept_labels(text: str) -> list[str]:
@@ -8730,8 +8771,11 @@ def ask_topic(
     is_review_session = topic.metadata.get("review_session_active") is True
     original_metadata = copy.deepcopy(topic.metadata)
     record_pending_attempt_reflection(topic, prompt)
+    has_pending_question = isinstance(topic.metadata.get("pending_question"), dict)
     needs_judgment = learner_message_needs_judgment(topic.metadata, prompt)
-    is_navigation = learner_requests_advance(prompt)
+    is_navigation = learner_requests_advance(prompt) or (
+        not has_pending_question and learner_acknowledges(prompt)
+    )
     message_kind = (
         "navigation"
         if is_navigation
@@ -8747,6 +8791,33 @@ def ask_topic(
     def capture_projection(metadata: dict[str, object], _body: str) -> None:
         nonlocal projected_metadata
         projected_metadata = copy.deepcopy(metadata)
+
+    if is_navigation:
+        previous_pending, skipped_remediation = apply_navigation_metadata(
+            projected_metadata, prompt
+        )
+        if previous_pending is not None:
+            log_pending_question_transition(
+                topic.slug,
+                previous_pending,
+                None,
+                reason="explicit_navigation",
+                event_sink=queue_event,
+            )
+        if skipped_remediation is not None:
+            log_remediation_event(
+                topic.slug,
+                "remediation_skipped",
+                skipped_remediation,
+                reason="explicit_navigation",
+                event_sink=queue_event,
+            )
+        topic = Topic(
+            slug=topic.slug,
+            path=topic.path,
+            metadata=projected_metadata,
+            body=topic.body,
+        )
 
     if needs_judgment:
         message_kind = update_learning_metadata(
@@ -17003,6 +17074,9 @@ def tutor_turn_contract(
           **Check:** label containing the complete task with all required context unambiguous
           and exactly matching what will be stored.
           Never request graded evidence only under Hint, Example, Feedback, or Action.
+        - Any Check must stay within the current focus and concepts already taught in the
+          visible lesson context. Do not introduce an unseen technical topic as a wrapper
+          for a communication or interview-process check.
         - Respect an explicit request to reduce effort. Use the smallest useful scaffold
           and one small Check instead of completing or narrating another full problem.
         - Default to at most 120 words and 8 nonblank lines unless a necessary code sample

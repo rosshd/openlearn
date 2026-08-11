@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+from hashlib import sha256
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import NAMESPACE_URL, uuid5
@@ -296,6 +297,9 @@ def _present_response(value: str) -> tuple[str, list[dict[str, object]]]:
 class OpenLearnWebServices:
     """Map interface-neutral openlearn services to browser view models."""
 
+    def __init__(self) -> None:
+        self._validated_provider_fingerprint = ""
+
     def provider_status(self) -> dict[str, object]:
         try:
             status = application.provider_status()
@@ -360,6 +364,17 @@ class OpenLearnWebServices:
             credentials = config.effective_provider_credentials()
         except config.ConfigError:
             return status
+        fingerprint = sha256(
+            "\0".join(
+                (
+                    credentials.base_url,
+                    credentials.model,
+                    credentials.api_key or "",
+                )
+            ).encode("utf-8")
+        ).hexdigest()
+        if status.get("managed") and fingerprint == self._validated_provider_fingerprint:
+            return {**status, "ready": True, "verified": True, "reason": ""}
         validation = providers.validate_provider(credentials.base_url, credentials.api_key)
         if validation.status is providers.ValidationStatus.VALID:
             validation = providers.validate_provider_model(
@@ -370,6 +385,7 @@ class OpenLearnWebServices:
         if validation.status is not providers.ValidationStatus.VALID:
             return status
         if status.get("managed"):
+            self._validated_provider_fingerprint = fingerprint
             return {**status, "ready": True, "verified": True, "reason": ""}
         try:
             providers.persist_validation_result(
@@ -407,6 +423,7 @@ class OpenLearnWebServices:
         ]
 
     def configure_provider(self, request: ProviderSetupRequest) -> dict[str, object]:
+        self._validated_provider_fingerprint = ""
         preset = providers.PROVIDER_PRESETS.get(request.provider)
         if preset is None:
             return {"ok": False, "error": "Choose a supported model provider."}
@@ -816,6 +833,9 @@ class OpenLearnWebServices:
             value = interview_prep.load_profile(cli.interview_profile_path(slug))
         return {"title": snapshot.card.title, **self._placement_view(slug, value)}
 
+    def interview_placement_exists(self, slug: str) -> bool:
+        return self._interview_course(slug) is not None
+
     def update_placement(self, slug: str, request: PlacementRequest) -> dict[str, object]:
         if self._interview_course(slug) is None:
             return {"slug": slug, "missing": True}
@@ -1176,7 +1196,11 @@ class OpenLearnWebServices:
         pending = topic.metadata.get("pending_question")
         prompt = ""
         if isinstance(pending, dict) and isinstance(pending.get("question"), str):
-            prompt = str(pending["question"])
+            prompt = _plain_text(str(pending["question"]))
+        if response_kind == "Check" and prompt:
+            # The Check response already contains the complete stored prompt.
+            # Keep the pending state without rendering the same prompt twice.
+            prompt = ""
         state = cli.load_state(slug)
         saved_response = state.get("pending_learner_prompt")
         saved_response = saved_response if isinstance(saved_response, str) else ""

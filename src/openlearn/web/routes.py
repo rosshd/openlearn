@@ -174,16 +174,22 @@ async def create_course(request: Request) -> JSONResponse:
         if callable(entry_mode_operation)
         else None
     )
-    if entry_mode != "interview_prep" and not await _provider_ready(request):
+    provider_ready = await _provider_ready(request)
+    if entry_mode != "interview_prep" and not provider_ready:
         return _setup_required(request)
     result = public_mapping(await _call(request, "create_course", payload))
     if not result.get("ok", False):
         return _json_error(str(result.get("error") or "Course creation failed."), 422)
     if result.get("slug"):
         if result.get("state") == "placement_recommended":
-            result["placement_url"] = str(
-                request.url_for("placement", slug=result["slug"])
-            )
+            placement_url = request.url_for("placement", slug=result["slug"])
+            result["placement_url"] = str(placement_url)
+            if not provider_ready:
+                result["setup_url"] = str(
+                    request.url_for("setup").include_query_params(
+                        next=placement_url.path
+                    )
+                )
             return JSONResponse(result)
         result.setdefault(
             "initialization_url",
@@ -321,9 +327,18 @@ async def placement(request: Request, slug: str) -> Any:
         slug = canonical_slug(slug)
     except ValueError as error:
         raise HTTPException(status_code=404, detail="Course not found") from error
-    snapshot = public_mapping(await _call(request, "placement", slug))
-    if snapshot.get("missing"):
+    existence_operation = getattr(
+        request.app.state.services, "interview_placement_exists", None
+    )
+    if callable(existence_operation):
+        exists = bool(await _call(request, "interview_placement_exists", slug))
+    else:
+        exists = not public_mapping(await _call(request, "placement", slug)).get("missing")
+    if not exists:
         raise HTTPException(status_code=404, detail="Placement not found")
+    if not await _provider_ready(request):
+        return _setup_redirect(request)
+    snapshot = public_mapping(await _call(request, "placement", slug))
     response = _templates(request).TemplateResponse(
         request,
         "placement.html",
@@ -340,6 +355,11 @@ async def update_placement(request: Request, slug: str) -> JSONResponse:
         payload = PlacementRequest.model_validate(await request.json())
     except (ValidationError, ValueError):
         return _json_error("Check the placement action and try again.")
+    if not await _provider_ready(request):
+        return _setup_required(
+            request,
+            next_path=request.url_for("placement", slug=slug).path,
+        )
     if payload.action == "skip":
         result = public_mapping(await _call(request, "skip_placement", slug))
     else:
@@ -352,13 +372,6 @@ async def update_placement(request: Request, slug: str) -> JSONResponse:
         return _json_error(str(result.get("error")), 422)
     if result.get("status") == "provisional":
         if payload.action == "submit":
-            return JSONResponse(result)
-        if not await _provider_ready(request):
-            result["setup_url"] = str(
-                request.url_for("setup").include_query_params(
-                    next=request.url_for("focus", slug=slug).path
-                )
-            )
             return JSONResponse(result)
         initialized = public_mapping(await _call(request, "start_course_initialization", slug))
         result.update(

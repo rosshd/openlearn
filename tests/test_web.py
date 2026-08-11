@@ -121,7 +121,11 @@ def test_default_web_app_runs_setup_dashboard_course_and_tutor_flow(
     assert "placement test" not in focus.text.lower()
     assert "**Lesson:**" not in focus.text
     assert "Pick up where you left off" in client.get("/dashboard").text
-    assert "Add another course" in client.get("/dashboard").text
+    dashboard_html = client.get("/dashboard").text
+    dashboard_header = dashboard_html.split('class="course-list"', 1)[0]
+    assert "Add another course" not in dashboard_header
+    courses_panel = dashboard_html.split('class="course-list"', 1)[1]
+    assert "Add another course" in courses_panel
 
     revision = int(focus.text.split('data-revision="', 1)[1].split('"', 1)[0])
     turn = client.post(
@@ -479,7 +483,7 @@ def test_non_interview_course_rejects_placement_mutations(client: TestClient) ->
     assert not cli.interview_profile_path("systems-design").exists()
 
 
-def test_completed_placement_setup_return_starts_pending_first_lesson(
+def test_interview_setup_precedes_placement_and_returns_to_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("OPENLEARN_HOME", str(tmp_path))
@@ -491,6 +495,9 @@ def test_completed_placement_setup_return_starts_pending_first_lesson(
 
         def provider_status(self) -> dict[str, object]:
             return {"ready": self.ready, "managed": False, "providers": []}
+
+        def ensure_provider_ready(self) -> dict[str, object]:
+            return self.provider_status()
 
     services = ToggleProviderServices()
     offline = TestClient(create_app(services=services, testing=True))
@@ -506,25 +513,38 @@ def test_completed_placement_setup_return_starts_pending_first_lesson(
             "submission_id": str(uuid4()),
         },
     ).json()
-    placement = offline.get(f"/courses/{created['slug']}/placement")
-    assert placement.status_code == 200
-    assert "Start quick placement" in placement.text
+    expected_placement_path = f"/courses/{created['slug']}/placement"
+    assert created["setup_url"].endswith(
+        f"/setup?next=%2Fcourses%2F{created['slug']}%2Fplacement"
+    )
+    placement = offline.get(expected_placement_path, follow_redirects=False)
+    assert placement.status_code == 303
+    assert placement.headers["location"].endswith(
+        f"/setup?next=%2Fcourses%2F{created['slug']}%2Fplacement"
+    )
+    blocked = offline.post(
+        f"/api/courses/{created['slug']}/placement",
+        headers={"x-csrf-token": token},
+        json={"action": "start"},
+    )
+    assert blocked.status_code == 428
+    assert blocked.json()["setup_url"].endswith(
+        f"/setup?next=%2Fcourses%2F{created['slug']}%2Fplacement"
+    )
+    assert tutor_service.course_revision(created["slug"]) == 0
+
+    services.ready = True
+    returned = offline.get(expected_placement_path)
+    assert returned.status_code == 200
+    assert "Start quick placement" in returned.text
     skipped = offline.post(
         f"/api/courses/{created['slug']}/placement",
         headers={"x-csrf-token": token},
         json={"action": "skip"},
     )
-    assert skipped.status_code == 200
-    assert skipped.json()["setup_url"].endswith(
-        f"/setup?next=%2Fcourses%2F{created['slug']}"
-    )
-    assert tutor_service.course_revision(created["slug"]) == 0
-
-    services.ready = True
-    returned = offline.get(f"/courses/{created['slug']}", follow_redirects=False)
-    assert returned.status_code == 303
-    assert "/initializing/" in returned.headers["location"]
-    operation_id = returned.headers["location"].rsplit("/", 1)[-1]
+    assert skipped.status_code == 202
+    assert "/initializing/" in skipped.json()["initialization_url"]
+    operation_id = str(skipped.json()["operation_id"])
     assert wait_for_operation(offline, created["slug"], operation_id)["state"] == "committed"
 
 
@@ -604,7 +624,17 @@ def test_mock_setup_persists_secret_without_echoing_it(client: TestClient) -> No
     assert cli.configured_openai_api_key() == "test-secret-key"
 
 
-def test_saved_provider_is_not_validated_until_interview_teaching_begins(
+def test_setup_masks_api_keys_without_a_password_input(client: TestClient) -> None:
+    setup = client.get("/setup").text
+
+    api_key_markup = setup.split('id="api-key"', 1)[1].split(">", 1)[0]
+    assert 'type="text"' in api_key_markup
+    assert 'autocomplete="off"' in api_key_markup
+    assert "data-secret-toggle" in setup
+    assert 'type="password"' not in api_key_markup
+
+
+def test_saved_provider_is_validated_before_interview_placement(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("OPENLEARN_HOME", str(tmp_path))
@@ -647,11 +677,11 @@ def test_saved_provider_is_not_validated_until_interview_teaching_begins(
 
     assert created.status_code == 200
     assert "setup_url" not in created.json()
-    assert config.provider_status().verified is False
+    assert config.provider_status().verified is True
     assert saved_key_client.get(created.json()["placement_url"]).status_code == 200
 
 
-def test_invalid_saved_provider_allows_offline_placement_then_routes_to_setup(
+def test_invalid_saved_provider_routes_to_setup_before_placement(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("OPENLEARN_HOME", str(tmp_path))
@@ -686,36 +716,19 @@ def test_invalid_saved_provider_allows_offline_placement_then_routes_to_setup(
     )
 
     body = created.json()
-    assert "setup_url" not in body
+    expected_suffix = f"/setup?next=%2Fcourses%2F{body['slug']}%2Fplacement"
+    assert body["setup_url"].endswith(expected_suffix)
     placement = invalid_key_client.get(body["placement_url"], follow_redirects=False)
-    assert placement.status_code == 200
+    assert placement.status_code == 303
+    assert placement.headers["location"].endswith(expected_suffix)
     started = invalid_key_client.post(
         f"/api/courses/{body['slug']}/placement",
         headers={"x-csrf-token": token},
         json={"action": "start"},
     )
-    assert started.status_code == 200
-    saved = invalid_key_client.post(
-        f"/api/courses/{body['slug']}/placement",
-        headers={"x-csrf-token": token},
-        json={
-            "action": "save_confidence",
-            "role_family": "general SWE",
-            "target_level": "entry",
-            "interview_focus": "coding",
-            "ratings": confidence_ratings(),
-        },
-    )
-    assert saved.status_code == 200
-    confirmed = invalid_key_client.post(
-        f"/api/courses/{body['slug']}/placement",
-        headers={"x-csrf-token": token},
-        json={"action": "confirm_outline", "outline": saved.json()["outline"]},
-    )
-    expected_suffix = f"/setup?next=%2Fcourses%2F{body['slug']}"
-    assert confirmed.status_code == 200
-    assert confirmed.json()["setup_url"].endswith(expected_suffix)
-    setup = invalid_key_client.get(confirmed.json()["setup_url"])
+    assert started.status_code == 428
+    assert started.json()["setup_url"].endswith(expected_suffix)
+    setup = invalid_key_client.get(body["setup_url"])
     assert "API key (already saved)" in setup.text
     assert "Leave this blank to test the saved key" in setup.text
 
@@ -843,6 +856,35 @@ def test_environment_managed_provider_requires_explicit_verification(
     setup = managed_client.get("/setup")
     assert "Environment managed" in setup.text
     assert 'data-endpoint="/api/setup"' not in setup.text
+
+
+def test_managed_provider_validation_is_cached_for_the_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENLEARN_HOME", str(tmp_path))
+    monkeypatch.delenv("OPENLEARN_MOCK", raising=False)
+    monkeypatch.setenv("OPENLEARN_BASE_URL", "https://openrouter.ai/api/v1")
+    monkeypatch.setenv("OPENLEARN_MODEL", "test-model")
+    monkeypatch.setenv("OPENAI_API_KEY", "managed-test-key")
+    monkeypatch.delenv("OPENLEARN_PROVIDER_VERIFIED", raising=False)
+    cli.clear_config_cache()
+    calls = {"provider": 0, "model": 0}
+
+    def validate_provider(*_args: object) -> providers.ValidationResult:
+        calls["provider"] += 1
+        return providers.ValidationResult(providers.ValidationStatus.VALID)
+
+    def validate_model(*_args: object) -> providers.ValidationResult:
+        calls["model"] += 1
+        return providers.ValidationResult(providers.ValidationStatus.VALID)
+
+    monkeypatch.setattr(providers, "validate_provider", validate_provider)
+    monkeypatch.setattr(providers, "validate_provider_model", validate_model)
+    services = OpenLearnWebServices()
+
+    assert services.ensure_provider_ready()["ready"] is True
+    assert services.ensure_provider_ready()["ready"] is True
+    assert calls == {"provider": 1, "model": 1}
 
 
 def test_unverified_provider_allows_provider_free_course_browsing(
@@ -1352,6 +1394,36 @@ def test_present_response_hides_reasoning_from_existing_lesson_history() -> None
 
     assert kind == "Lesson"
     assert blocks == [{"kind": "paragraph", "text": "Clarify constraints before coding."}]
+
+
+def test_focus_renders_a_pending_check_once(client: TestClient) -> None:
+    cli.cmd_new(
+        argparse.Namespace(topic="Single Check", goal="Avoid duplicate questions"),
+        output_func=lambda _text: None,
+    )
+    topic = cli.read_topic("single-check")
+    question = "What output should the function return when no match exists?"
+    metadata = dict(topic.metadata)
+    metadata["pending_question"] = {
+        "kind": "free_response",
+        "question": question,
+    }
+    cli.write_topic(topic.path, metadata, topic.body)
+    cli.append_session(
+        cli.read_topic(topic.slug),
+        "chat",
+        "Ready",
+        f"**Check:**\n{question}",
+    )
+
+    view = OpenLearnWebServices().focus(topic.slug)
+
+    assert view["move"]["kind"] == "Check"
+    assert view["move"]["prompt"] == ""
+    assert sum(
+        question in str(block.get("text", ""))
+        for block in view["move"]["blocks"]
+    ) == 1
 
 
 def test_web_turn_uses_current_provider_model(

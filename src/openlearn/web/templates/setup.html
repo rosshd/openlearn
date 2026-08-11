@@ -52,11 +52,14 @@
     <p class="field-note" data-provider-explanation>{{ provider.providers|selectattr('id', 'equalto', provider.selected_provider)|map(attribute='explanation')|first }}</p>
 
     <label for="api-key" data-api-key-label data-key-configured="{{ 'true' if provider.key_configured else 'false' }}">API key{% if provider.key_configured %} (already saved){% endif %}</label>
-    <input id="api-key" name="api_key" type="password" autocomplete="off" spellcheck="false" data-1p-ignore data-lpignore="true" data-form-type="other"
-      placeholder="Paste a new key">
+    <div class="secret-entry-wrap">
+      <input id="api-key" class="secret-entry" name="api_key" type="text" autocomplete="off" spellcheck="false" autocapitalize="none" data-1p-ignore data-lpignore="true" data-form-type="other"
+        placeholder="Paste a new key">
+      <button type="button" class="secret-toggle" data-secret-toggle aria-pressed="false" aria-controls="api-key">Show</button>
+    </div>
     <p class="field-note">
       {% if provider.key_configured %}Leave this blank to test the saved key, or paste a new key to replace it.{% else %}Paste the key from your provider. Stored values are never loaded back into this page.{% endif %}
-      Your browser may separately offer to save it; that choice only affects your browser's password store.
+      When supported by your browser, this stays masked without presenting the key as a website password.
     </p>
 
     <label for="model">Model</label>

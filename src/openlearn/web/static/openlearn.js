@@ -77,6 +77,20 @@ const providerModel = document.querySelector("#model");
 const providerBaseUrl = document.querySelector("#base-url");
 const providerExplanation = document.querySelector("[data-provider-explanation]");
 const providerKeyLabel = document.querySelector("[data-api-key-label]");
+const providerKey = document.querySelector("#api-key");
+
+if (providerKey) {
+  const supportsMaskedText = CSS.supports("-webkit-text-security", "disc");
+  if (!supportsMaskedText) providerKey.type = "password";
+  document.querySelector("[data-secret-toggle]")?.addEventListener("click", (event) => {
+    const revealed = providerKey.dataset.revealed !== "true";
+    providerKey.dataset.revealed = String(revealed);
+    if (!supportsMaskedText) providerKey.type = revealed ? "text" : "password";
+    event.currentTarget.setAttribute("aria-pressed", String(revealed));
+    event.currentTarget.textContent = revealed ? "Hide" : "Show";
+    providerKey.focus();
+  });
+}
 
 if (providerSelect && providerModel && providerBaseUrl) {
   const updateProviderPresentation = () => {
@@ -804,7 +818,8 @@ async function pollOperation(operationId) {
     };
     setOperationState(labels[state] || result.message || "Working…");
     if (state === "committed") {
-      window.location.reload();
+      clearTurnComposer();
+      window.location.replace(window.location.href);
       return;
     }
     if (state === "conflict") {
@@ -818,6 +833,24 @@ async function pollOperation(operationId) {
       return;
     }
   }
+}
+
+function updateComposerAction() {
+  if (!turnForm) return;
+  const hasText = Boolean(turnForm.elements.text.value.trim());
+  turnForm.dataset.hasText = String(hasText);
+  const label = turnForm.querySelector("[data-composer-submit-label]");
+  const hint = turnForm.querySelector("[data-composer-submit-hint]");
+  if (label) label.textContent = hasText ? "Send response" : "Continue";
+  if (hint) hint.textContent = hasText ? "⌘↵" : "→";
+}
+
+function clearTurnComposer() {
+  if (!turnForm) return;
+  const textarea = turnForm.elements.text;
+  textarea.value = "";
+  textarea.defaultValue = "";
+  updateComposerAction();
 }
 
 if (focusShell?.dataset.operationId) {
@@ -848,7 +881,10 @@ async function submitTurn(overrideIntent = null) {
       body: JSON.stringify(payload),
     });
     if (result.operation_id) await pollOperation(result.operation_id);
-    else if (result.state === "committed") window.location.reload();
+    else if (result.state === "committed") {
+      clearTurnComposer();
+      window.location.replace(window.location.href);
+    }
     else if (result.state === "retryable_error") {
       setOperationState(result.error || "Your response is saved. Retry when the provider is available.", true);
       lockTurnForm(false);
@@ -864,9 +900,10 @@ async function submitTurn(overrideIntent = null) {
 
 turnForm?.addEventListener("submit", (event) => {
   event.preventDefault();
-  submitTurn();
+  submitTurn(turnForm.elements.text.value.trim() ? null : "next");
 });
 
+turnForm?.querySelector("textarea")?.addEventListener("input", updateComposerAction);
 turnForm?.querySelector("textarea")?.addEventListener("keydown", (event) => {
   if (
     event.key === "Enter"
@@ -875,7 +912,6 @@ turnForm?.querySelector("textarea")?.addEventListener("keydown", (event) => {
     && !event.ctrlKey
     && !event.isComposing
     && !event.currentTarget.value.trim()
-    && focusShell?.dataset.moveKind === "Next"
   ) {
     event.preventDefault();
     submitTurn("next");
@@ -886,6 +922,8 @@ turnForm?.querySelector("textarea")?.addEventListener("keydown", (event) => {
     turnForm.requestSubmit();
   }
 });
+
+updateComposerAction();
 
 for (const button of document.querySelectorAll("[data-navigation-intent]")) {
   button.addEventListener("click", () => {

@@ -196,6 +196,12 @@ def test_real_browser_course_polling_theme_conflict_and_keyboard_submit(
                 first.locator("[data-focus-shell]").wait_for(state="visible")
                 playwright.expect(first.get_by_text("Before writing code", exact=False)).to_be_visible()
                 playwright.expect(first.get_by_text("Press Enter to continue", exact=False)).to_have_count(0)
+                composer_submit = first.locator("[data-composer-submit]")
+                playwright.expect(composer_submit).to_contain_text("Continue")
+                first.locator("#learner-response").fill("A response")
+                playwright.expect(composer_submit).to_contain_text("Send response")
+                first.locator("#learner-response").fill("")
+                playwright.expect(composer_submit).to_contain_text("Continue")
                 first.emulate_media(reduced_motion="no-preference")
                 first.set_viewport_size({"width": 1280, "height": 800})
                 initial_revision = _revision(first)
@@ -398,6 +404,10 @@ def test_real_browser_course_polling_theme_conflict_and_keyboard_submit(
                 assert saved_body["state"] == "saved"
                 assert saved_body["operation_id"]
                 _wait_for_new_revision(first, initial_revision)
+                playwright.expect(first.locator("#learner-response")).to_have_value("")
+                playwright.expect(first.locator("[data-composer-submit]")).to_contain_text(
+                    "Continue"
+                )
 
                 stale.locator("#learner-response").fill("This tab still has an old revision.")
                 with stale.expect_response(
