@@ -8419,6 +8419,65 @@ class InteractiveTests(unittest.TestCase):
                     cli.explicit_multiple_choice_option(answer, question)
                 )
 
+    def test_reasoning_multiple_choice_is_not_key_graded(self) -> None:
+        question = (
+            "Would two equal values at distinct indices be valid, and why?\n"
+            "A) Yes, because the indices differ\n"
+            "B) No, because the values match\n"
+            "C) Only when both indices are positive\n"
+            "D) Only after sorting"
+        )
+        pending = {
+            "kind": "multiple_choice",
+            "question": question,
+            "answer_key": "C",
+        }
+        update: dict[str, object] = {
+            "last_answer_status": "correct",
+            "answer_score": 1.0,
+            "answer_kind": "production",
+        }
+        metadata = {
+            "pending_question": pending,
+            "last_answer_status": "correct",
+        }
+
+        self.assertTrue(cli.multiple_choice_requires_reasoning(question))
+        self.assertFalse(
+            cli.multiple_choice_requires_reasoning(
+                "How many items are present?\nA) One\nB) Two\nC) Three\nD) Four"
+            )
+        )
+        self.assertFalse(cli.pending_question_uses_answer_key(pending))
+        self.assertTrue(
+            cli.prepare_current_answer_judgment(metadata, "A, because the indices differ", update)
+        )
+        cli.apply_pending_question_answer_key(metadata, "A, because the indices differ")
+        self.assertEqual(update["last_answer_status"], "correct")
+        self.assertEqual(metadata["last_answer_status"], "correct")
+
+        prompt = cli.metadata_update_prompt(metadata, "A, because the indices differ", "Check")
+        self.assertIn('"kind": "free_response"', prompt)
+        self.assertNotIn('"answer_key"', prompt)
+
+    def test_reasoning_check_is_saved_as_free_response_without_hidden_key(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Indices", goal="Reason about constraints"))
+        question = (
+            "How would you justify using equal values from distinct indices?\n"
+            "A) By value only\nB) By index identity\nC) By sorting\nD) By mutation"
+        )
+        answer = f"**Check:**\n{question}\n<!-- answer: B -->"
+
+        cli.save_pending_question(cli.read_topic("indices"), answer, "B")
+
+        pending = cli.read_topic("indices").metadata["pending_question"]
+        self.assertEqual(pending["kind"], "free_response")
+        self.assertNotIn("answer_key", pending)
+        self.assertEqual(
+            cli.tutor_answer_contract_error(answer, require_check=True),
+            "reasoning Check must use free response",
+        )
+
     def test_multiple_choice_free_text_keeps_complete_semantic_judgment(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Python", goal="Learn functions"))
         path = cli.topic_path("python")

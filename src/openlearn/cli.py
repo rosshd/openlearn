@@ -354,8 +354,10 @@ Question mechanics:
   command, or concept; disambiguating common confusions; or when there are four
   plausible options with exactly one best answer.
 - Use free response when the learner needs to explain reasoning, trace an
-  algorithm, compare ideas, or synthesize multiple concepts. Avoid multiple
-  choice for "why" questions because guessing can hide weak understanding.
+  algorithm, compare ideas, evaluate an edge case, predict behavior, or
+  synthesize multiple concepts. Avoid multiple choice for "why" questions.
+  Never turn a why/how/what-would-happen reasoning prompt into multiple choice;
+  guessing can hide weak understanding.
 - Use hands-on checks when the concept is a keybinding, workflow step,
   algorithm trace, command, or small coding move the learner can try directly.
 - Skip the check when the slide is only orientation or a definitional fact the
@@ -5291,6 +5293,51 @@ def parse_multiple_choice_options(question: str) -> tuple[str, dict[str, str]] |
     return stem, options
 
 
+def multiple_choice_requires_reasoning(question: str) -> bool:
+    """Return whether a four-option prompt asks for production, not recognition."""
+    parsed = parse_multiple_choice_options(question)
+    if parsed is None:
+        return False
+    stem, _options = parsed
+    stem = re.sub(
+        r"(?i)^\s*(?:\*\*)?Check:(?:\*\*)?\s*", "", stem
+    ).strip()
+    return bool(
+        re.search(
+            r"(?i)\b(?:why|explain|justify|reason|trace|compare|predict|"
+            r"how\s+(?:would|do|does|did|can|could|should)|"
+            r"what\s+would|walk\s+(?:me\s+)?through|"
+            r"would\b.{0,100}\b(?:valid|work|change))\b",
+            stem,
+        )
+    )
+
+
+def pending_question_uses_answer_key(pending: object) -> bool:
+    if not isinstance(pending, dict) or pending.get("kind") != "multiple_choice":
+        return False
+    question = pending.get("question")
+    answer_key = pending.get("answer_key")
+    return (
+        isinstance(question, str)
+        and not multiple_choice_requires_reasoning(question)
+        and isinstance(answer_key, str)
+        and answer_key in {"A", "B", "C", "D"}
+    )
+
+
+def pending_question_for_model(pending: object) -> object:
+    """Hide unreliable legacy keys when a prompt needs semantic reasoning."""
+    if not isinstance(pending, dict) or not multiple_choice_requires_reasoning(
+        str(pending.get("question") or "")
+    ):
+        return pending
+    normalized = dict(pending)
+    normalized["kind"] = "free_response"
+    normalized.pop("answer_key", None)
+    return normalized
+
+
 def explicit_multiple_choice_option(answer: str, question: str = "") -> str | None:
     """Return one unambiguous selected option, or None for semantic free text."""
     value = " ".join(answer.strip().split())
@@ -7809,11 +7856,10 @@ def log_remediation_event(
 
 def apply_pending_question_answer_key(metadata: dict[str, object], learner_prompt: str) -> None:
     pending = metadata.get("pending_question")
-    if not isinstance(pending, dict) or pending.get("kind") != "multiple_choice":
+    if not pending_question_uses_answer_key(pending):
         return
-    answer_key = pending.get("answer_key")
-    if not isinstance(answer_key, str) or answer_key not in {"A", "B", "C", "D"}:
-        return
+    assert isinstance(pending, dict)
+    answer_key = str(pending["answer_key"])
     question = pending.get("question")
     selected = explicit_multiple_choice_option(
         learner_prompt, question if isinstance(question, str) else ""
@@ -7831,7 +7877,8 @@ def prepare_current_answer_judgment(
 ) -> bool:
     """Validate this turn's judgment without consulting persisted answer fields."""
     pending = metadata.get("pending_question")
-    if isinstance(pending, dict) and pending.get("kind") == "multiple_choice":
+    if pending_question_uses_answer_key(pending):
+        assert isinstance(pending, dict)
         answer_key = pending.get("answer_key")
         question = pending.get("question")
         selected = explicit_multiple_choice_option(
@@ -9020,20 +9067,27 @@ def ask_topic(
     previous_pending = projected_metadata.get("pending_question")
     question = extract_pending_question_text(answer)
     if question and explicit_check_section_count(answer) == 1:
+        reasoning_check = multiple_choice_requires_reasoning(question)
+        keyed_recognition = (
+            answer_key in {"A", "B", "C", "D"} and not reasoning_check
+        )
         pending_question: dict[str, str] = {
             "kind": (
                 "multiple_choice"
-                if answer_key in {"A", "B", "C", "D"}
-                or any(
-                    re.match(r"(?i)^[A-D][\).:-]\s+", line.strip())
-                    for line in question.splitlines()
+                if keyed_recognition
+                or (
+                    not reasoning_check
+                    and any(
+                        re.match(r"(?i)^[A-D][\).:-]\s+", line.strip())
+                        for line in question.splitlines()
+                    )
                 )
                 else "free_response"
             ),
             "question": question.strip(),
             "created": today(),
         }
-        if answer_key in {"A", "B", "C", "D"}:
+        if keyed_recognition:
             pending_question["answer_key"] = answer_key
         focus = projected_metadata.get("current_focus")
         if isinstance(focus, str) and focus.strip():
@@ -9236,6 +9290,8 @@ def tutor_answer_contract_error(
         return "multiple Check sections"
     if check_count == 1 and not question:
         return "empty or conversational Check"
+    if multiple_choice_requires_reasoning(question):
+        return "reasoning Check must use free response"
     if require_check and (check_count != 1 or not question):
         return "missing required Check"
     if forbid_choice_claim and re.search(
@@ -13273,15 +13329,20 @@ def save_pending_question(
         return
     if not topic.path.exists():
         return
-    is_multiple_choice = has_answer_key or any(
-        re.match(r"(?i)^[A-D][\).:-]\s+", line.strip()) for line in question.splitlines()
+    reasoning_check = multiple_choice_requires_reasoning(question)
+    is_multiple_choice = not reasoning_check and (
+        has_answer_key
+        or any(
+            re.match(r"(?i)^[A-D][\).:-]\s+", line.strip())
+            for line in question.splitlines()
+        )
     )
     pending_question: dict[str, str] = {
         "kind": "multiple_choice" if is_multiple_choice else "free_response",
         "question": question,
         "created": today(),
     }
-    if has_answer_key:
+    if has_answer_key and not reasoning_check:
         pending_question["answer_key"] = answer_key
     focus = focus_override or topic.metadata.get("current_focus")
     if isinstance(focus, str) and focus.strip():
@@ -13506,6 +13567,13 @@ def metadata_update_prompt(
         "review_due",
     )
     extractor_context = {key: metadata[key] for key in extractor_context_keys if key in metadata}
+    pending = extractor_context.get("pending_question")
+    normalized_pending = pending_question_for_model(pending)
+    if normalized_pending is not pending:
+        # Older tutor turns could save a reasoning prompt as multiple choice with
+        # an unreliable hidden key. Let the judge evaluate the explanation
+        # semantically instead of making that stale key authoritative.
+        extractor_context["pending_question"] = normalized_pending
     metadata_snapshot = json.dumps(extractor_context, indent=2, sort_keys=True)
     return textwrap.dedent(
         f"""
@@ -13712,11 +13780,7 @@ def update_learning_metadata(
         score_val = metadata.get("last_answer_score")
         answer_kind = normalized_answer_kind(update.get("answer_kind")) if fresh_score else ""
         pending_for_kind = metadata.get("pending_question")
-        if (
-            fresh_score
-            and isinstance(pending_for_kind, dict)
-            and pending_for_kind.get("kind") == "multiple_choice"
-        ):
+        if fresh_score and pending_question_uses_answer_key(pending_for_kind):
             answer_kind = "recognition"
         is_transfer = answer_eval_is_transfer(update.get("is_transfer")) if fresh_score else False
         gameable = judge_gameable(update.get("gameable")) if fresh_score else False
@@ -16914,6 +16978,10 @@ def system_prompt(
     model_metadata.pop("assessment_mode", None)
     model_metadata.pop("enter_advance_cue", None)
     model_metadata.pop("pending_learner_prompt", None)
+    model_pending = model_metadata.get("pending_question")
+    normalized_pending = pending_question_for_model(model_pending)
+    if normalized_pending is not model_pending:
+        model_metadata["pending_question"] = normalized_pending
     quick_learn_prompt = (
         (
             "Quick Learn mode — optimize for coverage per minute:\n"
@@ -17105,7 +17173,7 @@ def pending_question_prompt(metadata: dict[str, object]) -> str:
             f"The current learner message was classified as {message_kind}, not as an answer. "
             "Respond to that intent and do not grade it or create mastery evidence."
         )
-    pending = metadata.get("pending_question")
+    pending = pending_question_for_model(metadata.get("pending_question"))
     if not isinstance(pending, dict):
         if message_kind == "answer":
             return (
@@ -17115,12 +17183,11 @@ def pending_question_prompt(metadata: dict[str, object]) -> str:
             )
         return ""
     question = pending.get("question")
-    answer_key = pending.get("answer_key")
     if not isinstance(question, str) or not question.strip():
         return ""
     answer_key_instruction = ""
-    if isinstance(answer_key, str) and answer_key in {"A", "B", "C", "D"}:
-        answer_key_instruction = f"\nStored correct answer key: {answer_key}"
+    if pending_question_uses_answer_key(pending):
+        answer_key_instruction = f"\nStored correct answer key: {pending['answer_key']}"
     judgment_instruction = (
         "The current learner message was already classified and judged. Use the stored "
         "judgment below; do not re-judge or reattribute it."

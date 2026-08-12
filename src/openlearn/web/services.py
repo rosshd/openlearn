@@ -273,7 +273,22 @@ def _show_provider_recovery(error_code: str | None) -> bool:
 
 
 def _plain_text(value: str) -> str:
-    return value.replace("**", "").replace("__", "").strip()
+    text = value.replace("**", "").replace("__", "")
+    text = re.sub(r"`([^`]+)`", r"\1", text)
+    text = re.sub(r"(?<!\w)([*_])([^\n]+?)\1(?!\w)", r"\2", text)
+    return text.strip()
+
+
+_CHECK_SECTION = re.compile(
+    r"^\s*(?:\*\*)?Check\s*:(?:\*\*)?\s*.*?"
+    r"(?=^\s*(?:\*\*)?(?:Lesson|Feedback|Example|Hint|Next)\s*:(?:\*\*)?|\Z)",
+    flags=re.IGNORECASE | re.MULTILINE | re.DOTALL,
+)
+
+
+def _without_check_section(value: str) -> str:
+    """Remove the response's Check section when the pending prompt owns it."""
+    return _CHECK_SECTION.sub("", value).strip()
 
 
 def _present_response(value: str) -> tuple[str, list[dict[str, object]]]:
@@ -1261,18 +1276,17 @@ class OpenLearnWebServices:
         latest_lesson = cli.last_tutor_lesson_entry_from_entries(entries)
         latest = latest_lesson[1] if latest_lesson else None
         answer = latest["response"] if latest else "Your course is ready. Ask the tutor to begin."
-        response_kind, blocks = _present_response(answer)
         move_title = _lesson_focus_title(topic, answer)
-        move_kind = "Current lesson" if response_kind == "Lesson" else response_kind
         pending = topic.metadata.get("pending_question")
         prompt = ""
         if isinstance(pending, dict) and isinstance(pending.get("question"), str):
             prompt = _plain_text(str(pending["question"]))
         requires_response = bool(prompt)
-        if response_kind == "Check" and prompt:
-            # The Check response already contains the complete stored prompt.
-            # Keep the pending state without rendering the same prompt twice.
-            prompt = ""
+        presented_answer = _without_check_section(answer) if prompt else answer
+        response_kind, blocks = _present_response(presented_answer)
+        if prompt and not blocks:
+            response_kind = "Check"
+        move_kind = "Current lesson" if response_kind == "Lesson" else response_kind
         state = cli.load_state(slug)
         saved_response = state.get("pending_learner_prompt")
         saved_response = saved_response if isinstance(saved_response, str) else ""
@@ -1396,7 +1410,9 @@ class OpenLearnWebServices:
             "error": result.error_message or "",
             "error_code": result.error_code or "",
             "show_provider_recovery": _show_provider_recovery(result.error_code),
-            "preview_text": _operation_preview(result.preview),
+            "preview_text": _operation_preview(
+                result.preview or (result.move.content if result.move is not None else None)
+            ),
         }
 
     def history(self, slug: str, *, page: int) -> dict[str, object]:

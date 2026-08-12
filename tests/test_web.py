@@ -25,6 +25,7 @@ from openlearn.web.services import (
     COURSE_INITIALIZATION_PROMPT,
     OpenLearnWebServices,
     _focus_progress,
+    _plain_text,
     _present_response,
 )
 
@@ -1428,6 +1429,10 @@ def test_present_response_leaves_terminal_advance_cue_to_web_controls() -> None:
     assert blocks == [{"kind": "paragraph", "text": "A sliding window reuses work."}]
 
 
+def test_plain_text_removes_inline_markdown_markers() -> None:
+    assert _plain_text("Use *indices* and `left_pointer`.") == "Use indices and left_pointer."
+
+
 def test_focus_renders_a_pending_check_once(client: TestClient) -> None:
     cli.cmd_new(
         argparse.Namespace(topic="Single Check", goal="Avoid duplicate questions"),
@@ -1452,16 +1457,48 @@ def test_focus_renders_a_pending_check_once(client: TestClient) -> None:
 
     assert view["move"]["kind"] == "Check"
     assert view["requires_response"] is True
-    assert view["move"]["prompt"] == ""
+    assert view["move"]["prompt"] == question
     assert sum(
         question in str(block.get("text", ""))
         for block in view["move"]["blocks"]
-    ) == 1
+    ) == 0
 
     page = client.get(f"/courses/{topic.slug}")
     assert 'id="learner-response"' in page.text
     assert "Send answer" in page.text
     assert "Response intent" not in page.text
+
+
+def test_focus_separates_feedback_from_the_pending_check(client: TestClient) -> None:
+    cli.cmd_new(
+        argparse.Namespace(topic="Feedback Check", goal="Separate tutor feedback"),
+        output_func=lambda _text: None,
+    )
+    topic = cli.read_topic("feedback-check")
+    question = "Explain why two equal values at distinct indices are valid."
+    metadata = dict(topic.metadata)
+    metadata["pending_question"] = {
+        "kind": "free_response",
+        "question": question,
+    }
+    cli.write_topic(topic.path, metadata, topic.body)
+    cli.append_session(
+        cli.read_topic(topic.slug),
+        "chat",
+        "Ready",
+        "**Feedback:**\nGood attention to the index constraint.\n\n"
+        f"**Check:**\n{question}",
+    )
+
+    view = OpenLearnWebServices().focus(topic.slug)
+
+    assert view["move"]["kind"] == "Feedback"
+    assert view["move"]["prompt"] == question
+    assert view["move"]["blocks"] == [
+        {"kind": "paragraph", "text": "Good attention to the index constraint."}
+    ]
+    page = client.get(f"/courses/{topic.slug}")
+    assert page.text.count(question) == 1
 
 
 def test_focus_uses_template_concept_when_legacy_course_has_no_saved_focus(
@@ -1586,6 +1623,31 @@ def test_operation_status_exposes_safe_preview_and_recovery_code(
     assert status["error_code"] == "provider_unavailable"
     assert status["show_provider_recovery"] is True
     assert "move" not in status
+
+
+def test_committed_operation_status_uses_final_move_as_preview(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = tutor_service.TutorTurnResult(
+        submission_id=str(uuid4()),
+        status="committed",
+        input_status="saved",
+        message_kind="answer",
+        move=tutor_service.TutorMove(
+            move_id=str(uuid4()),
+            kind="feedback",
+            content="Feedback: Final complete response",
+            prompt="",
+            revision=3,
+            action_kind="continue",
+            history_summary="",
+        ),
+    )
+    monkeypatch.setattr(tutor_service, "operation_status", lambda *_args: result)
+
+    status = OpenLearnWebServices().operation_status("existing-course", result.submission_id)
+
+    assert status["preview_text"] == "Final complete response"
 
 
 def test_initialization_refresh_recovers_orphaned_saved_operation(

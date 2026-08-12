@@ -804,17 +804,61 @@ function setOperationState(message, isError = false, result = null) {
   if (isError) state.focus();
 }
 
-let lastTutorPreview = null;
+let tutorPreviewTarget = "";
+let tutorPreviewVisible = "";
+let tutorPreviewFrame = null;
+let tutorPreviewLastAt = 0;
+let tutorPreviewCommitted = false;
+let tutorPreviewDrainResolve = null;
 
-function renderTutorPreview(preview) {
+function tutorPreviewNodes() {
   const surface = document.querySelector("[data-current-move]");
   const region = surface?.querySelector("[data-tutor-stream-preview]");
   const text = region?.querySelector("[data-tutor-stream-text]");
+  return { surface, region, text };
+}
+
+function paintTutorPreview(now) {
+  tutorPreviewFrame = null;
+  const { region, text } = tutorPreviewNodes();
+  if (!region || !text) return;
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (reduceMotion) {
+    tutorPreviewVisible = tutorPreviewTarget;
+  } else if (tutorPreviewVisible.length < tutorPreviewTarget.length) {
+    const elapsed = tutorPreviewLastAt ? Math.min(now - tutorPreviewLastAt, 80) : 16;
+    const rate = tutorPreviewCommitted ? 380 : 105;
+    const count = Math.max(1, Math.floor((elapsed * rate) / 1000));
+    tutorPreviewVisible = tutorPreviewTarget.slice(
+      0,
+      Math.min(tutorPreviewVisible.length + count, tutorPreviewTarget.length),
+    );
+  }
+  tutorPreviewLastAt = now;
+  text.textContent = tutorPreviewVisible || "Thinking through your answer…";
+  text.classList.toggle("stream-placeholder", !tutorPreviewVisible);
+  region.scrollTop = region.scrollHeight;
+  if (tutorPreviewVisible.length < tutorPreviewTarget.length) {
+    tutorPreviewFrame = window.requestAnimationFrame(paintTutorPreview);
+  } else if (tutorPreviewDrainResolve) {
+    const resolve = tutorPreviewDrainResolve;
+    tutorPreviewDrainResolve = null;
+    resolve();
+  }
+}
+
+function scheduleTutorPreview() {
+  if (tutorPreviewFrame === null) {
+    tutorPreviewFrame = window.requestAnimationFrame(paintTutorPreview);
+  }
+}
+
+function renderTutorPreview(preview) {
+  const { surface, region, text } = tutorPreviewNodes();
   if (!surface || !region || !text) return;
   const visible = (preview || "").trimStart();
-  const nextPreview = visible || "Thinking through your answer…";
-  if (lastTutorPreview === nextPreview) return;
   if (!surface.dataset.streaming) {
+    surface.style.height = `${Math.ceil(surface.getBoundingClientRect().height)}px`;
     surface.querySelector("[data-move-content]")?.setAttribute("hidden", "");
     surface.querySelector("[data-move-prompt]")?.setAttribute("hidden", "");
     const kind = surface.querySelector("[data-move-kind]");
@@ -823,10 +867,54 @@ function renderTutorPreview(preview) {
     if (title) title.textContent = "Your next learning move";
     region.hidden = false;
     surface.dataset.streaming = "true";
+    text.textContent = "Thinking through your answer…";
+    text.classList.add("stream-placeholder");
   }
-  text.textContent = nextPreview;
-  text.classList.toggle("stream-placeholder", !visible);
-  lastTutorPreview = nextPreview;
+  if (visible === tutorPreviewTarget) return;
+  if (!visible.startsWith(tutorPreviewVisible)) {
+    let commonLength = 0;
+    while (
+      commonLength < visible.length
+      && commonLength < tutorPreviewVisible.length
+      && visible[commonLength] === tutorPreviewVisible[commonLength]
+    ) commonLength += 1;
+    tutorPreviewVisible = tutorPreviewVisible.slice(0, commonLength);
+  }
+  tutorPreviewTarget = visible;
+  scheduleTutorPreview();
+}
+
+async function finishTutorPreview(finalPreview) {
+  renderTutorPreview(finalPreview);
+  tutorPreviewCommitted = true;
+  scheduleTutorPreview();
+  if (tutorPreviewVisible.length < tutorPreviewTarget.length) {
+    await Promise.race([
+      new Promise((resolve) => { tutorPreviewDrainResolve = resolve; }),
+      new Promise((resolve) => window.setTimeout(resolve, 2200)),
+    ]);
+  }
+  if (tutorPreviewVisible !== tutorPreviewTarget) {
+    tutorPreviewVisible = tutorPreviewTarget;
+    const { region, text } = tutorPreviewNodes();
+    if (text) text.textContent = tutorPreviewVisible;
+    if (region) region.scrollTop = region.scrollHeight;
+  }
+}
+
+function restoreTutorSurfaceAfterError() {
+  const { surface, region } = tutorPreviewNodes();
+  if (!surface || !region) return;
+  if (tutorPreviewFrame !== null) window.cancelAnimationFrame(tutorPreviewFrame);
+  tutorPreviewFrame = null;
+  tutorPreviewCommitted = false;
+  tutorPreviewTarget = "";
+  tutorPreviewVisible = "";
+  region.hidden = true;
+  surface.querySelector("[data-move-content]")?.removeAttribute("hidden");
+  surface.querySelector("[data-move-prompt]")?.removeAttribute("hidden");
+  delete surface.dataset.streaming;
+  surface.style.height = "";
 }
 
 function lockTurnForm(locked) {
@@ -862,11 +950,13 @@ async function pollOperation(operationId) {
   const result = await waitForOperation(operationId, setOperationState);
   if (result.state === "committed") {
     clearTurnComposer();
+    await finishTutorPreview(result.preview_text || "");
     document.querySelector("[data-current-move]")?.setAttribute("data-stream-complete", "true");
     setOperationState("Lesson ready.");
-    window.setTimeout(() => window.location.replace(window.location.href), 320);
+    window.setTimeout(() => window.location.replace(window.location.href), 440);
     return;
   }
+  restoreTutorSurfaceAfterError();
   if (result.state === "conflict") {
     setOperationState("This course changed elsewhere. Refresh to continue from the newest move.", true);
   } else {
