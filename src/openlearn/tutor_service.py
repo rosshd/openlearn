@@ -52,6 +52,13 @@ class TutorTurnResult:
     move: TutorMove | None
     error_code: str | None = None
     error_message: str | None = None
+    preview: str | None = None
+
+
+@dataclass
+class _LiveTurnState:
+    phase: OperationStatus = "saved"
+    preview: str | None = None
 
 
 _GENERATION_LOCK = threading.RLock()
@@ -61,6 +68,7 @@ _EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="openlearn-tuto
 _FUTURES: dict[tuple[str, str], Future[TutorTurnResult]] = {}
 _FUTURES_GUARD = threading.Lock()
 _RUNNING: set[tuple[str, str]] = set()
+_LIVE_TURNS: dict[tuple[str, str], _LiveTurnState] = {}
 _OPERATION_TIMEOUT = timedelta(minutes=3)
 
 
@@ -117,6 +125,18 @@ def operation_status(slug: str, submission_id: str) -> TutorTurnResult | None:
     """Return either a terminal receipt or the current durable operation state."""
     from openlearn import cli
 
+    key = (slug, submission_id)
+    with _FUTURES_GUARD:
+        if key in _RUNNING:
+            live = _LIVE_TURNS.get(key, _LiveTurnState())
+            return TutorTurnResult(
+                submission_id=submission_id,
+                status=live.phase,
+                input_status="saved",
+                message_kind="",
+                move=None,
+                preview=live.preview,
+            )
     with _course_lock(slug):
         # Read the receipt and active operation from one state snapshot. A turn
         # can commit between two reads, leaving no active turn in the newer
@@ -133,8 +153,11 @@ def operation_status(slug: str, submission_id: str) -> TutorTurnResult | None:
         recovered = _recover_active_turn(slug, active)
         if recovered is not None:
             return recovered
-        status = active.get("status")
-        if status not in {"saved", "generating"}:
+        with _FUTURES_GUARD:
+            live = _LIVE_TURNS.get((slug, submission_id))
+            status = live.phase if live is not None else active.get("status")
+            preview = live.preview if live is not None else None
+        if status not in {"saved", "judging", "generating", "validating"}:
             return None
         return TutorTurnResult(
             submission_id=submission_id,
@@ -142,6 +165,7 @@ def operation_status(slug: str, submission_id: str) -> TutorTurnResult | None:
             input_status="saved",
             message_kind="",
             move=None,
+            preview=preview,
         )
 
 
@@ -156,6 +180,43 @@ def _result_from_dict(raw: dict[str, object]) -> TutorTurnResult:
         move=move,
         error_code=str(raw["error_code"]) if raw.get("error_code") else None,
         error_message=str(raw["error_message"]) if raw.get("error_message") else None,
+    )
+
+
+def _receipt_dict(result: TutorTurnResult) -> dict[str, object]:
+    receipt = asdict(result)
+    receipt.pop("preview", None)
+    return receipt
+
+
+def _clear_live_turn(key: tuple[str, str]) -> None:
+    with _FUTURES_GUARD:
+        _LIVE_TURNS.pop(key, None)
+
+
+def _turn_failure(exc: Exception) -> tuple[str, str]:
+    from openlearn import cli
+
+    current: BaseException | None = exc
+    while current is not None:
+        if isinstance(current, cli.ProviderRequestError):
+            messages = {
+                "provider_credentials": "Your response is saved, but the provider rejected its credentials. Review Provider settings, then retry.",
+                "provider_rate_limited": "Your response is saved. The provider is rate limited, so wait briefly and retry.",
+                "provider_unavailable": "Your response is saved, but the model provider could not finish this turn. Retry, or review Provider settings if it repeats.",
+            }
+            return current.category, messages.get(
+                current.category, messages["provider_unavailable"]
+            )
+        if isinstance(current, cli.JudgeOutputError):
+            return (
+                "judge_invalid_output",
+                "Your answer is saved, but the selected judge model did not return usable grading data. Retry now, or review Provider settings if it repeats.",
+            )
+        current = current.__cause__ or current.__context__
+    return (
+        "turn_failure",
+        "Your response is saved, but openlearn could not finish this turn. Retry without retyping it.",
     )
 
 
@@ -196,7 +257,7 @@ def _save_operation(
         if result is not None:
             results = internal.get("turn_results")
             results = dict(results) if isinstance(results, dict) else {}
-            results[submission_id] = asdict(result)
+            results[submission_id] = _receipt_dict(result)
             while len(results) > 50:
                 results.pop(next(iter(results)))
             internal["turn_results"] = results
@@ -397,6 +458,24 @@ def _execute_prepared_turn(
         )
     result_holder: list[TutorTurnResult] = []
 
+    def publish_preview(value: str) -> None:
+        key = (slug, sid)
+        with _FUTURES_GUARD:
+            live = _LIVE_TURNS.setdefault(key, _LiveTurnState())
+            live.preview = value[-32_000:] if value else None
+
+    def publish_status(value: cli.TutorTurnPhase) -> None:
+        with _FUTURES_GUARD:
+            live = _LIVE_TURNS.setdefault((slug, sid), _LiveTurnState())
+            live.phase = value
+
+    class TurnObserver:
+        def publish_phase(self, phase: cli.TutorTurnPhase) -> None:
+            publish_status(phase)
+
+        def publish_preview(self, text: str) -> None:
+            publish_preview(text)
+
     def commit_receipt(
         answer: str,
         metadata: dict[str, object],
@@ -437,7 +516,7 @@ def _execute_prepared_turn(
             )
             results = internal.get("turn_results")
             results = dict(results) if isinstance(results, dict) else {}
-            results[sid] = asdict(result)
+            results[sid] = _receipt_dict(result)
             while len(results) > 50:
                 results.pop(next(iter(results)))
             internal["course_revision"] = new_revision
@@ -463,11 +542,14 @@ def _execute_prepared_turn(
                     _message_kind(intent) if intent != "answer" else None
                 ),
                 commit_state_hook=commit_receipt,
+                turn_observer=TurnObserver(),
             )
         if not result_holder:
             raise TutorOperationError("tutor turn did not produce a committed result")
+        _clear_live_turn((slug, sid))
         return result_holder[0]
     except cli.TurnCommitConflictError as exc:
+        _clear_live_turn((slug, sid))
         with _course_lock(slug):
             result = TutorTurnResult(
                 submission_id=sid,
@@ -491,6 +573,7 @@ def _execute_prepared_turn(
             )
         raise TutorConflictError(result.error_message) from exc
     except Exception as exc:
+        _clear_live_turn((slug, sid))
         with _course_lock(slug):
             committed = operation_result(slug, sid)
             if committed is not None and committed.status == "committed":
@@ -499,14 +582,15 @@ def _execute_prepared_turn(
                 raise TutorOperationError(
                     committed.error_message or "Tutor turn must be retried."
                 ) from exc
+            error_code, error_message = _turn_failure(exc)
             result = TutorTurnResult(
                 submission_id=sid,
                 status="retryable_error",
                 input_status="saved",
                 message_kind=_message_kind(intent),
                 move=None,
-                error_code="provider_or_turn_failure",
-                error_message="Your response is saved. Retry when the provider is available.",
+                error_code=error_code,
+                error_message=error_message,
             )
             _save_operation(
                 slug,
@@ -515,7 +599,7 @@ def _execute_prepared_turn(
                 expected_revision=revision,
                 prompt=normalized,
                 result=result,
-                error_code="provider_or_turn_failure",
+                error_code=error_code,
             )
         if isinstance(exc, TutorOperationError):
             raise
@@ -620,6 +704,7 @@ def start_turn(
             with _FUTURES_GUARD:
                 _FUTURES.pop(operation_key, None)
                 _RUNNING.discard(operation_key)
+                _LIVE_TURNS.pop(operation_key, None)
 
         future.add_done_callback(release)
         return pending

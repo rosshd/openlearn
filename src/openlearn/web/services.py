@@ -238,12 +238,37 @@ def _source_result(result: source_imports.CourseSourceImportResult) -> dict[str,
 def _move(move: tutor_service.TutorMove | None) -> dict[str, object]:
     if move is None:
         return {}
+    kind, blocks = _present_response(move.content)
     return {
-        "kind": move.kind.replace("_", " ").title(),
+        "kind": kind or move.kind.replace("_", " ").title(),
         "title": "Your next learning move",
         "content": move.content,
+        "blocks": blocks,
         "prompt": move.prompt,
         "position": f"Step {move.revision}",
+    }
+
+
+def _operation_preview(value: str | None) -> str:
+    if not value:
+        return ""
+    text = cli.sanitize_stream_preview(value)
+    text = re.sub(
+        r"^\s*(?:\*\*)?(?:Lesson|Feedback|Example|Check|Hint|Next)\s*:(?:\*\*)?\s*",
+        "",
+        text,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    return _plain_text(text)
+
+
+def _show_provider_recovery(error_code: str | None) -> bool:
+    return error_code in {
+        "judge_invalid_output",
+        "provider_credentials",
+        "provider_rate_limited",
+        "provider_unavailable",
     }
 
 
@@ -1286,6 +1311,11 @@ class OpenLearnWebServices:
                         "id": operation_id,
                         "state": result.status,
                         "error": result.error_message or "",
+                        "error_code": result.error_code or "",
+                        "show_provider_recovery": _show_provider_recovery(
+                            result.error_code
+                        ),
+                        "preview_text": _operation_preview(result.preview),
                     }
         return {
             "slug": slug,
@@ -1364,7 +1394,9 @@ class OpenLearnWebServices:
         return {
             "state": result.status,
             "error": result.error_message or "",
-            "move": _move(result.move),
+            "error_code": result.error_code or "",
+            "show_provider_recovery": _show_provider_recovery(result.error_code),
+            "preview_text": _operation_preview(result.preview),
         }
 
     def history(self, slug: str, *, page: int) -> dict[str, object]:

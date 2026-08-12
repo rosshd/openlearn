@@ -12,7 +12,7 @@
 {% endblock %}
 {% block content %}
 <div class="focus-shell" data-focus-shell data-course-slug="{{ course.slug }}" data-revision="{{ course.revision or 0 }}"
-  {% if course.operation %}data-operation-id="{{ course.operation.id }}" data-operation-state="{{ course.operation.state }}" data-operation-error="{{ course.operation.error }}"{% endif %}>
+  {% if course.operation %}data-operation-id="{{ course.operation.id }}" data-operation-state="{{ course.operation.state }}" data-operation-error="{{ course.operation.error }}" data-operation-provider-recovery="{{ 'true' if course.operation.show_provider_recovery else 'false' }}"{% endif %}>
   <aside class="tool-rail" aria-label="Lesson tools">
     <button type="button" class="rail-button" data-tool-open="chat" aria-expanded="false" aria-controls="learning-tool-surface"><span aria-hidden="true">?</span> Chat</button>
     <button type="button" class="rail-button" data-tool-open="code" aria-expanded="false" aria-controls="learning-tool-surface"><span aria-hidden="true">{ }</span> Code</button>
@@ -32,11 +32,11 @@
 
     <article class="move-surface" data-current-move>
       <div class="move-header">
-        <p class="eyebrow">{{ course.move.kind or 'Current move' }}</p>
+        <p class="eyebrow" data-move-kind>{{ course.move.kind or 'Current move' }}</p>
         <span class="move-number">{{ course.move.position or course.position or 'Now' }}</span>
       </div>
       <h1 id="move-title" tabindex="-1">{{ course.move.title or 'Ready when you are' }}</h1>
-      <div class="move-content">
+      <div class="move-content" data-move-content>
         {% for block in course.move.blocks or [] %}
           {% if block.kind == 'paragraph' %}<p>{{ block.text }}</p>
           {% elif block.kind == 'unordered_list' %}<ul>{% for item in block['items'] %}<li>{{ item }}</li>{% endfor %}</ul>
@@ -46,7 +46,11 @@
         {% endfor %}
         {% if course.move.content %}<p>{{ course.move.content }}</p>{% endif %}
       </div>
-      {% if course.move.prompt %}<div class="prompt-block"><p>{{ course.move.prompt }}</p></div>{% endif %}
+      {% if course.move.prompt %}<div class="prompt-block" data-move-prompt><p>{{ course.move.prompt }}</p></div>{% endif %}
+      <div class="tutor-stream-preview" data-tutor-stream-preview hidden>
+        <p class="stream-label"><span class="stream-pulse" aria-hidden="true"></span>Tutor response</p>
+        <div data-tutor-stream-text></div><span class="stream-caret" aria-hidden="true"></span>
+      </div>
     </article>
 
     {% if course.requires_response %}
@@ -71,7 +75,10 @@
       <button class="tool-button" type="button" data-tool-open="chat" aria-expanded="false" aria-controls="learning-tool-surface">Ask a question</button>
     </div>
     {% endif %}
-    <div class="operation-state" data-operation-state role="status" aria-live="polite" aria-atomic="true" tabindex="-1" hidden></div>
+    <div class="operation-state" data-operation-state role="status" aria-live="polite" aria-atomic="true" tabindex="-1" hidden>
+      <span data-operation-message></span>
+      <a href="{{ url_for('setup') }}" data-provider-recovery hidden>Review provider settings</a>
+    </div>
   </section>
 
   <aside class="learning-tool" id="learning-tool-surface" data-tool-surface hidden aria-labelledby="learning-tool-title">

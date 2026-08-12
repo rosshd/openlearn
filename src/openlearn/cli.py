@@ -37,6 +37,7 @@ from uuid import uuid4
 from urllib.parse import urlencode, urlparse
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+from typing import Literal, Protocol
 
 from platformdirs import user_data_dir
 
@@ -143,6 +144,13 @@ REPL_PASTE_CONTINUATION_WAIT_SECONDS = 0.05
 OPENAI_MAX_ATTEMPTS = 3
 OPENAI_RETRY_BASE_DELAY_SECONDS = 0.5
 OPENAI_RETRY_JITTER_SECONDS = 0.25
+TutorTurnPhase = Literal["judging", "generating", "validating"]
+
+
+class TutorTurnObserver(Protocol):
+    def publish_phase(self, phase: TutorTurnPhase) -> object: ...
+
+    def publish_preview(self, text: str) -> object: ...
 JUDGE_MAX_TOKENS = 1024
 JUDGE_TIMEOUT_SECONDS = 20
 JUDGE_MAX_ATTEMPTS = 2
@@ -8859,6 +8867,7 @@ def ask_topic(
     deferred_updates: DeferredTurnUpdates | None = None,
     pending_learner_prompt: str | None = None,
     system_prompt_sink: Callable[[str], object] | None = None,
+    turn_observer: TutorTurnObserver | None = None,
     allow_specialized_actions: bool = True,
     session_kind: TutorSessionKind = "chat",
     message_kind_override: str | None = None,
@@ -8950,6 +8959,8 @@ def ask_topic(
     )
 
     if needs_judgment:
+        if turn_observer is not None:
+            turn_observer.publish_phase("judging")
         message_kind = update_learning_metadata(
             topic,
             prompt,
@@ -8980,17 +8991,22 @@ def ask_topic(
         else prompt
     )
     _LAST_RESPONSE_FOCUS_TITLE = ""
+    if turn_observer is not None:
+        turn_observer.publish_phase("generating")
     generated_answer = generate_validated_tutor_answer(
         topic,
         generation_prompt,
         model,
         output_func=output_func,
         system_prompt_sink=system_prompt_sink,
+        stream_sink=(turn_observer.publish_preview if turn_observer is not None else None),
         engagement_check_due=engagement_check_due,
     )
     focus_title = _LAST_RESPONSE_FOCUS_TITLE or tutor_response_focus_title(generated_answer)
     answer = sanitize_model_output(generated_answer)
     answer = enforce_first_lesson_response(topic, prompt, answer)
+    if turn_observer is not None:
+        turn_observer.publish_phase("validating")
     answer_key = _LAST_RESPONSE_ANSWER_KEY
     coding_drill_action = _LAST_RESPONSE_CODING_DRILL_ACTION
     _LAST_RESPONSE_ANSWER_KEY = ""
@@ -9128,6 +9144,7 @@ def generate_validated_tutor_answer(
     *,
     output_func=print,
     system_prompt_sink: Callable[[str], object] | None = None,
+    stream_sink: Callable[[str], object] | None = None,
     engagement_check_due: bool = False,
 ) -> str:
     """Generate, validate, then reveal one tutor response."""
@@ -9153,6 +9170,8 @@ def generate_validated_tutor_answer(
     buffered_output: list[str] = []
     for attempt in range(2):
         buffered_output = []
+        if stream_sink is not None:
+            stream_sink("")
         user = (
             prompt
             if attempt == 0
@@ -9163,11 +9182,13 @@ def generate_validated_tutor_answer(
                 forbid_choice_claim=forbid_choice_claim,
             )
         )
+        stream_options = {"stream_sink": stream_sink} if stream_sink is not None else {}
         candidate = call_openai_streaming(
             model=model,
             system=system,
             user=user,
             output_func=buffered_output.append,
+            **stream_options,
         )
         error = tutor_answer_contract_error(
             candidate,
@@ -13577,7 +13598,7 @@ def update_learning_metadata(
                     retry_status("Judge returned no usable output; retrying once...")
                 continue
             if isinstance(pending_at_answer, dict):
-                raise OpenLearnError(
+                raise JudgeOutputError(
                     "Could not grade your answer after two judge attempts. "
                     f"{exc} Configure a dedicated judge with "
                     "`openlearn config set-extractor-model <model>`."
@@ -13616,7 +13637,7 @@ def update_learning_metadata(
 
     if not update:
         if isinstance(pending_at_answer, dict):
-            raise OpenLearnError(
+            raise JudgeOutputError(
                 "Could not grade your answer after two judge attempts. "
                 f"{unusable_reason} Your saved answer can be retried unchanged. "
                 "Configure a dedicated judge with "
@@ -17757,6 +17778,64 @@ def is_transient_openai_error(exc: HTTPError | URLError | TimeoutError) -> bool:
     return True
 
 
+def _provider_transport_error(
+    exc: HTTPError | URLError | TimeoutError, *, api_key: str
+) -> ProviderRequestError:
+    if isinstance(exc, HTTPError):
+        if exc.code == 401 and not api_key:
+            return ProviderRequestError(
+                "provider_credentials",
+                "This endpoint requires an API key. Run: openlearn config set-key",
+            )
+        detail = exc.read().decode("utf-8", errors="replace")
+        category = (
+            "provider_credentials"
+            if exc.code in {401, 403}
+            else "provider_rate_limited" if exc.code == 429 else "provider_unavailable"
+        )
+        return ProviderRequestError(
+            category, f"OpenAI request failed: HTTP {exc.code}: {detail}"
+        )
+    reason = exc.reason if isinstance(exc, URLError) else str(exc)
+    return ProviderRequestError(
+        "provider_unavailable", f"OpenAI request failed: {reason}"
+    )
+
+
+def _openrouter_request_options(
+    base_url: str, *, json_response: bool = False
+) -> dict[str, object]:
+    """Return OpenRouter-only controls without burdening compatible endpoints."""
+    hostname = (urlparse(base_url).hostname or "").casefold()
+    if hostname != "openrouter.ai" and not hostname.endswith(".openrouter.ai"):
+        return {}
+    options: dict[str, object] = {
+        "reasoning": {"effort": "none", "exclude": True},
+    }
+    if json_response:
+        options["response_format"] = {"type": "json_object"}
+    return options
+
+
+def _stream_error(event: dict[str, object]) -> ProviderRequestError | None:
+    """Extract a safe actionable message from an SSE error event."""
+    error = event.get("error")
+    if not isinstance(error, dict):
+        return None
+    code = error.get("code")
+    message = error.get("message")
+    safe_message = str(message).strip() if isinstance(message, str) else ""
+    safe_code = str(code).strip() if isinstance(code, (str, int)) else ""
+    detail = safe_message[:240] or "The provider ended the response early."
+    suffix = f" ({safe_code})" if safe_code else ""
+    category = (
+        "provider_credentials"
+        if safe_code in {"401", "403"}
+        else "provider_rate_limited" if safe_code == "429" else "provider_unavailable"
+    )
+    return ProviderRequestError(category, f"Provider stream failed{suffix}: {detail}")
+
+
 def call_openai(
     model: str,
     system: str,
@@ -17768,6 +17847,7 @@ def call_openai(
     max_tokens: int = DEFAULT_MAX_TOKENS,
     timeout_seconds: int = 60,
     max_attempts: int = OPENAI_MAX_ATTEMPTS,
+    json_response: bool = False,
 ) -> str:
     if _DRY_RUN:
         raise DryRunPrompt(model, system, user)
@@ -17791,6 +17871,7 @@ def call_openai(
             {"role": "user", "content": user},
         ],
     }
+    payload.update(_openrouter_request_options(base_url, json_response=json_response))
     headers = {
         "Content-Type": "application/json",
         "User-Agent": f"openLearn/{__version__}",
@@ -17810,17 +17891,7 @@ def call_openai(
             break
         except (HTTPError, URLError, TimeoutError) as exc:
             if not is_transient_openai_error(exc) or attempt == max_attempts:
-                if isinstance(exc, HTTPError):
-                    if exc.code == 401 and not api_key:
-                        raise OpenLearnError(
-                            "This endpoint requires an API key. Run: openlearn config set-key"
-                        ) from exc
-                    detail = exc.read().decode("utf-8", errors="replace")
-                    raise OpenLearnError(
-                        f"OpenAI request failed: HTTP {exc.code}: {detail}"
-                    ) from exc
-                reason = exc.reason if isinstance(exc, URLError) else str(exc)
-                raise OpenLearnError(f"OpenAI request failed: {reason}") from exc
+                raise _provider_transport_error(exc, api_key=api_key) from exc
             delay = OPENAI_RETRY_BASE_DELAY_SECONDS * 2 ** (attempt - 1)
             delay += retry_jitter(0.0, OPENAI_RETRY_JITTER_SECONDS)
             if retry_status is not None:
@@ -17850,6 +17921,7 @@ def call_openai_judgment(model: str, system: str, user: str) -> str:
         max_tokens=JUDGE_MAX_TOKENS,
         timeout_seconds=JUDGE_TIMEOUT_SECONDS,
         max_attempts=1,
+        json_response=True,
     )
 
 
@@ -17875,6 +17947,7 @@ def call_openai_streaming(
     retry_sleep: Callable[[float], object] = time.sleep,
     retry_jitter: Callable[[float, float], float] = random.uniform,
     retry_status: Callable[[str], object] | None = None,
+    stream_sink: Callable[[str], object] | None = None,
 ) -> str:
     global _LAST_RESPONSE_ANSWER_KEY, _LAST_RESPONSE_FOCUS_TITLE
     global _LAST_RESPONSE_CODING_DRILL_ACTION, _LAST_RESPONSE_COVERED_CONCEPTS
@@ -17905,6 +17978,8 @@ def call_openai_streaming(
             raise OpenLearnError(
                 "OpenAI response did not contain output text; try a faster non-reasoning model or increase the token limit."
             )
+        if stream_sink is not None:
+            stream_sink(text)
         emit_tutor_output(text, output_func)
         return text.strip()
 
@@ -17925,6 +18000,8 @@ def call_openai_streaming(
             raise OpenLearnError(
                 "OpenAI response did not contain output text; try a faster non-reasoning model or increase the token limit."
             )
+        if stream_sink is not None:
+            stream_sink(text)
         emit_tutor_output(text, output_func)
         return text.strip()
 
@@ -17943,6 +18020,7 @@ def call_openai_streaming(
             {"role": "user", "content": user},
         ],
     }
+    payload.update(_openrouter_request_options(base_url))
     headers = {
         "Content-Type": "application/json",
         "User-Agent": f"openLearn/{__version__}",
@@ -17960,6 +18038,8 @@ def call_openai_streaming(
     spinner = spinner_context.__enter__()
     spinner_active = True
     tutor_stream: TutorResponseStream | None = None
+    last_preview_at = 0.0
+    published_preview = ""
     if spinner is not None:
         spinner.add_task("waiting", total=None)
     try:
@@ -17978,34 +18058,34 @@ def call_openai_streaming(
                             event = json.loads(data)
                         except json.JSONDecodeError:
                             continue
+                        stream_error = _stream_error(event)
+                        if stream_error:
+                            raise stream_error
                         text = extract_stream_delta(event)
                         if not text:
                             continue
                         chunks.append(text)
                         if output_func is print:
+                            preview = sanitize_stream_preview("".join(chunks))
                             if tutor_stream is None:
                                 if spinner_active:
                                     spinner_context.__exit__(None, None, None)
                                     spinner_active = False
                                 tutor_stream = TutorResponseStream()
                                 tutor_stream.start()
-                            tutor_stream.update(sanitize_stream_preview("".join(chunks)))
+                            tutor_stream.update(preview)
+                        elif stream_sink is not None:
+                            now = time.monotonic()
+                            if now - last_preview_at >= 0.075:
+                                published_preview = sanitize_stream_preview("".join(chunks))
+                                stream_sink(published_preview)
+                                last_preview_at = now
                 break
             except (HTTPError, URLError, TimeoutError) as exc:
                 if not is_transient_openai_error(exc) or attempt == OPENAI_MAX_ATTEMPTS:
                     if tutor_stream is not None:
                         tutor_stream.abort()
-                    if isinstance(exc, HTTPError):
-                        if exc.code == 401 and not api_key:
-                            raise OpenLearnError(
-                                "This endpoint requires an API key. Run: openlearn config set-key"
-                            ) from exc
-                        detail = exc.read().decode("utf-8", errors="replace")
-                        raise OpenLearnError(
-                            f"OpenAI request failed: HTTP {exc.code}: {detail}"
-                        ) from exc
-                    reason = exc.reason if isinstance(exc, URLError) else str(exc)
-                    raise OpenLearnError(f"OpenAI request failed: {reason}") from exc
+                    raise _provider_transport_error(exc, api_key=api_key) from exc
                 if tutor_stream is not None:
                     tutor_stream.abort()
                     tutor_stream = None
@@ -18025,6 +18105,10 @@ def call_openai_streaming(
             spinner_context.__exit__(None, None, None)
 
     raw_text = "".join(chunks)
+    if stream_sink is not None:
+        final_preview = sanitize_stream_preview(raw_text)
+        if final_preview != published_preview:
+            stream_sink(final_preview)
     _LAST_RESPONSE_COVERED_CONCEPTS = extract_covered_concepts(raw_text)
     _LAST_RESPONSE_FOCUS_TITLE = tutor_response_focus_title(raw_text)
     if capture_answer_key:
@@ -18165,6 +18249,16 @@ def today() -> str:
 
 
 class OpenLearnError(Exception):
+    pass
+
+
+class ProviderRequestError(OpenLearnError):
+    def __init__(self, category: str, message: str) -> None:
+        super().__init__(message)
+        self.category = category
+
+
+class JudgeOutputError(OpenLearnError):
     pass
 
 

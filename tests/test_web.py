@@ -1566,6 +1566,28 @@ def test_history_service_pages_all_session_entries(client: TestClient) -> None:
     assert second["items"][0]["blocks"][0]["kind"] == "unordered_list"
 
 
+def test_operation_status_exposes_safe_preview_and_recovery_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = tutor_service.TutorTurnResult(
+        submission_id=str(uuid4()),
+        status="generating",
+        input_status="saved",
+        message_kind="answer",
+        move=None,
+        error_code="provider_unavailable",
+        preview="Lesson: A partial explanation",
+    )
+    monkeypatch.setattr(tutor_service, "operation_status", lambda *_args: result)
+
+    status = OpenLearnWebServices().operation_status("existing-course", result.submission_id)
+
+    assert status["preview_text"] == "A partial explanation"
+    assert status["error_code"] == "provider_unavailable"
+    assert status["show_provider_recovery"] is True
+    assert "move" not in status
+
+
 def test_initialization_refresh_recovers_orphaned_saved_operation(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

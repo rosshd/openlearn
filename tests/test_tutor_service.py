@@ -88,8 +88,51 @@ class TutorServiceTests(TestCase):
         self.assertIsNotNone(first.move)
         self.assertEqual(course_revision("web-tutor"), 1)
         self.assertFalse(cli.topic_turn_journal_path("web-tutor").exists())
+        receipt = cli.load_state("web-tutor")["_openlearn_internal"]["turn_results"][submission_id]
+        self.assertNotIn("preview", receipt)
         body = cli.read_topic("web-tutor").body
         self.assertEqual(body.count("Explain normal mode."), 1)
+
+    def test_running_turn_publishes_stream_preview_without_persisting_tokens(self) -> None:
+        started = threading.Event()
+        release = threading.Event()
+        submission_id = str(uuid4())
+
+        def slow_turn(*_args: object, **kwargs: object) -> str:
+            observer = kwargs["turn_observer"]
+            observer.publish_phase("generating")
+            observer.publish_preview("Lesson: Building the next explanation")
+            started.set()
+            release.wait(timeout=3)
+            raise cli.ProviderRequestError(
+                "provider_unavailable", "Provider request failed: temporary outage"
+            )
+
+        with mock.patch.object(cli, "ask_topic", side_effect=slow_turn):
+            result = start_turn(
+                "web-tutor",
+                "My answer",
+                submission_id=submission_id,
+                expected_revision=0,
+            )
+            self.assertEqual(result.status, "saved")
+            self.assertTrue(started.wait(timeout=3))
+            running = operation_status("web-tutor", submission_id)
+            self.assertIsNotNone(running)
+            self.assertEqual(running.preview, "Lesson: Building the next explanation")
+            state_text = cli.topic_state_path("web-tutor").read_text(encoding="utf-8")
+            self.assertNotIn("Building the next explanation", state_text)
+            release.set()
+
+        deadline = time.monotonic() + 3
+        terminal = operation_status("web-tutor", submission_id)
+        while terminal is not None and terminal.status not in {"retryable_error", "conflict"}:
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(0.01)
+            terminal = operation_status("web-tutor", submission_id)
+        self.assertIsNotNone(terminal)
+        self.assertEqual(terminal.error_code, "provider_unavailable")
+        self.assertIsNone(terminal.preview)
 
     def test_question_turn_is_saved_as_side_chat(self) -> None:
         result = submit_turn(

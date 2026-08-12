@@ -5516,6 +5516,18 @@ class ProviderResponseTests(unittest.TestCase):
 
         self.assertEqual(text, "Check: Choose one.\nA) One\nB) Two")
 
+    def test_sanitize_model_output_hides_plain_reasoning_preamble(self) -> None:
+        raw = (
+            "Thinking Process: I should inspect the course metadata first. "
+            "**Lesson:** Trace one concrete example before choosing an approach."
+        )
+
+        self.assertEqual(
+            cli.sanitize_model_output(raw),
+            "**Lesson:** Trace one concrete example before choosing an approach.",
+        )
+        self.assertEqual(cli.sanitize_stream_preview("Thinking Process: still deciding"), "")
+
     def test_call_openai_sends_completion_limit(self) -> None:
         previous_key = os.environ.get("OPENAI_API_KEY")
         os.environ["OPENAI_API_KEY"] = "sk-test"
@@ -5551,6 +5563,65 @@ class ProviderResponseTests(unittest.TestCase):
         self.assertEqual(payload["max_tokens"], cli.DEFAULT_MAX_TOKENS)
         self.assertIs(payload["include_reasoning"], False)
 
+    def test_openrouter_completion_disables_reasoning(self) -> None:
+        os.environ["OPENAI_API_KEY"] = "sk-test"
+        requests = []
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def read(self):
+                return json.dumps(
+                    {"choices": [{"message": {"content": "short answer"}}]}
+                ).encode()
+
+        def fake_urlopen(request, timeout=0):
+            requests.append(request)
+            return FakeResponse()
+
+        with (
+            mock.patch.object(cli, "configured_base_url", return_value="https://openrouter.ai/api/v1"),
+            mock.patch.object(cli, "urlopen", side_effect=fake_urlopen),
+        ):
+            cli.call_openai("test-model", "system", "user")
+
+        payload = json.loads(requests[0].data.decode("utf-8"))
+        self.assertEqual(payload["reasoning"], {"effort": "none", "exclude": True})
+
+    def test_compatible_completion_omits_openrouter_only_options(self) -> None:
+        os.environ["OPENAI_API_KEY"] = "sk-test"
+        requests = []
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def read(self):
+                return json.dumps(
+                    {"choices": [{"message": {"content": "short answer"}}]}
+                ).encode()
+
+        def fake_urlopen(request, timeout=0):
+            requests.append(request)
+            return FakeResponse()
+
+        with (
+            mock.patch.object(cli, "configured_base_url", return_value="https://example.test/v1"),
+            mock.patch.object(cli, "urlopen", side_effect=fake_urlopen),
+        ):
+            cli.call_openai("test-model", "system", "user")
+
+        payload = json.loads(requests[0].data.decode("utf-8"))
+        self.assertNotIn("reasoning", payload)
+        self.assertNotIn("response_format", payload)
+
     def test_answer_judge_uses_bounded_json_request(self) -> None:
         os.environ["OPENAI_API_KEY"] = "sk-test"
         requests = []
@@ -5571,12 +5642,17 @@ class ProviderResponseTests(unittest.TestCase):
             requests.append((request, timeout))
             return FakeResponse()
 
-        with mock.patch.object(cli, "urlopen", side_effect=fake_urlopen):
+        with (
+            mock.patch.object(cli, "configured_base_url", return_value="https://openrouter.ai/api/v1"),
+            mock.patch.object(cli, "urlopen", side_effect=fake_urlopen),
+        ):
             result = cli.call_openai_judgment("extractor-model", "system", "user")
 
         payload = json.loads(requests[0][0].data.decode("utf-8"))
         self.assertEqual(result, '{"message_kind":"answer"}')
         self.assertEqual(payload["max_tokens"], cli.JUDGE_MAX_TOKENS)
+        self.assertEqual(payload["response_format"], {"type": "json_object"})
+        self.assertEqual(payload["reasoning"], {"effort": "none", "exclude": True})
         self.assertEqual(requests[0][1], cli.JUDGE_TIMEOUT_SECONDS)
 
     def test_answer_judge_bound_does_not_retry_provider_failure(self) -> None:
@@ -5814,10 +5890,15 @@ class ProviderResponseTests(unittest.TestCase):
             return FakeResponse()
 
         cli.urlopen = fake_urlopen
+        previews = []
         try:
             output = []
             answer = cli.call_openai_streaming(
-                "test-model", "system", "user", output_func=output.append
+                "test-model",
+                "system",
+                "user",
+                output_func=output.append,
+                stream_sink=previews.append,
             )
         finally:
             cli.urlopen = original_urlopen
@@ -5830,7 +5911,29 @@ class ProviderResponseTests(unittest.TestCase):
 
         self.assertIs(payload["stream"], True)
         self.assertEqual(answer, "Hello there")
+        self.assertEqual(previews, ["Hello", "Hello there"])
         self.assertEqual(output, ["", "Tutor", "Hello there", "End tutor response", ""])
+
+    def test_call_openai_streaming_surfaces_sse_error(self) -> None:
+        os.environ["OPENAI_API_KEY"] = "sk-test"
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def __iter__(self):
+                yield b'data: {"error":{"code":429,"message":"rate limited"}}\n'
+
+        with (
+            mock.patch.object(cli, "urlopen", return_value=FakeResponse()),
+            self.assertRaisesRegex(cli.OpenLearnError, "rate limited"),
+        ):
+            cli.call_openai_streaming(
+                "test-model", "system", "user", output_func=lambda _line: None
+            )
 
     def test_call_openai_streaming_retries_transient_failures_then_succeeds(self) -> None:
         previous_key = os.environ.get("OPENAI_API_KEY")

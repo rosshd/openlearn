@@ -788,14 +788,45 @@ if (initializationShell) {
   });
 }
 
-function setOperationState(message, isError = false) {
+function setOperationState(message, isError = false, result = null) {
   const state = document.querySelector("[data-operation-state]");
   if (!state) return;
   state.hidden = false;
-  state.textContent = message;
+  const messageNode = state.querySelector("[data-operation-message]");
+  if (messageNode) messageNode.textContent = message;
+  else state.textContent = message;
   state.classList.toggle("error", isError);
   state.setAttribute("aria-live", isError ? "assertive" : "polite");
+  const recovery = state.querySelector("[data-provider-recovery]");
+  if (recovery) {
+    recovery.hidden = !isError || result?.show_provider_recovery !== true;
+  }
   if (isError) state.focus();
+}
+
+let lastTutorPreview = null;
+
+function renderTutorPreview(preview) {
+  const surface = document.querySelector("[data-current-move]");
+  const region = surface?.querySelector("[data-tutor-stream-preview]");
+  const text = region?.querySelector("[data-tutor-stream-text]");
+  if (!surface || !region || !text) return;
+  const visible = (preview || "").trimStart();
+  const nextPreview = visible || "Thinking through your answer…";
+  if (lastTutorPreview === nextPreview) return;
+  if (!surface.dataset.streaming) {
+    surface.querySelector("[data-move-content]")?.setAttribute("hidden", "");
+    surface.querySelector("[data-move-prompt]")?.setAttribute("hidden", "");
+    const kind = surface.querySelector("[data-move-kind]");
+    const title = surface.querySelector("#move-title");
+    if (kind) kind.textContent = "Tutor is responding";
+    if (title) title.textContent = "Your next learning move";
+    region.hidden = false;
+    surface.dataset.streaming = "true";
+  }
+  text.textContent = nextPreview;
+  text.classList.toggle("stream-placeholder", !visible);
+  lastTutorPreview = nextPreview;
 }
 
 function lockTurnForm(locked) {
@@ -810,7 +841,7 @@ function lockTurnForm(locked) {
 async function waitForOperation(operationId, setStatus) {
   const slug = focusShell.dataset.courseSlug;
   for (;;) {
-    await new Promise((resolve) => window.setTimeout(resolve, 700));
+    await new Promise((resolve) => window.setTimeout(resolve, 250));
     const result = await requestJson(`/api/courses/${encodeURIComponent(slug)}/operations/${encodeURIComponent(operationId)}`);
     const state = result.state || "working";
     const labels = {
@@ -819,7 +850,10 @@ async function waitForOperation(operationId, setStatus) {
       generating: "Preparing the next useful move…",
       validating: "Checking the lesson before showing it…",
     };
-    setStatus(labels[state] || result.message || "Working…");
+    if (state === "generating" || result.preview_text) {
+      renderTutorPreview(result.preview_text || "");
+    }
+    setStatus(labels[state] || result.message || "Working…", false, result);
     if (["committed", "conflict", "retryable_error"].includes(state)) return result;
   }
 }
@@ -828,13 +862,15 @@ async function pollOperation(operationId) {
   const result = await waitForOperation(operationId, setOperationState);
   if (result.state === "committed") {
     clearTurnComposer();
-    window.location.replace(window.location.href);
+    document.querySelector("[data-current-move]")?.setAttribute("data-stream-complete", "true");
+    setOperationState("Lesson ready.");
+    window.setTimeout(() => window.location.replace(window.location.href), 320);
     return;
   }
   if (result.state === "conflict") {
     setOperationState("This course changed elsewhere. Refresh to continue from the newest move.", true);
   } else {
-    setOperationState(result.error || "Your response is saved. Retry when the provider is available.", true);
+    setOperationState(result.error || "Your response is saved. Retry when the provider is available.", true, result);
   }
   lockTurnForm(false);
 }
@@ -848,7 +884,11 @@ function clearTurnComposer() {
 
 if (focusShell?.dataset.operationId) {
   if (focusShell.dataset.operationState === "retryable_error") {
-    setOperationState(focusShell.dataset.operationError || "Your response is saved. Retry when the provider is available.", true);
+    setOperationState(
+      focusShell.dataset.operationError || "Your response is saved. Retry when the provider is available.",
+      true,
+      { show_provider_recovery: focusShell.dataset.operationProviderRecovery === "true" },
+    );
   } else {
     lockTurnForm(true);
     setOperationState("Resuming your saved tutor turn…");
@@ -886,7 +926,7 @@ async function submitTurn(overrideIntent = null) {
       window.location.replace(window.location.href);
     }
     else if (result.state === "retryable_error") {
-      setOperationState(result.error || "Your response is saved. Retry when the provider is available.", true);
+      setOperationState(result.error || "Your response is saved. Retry when the provider is available.", true, result);
       lockTurnForm(false);
     } else {
       setOperationState(result.message || "Your response is saved.");

@@ -63,6 +63,16 @@ def sanitize_model_output(text: str) -> str:
     )
     text = re.sub(rf"(?is)<{hidden_tags}\b[^>]*>.*$", "", text)
     text = re.sub(r"(?is)<system-reminder>.*?</system-reminder>", "", text)
+    visible_label = r"(?:\*\*)?(?:Lesson|Feedback|Example|Check|Hint|Next)\s*:"
+    text = re.sub(
+        rf"(?is)^\s*(?:thinking process|analysis|reasoning)\s*:.*?(?={visible_label})",
+        "",
+        text,
+    )
+    if re.match(r"(?is)^\s*(?:thinking process|analysis|reasoning)\s*:", text) and not re.search(
+        visible_label, text
+    ):
+        return ""
     text = re.sub(r"(?is)<!--\s*answer\s*:\s*[A-D]\s*-->", "", text)
     text = re.sub(r"(?is)<!--\s*covered\s*:\s*.*?-->", "", text)
     text = re.sub(r"(?is)<!--\s*focus\s*:\s*.*?-->", "", text)
