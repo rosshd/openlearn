@@ -11,7 +11,7 @@ from urllib.request import Request, urlopen
 
 import pytest
 
-from openlearn import interview_prep
+from openlearn import cli, interview_prep
 
 
 pytestmark = pytest.mark.skipif(
@@ -67,6 +67,7 @@ def _assert_no_page_overflow(page) -> None:
 
 def test_real_browser_course_polling_theme_conflict_and_keyboard_submit(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     playwright = pytest.importorskip("playwright.sync_api")
     port = _free_loopback_port()
@@ -195,13 +196,39 @@ def test_real_browser_course_polling_theme_conflict_and_keyboard_submit(
                     )
                 first.locator("[data-focus-shell]").wait_for(state="visible")
                 playwright.expect(first.get_by_text("Before writing code", exact=False)).to_be_visible()
-                playwright.expect(first.get_by_text("Press Enter to continue", exact=False)).to_have_count(0)
+                playwright.expect(first.get_by_text("Press Enter to continue", exact=True)).to_be_visible()
+                assert first.locator("#learner-response").count() == 0
+                passive_revision = _revision(first)
+                first.locator("body").press("Enter")
+                _wait_for_new_revision(first, passive_revision)
+
+                lesson_title = first.locator("#move-title").inner_text()
+                first.get_by_role("button", name="Chat", exact=True).click()
+                playwright.expect(first.locator('[data-tool-panel="chat"]')).to_be_visible()
+                playwright.expect(first.locator(".focus-column")).to_be_visible()
+                first.locator("#chat-question").fill("Can you explain that another way?")
+                first.locator("#chat-question").press("Control+Enter")
+                playwright.expect(first.locator(".chat-exchange")).to_have_count(1)
+                playwright.expect(first.locator("#chat-question")).to_have_value("")
+                assert first.locator("#move-title").inner_text() == lesson_title
+                assert "tool=chat" in first.url
+                first.get_by_role("button", name="Close learning tool").click()
+
+                slug = first.locator("[data-focus-shell]").get_attribute("data-course-slug")
+                monkeypatch.setenv("OPENLEARN_HOME", str(home))
+                cli.clear_config_cache()
+                topic = cli.read_topic(slug)
+                check = "**Check:**\nWhich Vim mode runs commands like dd?"
+                cli.append_session(topic, "lesson", "Browser response check", check)
+                cli.save_pending_question(
+                    cli.read_topic(slug),
+                    check,
+                    "",
+                    question_text="Which Vim mode runs commands like dd?",
+                )
+                first.reload()
                 composer_submit = first.locator("[data-composer-submit]")
-                playwright.expect(composer_submit).to_contain_text("Continue")
-                first.locator("#learner-response").fill("A response")
-                playwright.expect(composer_submit).to_contain_text("Send response")
-                first.locator("#learner-response").fill("")
-                playwright.expect(composer_submit).to_contain_text("Continue")
+                playwright.expect(composer_submit).to_contain_text("Send answer")
                 first.emulate_media(reduced_motion="no-preference")
                 first.set_viewport_size({"width": 1280, "height": 800})
                 initial_revision = _revision(first)
@@ -404,10 +431,7 @@ def test_real_browser_course_polling_theme_conflict_and_keyboard_submit(
                 assert saved_body["state"] == "saved"
                 assert saved_body["operation_id"]
                 _wait_for_new_revision(first, initial_revision)
-                playwright.expect(first.locator("#learner-response")).to_have_value("")
-                playwright.expect(first.locator("[data-composer-submit]")).to_contain_text(
-                    "Continue"
-                )
+                playwright.expect(first.locator("[data-current-move]")).to_be_visible()
 
                 stale.locator("#learner-response").fill("This tab still has an old revision.")
                 with stale.expect_response(
@@ -417,10 +441,22 @@ def test_real_browser_course_polling_theme_conflict_and_keyboard_submit(
                 assert conflict.value.status == 409
                 assert "course changed" in stale.locator("[data-operation-state]").inner_text()
 
+                retry_question = "What is the average lookup cost of a hash map?"
+                topic = cli.read_topic(slug)
+                retry_check = f"**Check:**\n{retry_question}"
+                cli.append_session(topic, "lesson", "Retry check", retry_check)
+                cli.save_pending_question(
+                    cli.read_topic(slug),
+                    retry_check,
+                    "",
+                    question_text=retry_question,
+                )
                 stale.reload()
                 refreshed_revision = _revision(stale)
                 assert refreshed_revision > initial_revision
-                stale.locator("#learner-response").fill("After refreshing, keyboard submit works.")
+                stale.locator("#learner-response").fill(
+                    "Average lookup is constant time when hashing is well distributed."
+                )
                 with stale.expect_response(
                     lambda response: response.url.endswith("/turns")
                 ) as retried:
@@ -435,6 +471,7 @@ def test_real_browser_course_polling_theme_conflict_and_keyboard_submit(
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=5)
+            cli.clear_config_cache()
 
 
 def test_real_browser_unverified_provider_stays_in_setup(

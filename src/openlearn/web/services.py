@@ -225,7 +225,7 @@ def _plain_text(value: str) -> str:
 
 def _present_response(value: str) -> tuple[str, list[dict[str, object]]]:
     """Parse a small safe Markdown subset into explicit presentation blocks."""
-    text = cli.sanitize_model_output(value)
+    text = cli.strip_tutor_enter_advance_cue(cli.sanitize_model_output(value))
     text = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
     lines = text.splitlines()
     blocks: list[dict[str, object]] = []
@@ -292,6 +292,26 @@ def _present_response(value: str) -> tuple[str, list[dict[str, object]]]:
         else:
             blocks.pop(0)
     return label, blocks
+
+
+def _side_conversation(entries: list[dict[str, str]]) -> list[dict[str, object]]:
+    selected: list[dict[str, str]] = []
+    for entry in reversed(entries):
+        if entry.get("kind") != cli.SIDE_CHAT_SESSION_KIND:
+            continue
+        selected.append(entry)
+        if len(selected) == 20:
+            break
+    conversation: list[dict[str, object]] = []
+    for entry in reversed(selected):
+        _kind, blocks = _present_response(str(entry.get("response") or ""))
+        conversation.append(
+            {
+                "question": _plain_text(str(entry.get("prompt") or "")),
+                "blocks": blocks,
+            }
+        )
+    return conversation
 
 
 class OpenLearnWebServices:
@@ -1185,7 +1205,8 @@ class OpenLearnWebServices:
             return {"slug": slug, "missing": True}
         _context, log = cli.split_session_log(topic.body)
         entries = cli.session_entries(log)
-        latest = entries[-1] if entries else None
+        latest_lesson = cli.last_tutor_lesson_entry_from_entries(entries)
+        latest = latest_lesson[1] if latest_lesson else None
         answer = latest["response"] if latest else "Your course is ready. Ask the tutor to begin."
         response_kind, blocks = _present_response(answer)
         move_title = (
@@ -1197,6 +1218,7 @@ class OpenLearnWebServices:
         prompt = ""
         if isinstance(pending, dict) and isinstance(pending.get("question"), str):
             prompt = _plain_text(str(pending["question"]))
+        requires_response = bool(prompt)
         if response_kind == "Check" and prompt:
             # The Check response already contains the complete stored prompt.
             # Keep the pending state without rendering the same prompt twice.
@@ -1255,6 +1277,7 @@ class OpenLearnWebServices:
             },
             "progress": _focus_progress(snapshot.card.progress),
             "feedback": None,
+            "requires_response": requires_response,
             "operation": operation,
             "initialization": initialization,
             "saved_response": saved_response,
@@ -1281,6 +1304,11 @@ class OpenLearnWebServices:
                 submission_id=request.submission_id,
                 expected_revision=request.expected_revision,
                 model=config.configured_model(),
+                session_kind=(
+                    cli.SIDE_CHAT_SESSION_KIND
+                    if request.intent in {"question", "stuck"}
+                    else "chat"
+                ),
             )
         except tutor_service.TutorConflictError as error:
             return {"state": "conflict", "error": str(error)}
@@ -1291,6 +1319,17 @@ class OpenLearnWebServices:
             "submission_id": result.submission_id,
             "operation_id": result.submission_id,
             "move": _move(result.move),
+        }
+
+    def chat(self, slug: str) -> dict[str, object]:
+        try:
+            topic = cli.read_topic(slug)
+        except (cli.OpenLearnError, OSError):
+            return {"slug": slug, "missing": True}
+        _context, log = cli.split_session_log(topic.body)
+        return {
+            "conversation": _side_conversation(cli.session_entries(log)),
+            "revision": tutor_service.course_revision(slug),
         }
 
     def operation_status(self, slug: str, operation_id: str) -> dict[str, object]:
@@ -1309,7 +1348,11 @@ class OpenLearnWebServices:
         except (cli.OpenLearnError, OSError):
             return {"items": [], "page": page, "has_more": False}
         _context, log = cli.split_session_log(topic.body)
-        entries = list(reversed(cli.session_entries(log)))
+        entries = [
+            entry
+            for entry in reversed(cli.session_entries(log))
+            if entry.get("kind") != cli.SIDE_CHAT_SESSION_KIND
+        ]
         page_size = 10
         start = (page - 1) * page_size
         selected = entries[start : start + page_size]

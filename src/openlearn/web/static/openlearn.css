@@ -210,7 +210,7 @@ h2 { font-size: clamp(1.35rem, 3vw, 2rem); line-height: 1.1; letter-spacing: -0.
 .panel-heading h2 { margin: 0; }
 .panel-heading span { color: var(--graphite-soft); font: 700 0.75rem/1 ui-monospace, monospace; }
 .panel-heading-actions { display: flex; align-items: center; gap: 0.9rem; }
-.panel-heading-actions .quiet-link { white-space: nowrap; font-size: 0.9rem; font-weight: 750; }
+.course-add-action { white-space: nowrap; font-size: 0.84rem; }
 .course-row { min-height: 4.6rem; padding: 0.8rem 0; border-bottom: 1px solid var(--line); display: grid; grid-template-columns: 2.4rem 1fr auto; gap: 0.8rem; align-items: center; text-decoration: none; }
 .course-row small { display: block; color: var(--graphite-soft); }
 .course-tool { display: grid; place-items: center; width: 2rem; height: 2rem; border: 1px solid var(--line-strong); color: var(--orange-ink); font: 700 0.7rem/1 ui-monospace, monospace; }
@@ -375,16 +375,10 @@ h2 { font-size: clamp(1.35rem, 3vw, 2rem); line-height: 1.1; letter-spacing: -0.
 .outline-editor { padding: 1rem; border: 1px solid var(--line-strong); background: var(--surface-raised); }
 .placement-complete { max-width: 46rem; }
 .composer { border: 1px solid var(--line-strong); background: var(--surface); }
-.intent-picker { margin: 0; padding: 0.45rem; border: 0; border-bottom: 1px solid var(--line); display: flex; gap: 0.25rem; flex-wrap: wrap; }
-.intent-picker label { cursor: pointer; }
-.intent-picker input { position: absolute; opacity: 0; pointer-events: none; }
-.intent-picker span { min-height: 2.75rem; padding: 0.65rem 0.8rem; display: block; }
-.intent-picker input:checked + span { background: var(--graphite); color: var(--canvas); }
-.intent-picker input:focus-visible + span { outline: 3px solid var(--orange); }
 .composer textarea { min-height: 8rem; border: 0; border-radius: 0; }
 .composer-footer { padding: 0.7rem; border-top: 1px solid var(--line); }
-.composer[data-has-text="false"] .intent-readout { visibility: hidden; }
-.intent-readout { color: var(--graphite-soft); font-size: 0.82rem; }
+.lesson-actions { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }
+.keyboard-hint { color: var(--graphite-soft); font: 700 0.75rem/1 ui-monospace, monospace; }
 .operation-state { padding: 0.8rem; border-top: 1px solid var(--line); color: var(--teal); }
 .secondary-actions { display: flex; gap: 1rem; justify-content: center; }
 .secondary-actions button { min-height: 2.75rem; border: 0; background: transparent; text-decoration: underline; text-underline-offset: 0.25rem; cursor: pointer; }
@@ -421,6 +415,17 @@ h2 { font-size: clamp(1.35rem, 3vw, 2rem); line-height: 1.1; letter-spacing: -0.
 .tool-panel > h3 { margin: 0; font-size: 1.15rem; }
 .tool-panel label, .tool-form label { font-weight: 700; }
 .tool-panel input, .tool-panel textarea { width: 100%; min-height: 3rem; padding: 0.75rem; border: 1px solid var(--line-strong); background: var(--surface); color: var(--graphite); }
+.chat-panel { align-content: start; }
+.chat-panel > div:first-child p { margin-bottom: 0; }
+.chat-conversation { max-height: min(52vh, 34rem); padding-right: 0.25rem; overflow-y: auto; }
+.chat-exchange { display: grid; gap: 0.7rem; padding: 1rem 0; border-top: 1px solid var(--line); }
+.chat-exchange span { color: var(--graphite-soft); font: 750 0.7rem/1 ui-monospace, monospace; text-transform: uppercase; }
+.chat-exchange p, .chat-exchange ul, .chat-exchange ol { margin: 0.35rem 0 0; }
+.chat-learner { margin-left: clamp(1rem, 8%, 3rem); padding: 0.75rem; background: color-mix(in srgb, var(--orange) 10%, var(--surface)); }
+.chat-tutor { margin-right: clamp(1rem, 8%, 3rem); padding: 0.75rem; border-left: 4px solid var(--teal); background: var(--surface); }
+.chat-tutor pre { max-width: 100%; padding: 0.75rem; overflow-x: auto; background: var(--chrome); color: var(--chrome-ink); }
+.chat-form { display: grid; gap: 0.65rem; padding-top: 1rem; border-top: 1px solid var(--line); }
+.chat-form textarea { min-height: 7rem; resize: vertical; }
 .code-editor { resize: vertical; tab-size: 4; white-space: pre; font: 0.9rem/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; }
 .tool-actions { display: flex; flex-wrap: wrap; gap: 0.65rem; }
 .tool-actions button, .tool-form button { min-height: 2.75rem; padding: 0.6rem 0.8rem; border: 1px solid var(--line-strong); background: transparent; cursor: pointer; }
@@ -475,6 +480,7 @@ h2 { font-size: clamp(1.35rem, 3vw, 2rem); line-height: 1.1; letter-spacing: -0.
   .tool-rail { margin-right: 0; }
   .focus-shell[data-tool-active] .focus-column { display: none; }
   .focus-shell[data-tool-active] .learning-tool { margin-left: 0; grid-column: 2; }
+  .focus-shell[data-tool-active="chat"] .focus-column { display: grid; grid-column: 2; }
 }
 
 @media (max-width: 760px) {
@@ -493,13 +499,13 @@ h2 { font-size: clamp(1.35rem, 3vw, 2rem); line-height: 1.1; letter-spacing: -0.
   .focus-shell { display: grid; grid-template-columns: 1fr; gap: 1rem; }
   .focus-shell[data-tool-active] { width: 100%; grid-template-columns: 1fr; }
   .focus-shell[data-tool-active] .focus-column { display: none; }
+  .focus-shell[data-tool-active="chat"] .focus-column { display: grid; }
   .tool-rail { margin-right: 0; position: static; grid-template-columns: repeat(3, 1fr); }
   .rail-button { min-height: 2.75rem; display: flex; align-items: center; gap: 0.5rem; }
   .focus-shell[data-tool-active] .learning-tool { width: auto; min-height: 0; margin-left: 0; position: static; max-height: none; padding-inline: clamp(1.2rem, 2vw, 1.75rem); border-inline-width: 1px; }
   .composer-footer { align-items: stretch; flex-direction: column; }
   .form-footer { align-items: stretch; flex-direction: column; }
   .form-footer .primary-action { align-self: stretch; }
-  .intent-readout { padding-inline: 0.3rem; }
   .placement-heading { flex-direction: row; align-items: center; }
   .pattern-rating { grid-template-columns: 1fr; }
   .pattern-rating > legend, .rating-buttons { grid-column: 1; }
@@ -522,7 +528,6 @@ h2 { font-size: clamp(1.35rem, 3vw, 2rem); line-height: 1.1; letter-spacing: -0.
   .focus-identity { flex-direction: column; gap: 0; }
   .tool-rail { grid-template-columns: 1fr 1fr; }
   .move-surface { padding: 1.2rem; }
-  .intent-picker { display: grid; grid-template-columns: 1fr; }
 }
 
 @media (prefers-reduced-motion: reduce) {

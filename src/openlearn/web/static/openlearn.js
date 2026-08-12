@@ -217,14 +217,8 @@ for (const form of document.querySelectorAll("[data-enter-flow]")) {
   });
 }
 
-for (const intent of document.querySelectorAll('input[name="intent"]')) {
-  intent.addEventListener("change", () => {
-    const readout = document.querySelector("[data-intent-label]");
-    if (readout) readout.textContent = intent.parentElement.textContent.trim();
-  });
-}
-
 const turnForm = document.querySelector("[data-turn-form]");
+const chatForm = document.querySelector("[data-chat-form]");
 const focusShell = document.querySelector("[data-focus-shell]");
 const initializationShell = document.querySelector("[data-initialization-shell]");
 const toolSurface = document.querySelector("[data-tool-surface]");
@@ -240,7 +234,7 @@ let toolOpenVersion = 0;
 let surfaceMotionVersion = 0;
 const focusLayoutAnimations = new Map();
 
-const availableTools = new Set(["code", "video", "sources"]);
+const availableTools = new Set(["chat", "code", "video", "sources"]);
 
 function reducedMotionRequested() {
   return window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
@@ -450,7 +444,9 @@ function renderSources(result) {
 }
 
 async function loadToolState(tool) {
-  if (tool === "code") {
+  if (tool === "chat") {
+    await refreshChat();
+  } else if (tool === "code") {
     const result = await requestJson(toolEndpoint("code"));
     const draft = toolSurface.querySelector("[data-code-draft]");
     codeRevision = result.revision || null;
@@ -487,7 +483,7 @@ async function openTool(tool, opener, {updateUrl = true} = {}) {
   for (const panel of toolSurface.querySelectorAll("[data-tool-panel]")) {
     panel.hidden = panel.dataset.toolPanel !== tool;
   }
-  const titles = {code: "Code workbench", video: "Video player", sources: "Course sources"};
+  const titles = {chat: "Tutor chat", code: "Code workbench", video: "Video player", sources: "Course sources"};
   toolSurface.querySelector("[data-tool-title]").textContent = titles[tool] || "Learning tool";
   if (toolSurface.hidden || toolSurface.getAttribute("aria-hidden") === "true") {
     revealSurface(toolSurface, () => {
@@ -497,7 +493,13 @@ async function openTool(tool, opener, {updateUrl = true} = {}) {
     transitionFocusLayout(() => { focusShell.dataset.toolActive = tool; });
   }
   if (updateUrl) setToolUrl(tool);
-  toolStatus(tool === "video" ? "Video stays private until you load it." : "Loading local tool state…");
+  toolStatus(
+    tool === "chat"
+      ? "Your lesson stays open while you ask."
+      : tool === "video"
+        ? "Video stays private until you load it."
+        : "Loading local tool state…"
+  );
   try {
     await loadToolState(tool);
     if (openVersion === toolOpenVersion && tool !== "video") toolStatus("Ready.");
@@ -797,14 +799,15 @@ function setOperationState(message, isError = false) {
 }
 
 function lockTurnForm(locked) {
-  if (!turnForm) return;
-  for (const control of turnForm.elements) control.disabled = locked;
+  if (turnForm) {
+    for (const control of turnForm.elements) control.disabled = locked;
+    turnForm.setAttribute("aria-busy", String(locked));
+  }
   for (const control of document.querySelectorAll("[data-navigation-intent]")) control.disabled = locked;
-  turnForm.setAttribute("aria-busy", String(locked));
   turnInFlight = locked;
 }
 
-async function pollOperation(operationId) {
+async function waitForOperation(operationId, setStatus) {
   const slug = focusShell.dataset.courseSlug;
   for (;;) {
     await new Promise((resolve) => window.setTimeout(resolve, 700));
@@ -816,33 +819,24 @@ async function pollOperation(operationId) {
       generating: "Preparing the next useful move…",
       validating: "Checking the lesson before showing it…",
     };
-    setOperationState(labels[state] || result.message || "Working…");
-    if (state === "committed") {
-      clearTurnComposer();
-      window.location.replace(window.location.href);
-      return;
-    }
-    if (state === "conflict") {
-      setOperationState("This course changed elsewhere. Refresh to continue from the newest move.", true);
-      lockTurnForm(false);
-      return;
-    }
-    if (state === "retryable_error") {
-      setOperationState(result.error || "Your response is saved. Retry when the provider is available.", true);
-      lockTurnForm(false);
-      return;
-    }
+    setStatus(labels[state] || result.message || "Working…");
+    if (["committed", "conflict", "retryable_error"].includes(state)) return result;
   }
 }
 
-function updateComposerAction() {
-  if (!turnForm) return;
-  const hasText = Boolean(turnForm.elements.text.value.trim());
-  turnForm.dataset.hasText = String(hasText);
-  const label = turnForm.querySelector("[data-composer-submit-label]");
-  const hint = turnForm.querySelector("[data-composer-submit-hint]");
-  if (label) label.textContent = hasText ? "Send response" : "Continue";
-  if (hint) hint.textContent = hasText ? "⌘↵" : "→";
+async function pollOperation(operationId) {
+  const result = await waitForOperation(operationId, setOperationState);
+  if (result.state === "committed") {
+    clearTurnComposer();
+    window.location.replace(window.location.href);
+    return;
+  }
+  if (result.state === "conflict") {
+    setOperationState("This course changed elsewhere. Refresh to continue from the newest move.", true);
+  } else {
+    setOperationState(result.error || "Your response is saved. Retry when the provider is available.", true);
+  }
+  lockTurnForm(false);
 }
 
 function clearTurnComposer() {
@@ -850,7 +844,6 @@ function clearTurnComposer() {
   const textarea = turnForm.elements.text;
   textarea.value = "";
   textarea.defaultValue = "";
-  updateComposerAction();
 }
 
 if (focusShell?.dataset.operationId) {
@@ -867,8 +860,15 @@ if (focusShell?.dataset.operationId) {
 }
 
 async function submitTurn(overrideIntent = null) {
-  if (!turnForm || !focusShell || turnInFlight) return;
-  const payload = formPayload(turnForm);
+  if (!focusShell || turnInFlight) return;
+  const payload = turnForm
+    ? formPayload(turnForm)
+    : {
+        intent: "next",
+        text: "",
+        submission_id: crypto.randomUUID(),
+        expected_revision: Number(focusShell.dataset.revision || 0),
+      };
   if (overrideIntent) {
     payload.intent = overrideIntent;
     payload.text = "";
@@ -900,30 +900,16 @@ async function submitTurn(overrideIntent = null) {
 
 turnForm?.addEventListener("submit", (event) => {
   event.preventDefault();
-  submitTurn(turnForm.elements.text.value.trim() ? null : "next");
+  if (!turnForm.reportValidity()) return;
+  submitTurn();
 });
 
-turnForm?.querySelector("textarea")?.addEventListener("input", updateComposerAction);
 turnForm?.querySelector("textarea")?.addEventListener("keydown", (event) => {
-  if (
-    event.key === "Enter"
-    && !event.shiftKey
-    && !event.metaKey
-    && !event.ctrlKey
-    && !event.isComposing
-    && !event.currentTarget.value.trim()
-  ) {
-    event.preventDefault();
-    submitTurn("next");
-    return;
-  }
   if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
     event.preventDefault();
     turnForm.requestSubmit();
   }
 });
-
-updateComposerAction();
 
 for (const button of document.querySelectorAll("[data-navigation-intent]")) {
   button.addEventListener("click", () => {
@@ -932,6 +918,149 @@ for (const button of document.querySelectorAll("[data-navigation-intent]")) {
     submitTurn(button.dataset.navigationIntent);
   });
 }
+
+document.addEventListener("keydown", (event) => {
+  if (
+    event.key !== "Enter"
+    || event.shiftKey
+    || event.altKey
+    || event.metaKey
+    || event.ctrlKey
+    || event.isComposing
+    || turnForm
+    || focusShell?.dataset.toolActive
+    || document.querySelector(".drawer:not([hidden])")
+    || event.target.closest?.("button, a, input, textarea, select")
+  ) return;
+  event.preventDefault();
+  submitTurn("next");
+});
+
+function appendPresentationBlocks(container, blocks) {
+  for (const block of blocks || []) {
+    if (block.kind === "code") {
+      const pre = document.createElement("pre");
+      const code = document.createElement("code");
+      code.textContent = block.text || "";
+      pre.append(code);
+      container.append(pre);
+    } else if (block.kind === "unordered_list" || block.kind === "ordered_list") {
+      const list = document.createElement(block.kind === "ordered_list" ? "ol" : "ul");
+      for (const value of block.items || []) {
+        const itemNode = document.createElement("li");
+        itemNode.textContent = value;
+        list.append(itemNode);
+      }
+      container.append(list);
+    } else {
+      const content = document.createElement("p");
+      content.textContent = block.text || "";
+      container.append(content);
+    }
+  }
+}
+
+function chatExchange(exchange) {
+  const article = document.createElement("article");
+  article.className = "chat-exchange";
+  const learner = document.createElement("div");
+  learner.className = "chat-learner";
+  const learnerLabel = document.createElement("span");
+  learnerLabel.textContent = "You";
+  const question = document.createElement("p");
+  question.textContent = exchange.question || "";
+  learner.append(learnerLabel, question);
+  const tutor = document.createElement("div");
+  tutor.className = "chat-tutor";
+  const tutorLabel = document.createElement("span");
+  tutorLabel.textContent = "Tutor";
+  tutor.append(tutorLabel);
+  appendPresentationBlocks(tutor, exchange.blocks || []);
+  article.append(learner, tutor);
+  return article;
+}
+
+function renderChatConversation(conversation) {
+  const region = toolSurface?.querySelector("[data-chat-conversation]");
+  if (!region) return;
+  region.replaceChildren();
+  if (!conversation?.length) {
+    const empty = document.createElement("p");
+    empty.className = "quiet-copy";
+    empty.dataset.chatEmpty = "true";
+    empty.textContent = "No questions in this lesson yet.";
+    region.append(empty);
+    return;
+  }
+  for (const exchange of conversation) region.append(chatExchange(exchange));
+  region.scrollTop = region.scrollHeight;
+}
+
+function setCourseRevision(revision) {
+  if (!focusShell || !Number.isInteger(revision) || revision < 0) return;
+  focusShell.dataset.revision = String(revision);
+  for (const field of document.querySelectorAll('input[name="expected_revision"]')) {
+    field.value = String(revision);
+  }
+}
+
+async function refreshChat() {
+  if (!focusShell) return;
+  const result = await requestJson(`/api/courses/${encodeURIComponent(focusShell.dataset.courseSlug)}/chat`);
+  renderChatConversation(result.conversation || []);
+  setCourseRevision(result.revision);
+}
+
+function setChatStatus(message, isError = false) {
+  const status = chatForm?.querySelector("[data-chat-status]");
+  if (!status) return;
+  status.textContent = message;
+  status.classList.toggle("error", isError);
+}
+
+function lockChatForm(locked) {
+  if (!chatForm) return;
+  for (const control of chatForm.elements) control.disabled = locked;
+  chatForm.setAttribute("aria-busy", String(locked));
+}
+
+chatForm?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!chatForm.reportValidity()) return;
+  const payload = formPayload(chatForm);
+  lockChatForm(true);
+  setChatStatus("Saving your question locally…");
+  try {
+    const result = await requestJson(`/api/courses/${encodeURIComponent(focusShell.dataset.courseSlug)}/turns`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    const completed = result.operation_id
+      ? await waitForOperation(result.operation_id, (message) => setChatStatus(message))
+      : result;
+    if (completed.state === "committed") {
+      chatForm.elements.text.value = "";
+      chatForm.elements.submission_id.value = crypto.randomUUID();
+      await refreshChat();
+      setChatStatus("Answered. Your lesson is still open.");
+    } else if (completed.state === "conflict") {
+      setChatStatus("This course changed elsewhere. Refresh before asking again.", true);
+    } else {
+      setChatStatus(completed.error || "Your question is saved. Retry when the provider is available.", true);
+    }
+  } catch (error) {
+    setChatStatus(error.message, true);
+  } finally {
+    lockChatForm(false);
+  }
+});
+
+chatForm?.querySelector("textarea")?.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+    event.preventDefault();
+    chatForm.requestSubmit();
+  }
+});
 
 function historyItem(item) {
   const article = document.createElement("article");
@@ -945,27 +1074,10 @@ function historyItem(item) {
     title.textContent = item.title;
     article.append(title);
   }
-  for (const block of item.blocks || [{kind: "paragraph", text: item.content || ""}]) {
-    if (block.kind === "code") {
-      const pre = document.createElement("pre");
-      const code = document.createElement("code");
-      code.textContent = block.text || "";
-      pre.append(code);
-      article.append(pre);
-    } else if (block.kind === "unordered_list" || block.kind === "ordered_list") {
-      const list = document.createElement(block.kind === "ordered_list" ? "ol" : "ul");
-      for (const value of block.items || []) {
-        const itemNode = document.createElement("li");
-        itemNode.textContent = value;
-        list.append(itemNode);
-      }
-      article.append(list);
-    } else {
-      const content = document.createElement("p");
-      content.textContent = block.text || "";
-      article.append(content);
-    }
-  }
+  appendPresentationBlocks(
+    article,
+    item.blocks || [{kind: "paragraph", text: item.content || ""}],
+  );
   return article;
 }
 

@@ -106,7 +106,7 @@ from openlearn.constants import (
     ROLLING_PASS_RATE_WINDOW,
     STATE_FILE,
 )
-from openlearn.models import PendingContext, Topic, TopicSummary
+from openlearn.models import PendingContext, Topic, TopicSummary, TutorSessionKind
 from openlearn.text import (
     concept_key,
     extract_answer_key,
@@ -265,6 +265,7 @@ _CONFIG_CACHE: dict[str, object] | None = None
 _LAST_RESPONSE_ANSWER_KEY = ""
 _LAST_RESPONSE_CODING_DRILL_ACTION: CodingDrillAction | None = None
 _DRY_RUN = False
+SIDE_CHAT_SESSION_KIND: TutorSessionKind = "side_chat"
 
 
 class DryRunPrompt(Exception):
@@ -6060,7 +6061,12 @@ def last_tutor_lesson_response(topic: Topic) -> str:
 
 def last_tutor_lesson_entry(topic: Topic) -> tuple[int, dict[str, str]] | None:
     _topic_body, session_log = split_session_log(topic.body)
-    entries = session_entries(session_log)
+    return last_tutor_lesson_entry_from_entries(session_entries(session_log))
+
+
+def last_tutor_lesson_entry_from_entries(
+    entries: list[dict[str, str]],
+) -> tuple[int, dict[str, str]] | None:
     for index in range(len(entries) - 1, -1, -1):
         entry = entries[index]
         if (
@@ -6679,6 +6685,33 @@ def tutor_response_has_enter_advance_cue(value: object) -> bool:
         if in_next_section and "press enter to continue" in line.casefold():
             return True
     return False
+
+
+def strip_tutor_enter_advance_cue(value: str) -> str:
+    """Remove the terminal-only blank-input cue from a tutor response."""
+    if not tutor_response_has_enter_advance_cue(value):
+        return value
+    section_pattern = re.compile(
+        r"(?i)^\s*(?:\*\*)?"
+        r"(Lesson|Feedback|Example|Check|Hint|Next|Action):"
+        r"(?:\*\*)?\s*(.*)$"
+    )
+    lines: list[str] = []
+    in_next_section = False
+    next_header_index: int | None = None
+    for line in value.splitlines():
+        section = section_pattern.match(line)
+        if section:
+            in_next_section = section.group(1).casefold() == "next"
+            next_header_index = len(lines) if in_next_section else None
+            if in_next_section and "press enter to continue" in section.group(2).casefold():
+                continue
+        if in_next_section and "press enter to continue" in line.casefold():
+            if next_header_index is not None and next_header_index == len(lines) - 1:
+                lines.pop()
+            continue
+        lines.append(line)
+    return "\n".join(lines).strip()
 
 
 def claim_blank_input_advance() -> bool:
@@ -8758,6 +8791,8 @@ def ask_topic(
     pending_learner_prompt: str | None = None,
     system_prompt_sink: Callable[[str], object] | None = None,
     allow_specialized_actions: bool = True,
+    session_kind: TutorSessionKind = "chat",
+    message_kind_override: str | None = None,
     commit_state_hook: (
         Callable[[str, dict[str, object], dict[str, object]], None] | None
     ) = None,
@@ -8770,16 +8805,31 @@ def ask_topic(
     model = model or str(topic.metadata.get("model") or configured_model())
     is_review_session = topic.metadata.get("review_session_active") is True
     original_metadata = copy.deepcopy(topic.metadata)
-    record_pending_attempt_reflection(topic, prompt)
     has_pending_question = isinstance(topic.metadata.get("pending_question"), dict)
-    needs_judgment = learner_message_needs_judgment(topic.metadata, prompt)
-    is_navigation = learner_requests_advance(prompt) or (
-        not has_pending_question and learner_acknowledges(prompt)
+    explicit_message_kind = (
+        message_kind_override
+        if message_kind_override in {"question", "request", "confusion", "navigation"}
+        else ""
+    )
+    needs_judgment = not explicit_message_kind and learner_message_needs_judgment(
+        topic.metadata, prompt
+    )
+    if session_kind != SIDE_CHAT_SESSION_KIND:
+        record_pending_attempt_reflection(topic, prompt)
+    is_navigation = explicit_message_kind == "navigation" or (
+        not explicit_message_kind
+        and (
+            learner_requests_advance(prompt)
+            or (not has_pending_question and learner_acknowledges(prompt))
+        )
     )
     message_kind = (
-        "navigation"
-        if is_navigation
-        else ("" if needs_judgment else classify_ungraded_learner_message(prompt))
+        explicit_message_kind
+        or (
+            "navigation"
+            if is_navigation
+            else ("" if needs_judgment else classify_ungraded_learner_message(prompt))
+        )
     )
     queued_events: list[tuple[str, str, dict[str, object]]] = []
     state_before = copy.deepcopy(load_state(topic.slug))
@@ -8910,7 +8960,7 @@ def ask_topic(
     mutation_id = f"turn_{uuid4().hex}"
     created = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     session_entry = _session_entry(
-        "chat", prompt, answer, created=created, mutation_id=mutation_id
+        session_kind, prompt, answer, created=created, mutation_id=mutation_id
     )
     projected_body = topic.body.rstrip() + "\n\n" + session_entry + "\n"
     if tutor_response_has_enter_advance_cue(answer):

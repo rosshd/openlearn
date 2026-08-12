@@ -117,7 +117,9 @@ def test_default_web_app_runs_setup_dashboard_course_and_tutor_flow(
     focus = client.get(f"/courses/{slug}")
     assert focus.status_code == 200
     assert "Lesson" in focus.text
-    assert "Press Enter to continue" not in focus.text
+    assert "Press Enter to continue" in focus.text
+    assert 'id="learner-response"' not in focus.text
+    assert 'data-tool-open="chat"' in focus.text
     assert "placement test" not in focus.text.lower()
     assert "**Lesson:**" not in focus.text
     assert "Pick up where you left off" in client.get("/dashboard").text
@@ -126,6 +128,7 @@ def test_default_web_app_runs_setup_dashboard_course_and_tutor_flow(
     assert "Add another course" not in dashboard_header
     courses_panel = dashboard_html.split('class="course-list"', 1)[1]
     assert "Add another course" in courses_panel
+    assert "course-add-action" in courses_panel
 
     revision = int(focus.text.split('data-revision="', 1)[1].split('"', 1)[0])
     turn = client.post(
@@ -142,9 +145,16 @@ def test_default_web_app_runs_setup_dashboard_course_and_tutor_flow(
     assert turn.status_code == 202
     operation_id = turn.json()["operation_id"]
     assert wait_for_operation(client, slug, operation_id)["state"] == "committed"
+    resumed_focus = client.get(f"/courses/{slug}")
+    assert 'id="learner-response"' not in resumed_focus.text
+    chat = client.get(f"/api/courses/{slug}/chat").json()
+    assert chat["conversation"][0]["question"] == (
+        "Can you explain the tradeoff with an example?"
+    )
+    assert chat["conversation"][0]["blocks"]
     history = client.get(f"/courses/{slug}/history", headers={"accept": "application/json"})
     assert history.status_code == 200
-    assert len(history.json()["items"]) == 2
+    assert len(history.json()["items"]) == 1
     assert COURSE_INITIALIZATION_PROMPT not in history.text
     assert any(item["title"] == "First lesson" for item in history.json()["items"])
 
@@ -239,7 +249,7 @@ def test_interview_course_confidence_placement_resumes_and_builds_first_lesson(
     wait_for_operation(restarted_client, body["slug"], finished.json()["operation_id"])
     lesson = restarted_client.get(f"/courses/{body['slug']}")
     assert lesson.status_code == 200
-    assert "Press Enter to continue" not in lesson.text
+    assert "Press Enter to continue" in lesson.text
     assert "Before writing code" in lesson.text
     assert "Your next learning move" not in lesson.text
 
@@ -780,6 +790,15 @@ def test_focus_recovers_saved_turn_for_explicit_retry(client: TestClient) -> Non
     wait_for_operation(client, slug, created["operation_id"], "committed")
     operation_id = str(uuid4())
     saved_text = "My saved explanation"
+    question = "What makes this tradeoff useful?"
+    topic = cli.read_topic(slug)
+    cli.append_session(topic, "lesson", "Recovery check", f"**Check:**\n{question}")
+    cli.save_pending_question(
+        cli.read_topic(slug),
+        f"**Check:**\n{question}",
+        "",
+        question_text=question,
+    )
     state = cli.load_state(slug)
     internal = state.setdefault("_openlearn_internal", {})
     internal["active_turn"] = {
@@ -1396,6 +1415,16 @@ def test_present_response_hides_reasoning_from_existing_lesson_history() -> None
     assert blocks == [{"kind": "paragraph", "text": "Clarify constraints before coding."}]
 
 
+def test_present_response_leaves_terminal_advance_cue_to_web_controls() -> None:
+    kind, blocks = _present_response(
+        "**Lesson:**\nA sliding window reuses work.\n\n"
+        "**Next:**\nPress Enter to continue, or type what you want more help with."
+    )
+
+    assert kind == "Lesson"
+    assert blocks == [{"kind": "paragraph", "text": "A sliding window reuses work."}]
+
+
 def test_focus_renders_a_pending_check_once(client: TestClient) -> None:
     cli.cmd_new(
         argparse.Namespace(topic="Single Check", goal="Avoid duplicate questions"),
@@ -1419,11 +1448,17 @@ def test_focus_renders_a_pending_check_once(client: TestClient) -> None:
     view = OpenLearnWebServices().focus(topic.slug)
 
     assert view["move"]["kind"] == "Check"
+    assert view["requires_response"] is True
     assert view["move"]["prompt"] == ""
     assert sum(
         question in str(block.get("text", ""))
         for block in view["move"]["blocks"]
     ) == 1
+
+    page = client.get(f"/courses/{topic.slug}")
+    assert 'id="learner-response"' in page.text
+    assert "Send answer" in page.text
+    assert "Response intent" not in page.text
 
 
 def test_web_turn_uses_current_provider_model(

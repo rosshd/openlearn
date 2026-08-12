@@ -9,6 +9,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Literal
 from uuid import UUID, uuid4
 
+from openlearn.models import TutorSessionKind
+
 
 TurnIntent = Literal["answer", "question", "confusion", "navigation"]
 OperationStatus = Literal[
@@ -370,6 +372,7 @@ def _execute_prepared_turn(
     revision: int,
     intent: TurnIntent,
     model: str | None,
+    session_kind: TutorSessionKind,
 ) -> TutorTurnResult:
     from openlearn import cli
 
@@ -455,6 +458,10 @@ def _execute_prepared_turn(
                 output_func=lambda _text="": None,
                 pending_learner_prompt=normalized,
                 allow_specialized_actions=False,
+                session_kind=session_kind,
+                message_kind_override=(
+                    _message_kind(intent) if intent != "answer" else None
+                ),
                 commit_state_hook=commit_receipt,
             )
         if not result_holder:
@@ -523,6 +530,7 @@ def submit_turn(
     submission_id: str | None = None,
     expected_revision: int | None = None,
     model: str | None = None,
+    session_kind: TutorSessionKind = "chat",
 ) -> TutorTurnResult:
     """Run one durable, presentation-independent learner turn.
 
@@ -538,7 +546,9 @@ def submit_turn(
         with _FUTURES_GUARD:
             _RUNNING.add((slug, sid))
     try:
-        return _execute_prepared_turn(slug, normalized, sid, revision, intent, model)
+        return _execute_prepared_turn(
+            slug, normalized, sid, revision, intent, model, session_kind
+        )
     finally:
         with _FUTURES_GUARD:
             _RUNNING.discard((slug, sid))
@@ -552,6 +562,7 @@ def start_turn(
     submission_id: str | None = None,
     expected_revision: int | None = None,
     model: str | None = None,
+    session_kind: TutorSessionKind = "chat",
 ) -> TutorTurnResult:
     """Persist a turn, then execute it in the bounded tutor worker pool."""
     sid, normalized = _validate_turn(text, submission_id)
@@ -578,6 +589,7 @@ def start_turn(
                 revision,
                 intent,
                 model,
+                session_kind,
             )
         except RuntimeError as exc:
             failed = TutorTurnResult(

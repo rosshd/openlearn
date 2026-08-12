@@ -37,7 +37,7 @@
         <h2 id="courses-title">Courses</h2>
         <div class="panel-heading-actions">
           <span>{{ dashboard.courses|length }}</span>
-          {% if dashboard.courses %}<a class="quiet-link" href="{{ url_for('new_course') }}">Add another course <span aria-hidden="true">+</span></a>{% endif %}
+          {% if dashboard.courses %}<a class="primary-action compact course-add-action" href="{{ url_for('new_course') }}">Add another course <span aria-hidden="true">+</span></a>{% endif %}
         </div>
       </div>
       {% for course in dashboard.courses %}

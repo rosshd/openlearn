@@ -91,6 +91,51 @@ class TutorServiceTests(TestCase):
         body = cli.read_topic("web-tutor").body
         self.assertEqual(body.count("Explain normal mode."), 1)
 
+    def test_question_turn_is_saved_as_side_chat(self) -> None:
+        result = submit_turn(
+            "web-tutor",
+            "Why does Normal mode work that way?",
+            intent="question",
+            submission_id=str(uuid4()),
+            expected_revision=0,
+            session_kind=cli.SIDE_CHAT_SESSION_KIND,
+        )
+
+        self.assertEqual(result.status, "committed")
+        topic = cli.read_topic("web-tutor")
+        _body, log = cli.split_session_log(topic.body)
+        self.assertEqual(cli.session_entries(log)[-1]["kind"], "side_chat")
+        self.assertIsNone(cli.last_tutor_lesson_entry(topic))
+
+    def test_side_chat_question_does_not_answer_the_pending_check(self) -> None:
+        question = "Which mode runs commands?"
+        check = f"**Check:**\n{question}"
+        cli.append_session(cli.read_topic("web-tutor"), "lesson", "Check", check)
+        cli.save_pending_question(
+            cli.read_topic("web-tutor"),
+            check,
+            "B",
+            question_text=question,
+        )
+
+        with mock.patch.object(cli, "record_pending_attempt_reflection") as recorder:
+            result = submit_turn(
+                "web-tutor",
+                "Can you explain what the question is asking?",
+                intent="question",
+                submission_id=str(uuid4()),
+                expected_revision=0,
+                session_kind=cli.SIDE_CHAT_SESSION_KIND,
+            )
+
+        self.assertEqual(result.status, "committed")
+        recorder.assert_not_called()
+        pending = cli.read_topic("web-tutor").metadata["pending_question"]
+        self.assertEqual(pending["question"], question)
+        self.assertEqual(pending["answer_key"], "B")
+        self.assertEqual(cli.read_topic("web-tutor").metadata["last_answer_status"], "")
+        self.assertEqual(cli.read_topic("web-tutor").metadata["known"], [])
+
     def test_stale_revision_conflicts_before_mutation(self) -> None:
         with self.assertRaises(TutorConflictError):
             submit_turn(

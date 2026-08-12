@@ -14,6 +14,7 @@
 <div class="focus-shell" data-focus-shell data-course-slug="{{ course.slug }}" data-revision="{{ course.revision or 0 }}"
   {% if course.operation %}data-operation-id="{{ course.operation.id }}" data-operation-state="{{ course.operation.state }}" data-operation-error="{{ course.operation.error }}"{% endif %}>
   <aside class="tool-rail" aria-label="Lesson tools">
+    <button type="button" class="rail-button" data-tool-open="chat" aria-expanded="false" aria-controls="learning-tool-surface"><span aria-hidden="true">?</span> Chat</button>
     <button type="button" class="rail-button" data-tool-open="code" aria-expanded="false" aria-controls="learning-tool-surface"><span aria-hidden="true">{ }</span> Code</button>
     <button type="button" class="rail-button" data-tool-open="video" aria-expanded="false" aria-controls="learning-tool-surface"><span aria-hidden="true">▶</span> Video</button>
     <button type="button" class="rail-button" data-tool-open="sources" aria-expanded="false" aria-controls="learning-tool-surface"><span aria-hidden="true">＋</span> Sources</button>
@@ -48,28 +49,30 @@
       {% if course.move.prompt %}<div class="prompt-block"><p>{{ course.move.prompt }}</p></div>{% endif %}
     </article>
 
+    {% if course.requires_response %}
     <form class="composer" data-turn-form>
       <input type="hidden" name="submission_id" data-uuid value="{{ course.operation.id if course.operation else '' }}">
       <input type="hidden" name="expected_revision" value="{{ course.revision or 0 }}">
-      <fieldset class="intent-picker">
-        <legend class="sr-only">Response intent</legend>
-        <label><input type="radio" name="intent" value="answer" checked><span>Answer</span></label>
-        <label><input type="radio" name="intent" value="question"><span>Ask a question</span></label>
-        <label><input type="radio" name="intent" value="stuck"><span>I am stuck</span></label>
-      </fieldset>
+      <input type="hidden" name="intent" value="answer">
       <label class="sr-only" for="learner-response">Your response</label>
-      <textarea id="learner-response" name="text" rows="5" maxlength="32000" autocomplete="off" placeholder="Work through your thinking here…">{{ course.saved_response or '' }}</textarea>
+      <textarea id="learner-response" name="text" rows="5" maxlength="32000" autocomplete="off" required placeholder="Work through your thinking here…">{{ course.saved_response or '' }}</textarea>
       <div class="composer-footer">
-        <span class="intent-readout">Sending as <strong data-intent-label>Answer</strong></span>
-        <button class="primary-action" type="submit" data-composer-submit><span data-composer-submit-label>Continue</span> <span aria-hidden="true" data-composer-submit-hint>→</span></button>
+        <button class="tool-button" type="button" data-tool-open="chat" aria-expanded="false" aria-controls="learning-tool-surface">Ask a question or get unstuck</button>
+        <button class="primary-action" type="submit" data-composer-submit><span data-composer-submit-label>Send answer</span> <span aria-hidden="true" data-composer-submit-hint>⌘↵</span></button>
       </div>
-      <div class="operation-state" data-operation-state role="status" aria-live="polite" aria-atomic="true" tabindex="-1" hidden></div>
     </form>
-
     <nav class="secondary-actions" aria-label="Lesson navigation">
       <button type="button" data-navigation-intent="skip">Skip for now</button>
       <button type="button" data-navigation-intent="next">Next concept</button>
     </nav>
+    {% else %}
+    <div class="lesson-actions">
+      <button class="primary-action" type="button" data-navigation-intent="next">Continue <span aria-hidden="true">→</span></button>
+      <button class="tool-button" type="button" data-tool-open="chat" aria-expanded="false" aria-controls="learning-tool-surface">Ask a question</button>
+      <span class="keyboard-hint">Press Enter to continue</span>
+    </div>
+    {% endif %}
+    <div class="operation-state" data-operation-state role="status" aria-live="polite" aria-atomic="true" tabindex="-1" hidden></div>
   </section>
 
   <aside class="learning-tool" id="learning-tool-surface" data-tool-surface hidden aria-labelledby="learning-tool-title">
@@ -81,6 +84,27 @@
       <button class="drawer-close" type="button" data-tool-close aria-label="Close learning tool">×</button>
     </header>
     <p class="field-note" role="status" aria-live="polite" aria-atomic="true" tabindex="-1" data-tool-status></p>
+
+    <section class="tool-panel chat-panel" data-tool-panel="chat" hidden aria-labelledby="chat-tool-title">
+      <div>
+        <h3 id="chat-tool-title">Ask about this lesson</h3>
+        <p class="quiet-copy">The lesson stays in place while you clarify an idea or ask for another example.</p>
+      </div>
+      <div class="chat-conversation" data-chat-conversation role="log" aria-live="polite" aria-relevant="additions">
+        <p class="quiet-copy" data-chat-empty>Loading your lesson questions…</p>
+      </div>
+      <form class="chat-form" data-chat-form>
+        <input type="hidden" name="submission_id" data-uuid value="">
+        <input type="hidden" name="expected_revision" value="{{ course.revision or 0 }}">
+        <input type="hidden" name="intent" value="question">
+        <label for="chat-question">Your question</label>
+        <textarea id="chat-question" name="text" rows="4" maxlength="32000" autocomplete="off" required placeholder="What would you like clarified?"></textarea>
+        <div class="tool-actions">
+          <button class="primary-action compact" type="submit" data-chat-submit>Ask tutor</button>
+        </div>
+        <p class="field-note" data-chat-status role="status" aria-live="polite"></p>
+      </form>
+    </section>
 
     <section class="tool-panel" data-tool-panel="code" hidden aria-labelledby="code-tool-title">
       <h3 id="code-tool-title">Python workbench</h3>

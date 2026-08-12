@@ -469,6 +469,20 @@ async def submit_turn(request: Request, slug: str) -> JSONResponse:
     return JSONResponse(result, status_code=status)
 
 
+@router.get("/api/courses/{slug}/chat", response_class=JSONResponse)
+async def course_chat(request: Request, slug: str) -> JSONResponse:
+    try:
+        slug = canonical_slug(slug)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail="Course not found") from error
+    result = public_mapping(await _call(request, "chat", slug))
+    if result.get("missing"):
+        raise HTTPException(status_code=404, detail="Course not found")
+    response = JSONResponse(result)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 @router.post("/api/courses/{slug}/tools/video", response_class=JSONResponse)
 async def prepare_video(request: Request, slug: str) -> JSONResponse:
     try:
