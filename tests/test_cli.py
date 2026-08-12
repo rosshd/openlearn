@@ -5482,6 +5482,12 @@ class ProviderResponseTests(unittest.TestCase):
         self.assertEqual(cli.extract_covered_concepts(raw), ["Mutex", "Critical section"])
         self.assertNotIn("covered", cli.sanitize_model_output(raw).lower())
 
+    def test_focus_marker_is_extracted_and_hidden(self) -> None:
+        raw = "Lesson: Trace an example.\n<!-- focus: Concrete Tracing -->"
+
+        self.assertEqual(cli.tutor_response_focus_title(raw), "Concrete Tracing")
+        self.assertNotIn("focus", cli.sanitize_model_output(raw).lower())
+
     def test_sanitize_model_output_hides_plain_correct_answer_line(self) -> None:
         text = cli.sanitize_model_output(
             "Check: Choose one.\nA) One\nB) Two\nCorrect answer: A) One"
@@ -17422,6 +17428,86 @@ class PromptInstructionTests(unittest.TestCase):
         self.assertIn("video or visual resource may support the one selected move", normalized)
         self.assertNotIn("Lesson, Example, Check", normalized)
         self.assertIn(cli.TUTOR_FORMAT_RULES.splitlines()[0], prompt)
+
+    def test_two_passive_lessons_require_an_engagement_check(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Vim", goal="learn vim"))
+        topic = cli.read_topic("vim")
+        cli.append_session(
+            topic,
+            "chat",
+            "Start",
+            "**Lesson:**\nNormal mode runs editing commands.",
+        )
+        cli.append_session(
+            cli.read_topic("vim"),
+            cli.SIDE_CHAT_SESSION_KIND,
+            "Can you clarify?",
+            "**Lesson:**\nIt keeps commands separate from inserted text.",
+        )
+        cli.append_session(
+            cli.read_topic("vim"),
+            "chat",
+            "Continue",
+            "**Lesson:**\nInsert mode enters text into the buffer.",
+        )
+
+        self.assertTrue(cli.lesson_engagement_check_due(cli.read_topic("vim")))
+
+        cli.append_session(
+            cli.read_topic("vim"),
+            "chat",
+            "Continue",
+            "**Check:**\nExplain when you would return to Normal mode.",
+        )
+        self.assertFalse(cli.lesson_engagement_check_due(cli.read_topic("vim")))
+
+    def test_engagement_check_due_overrides_navigation_branch(self) -> None:
+        metadata = {
+            "current_turn_message_kind": "navigation",
+        }
+
+        contract = cli.tutor_turn_contract(metadata, engagement_check_due=True)
+
+        self.assertIn("engagement check due", contract)
+        self.assertIn("latest visible lesson", contract)
+
+    def test_navigation_response_cannot_invent_a_learner_choice(self) -> None:
+        error = cli.tutor_answer_contract_error(
+            "**Lesson:**\nGreat choice - let's learn hashing.",
+            require_check=False,
+            forbid_choice_claim=True,
+        )
+
+        self.assertEqual(error, "navigation response invents a learner choice")
+
+    def test_side_chat_prompt_anchors_the_exact_visible_lesson(self) -> None:
+        call_silent(cli.cmd_new, Namespace(topic="Interview", goal="practice interviews"))
+        cli.append_session(
+            cli.read_topic("interview"),
+            "chat",
+            "Continue",
+            "**Lesson:**\nTrace two concrete examples before coding.",
+        )
+
+        prompt = cli.side_chat_generation_prompt(
+            cli.read_topic("interview"),
+            "Can you explain this slide more?",
+        )
+
+        self.assertIn("Trace two concrete examples before coding", prompt)
+        self.assertIn("Can you explain this slide more?", prompt)
+        self.assertIn("not an earlier exchange", prompt)
+
+    def test_tutor_response_focus_title_prefers_hidden_focus_metadata(self) -> None:
+        response = (
+            "**Lesson:**\nTrace one example before coding.\n\n"
+            "<!-- focus: Tracing Concrete Examples -->"
+        )
+
+        self.assertEqual(
+            cli.tutor_response_focus_title(response),
+            "Tracing Concrete Examples",
+        )
 
     def test_quick_learn_prompt_prefers_enter_to_done(self) -> None:
         topic = cli.Topic(

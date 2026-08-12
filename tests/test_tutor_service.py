@@ -136,6 +136,81 @@ class TutorServiceTests(TestCase):
         self.assertEqual(cli.read_topic("web-tutor").metadata["last_answer_status"], "")
         self.assertEqual(cli.read_topic("web-tutor").metadata["known"], [])
 
+    def test_side_chat_generation_receives_the_current_visible_lesson(self) -> None:
+        current = "**Lesson:**\nTrace two examples before choosing an approach."
+        cli.append_session(cli.read_topic("web-tutor"), "chat", "Continue", current)
+        captured: dict[str, str] = {}
+
+        def answer(*_args: object, **kwargs: object) -> str:
+            captured["user"] = str(kwargs["user"])
+            return "**Lesson:**\nTracing exposes assumptions before code hides them."
+
+        with (
+            mock.patch.object(cli, "call_openai_streaming", side_effect=answer),
+            mock.patch.object(cli, "finish_turn_update") as finish,
+        ):
+            result = submit_turn(
+                "web-tutor",
+                "Can you explain this slide more?",
+                intent="question",
+                submission_id=str(uuid4()),
+                expected_revision=0,
+                session_kind=cli.SIDE_CHAT_SESSION_KIND,
+            )
+
+        self.assertEqual(result.status, "committed")
+        self.assertIn("Trace two examples before choosing an approach", captured["user"])
+        self.assertIn("Can you explain this slide more?", captured["user"])
+        finish.assert_not_called()
+
+    def test_navigation_after_two_passive_lessons_generates_a_check(self) -> None:
+        for index in range(2):
+            cli.append_session(
+                cli.read_topic("web-tutor"),
+                "chat",
+                f"Continue {index}",
+                f"**Lesson:**\nPassive concept {index}.",
+            )
+        captured: dict[str, str] = {}
+
+        def answer(*_args: object, **kwargs: object) -> str:
+            captured["system"] = str(kwargs["system"])
+            return "**Check:**\nHow would you apply the latest idea?"
+
+        with mock.patch.object(cli, "call_openai_streaming", side_effect=answer):
+            result = submit_turn(
+                "web-tutor",
+                "Continue to the next useful concept.",
+                intent="navigation",
+                submission_id=str(uuid4()),
+                expected_revision=0,
+            )
+
+        self.assertEqual(result.status, "committed")
+        self.assertIn("engagement check due", captured["system"])
+        self.assertEqual(result.move.kind, "check")
+        self.assertIn("How would you apply", result.move.prompt)
+
+    def test_primary_lesson_focus_marker_updates_the_course_focus(self) -> None:
+        response = (
+            "**Lesson:**\nTrace one example before coding.\n\n"
+            "<!-- focus: Tracing Concrete Examples -->"
+        )
+        with mock.patch.object(cli, "call_openai_streaming", return_value=response):
+            result = submit_turn(
+                "web-tutor",
+                "Explain the next idea.",
+                intent="question",
+                submission_id=str(uuid4()),
+                expected_revision=0,
+            )
+
+        self.assertEqual(result.status, "committed")
+        self.assertEqual(
+            cli.read_topic("web-tutor").metadata["current_focus"],
+            "Tracing Concrete Examples",
+        )
+
     def test_stale_revision_conflicts_before_mutation(self) -> None:
         with self.assertRaises(TutorConflictError):
             submit_turn(

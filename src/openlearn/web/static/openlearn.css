@@ -211,9 +211,8 @@ h2 { font-size: clamp(1.35rem, 3vw, 2rem); line-height: 1.1; letter-spacing: -0.
 .panel-heading span { color: var(--graphite-soft); font: 700 0.75rem/1 ui-monospace, monospace; }
 .panel-heading-actions { display: flex; align-items: center; gap: 0.9rem; }
 .course-add-action { white-space: nowrap; font-size: 0.84rem; }
-.course-row { min-height: 4.6rem; padding: 0.8rem 0; border-bottom: 1px solid var(--line); display: grid; grid-template-columns: 2.4rem 1fr auto; gap: 0.8rem; align-items: center; text-decoration: none; }
+.course-row { min-height: 4.6rem; padding: 0.8rem 0; border-bottom: 1px solid var(--line); display: grid; grid-template-columns: 1fr auto; gap: 0.8rem; align-items: center; text-decoration: none; }
 .course-row small { display: block; color: var(--graphite-soft); }
-.course-tool { display: grid; place-items: center; width: 2rem; height: 2rem; border: 1px solid var(--line-strong); color: var(--orange-ink); font: 700 0.7rem/1 ui-monospace, monospace; }
 .course-progress { color: var(--teal); font-weight: 750; }
 .review-panel { border-top: 5px solid var(--teal); }
 
@@ -378,7 +377,6 @@ h2 { font-size: clamp(1.35rem, 3vw, 2rem); line-height: 1.1; letter-spacing: -0.
 .composer textarea { min-height: 8rem; border: 0; border-radius: 0; }
 .composer-footer { padding: 0.7rem; border-top: 1px solid var(--line); }
 .lesson-actions { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }
-.keyboard-hint { color: var(--graphite-soft); font: 700 0.75rem/1 ui-monospace, monospace; }
 .operation-state { padding: 0.8rem; border-top: 1px solid var(--line); color: var(--teal); }
 .secondary-actions { display: flex; gap: 1rem; justify-content: center; }
 .secondary-actions button { min-height: 2.75rem; border: 0; background: transparent; text-decoration: underline; text-underline-offset: 0.25rem; cursor: pointer; }

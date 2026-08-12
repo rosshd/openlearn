@@ -36,13 +36,11 @@
       <div class="panel-heading">
         <h2 id="courses-title">Courses</h2>
         <div class="panel-heading-actions">
-          <span>{{ dashboard.courses|length }}</span>
           {% if dashboard.courses %}<a class="primary-action compact course-add-action" href="{{ url_for('new_course') }}">Add another course <span aria-hidden="true">+</span></a>{% endif %}
         </div>
       </div>
       {% for course in dashboard.courses %}
       <a class="course-row" href="{{ url_for('focus', slug=course.slug) }}">
-        <span class="course-tool" aria-hidden="true">{{ loop.index|string }}</span>
         <span><strong>{{ course.title }}</strong><small>{{ course.current_unit or 'Ready to learn' }}</small></span>
         <span class="course-progress">{{ course.progress or 0 }}%</span>
       </a>

@@ -116,8 +116,8 @@ def test_default_web_app_runs_setup_dashboard_course_and_tutor_flow(
     assert initialized.headers["location"].endswith(f"/courses/{slug}")
     focus = client.get(f"/courses/{slug}")
     assert focus.status_code == 200
-    assert "Lesson" in focus.text
-    assert "Press Enter to continue" in focus.text
+    assert "Current lesson" in focus.text
+    assert "Press Enter to continue" not in focus.text
     assert 'id="learner-response"' not in focus.text
     assert 'data-tool-open="chat"' in focus.text
     assert "placement test" not in focus.text.lower()
@@ -129,6 +129,9 @@ def test_default_web_app_runs_setup_dashboard_course_and_tutor_flow(
     courses_panel = dashboard_html.split('class="course-list"', 1)[1]
     assert "Add another course" in courses_panel
     assert "course-add-action" in courses_panel
+    course_heading = courses_panel.split("</div>", 2)[0]
+    assert "<span>1</span>" not in course_heading
+    assert 'class="course-tool"' not in courses_panel
 
     revision = int(focus.text.split('data-revision="', 1)[1].split('"', 1)[0])
     turn = client.post(
@@ -249,7 +252,7 @@ def test_interview_course_confidence_placement_resumes_and_builds_first_lesson(
     wait_for_operation(restarted_client, body["slug"], finished.json()["operation_id"])
     lesson = restarted_client.get(f"/courses/{body['slug']}")
     assert lesson.status_code == 200
-    assert "Press Enter to continue" in lesson.text
+    assert "Press Enter to continue" not in lesson.text
     assert "Before writing code" in lesson.text
     assert "Your next learning move" not in lesson.text
 
@@ -1459,6 +1462,34 @@ def test_focus_renders_a_pending_check_once(client: TestClient) -> None:
     assert 'id="learner-response"' in page.text
     assert "Send answer" in page.text
     assert "Response intent" not in page.text
+
+
+def test_focus_uses_template_concept_when_legacy_course_has_no_saved_focus(
+    client: TestClient,
+) -> None:
+    cli.cmd_new(
+        argparse.Namespace(topic="Legacy Interview", goal="Learn interview reasoning"),
+        output_func=lambda _text: None,
+    )
+    topic = cli.read_topic("legacy-interview")
+    metadata = dict(topic.metadata)
+    metadata["current_focus"] = ""
+    metadata["template_units"] = [
+        "Unit 1: Interview Problem Solving - clarification and examples"
+    ]
+    cli.write_topic(topic.path, metadata, topic.body)
+    cli.append_session(
+        cli.read_topic(topic.slug),
+        "chat",
+        "Continue to the next useful concept.",
+        "**Lesson:**\nTrace one concrete example before coding.",
+    )
+
+    view = OpenLearnWebServices().focus(topic.slug)
+
+    assert view["current_unit"] == "Interview Problem Solving"
+    assert view["move"]["title"] == "Interview Problem Solving"
+    assert view["move"]["kind"] == "Current lesson"
 
 
 def test_web_turn_uses_current_provider_model(

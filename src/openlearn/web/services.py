@@ -145,6 +145,34 @@ def _focus_progress(progress: CourseProgress) -> dict[str, object]:
     }
 
 
+def _lesson_focus_title(
+    topic: cli.Topic,
+    response: str,
+) -> str:
+    response_focus = cli.tutor_response_focus_title(response)
+    if response_focus:
+        return response_focus
+    saved_focus = topic.metadata.get("current_focus")
+    if isinstance(saved_focus, str) and saved_focus.strip():
+        return saved_focus.strip()
+    current_unit = topic.metadata.get("current_unit")
+    if isinstance(current_unit, int):
+        unit = cli.course_unit_at(topic.metadata, current_unit)
+        title = unit.get("title") if isinstance(unit, dict) else None
+        if isinstance(title, str) and title.strip():
+            return title.strip()
+    template_units = topic.metadata.get("template_units")
+    if isinstance(template_units, list):
+        first = next(
+            (item.strip() for item in template_units if isinstance(item, str) and item.strip()),
+            "",
+        )
+        match = re.match(r"(?i)^Unit\s+\d+\s*:\s*(.*?)(?:\s+-\s+.*)?$", first)
+        if match and match.group(1).strip():
+            return match.group(1).strip()
+    return str(topic.metadata.get("topic") or "Learning focus").strip()
+
+
 def _draft(snapshot: code_workspace.DraftSnapshot) -> dict[str, object]:
     return {
         "language": snapshot.language,
@@ -1209,11 +1237,8 @@ class OpenLearnWebServices:
         latest = latest_lesson[1] if latest_lesson else None
         answer = latest["response"] if latest else "Your course is ready. Ask the tutor to begin."
         response_kind, blocks = _present_response(answer)
-        move_title = (
-            snapshot.card.current_focus or "Current lesson"
-            if response_kind == "Lesson"
-            else "Your next learning move"
-        )
+        move_title = _lesson_focus_title(topic, answer)
+        move_kind = "Current lesson" if response_kind == "Lesson" else response_kind
         pending = topic.metadata.get("pending_question")
         prompt = ""
         if isinstance(pending, dict) and isinstance(pending.get("question"), str):
@@ -1265,11 +1290,11 @@ class OpenLearnWebServices:
         return {
             "slug": slug,
             "title": snapshot.card.title,
-            "current_unit": snapshot.card.current_focus or "Current lesson",
+            "current_unit": move_title,
             "revision": revision,
             "saved_state": "Saved locally",
             "move": {
-                "kind": response_kind,
+                "kind": move_kind,
                 "title": move_title,
                 "blocks": blocks,
                 "prompt": prompt,

@@ -196,7 +196,7 @@ def test_real_browser_course_polling_theme_conflict_and_keyboard_submit(
                     )
                 first.locator("[data-focus-shell]").wait_for(state="visible")
                 playwright.expect(first.get_by_text("Before writing code", exact=False)).to_be_visible()
-                playwright.expect(first.get_by_text("Press Enter to continue", exact=True)).to_be_visible()
+                playwright.expect(first.get_by_text("Press Enter to continue", exact=True)).to_have_count(0)
                 assert first.locator("#learner-response").count() == 0
                 passive_revision = _revision(first)
                 first.locator("body").press("Enter")

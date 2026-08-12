@@ -65,6 +65,7 @@ def sanitize_model_output(text: str) -> str:
     text = re.sub(r"(?is)<system-reminder>.*?</system-reminder>", "", text)
     text = re.sub(r"(?is)<!--\s*answer\s*:\s*[A-D]\s*-->", "", text)
     text = re.sub(r"(?is)<!--\s*covered\s*:\s*.*?-->", "", text)
+    text = re.sub(r"(?is)<!--\s*focus\s*:\s*.*?-->", "", text)
     text = re.sub(r"(?im)^\s*answer\s*key\s*:\s*[A-D]\s*$", "", text)
     text = re.sub(r"(?im)^\s*correct\s+answer\s*:\s*[A-D]\s*[\).:-]?.*$", "", text)
     text = re.sub(r"(?im)^\s*\(?answer\s*:\s*[A-D]\)?.*$", "", text)
