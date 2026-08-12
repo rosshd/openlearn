@@ -8459,6 +8459,8 @@ class InteractiveTests(unittest.TestCase):
         prompt = cli.metadata_update_prompt(metadata, "A, because the indices differ", "Check")
         self.assertIn('"kind": "free_response"', prompt)
         self.assertNotIn('"answer_key"', prompt)
+        self.assertNotIn("A) Yes, because the indices differ", prompt)
+        self.assertIn("Would two equal values at distinct indices be valid, and why?", prompt)
 
     def test_reasoning_check_is_saved_as_free_response_without_hidden_key(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Indices", goal="Reason about constraints"))

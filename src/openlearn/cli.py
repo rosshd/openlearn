@@ -5328,13 +5328,17 @@ def pending_question_uses_answer_key(pending: object) -> bool:
 
 def pending_question_for_model(pending: object) -> object:
     """Hide unreliable legacy keys when a prompt needs semantic reasoning."""
-    if not isinstance(pending, dict) or not multiple_choice_requires_reasoning(
-        str(pending.get("question") or "")
-    ):
+    if not isinstance(pending, dict):
+        return pending
+    question = str(pending.get("question") or "")
+    if not multiple_choice_requires_reasoning(question):
         return pending
     normalized = dict(pending)
     normalized["kind"] = "free_response"
     normalized.pop("answer_key", None)
+    parsed = parse_multiple_choice_options(question)
+    if parsed is not None:
+        normalized["question"] = parsed[0].strip()
     return normalized
 
 
