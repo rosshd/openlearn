@@ -259,8 +259,9 @@ h2 { font-size: clamp(1.35rem, 3vw, 2rem); line-height: 1.1; letter-spacing: -0.
   transition: flex-grow var(--surface-motion-duration) cubic-bezier(0.4, 0, 0.2, 1), flex-basis var(--surface-motion-duration) cubic-bezier(0.4, 0, 0.2, 1);
 }
 .focus-shell[data-tool-active] .focus-column { flex-grow: 0.92; flex-basis: 24rem; }
-.move-surface { min-height: min(48vh, 33rem); padding: clamp(1.4rem, 5vw, 3.2rem); border: 1px solid var(--line-strong); border-top: 7px solid var(--orange); background: var(--surface); box-shadow: var(--shadow); animation: move-arrive 420ms ease-out; }
+.move-surface { min-height: min(48vh, 33rem); padding: clamp(1.4rem, 5vw, 3.2rem); border: 1px solid var(--line-strong); border-top: 7px solid var(--orange); background: var(--surface); box-shadow: var(--shadow); }
 .move-surface[data-streaming] { overflow: hidden; }
+.move-surface[data-stream-resizing] { transition: height 560ms cubic-bezier(0.22, 1, 0.36, 1); will-change: height; }
 .move-surface h1 { max-width: 20ch; font-size: clamp(2rem, 5vw, 3.5rem); }
 .move-content { max-width: 60ch; font-size: 1.08rem; line-height: 1.72; }
 .move-content p, .move-content ul, .move-content ol { margin-bottom: 1.15rem; }
@@ -295,14 +296,12 @@ h2 { font-size: clamp(1.35rem, 3vw, 2rem); line-height: 1.1; letter-spacing: -0.
 .tutor-stream-preview [data-tutor-stream-text] { display: inline; white-space: pre-wrap; }
 .tutor-stream-preview .stream-placeholder { color: var(--graphite-soft); }
 .stream-caret { width: 0.12em; height: 1.05em; margin-left: 0.14em; display: inline-block; vertical-align: -0.12em; background: var(--orange); animation: stream-caret 900ms steps(1, end) infinite; }
-.move-surface[data-stream-complete] { opacity: 0; transform: translateY(-0.2rem); transition: opacity 420ms ease, transform 420ms ease; }
 @keyframes stream-reveal { from { opacity: 0; transform: translateY(0.5rem); } }
-@keyframes move-arrive { from { opacity: 0; transform: translateY(0.25rem); } }
 @keyframes stream-pulse { 50% { opacity: 0.35; transform: scale(0.75); } }
 @keyframes stream-caret { 50% { opacity: 0; } }
 @media (prefers-reduced-motion: reduce) {
-  .move-surface, .tutor-stream-preview, .stream-pulse, .stream-caret { animation: none; }
-  .move-surface[data-stream-complete] { transition: none; }
+  .tutor-stream-preview, .stream-pulse, .stream-caret { animation: none; }
+  .move-surface[data-stream-resizing] { transition: none; }
 }
 .feedback-strip { padding: 1rem 1.2rem; border-left: 5px solid var(--teal); background: var(--teal-soft); }
 .feedback-strip p { margin: 0.35rem 0 0; }

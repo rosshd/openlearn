@@ -902,6 +902,67 @@ async function finishTutorPreview(finalPreview) {
   }
 }
 
+function measureTutorSurfaceHeight(surface) {
+  const clone = surface.cloneNode(true);
+  const preview = clone.querySelector("[data-tutor-stream-preview]");
+  const width = surface.getBoundingClientRect().width;
+  clone.removeAttribute("data-streaming");
+  clone.removeAttribute("data-stream-resizing");
+  clone.setAttribute("aria-hidden", "true");
+  clone.inert = true;
+  Object.assign(clone.style, {
+    animation: "none",
+    height: "auto",
+    left: "-10000px",
+    pointerEvents: "none",
+    position: "fixed",
+    top: "0",
+    transition: "none",
+    visibility: "hidden",
+    width: `${width}px`,
+  });
+  if (preview) {
+    preview.style.maxHeight = "none";
+    preview.style.overflow = "visible";
+  }
+  document.body.append(clone);
+  const height = Math.ceil(clone.getBoundingClientRect().height);
+  clone.remove();
+  return height;
+}
+
+async function resizeTutorSurfaceIfNeeded() {
+  const { surface } = tutorPreviewNodes();
+  if (!surface) return;
+  const currentHeight = Math.ceil(surface.getBoundingClientRect().height);
+  const targetHeight = measureTutorSurfaceHeight(surface);
+  if (!Number.isFinite(targetHeight) || Math.abs(targetHeight - currentHeight) < 8) return;
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    surface.style.height = `${targetHeight}px`;
+    return;
+  }
+  surface.dataset.streamResizing = "true";
+  await new Promise((resolve) => {
+    let settled = false;
+    const finish = (event) => {
+      if (
+        settled
+        || (event && (event.target !== surface || event.propertyName !== "height"))
+      ) return;
+      settled = true;
+      surface.removeEventListener("transitionend", finish);
+      window.clearTimeout(fallback);
+      resolve();
+    };
+    const fallback = window.setTimeout(finish, 700);
+    surface.addEventListener("transitionend", finish);
+    window.requestAnimationFrame(() => {
+      surface.style.height = `${targetHeight}px`;
+    });
+  });
+  delete surface.dataset.streamResizing;
+}
+
 function restoreTutorSurfaceAfterError() {
   const { surface, region } = tutorPreviewNodes();
   if (!surface || !region) return;
@@ -951,9 +1012,9 @@ async function pollOperation(operationId) {
   if (result.state === "committed") {
     clearTurnComposer();
     await finishTutorPreview(result.preview_text || "");
-    document.querySelector("[data-current-move]")?.setAttribute("data-stream-complete", "true");
+    await resizeTutorSurfaceIfNeeded();
     setOperationState("Lesson ready.");
-    window.setTimeout(() => window.location.replace(window.location.href), 440);
+    window.setTimeout(() => window.location.replace(window.location.href), 100);
     return;
   }
   restoreTutorSurfaceAfterError();

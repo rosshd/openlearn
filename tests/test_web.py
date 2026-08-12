@@ -1295,6 +1295,23 @@ def test_video_preparation_ignores_out_of_order_responses() -> None:
     )
 
 
+def test_completed_tutor_stream_keeps_card_visible_and_resizes_only_if_needed() -> None:
+    repository = Path(__file__).resolve().parents[1]
+    javascript = (repository / "src/openlearn/web/static/openlearn.js").read_text(
+        encoding="utf-8"
+    )
+    css = (repository / "src/openlearn/web/static/openlearn.css").read_text(
+        encoding="utf-8"
+    )
+
+    assert "data-stream-complete" not in javascript
+    assert "data-stream-complete" not in css
+    assert "move-arrive" not in css
+    assert "resizeTutorSurfaceIfNeeded" in javascript
+    assert "Math.abs(targetHeight - currentHeight)" in javascript
+    assert "data-stream-resizing" in css
+
+
 def test_initialization_failure_preserves_course_and_retries_same_operation(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
