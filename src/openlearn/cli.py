@@ -10,6 +10,7 @@ import hashlib
 import io
 import importlib
 import importlib.resources
+import inspect
 import json
 import math
 import os
@@ -9746,14 +9747,23 @@ def generate_validated_tutor_answer(
             )
         )
         stream_options = {"stream_sink": stream_sink} if stream_sink is not None else {}
-        candidate = call_openai_streaming(
-            model=model,
-            system=system,
-            user=user,
-            output_func=buffered_output.append,
-            response_metadata_sink=capture_candidate_metadata,
+        stream_arguments = {
+            "model": model,
+            "system": system,
+            "user": user,
+            "output_func": buffered_output.append,
             **stream_options,
-        )
+        }
+        metadata_arguments = {
+            **stream_arguments,
+            "response_metadata_sink": capture_candidate_metadata,
+        }
+        try:
+            inspect.signature(call_openai_streaming).bind(**metadata_arguments)
+        except (TypeError, ValueError):
+            candidate = call_openai_streaming(**stream_arguments)
+        else:
+            candidate = call_openai_streaming(**metadata_arguments)
         if candidate_metadata == TutorResponseMetadata():
             _visible_candidate, candidate_metadata = tutor_response_metadata(candidate)
         if interview_target is not None:
