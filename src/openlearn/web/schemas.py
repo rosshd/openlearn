@@ -65,7 +65,7 @@ class TutorSubmissionRequest(BaseModel):
     @field_validator("intent")
     @classmethod
     def allowed_intent(cls, value: str) -> str:
-        if value not in {"answer", "question", "stuck", "skip", "next"}:
+        if value not in {"answer", "question", "stuck", "skip", "next", "practice"}:
             raise ValueError("Unsupported learner intent")
         return value
 

@@ -170,6 +170,7 @@ TURN_METADATA_PATCH_KEYS = {
     "current_slide",
     "last_video_focus",
     "course_units",
+    "learner_preferences",
 }
 REMEDIATION_MINIMUM_SCORE = 0.7
 REMEDIATION_STAGE_BY_MISS = {
@@ -2303,6 +2304,8 @@ def learner_acknowledges(prompt: str) -> bool:
 
 def learner_preference_from_advance(prompt: str) -> str:
     value = one_line(prompt)
+    if re.search(r"(?i)\bskip\b.*\bfor now\b", value):
+        return ""
     if not re.search(
         r"(?i)\b(skip|don'?t need|do not need|proficient|already know|comfortable with|not interested)",
         value,
@@ -2412,6 +2415,24 @@ def handle_natural_advance(prompt: str, model: str | None = None, output_func=pr
         return False
     slug = resolve_topic_slug(None)
     topic = read_topic(slug)
+    state = load_state(slug)
+    if isinstance(state.get("interview_curriculum"), dict):
+        from openlearn import application, tutor_service
+
+        try:
+            result = application.advance_interview_curriculum(
+                slug,
+                prompt,
+                intent=("skip" if re.search(r"\bskip\b", prompt, re.IGNORECASE) else "continue"),
+                submission_id=str(uuid4()),
+                expected_revision=tutor_service.course_revision(slug),
+                model=model,
+            )
+        except (tutor_service.TutorConflictError, tutor_service.TutorOperationError) as exc:
+            raise OpenLearnError(str(exc)) from exc
+        if result.move is not None:
+            output_func(result.move.content)
+        return True
     save_learner_navigation_preference(topic, prompt)
     if finish_pending_chapter_quiz(slug):
         output_func("")
@@ -2452,6 +2473,10 @@ def handle_repl_command(
             output_func=output_func,
         )
     elif name in {"next", "n"}:
+        slug = resolve_topic_slug(args[0] if args else None)
+        if isinstance(load_state(slug).get("interview_curriculum"), dict):
+            handle_natural_advance("Continue to the next concept.", model, output_func)
+            return None
         cmd_next(
             argparse.Namespace(topic=args[0] if args else None, model=model),
             output_func=output_func,
@@ -2460,6 +2485,9 @@ def handle_repl_command(
         topic_args = [arg for arg in args if arg not in {"--force", "force", "yes"}]
         topic_value = topic_args[0] if topic_args else None
         slug = resolve_topic_slug(topic_value)
+        if isinstance(load_state(slug).get("interview_curriculum"), dict):
+            handle_natural_advance("Continue to the next concept.", model, output_func)
+            return None
         if finish_pending_chapter_quiz(slug):
             output_func("")
             output_func("Loading first slide of the new unit...")
@@ -6182,13 +6210,19 @@ def side_chat_generation_prompt(
     topic: Topic,
     learner_prompt: str,
     entries: list[dict[str, str]] | None = None,
+    *,
+    lesson_override: str | None = None,
 ) -> str:
     """Ground a side question in the exact lesson that remains visible in the UI."""
     if entries is None:
         _topic_body, session_log = split_session_log(topic.body)
         entries = session_entries(session_log)
     lesson_entry = last_tutor_lesson_entry_from_entries(entries)
-    lesson = lesson_entry[1]["response"].strip() if lesson_entry else ""
+    lesson = (
+        lesson_override.strip()
+        if lesson_override is not None
+        else (lesson_entry[1]["response"].strip() if lesson_entry else "")
+    )
     return textwrap.dedent(
         f"""
         Answer the learner's question about the currently visible lesson below.
@@ -8926,7 +8960,18 @@ def ask_topic(
     session_kind: TutorSessionKind = "chat",
     message_kind_override: str | None = None,
     commit_state_hook: (
-        Callable[[str, dict[str, object], dict[str, object]], None] | None
+        Callable[[str, dict[str, object], dict[str, object], str], None] | None
+    ) = None,
+    generated_state_hook: Callable[[str], None] | None = None,
+    generated_answer_override: str | None = None,
+    increment_course_revision: bool = True,
+    side_chat_lesson_override: str | None = None,
+    commit_events_hook: (
+        Callable[
+            [str, dict[str, object], dict[str, object]],
+            list[tuple[str, str, dict[str, object]]],
+        ]
+        | None
     ) = None,
 ) -> str:
     global _LAST_RESPONSE_ANSWER_KEY, _LAST_RESPONSE_CODING_DRILL_ACTION
@@ -9040,21 +9085,30 @@ def ask_topic(
             body=topic.body,
         )
     generation_prompt = (
-        side_chat_generation_prompt(topic, prompt, session_entries_for_turn)
+        side_chat_generation_prompt(
+            topic,
+            prompt,
+            session_entries_for_turn,
+            lesson_override=side_chat_lesson_override,
+        )
         if session_kind == SIDE_CHAT_SESSION_KIND
         else prompt
     )
     _LAST_RESPONSE_FOCUS_TITLE = ""
     if turn_observer is not None:
         turn_observer.publish_phase("generating")
-    generated_answer = generate_validated_tutor_answer(
-        topic,
-        generation_prompt,
-        model,
-        output_func=output_func,
-        system_prompt_sink=system_prompt_sink,
-        stream_sink=(turn_observer.publish_preview if turn_observer is not None else None),
-        engagement_check_due=engagement_check_due,
+    generated_answer = (
+        generated_answer_override
+        if generated_answer_override is not None
+        else generate_validated_tutor_answer(
+            topic,
+            generation_prompt,
+            model,
+            output_func=output_func,
+            system_prompt_sink=system_prompt_sink,
+            stream_sink=(turn_observer.publish_preview if turn_observer is not None else None),
+            engagement_check_due=engagement_check_due,
+        )
     )
     focus_title = _LAST_RESPONSE_FOCUS_TITLE or tutor_response_focus_title(generated_answer)
     answer = sanitize_model_output(generated_answer)
@@ -9066,6 +9120,9 @@ def ask_topic(
     _LAST_RESPONSE_ANSWER_KEY = ""
     _LAST_RESPONSE_CODING_DRILL_ACTION = None
     _LAST_RESPONSE_FOCUS_TITLE = ""
+    if generated_state_hook is not None and generated_answer_override is None:
+        generated_state_hook(answer)
+        state_before = copy.deepcopy(load_state(topic.slug))
     projected_metadata.pop("current_turn_message_kind", None)
     if session_kind != SIDE_CHAT_SESSION_KIND:
         if focus_title:
@@ -9146,10 +9203,13 @@ def ask_topic(
     internal = copy.deepcopy(internal) if isinstance(internal, dict) else {}
     revision = internal.get("course_revision")
     internal["schema_version"] = 1
-    internal["course_revision"] = revision + 1 if isinstance(revision, int) else 1
+    if increment_course_revision:
+        internal["course_revision"] = revision + 1 if isinstance(revision, int) else 1
     state_after["_openlearn_internal"] = internal
     if commit_state_hook is not None:
-        commit_state_hook(answer, projected_metadata, state_after)
+        commit_state_hook(answer, projected_metadata, state_after, mutation_id)
+    if commit_events_hook is not None:
+        queued_events.extend(commit_events_hook(answer, projected_metadata, state_after))
     _commit_projected_turn(
         topic.slug,
         state_before,
@@ -9767,7 +9827,13 @@ def _validated_projection_patch(value: object, *, label: str) -> list[dict[str, 
             )
         if label == "state" and not (
             is_dynamic_metadata_key(top_level_key)
-            or top_level_key in {"unit_state", "_openlearn_internal"}
+            or top_level_key
+            in {
+                "unit_state",
+                "_openlearn_internal",
+                "_turn_receipts",
+                "_turn_receipts_schema",
+            }
         ):
             raise OpenLearnError("saved tutor turn journal targets unsupported state")
         if op == "increment":
@@ -9986,23 +10052,116 @@ def _read_turn_journal(slug: str) -> dict[str, object] | None:
     return _validated_turn_journal(slug, raw)
 
 
-def _validated_receipt_mapping(raw: object) -> dict[str, str]:
+def _validated_receipt_mapping(raw: object) -> dict[str, object]:
     if not isinstance(raw, dict):
         raise OpenLearnError(
             "saved tutor turn receipts are corrupt; repair the state file before retrying"
         )
-    receipts: dict[str, str] = {}
+    receipts: dict[str, object] = {}
     for mutation_id, digest in raw.items():
+        valid_commit = (
+            isinstance(mutation_id, str)
+            and re.fullmatch(r"turn_[a-f0-9]{32}", mutation_id)
+            and isinstance(digest, str)
+            and re.fullmatch(r"[a-f0-9]{64}", digest)
+        )
+        valid_legacy_operation = (
+            isinstance(mutation_id, str)
+            and re.fullmatch(r"operation_[a-f0-9]{32}", mutation_id)
+            and isinstance(digest, dict)
+            and digest.get("schema_version") == 1
+            and isinstance(digest.get("submission_id"), str)
+            and mutation_id
+            == f"operation_{str(digest['submission_id']).replace('-', '')}"
+            and isinstance(digest.get("payload_hash"), str)
+            and re.fullmatch(r"[a-f0-9]{64}", str(digest["payload_hash"]))
+            and digest.get("status") == "committed"
+            and isinstance(digest.get("base_revision"), int)
+            and isinstance(digest.get("final_revision"), int)
+            and isinstance(digest.get("result"), dict)
+        )
+        valid_operation = False
         if (
-            not isinstance(mutation_id, str)
-            or not re.fullmatch(r"turn_[a-f0-9]{32}", mutation_id)
-            or not isinstance(digest, str)
-            or not re.fullmatch(r"[a-f0-9]{64}", digest)
+            isinstance(mutation_id, str)
+            and re.fullmatch(r"operation_[a-f0-9]{32}", mutation_id)
+            and isinstance(digest, dict)
+            and digest.get("schema_version") == 2
         ):
+            submission_id = digest.get("submission_id")
+            payload_hash = digest.get("payload_hash")
+            response_hash = digest.get("response_sha256")
+            receipt_hash = digest.get("receipt_sha256")
+            base_revision = digest.get("base_revision")
+            reservation_revision = digest.get("reservation_revision")
+            final_revision = digest.get("final_revision")
+            target = digest.get("target")
+            skill_ref = target.get("skill_ref") if isinstance(target, dict) else None
+            result = digest.get("result")
+            move = result.get("move") if isinstance(result, dict) else None
+            unsigned = dict(digest)
+            unsigned.pop("receipt_sha256", None)
+            caught_up = digest.get("receipt_kind") == "caught_up"
+            revision_chain_valid = (
+                base_revision == reservation_revision == final_revision
+                if caught_up
+                else isinstance(base_revision, int)
+                and isinstance(reservation_revision, int)
+                and isinstance(final_revision, int)
+                and base_revision + 1 == reservation_revision
+                and reservation_revision + 1 == final_revision
+            )
+            target_valid = (
+                target is None
+                if caught_up
+                else isinstance(target, dict)
+                and all(
+                    isinstance(target.get(key), str) and bool(target.get(key))
+                    for key in ("unit_id", "section_id", "requirement", "depth_mode")
+                )
+                and isinstance(skill_ref, dict)
+                and all(
+                    isinstance(skill_ref.get(key), str) and bool(skill_ref.get(key))
+                    for key in (
+                        "graph_id",
+                        "graph_version",
+                        "mastery_policy_version",
+                        "skill_id",
+                    )
+                )
+            )
+            valid_operation = bool(
+                isinstance(submission_id, str)
+                and re.fullmatch(
+                    r"[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}",
+                    submission_id,
+                )
+                and mutation_id == f"operation_{submission_id.replace('-', '')}"
+                and isinstance(payload_hash, str)
+                and re.fullmatch(r"[a-f0-9]{64}", payload_hash)
+                and isinstance(response_hash, str)
+                and re.fullmatch(r"[a-f0-9]{64}", response_hash)
+                and isinstance(receipt_hash, str)
+                and re.fullmatch(r"[a-f0-9]{64}", receipt_hash)
+                and receipt_hash == _payload_sha256(unsigned)
+                and digest.get("status") == "committed"
+                and revision_chain_valid
+                and isinstance(digest.get("mutation_id"), str)
+                and re.fullmatch(r"turn_[a-f0-9]{32}", str(digest["mutation_id"]))
+                and target_valid
+                and isinstance(result, dict)
+                and result.get("submission_id") == submission_id
+                and result.get("status") == "committed"
+                and result.get("input_status") == "committed"
+                and result.get("payload_hash") == payload_hash
+                and isinstance(move, dict)
+                and "content" not in move
+                and move.get("revision") == final_revision
+            )
+        if not valid_commit and not valid_legacy_operation and not valid_operation:
             raise OpenLearnError(
                 "saved tutor turn receipts are corrupt; repair the state file before retrying"
             )
-        receipts[mutation_id] = digest
+        receipts[mutation_id] = copy.deepcopy(digest)
     return receipts
 
 
@@ -10041,7 +10200,7 @@ def _validated_legacy_turn_receipt_ids(state: dict[str, object]) -> set[str]:
 
 def _normalized_turn_receipt_state(
     state: dict[str, object],
-) -> tuple[dict[str, object], dict[str, str], set[str], bool]:
+) -> tuple[dict[str, object], dict[str, object], set[str], bool]:
     raw = state.get("_turn_receipts")
     schema = state.get("_turn_receipts_schema")
     legacy_ids = _validated_legacy_turn_receipt_ids(state)
@@ -10072,7 +10231,7 @@ def _normalized_turn_receipt_state(
     return migrated, {}, legacy_ids, True
 
 
-def _validated_turn_receipts(state: dict[str, object]) -> dict[str, str]:
+def _validated_turn_receipts(state: dict[str, object]) -> dict[str, object]:
     _normalized, receipts, _legacy_ids, migrated = _normalized_turn_receipt_state(state)
     if migrated:
         raise OpenLearnError(
@@ -10200,6 +10359,11 @@ def _apply_turn_journal(slug: str, journal: dict[str, object]) -> bool:
 
         if existing_receipt is None:
             _apply_state_projection_patch(state, state_patch)
+            projected_receipts = state.get("_turn_receipts")
+            if isinstance(projected_receipts, dict):
+                for receipt_id, receipt_value in projected_receipts.items():
+                    if receipt_id.startswith("operation_"):
+                        receipts[receipt_id] = copy.deepcopy(receipt_value)
             receipts[mutation_id] = commit_hash
             state["_turn_receipts"] = receipts
             state["_turn_receipts_schema"] = 2
@@ -13162,6 +13326,31 @@ def cmd_resume(args: argparse.Namespace, input_func=input, output_func=print) ->
 
     if interview_value is not None:
         _preflight_interview_provider(topic, interview_value, output_func)
+        canonical = load_state(topic.slug).get("interview_curriculum")
+        if isinstance(canonical, dict):
+            from openlearn import application, tutor_service
+
+            try:
+                if isinstance(canonical.get("active_operation"), dict):
+                    result = application.resume_interview_progression(
+                        topic.slug, model=model
+                    )
+                else:
+                    result = application.advance_interview_curriculum(
+                        topic.slug,
+                        "Resume at the next curriculum concept.",
+                        submission_id=str(uuid4()),
+                        expected_revision=tutor_service.course_revision(topic.slug),
+                        model=model,
+                    )
+            except (
+                tutor_service.TutorConflictError,
+                tutor_service.TutorOperationError,
+            ) as exc:
+                raise OpenLearnError(str(exc)) from exc
+            if result.move is not None:
+                output_func(result.move.content)
+            return 0
     if not _DRY_RUN:
         topic = restore_learner_preferences_from_history(topic)
         set_active_topic(topic.slug)

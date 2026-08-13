@@ -8,6 +8,7 @@ projections for application-layer progression code.
 from __future__ import annotations
 
 import importlib.resources
+import copy
 import hashlib
 import json
 import re
@@ -16,6 +17,7 @@ from dataclasses import dataclass
 from datetime import date
 from importlib.resources.abc import Traversable
 from types import MappingProxyType
+from typing import Literal
 
 from openlearn import interview_skills
 
@@ -236,6 +238,248 @@ class MaterializedInterviewRoute:
 
 
 CANONICAL_STATE_SCHEMA_VERSION = 1
+
+ProgressionIntent = Literal["continue", "skip", "revisit", "practice"]
+
+
+@dataclass(frozen=True)
+class ProgressionTarget:
+    unit_id: str
+    section_id: str
+    skill_ref: Mapping[str, str]
+    requirement: str
+    depth_mode: str
+
+    @property
+    def skill_id(self) -> str:
+        return self.skill_ref["skill_id"]
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "unit_id": self.unit_id,
+            "section_id": self.section_id,
+            "skill_ref": dict(self.skill_ref),
+            "requirement": self.requirement,
+            "depth_mode": self.depth_mode,
+        }
+
+
+@dataclass(frozen=True)
+class ProgressionResolution:
+    state: dict[str, object]
+    target: ProgressionTarget | None
+    reason: str
+    caught_up: bool = False
+    deferred_skill_id: str | None = None
+
+
+def _progression_route_items(
+    state: Mapping[str, object],
+) -> tuple[tuple[dict[str, object], str], ...]:
+    route = state.get("route")
+    skills = route.get("skills") if isinstance(route, Mapping) else None
+    if not isinstance(skills, list) or not skills:
+        raise CurriculumBundleError("canonical interview route has no progression skills")
+    result: list[tuple[dict[str, object], str]] = []
+    for raw in skills:
+        if not isinstance(raw, Mapping):
+            raise CurriculumBundleError("canonical interview route skill is malformed")
+        ref = raw.get("skill_ref")
+        skill_id = ref.get("skill_id") if isinstance(ref, Mapping) else None
+        if not isinstance(skill_id, str):
+            raise CurriculumBundleError("canonical interview route skill identity is malformed")
+        result.append((dict(raw), skill_id))
+    return tuple(result)
+
+
+def _progression_target(item: Mapping[str, object]) -> ProgressionTarget:
+    ref = item.get("skill_ref")
+    if not isinstance(ref, Mapping):
+        raise CurriculumBundleError("canonical interview target is malformed")
+    return ProgressionTarget(
+        unit_id=str(item["unit_id"]),
+        section_id=str(item["section_id"]),
+        skill_ref=MappingProxyType({str(key): str(value) for key, value in ref.items()}),
+        requirement=str(item.get("requirement") or "required"),
+        depth_mode=str(item.get("depth_mode") or "learn"),
+    )
+
+
+def resolve_progression_target(
+    canonical_state: Mapping[str, object],
+    *,
+    intent: ProgressionIntent,
+    explicit_skill_id: str | None = None,
+    session_id: str = "",
+) -> ProgressionResolution:
+    """Resolve one deterministic instructional target without awarding mastery."""
+    if intent not in {"continue", "skip", "revisit", "practice"}:
+        raise ValueError("unsupported interview progression intent")
+    state = copy.deepcopy(dict(canonical_state))
+    route_items = _progression_route_items(state)
+    by_id = {skill_id: item for item, skill_id in route_items}
+    evidence = state.get("evidence")
+    if not isinstance(evidence, dict):
+        raise CurriculumBundleError("canonical interview evidence is malformed")
+
+    def skill_set(key: str) -> set[str]:
+        value = evidence.get(key)
+        return {item for item in value if isinstance(item, str)} if isinstance(value, list) else set()
+
+    ready = skill_set("ready")
+    exposed = skill_set("exposed")
+    weak = skill_set("weak")
+    due = skill_set("due_review")
+    commit_index = state.get("commit_index")
+    commit_index = commit_index if isinstance(commit_index, int) and commit_index >= 0 else 0
+    current_session = session_id or str(state.get("session_id") or "")
+    deferred_raw = state.get("deferred")
+    deferred = [dict(item) for item in deferred_raw if isinstance(item, Mapping)] if isinstance(deferred_raw, list) else []
+    deferred_by_id = {
+        str(item["skill_id"]): item
+        for item in deferred
+        if isinstance(item.get("skill_id"), str)
+    }
+    deferred_skill_id: str | None = None
+
+    cursor = state.get("cursor")
+    cursor_ref = cursor.get("skill_ref") if isinstance(cursor, Mapping) else None
+    cursor_skill = cursor_ref.get("skill_id") if isinstance(cursor_ref, Mapping) else None
+    if intent == "skip" and isinstance(cursor_skill, str) and cursor_skill in by_id:
+        deferred_skill_id = cursor_skill
+        deferred_by_id[cursor_skill] = {
+            "skill_id": cursor_skill,
+            "deferred_at_commit_index": commit_index,
+            "deferred_session_id": current_session,
+            "return_reason": "explicit_skip",
+        }
+        deferred = [
+            deferred_by_id[skill_id]
+            for _item, skill_id in route_items
+            if skill_id in deferred_by_id
+        ]
+        state["deferred"] = deferred
+
+    if intent == "revisit":
+        if explicit_skill_id not in by_id:
+            raise CurriculumBundleError("requested interview skill is absent from the route")
+        selected = by_id[str(explicit_skill_id)]
+        reason = "explicit_revisit"
+    elif intent == "practice":
+        selected = next((item for item, skill_id in route_items if skill_id in exposed), None)
+        if selected is None:
+            return ProgressionResolution(state, None, "caught_up", caught_up=True)
+        return ProgressionResolution(state, _progression_target(selected), "practice_now")
+    else:
+        excluded = {deferred_skill_id} if deferred_skill_id else set()
+        selected = next(
+            (item for item, skill_id in route_items if skill_id in due and skill_id not in excluded),
+            None,
+        )
+        reason = "due_review"
+        if selected is None:
+            selected = next(
+                (
+                    item
+                    for item, skill_id in route_items
+                    if skill_id in weak
+                    and item.get("requirement") == "required"
+                    and skill_id not in excluded
+                ),
+                None,
+            )
+            reason = "weakened_required"
+        if selected is None:
+            selected = next(
+                (
+                    item
+                    for item, skill_id in route_items
+                    if skill_id in deferred_by_id
+                    and skill_id not in excluded
+                    and (
+                        commit_index
+                        > int(deferred_by_id[skill_id].get("deferred_at_commit_index") or 0)
+                        or current_session
+                        != str(deferred_by_id[skill_id].get("deferred_session_id") or "")
+                    )
+                ),
+                None,
+            )
+            reason = "deferred_return"
+        if selected is None:
+            selected = next(
+                (
+                    item
+                    for item, skill_id in route_items
+                    if item.get("requirement") == "required"
+                    and skill_id not in ready | exposed | set(deferred_by_id) | excluded
+                ),
+                None,
+            )
+            reason = "uncovered_required"
+        if selected is None:
+            selected = next(
+                (
+                    item
+                    for item, skill_id in route_items
+                    if item.get("requirement") == "optional"
+                    and skill_id not in ready | exposed | set(deferred_by_id) | excluded
+                ),
+                None,
+            )
+            reason = "uncovered_optional"
+        if selected is None:
+            return ProgressionResolution(
+                state,
+                None,
+                "caught_up",
+                caught_up=True,
+                deferred_skill_id=deferred_skill_id,
+            )
+
+    target = _progression_target(selected)
+    state["cursor"] = {
+        "unit_id": target.unit_id,
+        "section_id": target.section_id,
+        "skill_ref": dict(target.skill_ref),
+        "instruction_status": "reserved",
+    }
+    state["session_id"] = current_session
+    return ProgressionResolution(
+        state,
+        target,
+        reason,
+        deferred_skill_id=deferred_skill_id,
+    )
+
+
+def record_progression_commit(
+    canonical_state: Mapping[str, object], skill_id: str
+) -> dict[str, object]:
+    """Record target-specific exposure after its learner-visible turn commits."""
+    state = copy.deepcopy(dict(canonical_state))
+    evidence = state.get("evidence")
+    if not isinstance(evidence, dict):
+        raise CurriculumBundleError("canonical interview evidence is malformed")
+    exposed = evidence.get("exposed")
+    values = {item for item in exposed if isinstance(item, str)} if isinstance(exposed, list) else set()
+    values.add(skill_id)
+    evidence["exposed"] = sorted(values)
+    deferred = state.get("deferred")
+    if isinstance(deferred, list):
+        state["deferred"] = [
+            item
+            for item in deferred
+            if not isinstance(item, Mapping) or item.get("skill_id") != skill_id
+        ]
+    commit_index = state.get("commit_index")
+    state["commit_index"] = (
+        commit_index + 1 if isinstance(commit_index, int) and commit_index >= 0 else 1
+    )
+    cursor = state.get("cursor")
+    if isinstance(cursor, dict):
+        cursor["instruction_status"] = "covered"
+    return state
 
 
 def _canonical_fingerprint(value: object) -> str:
@@ -494,6 +738,7 @@ def compatibility_projection(state: Mapping[str, object]) -> dict[str, object]:
     unit_indexes: dict[str, int] = {}
     current_unit_id = cursor.get("unit_id")
     current_section_id = cursor.get("section_id")
+    current_skill_ref = cursor.get("skill_ref")
     current_unit = 1
     current_slide = 1
     current_focus = ""
@@ -520,7 +765,21 @@ def compatibility_projection(state: Mapping[str, object]) -> dict[str, object]:
         ref = item.get("skill_ref")
         skill_id = ref.get("skill_id") if isinstance(ref, Mapping) else ""
         concepts.append({"id": skill_id, "label": str(item.get("section_label") or skill_id)})
-        if unit_id == current_unit_id and item.get("section_id") == current_section_id:
+        if (
+            unit_id == current_unit_id
+            and item.get("section_id") == current_section_id
+            and isinstance(current_skill_ref, Mapping)
+            and isinstance(ref, Mapping)
+            and all(
+                ref.get(key) == current_skill_ref.get(key)
+                for key in (
+                    "graph_id",
+                    "graph_version",
+                    "mastery_policy_version",
+                    "skill_id",
+                )
+            )
+        ):
             current_unit = int(unit["unit"])
             current_slide = int(unit["slide_count"])
             current_focus = str(item.get("section_label") or skill_id)

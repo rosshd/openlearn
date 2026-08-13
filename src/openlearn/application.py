@@ -104,6 +104,45 @@ class InterviewCurriculumPosition:
     review_reason: str | None = None
 
 
+def advance_interview_curriculum(
+    slug: str,
+    text: str,
+    *,
+    intent: Literal["continue", "skip", "practice"] = "continue",
+    submission_id: str | None = None,
+    expected_revision: int | None = None,
+    model: str | None = None,
+):
+    """Run one shared deterministic interview-curriculum navigation turn."""
+    from openlearn import tutor_service
+
+    normalized = {
+        "skip": "Skip for now and continue to the next curriculum concept.",
+        "practice": "Practice now using a covered curriculum concept.",
+    }.get(intent, text)
+    return tutor_service.submit_turn(
+        slug,
+        normalized,
+        intent="navigation",
+        submission_id=submission_id,
+        expected_revision=expected_revision,
+        model=model,
+        progression_intent=intent,
+    )
+
+
+def resume_interview_progression(slug: str, *, model: str | None = None):
+    from openlearn import tutor_service
+
+    return tutor_service.resume_interview_progression(slug, model=model)
+
+
+def cancel_interview_progression(slug: str, submission_id: str) -> None:
+    from openlearn import tutor_service
+
+    tutor_service.cancel_interview_progression(slug, submission_id)
+
+
 @dataclass(frozen=True)
 class TemplateSummary:
     template_id: str

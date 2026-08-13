@@ -310,3 +310,122 @@ def test_materialization_is_deterministic_and_rejects_invalid_inputs() -> None:
         _adaptive_route(pacing_override="fast")
     with pytest.raises(ValueError, match="confidence"):
         _adaptive_route(ratings={"graphs": 6})
+
+
+def _canonical_progression_state() -> dict[str, object]:
+    bundle = interview_curriculum.load_default_bundle()
+    route = _adaptive_route(interview_date="").to_dict()
+    return interview_curriculum.build_canonical_curriculum_state(
+        bundle,
+        route,
+        metadata={},
+        dynamic_state={},
+        source_fingerprint="source",
+        reconciliation_id="reconcile",
+    )
+
+
+def test_progression_resolver_selects_uncovered_and_due_targets_deterministically() -> None:
+    state = _canonical_progression_state()
+
+    first = interview_curriculum.resolve_progression_target(state, intent="continue")
+    assert first.target is not None
+    assert first.target.skill_id == "concept.arrays-strings"
+    assert first.reason == "uncovered_required"
+
+    evidence = state["evidence"]
+    assert isinstance(evidence, dict)
+    evidence["exposed"] = ["concept.arrays-strings"]
+    evidence["due_review"] = ["concept.arrays-strings"]
+    due = interview_curriculum.resolve_progression_target(state, intent="continue")
+    assert due.target is not None
+    assert due.target.skill_id == "concept.arrays-strings"
+    assert due.reason == "due_review"
+
+
+def test_skip_defers_without_mastery_and_returns_only_after_another_commit() -> None:
+    state = _canonical_progression_state()
+
+    skipped = interview_curriculum.resolve_progression_target(state, intent="skip")
+    assert skipped.target is not None
+    assert skipped.target.skill_id == "concept.hashing"
+    assert skipped.deferred_skill_id == "concept.arrays-strings"
+    assert "concept.arrays-strings" not in skipped.state["evidence"]["ready"]
+    assert "concept.arrays-strings" not in skipped.state["evidence"]["exposed"]
+
+    before_commit = interview_curriculum.resolve_progression_target(
+        skipped.state, intent="continue"
+    )
+    assert before_commit.target is not None
+    assert before_commit.target.skill_id != "concept.arrays-strings"
+
+    after_commit = interview_curriculum.record_progression_commit(
+        skipped.state, "concept.hashing"
+    )
+    returned = interview_curriculum.resolve_progression_target(
+        after_commit, intent="continue"
+    )
+    assert returned.target is not None
+    assert returned.target.skill_id == "concept.arrays-strings"
+    assert returned.reason == "deferred_return"
+
+
+def test_instructional_commit_does_not_clear_due_or_weak_evidence() -> None:
+    state = _canonical_progression_state()
+    evidence = state["evidence"]
+    assert isinstance(evidence, dict)
+    evidence["due_review"] = ["concept.arrays-strings"]
+    evidence["weak"] = ["concept.arrays-strings"]
+
+    committed = interview_curriculum.record_progression_commit(
+        state, "concept.arrays-strings"
+    )
+
+    assert committed["evidence"]["due_review"] == ["concept.arrays-strings"]
+    assert committed["evidence"]["weak"] == ["concept.arrays-strings"]
+
+
+def test_caught_up_practice_selects_covered_skill_without_moving_forward_cursor() -> None:
+    state = _canonical_progression_state()
+    route = state["route"]
+    assert isinstance(route, dict)
+    skills = route["skills"]
+    assert isinstance(skills, list)
+    skill_ids = [item["skill_ref"]["skill_id"] for item in skills]
+    state["evidence"] = {
+        "ready": list(skill_ids),
+        "exposed": list(skill_ids),
+        "weak": [],
+        "due_review": [],
+    }
+    original_cursor = deepcopy(state["cursor"])
+
+    caught_up = interview_curriculum.resolve_progression_target(state, intent="continue")
+    assert caught_up.target is None
+    assert caught_up.caught_up is True
+
+    practice = interview_curriculum.resolve_progression_target(state, intent="practice")
+    assert practice.target is not None
+    assert practice.reason == "practice_now"
+    assert practice.state["cursor"] == original_cursor
+
+
+def test_compatibility_projection_uses_full_cursor_identity_within_one_section() -> None:
+    state = _canonical_progression_state()
+    route = state["route"]
+    assert isinstance(route, dict)
+    skills = route["skills"]
+    assert isinstance(skills, list)
+    first = skills[0]
+    second = skills[1]
+    assert first["section_id"] == second["section_id"]
+    state["cursor"] = {
+        "unit_id": first["unit_id"],
+        "section_id": first["section_id"],
+        "skill_ref": deepcopy(first["skill_ref"]),
+        "instruction_status": "uncovered",
+    }
+
+    projection = interview_curriculum.compatibility_projection(state)
+
+    assert projection["current_slide"] == 1

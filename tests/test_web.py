@@ -254,7 +254,9 @@ def test_interview_course_confidence_placement_resumes_and_builds_first_lesson(
     lesson = restarted_client.get(f"/courses/{body['slug']}")
     assert lesson.status_code == 200
     assert "Press Enter to continue" not in lesson.text
-    assert "Before writing code" in lesson.text
+    canonical = cli.load_state(body["slug"])["interview_curriculum"]
+    assert canonical["cursor"]["skill_ref"]["skill_id"] == "concept.arrays-strings"
+    assert "concept.arrays-strings" in canonical["evidence"]["exposed"]
     assert "Your next learning move" not in lesson.text
 
     profile = interview_prep.load_profile(cli.interview_profile_path(body["slug"]))

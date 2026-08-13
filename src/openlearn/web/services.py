@@ -788,6 +788,14 @@ class OpenLearnWebServices:
         initialization_id = initialization_id or _initialization_id_for_slug(slug)
         if initialization_id is None:
             return {"ok": False, "error": "Course initialization is unavailable."}
+        interview_course = cli.interview_profile_path(slug).exists()
+        if interview_course:
+            try:
+                application.prepare_interview_curriculum(
+                    slug, boundary="preparation"
+                )
+            except (cli.OpenLearnError, ValueError) as error:
+                return {"ok": False, "error": str(error)}
         existing_operation = tutor_service.operation_status(slug, initialization_id)
         if existing_operation is not None:
             result: dict[str, object] = {
@@ -803,10 +811,11 @@ class OpenLearnWebServices:
             operation = tutor_service.start_turn(
                 slug,
                 _course_initialization_prompt(slug),
-                intent="question",
+                intent=("navigation" if interview_course else "question"),
                 submission_id=initialization_id,
                 expected_revision=0,
                 model=config.configured_model(),
+                progression_intent=("continue" if interview_course else None),
             )
         except tutor_service.TutorOperationError:
             operation = tutor_service.operation_status(slug, initialization_id)
@@ -1359,12 +1368,15 @@ class OpenLearnWebServices:
             "stuck": "confusion",
             "skip": "navigation",
             "next": "navigation",
+            "practice": "navigation",
         }[request.intent]
         text = request.text.strip()
         if request.intent == "skip":
             text = "Skip this for now and continue with a useful next move."
         elif request.intent == "next":
             text = "Continue to the next useful concept."
+        elif request.intent == "practice":
+            text = "Practice now using a covered curriculum concept."
         try:
             result = tutor_service.start_turn(
                 slug,
@@ -1377,6 +1389,11 @@ class OpenLearnWebServices:
                     cli.SIDE_CHAT_SESSION_KIND
                     if request.intent in {"question", "stuck"}
                     else "chat"
+                ),
+                progression_intent=(
+                    request.intent
+                    if request.intent in {"skip", "practice"}
+                    else ("continue" if request.intent == "next" else None)
                 ),
             )
         except tutor_service.TutorConflictError as error:

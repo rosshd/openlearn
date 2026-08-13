@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import copy
+import json
 import threading
 import time
 from concurrent.futures import wait
@@ -9,7 +11,7 @@ from pathlib import Path
 from unittest import TestCase, mock
 from uuid import uuid4
 
-from openlearn import cli, tutor_service
+from openlearn import application, cli, interview_curriculum, tutor_service
 from openlearn.tutor_service import (
     TutorConflictError,
     TutorOperationError,
@@ -68,6 +70,22 @@ class TutorServiceTests(TestCase):
         }
         cli.save_state("web-tutor", state)
 
+    def _create_interview_course(self) -> str:
+        cli.cmd_new(
+            argparse.Namespace(
+                topic="Interview Curriculum",
+                goal="Prepare for technical interviews",
+                mastery_profile="efficient",
+                template=None,
+                interview_prep=True,
+            ),
+            output_func=lambda _text="": None,
+        )
+        application.prepare_interview_curriculum(
+            "interview-curriculum", boundary="resume"
+        )
+        return "interview-curriculum"
+
     def test_submit_turn_returns_structured_move_and_replays(self) -> None:
         submission_id = str(uuid4())
         first = submit_turn(
@@ -78,7 +96,7 @@ class TutorServiceTests(TestCase):
         )
         replay = submit_turn(
             "web-tutor",
-            "This text is ignored for an idempotent replay.",
+            "Explain normal mode.",
             submission_id=submission_id,
             expected_revision=0,
         )
@@ -92,6 +110,638 @@ class TutorServiceTests(TestCase):
         self.assertNotIn("preview", receipt)
         body = cli.read_topic("web-tutor").body
         self.assertEqual(body.count("Explain normal mode."), 1)
+
+    def test_same_submission_rejects_a_different_payload(self) -> None:
+        submission_id = str(uuid4())
+        submit_turn(
+            "web-tutor",
+            "Explain normal mode.",
+            submission_id=submission_id,
+            expected_revision=0,
+        )
+
+        with self.assertRaises(TutorConflictError, msg="idempotency payload changed"):
+            submit_turn(
+                "web-tutor",
+                "Explain insert mode instead.",
+                submission_id=submission_id,
+                expected_revision=0,
+            )
+
+    def test_interview_navigation_reserves_then_commits_two_revisions(self) -> None:
+        slug = self._create_interview_course()
+        submission_id = str(uuid4())
+        entered_provider = threading.Event()
+        release_provider = threading.Event()
+        original = cli.ask_topic
+
+        def blocked(*args: object, **kwargs: object) -> str:
+            entered_provider.set()
+            release_provider.wait(timeout=3)
+            return original(*args, **kwargs)
+
+        with mock.patch.object(cli, "ask_topic", side_effect=blocked):
+            pending = start_turn(
+                slug,
+                "Continue to the next concept.",
+                intent="navigation",
+                submission_id=submission_id,
+                expected_revision=0,
+            )
+            self.assertEqual(pending.status, "saved")
+            self.assertTrue(entered_provider.wait(timeout=3))
+            reserved = cli.load_state(slug)
+            self.assertEqual(
+                reserved["_openlearn_internal"]["course_revision"], 1
+            )
+            active = reserved["interview_curriculum"]["active_operation"]
+            self.assertEqual(active["submission_id"], submission_id)
+            self.assertEqual(active["status"], "reserved")
+            self.assertEqual(
+                active["target"]["skill_ref"]["skill_id"],
+                "concept.arrays-strings",
+            )
+            release_provider.set()
+            with tutor_service._FUTURES_GUARD:
+                future = tutor_service._FUTURES[(slug, submission_id)]
+            result = future.result(timeout=3)
+
+        self.assertEqual(result.status, "committed")
+        committed = cli.load_state(slug)
+        self.assertEqual(committed["_openlearn_internal"]["course_revision"], 2)
+        self.assertIsNone(committed["interview_curriculum"]["active_operation"])
+        self.assertIn(
+            "concept.arrays-strings",
+            committed["interview_curriculum"]["evidence"]["exposed"],
+        )
+        permanent = committed["_turn_receipts"][
+            f"operation_{submission_id.replace('-', '')}"
+        ]
+        self.assertEqual(permanent["status"], "committed")
+        self.assertNotIn("content", permanent["result"]["move"])
+        self.assertNotIn(
+            result.move.content,
+            json.dumps(permanent, sort_keys=True),
+        )
+        events = cli.load_event_log(cli.topic_events_path(slug))
+        progression_events = [
+            event
+            for event in events
+            if event.get("event_type") == "interview_curriculum_advanced"
+            and event.get("data", {}).get("submission_id") == submission_id
+        ]
+        self.assertEqual(len(progression_events), 1)
+        self.assertEqual(
+            progression_events[0]["data"]["skill_ref"]["skill_id"],
+            "concept.arrays-strings",
+        )
+
+        internal = committed["_openlearn_internal"]
+        internal["turn_results"] = {}
+        cli.save_state(slug, committed)
+        old = tutor_service.operation_result(slug, submission_id)
+        self.assertIsNotNone(old)
+        self.assertEqual(old.status, "committed")
+        self.assertEqual(old.move.content, result.move.content)
+
+    def test_interview_provider_failure_retries_the_same_reserved_target(self) -> None:
+        slug = self._create_interview_course()
+        submission_id = str(uuid4())
+        original = cli.ask_topic
+        with mock.patch.object(cli, "ask_topic", side_effect=RuntimeError("provider down")):
+            with self.assertRaises(TutorOperationError):
+                submit_turn(
+                    slug,
+                    "Continue to the next concept.",
+                    intent="navigation",
+                    submission_id=submission_id,
+                    expected_revision=0,
+                )
+        failed = cli.load_state(slug)
+        active = failed["interview_curriculum"]["active_operation"]
+        self.assertEqual(active["target"]["skill_ref"]["skill_id"], "concept.arrays-strings")
+        self.assertEqual(failed["_openlearn_internal"]["course_revision"], 1)
+
+        with mock.patch.object(cli, "ask_topic", wraps=original):
+            result = submit_turn(
+                slug,
+                "Continue to the next concept.",
+                intent="navigation",
+                submission_id=submission_id,
+                expected_revision=0,
+            )
+        self.assertEqual(result.status, "committed")
+        self.assertEqual(course_revision(slug), 2)
+
+    def test_skip_resumes_with_the_saved_progression_intent(self) -> None:
+        slug = self._create_interview_course()
+        submission_id = str(uuid4())
+        with mock.patch.object(cli, "ask_topic", side_effect=RuntimeError("provider down")):
+            with self.assertRaises(TutorOperationError):
+                submit_turn(
+                    slug,
+                    "Skip this skill for now.",
+                    intent="navigation",
+                    progression_intent="skip",
+                    submission_id=submission_id,
+                    expected_revision=0,
+                )
+        active = cli.load_state(slug)["interview_curriculum"]["active_operation"]
+        self.assertEqual(active["progression_intent"], "skip")
+        reserved_skill = active["target"]["skill_ref"]["skill_id"]
+
+        result = tutor_service.resume_interview_progression(slug)
+
+        self.assertEqual(result.status, "committed")
+        self.assertIn(
+            reserved_skill,
+            cli.load_state(slug)["interview_curriculum"]["evidence"]["exposed"],
+        )
+        self.assertNotIn(
+            "concept.arrays-strings",
+            cli.load_state(slug)["interview_curriculum"]["evidence"]["exposed"],
+        )
+
+    def test_generated_interview_response_reloads_without_provider_call(self) -> None:
+        slug = self._create_interview_course()
+        submission_id = str(uuid4())
+        tutor_service._reserve_interview_progression(
+            slug,
+            "Continue to the next concept.",
+            submission_id,
+            0,
+            "navigation",
+            "chat",
+            progression_intent="continue",
+        )
+        def save_generated(state: dict[str, object]) -> None:
+            canonical = state["interview_curriculum"]
+            canonical["active_operation"]["status"] = "generated"
+            canonical["active_operation"]["generated_response"] = (
+                "**Lesson:**\nArrays preserve order and support indexed traversal."
+            )
+            state["_openlearn_internal"]["active_turn"]["status"] = "generated"
+
+        cli.update_state_atomic(slug, save_generated)
+        persisted = tutor_service._interview_progression_state(slug)
+        self.assertEqual(
+            persisted["active_operation"]["generated_response"],
+            "**Lesson:**\nArrays preserve order and support indexed traversal.",
+        )
+
+        with mock.patch.object(cli, "generate_validated_tutor_answer") as provider:
+            result = submit_turn(
+                slug,
+                "Continue to the next concept.",
+                intent="navigation",
+                submission_id=submission_id,
+                expected_revision=1,
+            )
+
+        provider.assert_not_called()
+        self.assertEqual(result.status, "committed")
+        self.assertIn("Arrays preserve order", result.move.content)
+        self.assertEqual(course_revision(slug), 2)
+
+    def test_failure_after_generated_persistence_retries_without_provider(self) -> None:
+        slug = self._create_interview_course()
+        submission_id = str(uuid4())
+        original_commit = cli._commit_projected_turn
+        with mock.patch.object(
+            cli, "_commit_projected_turn", side_effect=RuntimeError("crash after generated")
+        ):
+            with self.assertRaises(TutorOperationError):
+                submit_turn(
+                    slug,
+                    "Continue to the next concept.",
+                    intent="navigation",
+                    submission_id=submission_id,
+                    expected_revision=0,
+                )
+        interrupted = cli.load_state(slug)
+        operation = interrupted["interview_curriculum"]["active_operation"]
+        self.assertEqual(operation["status"], "generated")
+        self.assertIsInstance(operation["generated_response"], str)
+        self.assertEqual(course_revision(slug), 1)
+
+        with (
+            mock.patch.object(cli, "_commit_projected_turn", wraps=original_commit),
+            mock.patch.object(cli, "generate_validated_tutor_answer") as provider,
+        ):
+            result = submit_turn(
+                slug,
+                "Continue to the next concept.",
+                intent="navigation",
+                submission_id=submission_id,
+                expected_revision=1,
+            )
+        provider.assert_not_called()
+        self.assertEqual(result.status, "committed")
+        self.assertEqual(course_revision(slug), 2)
+
+    def test_explicit_cancellation_clears_reservation_without_progress(self) -> None:
+        slug = self._create_interview_course()
+        submission_id = str(uuid4())
+        before = copy.deepcopy(cli.load_state(slug)["interview_curriculum"])
+        tutor_service._reserve_interview_progression(
+            slug,
+            "Leave this one and keep going.",
+            submission_id,
+            0,
+            "navigation",
+            "chat",
+            progression_intent="skip",
+        )
+
+        tutor_service.cancel_interview_progression(slug, submission_id)
+
+        state = cli.load_state(slug)
+        self.assertIsNone(state["interview_curriculum"]["active_operation"])
+        self.assertEqual(state["interview_curriculum"]["cursor"], before["cursor"])
+        self.assertEqual(
+            state["interview_curriculum"].get("deferred"), before.get("deferred")
+        )
+        self.assertEqual(course_revision(slug), 1)
+        self.assertNotIn(
+            "concept.arrays-strings",
+            state["interview_curriculum"]["evidence"]["exposed"],
+        )
+        self.assertNotIn(
+            "concept.arrays-strings",
+            state["interview_curriculum"]["evidence"]["ready"],
+        )
+        projection = interview_curriculum.compatibility_projection(
+            state["interview_curriculum"]
+        )
+        metadata = cli.read_topic(slug).metadata
+        self.assertEqual(metadata["current_unit"], projection["current_unit"])
+        self.assertEqual(metadata["current_slide"], projection["current_slide"])
+
+    def test_practice_now_reserves_covered_skill_without_moving_cursor(self) -> None:
+        slug = self._create_interview_course()
+        state = cli.load_state(slug)
+        canonical = state["interview_curriculum"]
+        route = canonical["route"]["skills"]
+        skill_ids = [item["skill_ref"]["skill_id"] for item in route]
+        canonical["evidence"] = {
+            "ready": list(skill_ids),
+            "exposed": list(skill_ids),
+            "weak": [],
+            "due_review": [],
+        }
+        original_cursor = copy.deepcopy(canonical["cursor"])
+        cli.update_state_atomic(
+            slug,
+            lambda current: current.__setitem__("interview_curriculum", canonical),
+        )
+
+        submission_id = str(uuid4())
+        tutor_service._reserve_interview_progression(
+            slug,
+            "Practice now using a covered curriculum concept.",
+            submission_id,
+            0,
+            "navigation",
+            "chat",
+            progression_intent="practice",
+        )
+
+        reserved = cli.load_state(slug)["interview_curriculum"]
+        self.assertEqual(reserved["active_operation"]["reason"], "practice_now")
+        self.assertEqual(reserved["cursor"], original_cursor)
+
+    def test_interview_reservation_releases_store_locks_before_provider(self) -> None:
+        slug = self._create_interview_course()
+        submission_id = str(uuid4())
+        provider_started = threading.Event()
+        release_provider = threading.Event()
+        state_writer_done = threading.Event()
+
+        def blocked_provider(*_args: object, **_kwargs: object) -> str:
+            provider_started.set()
+            release_provider.wait(timeout=3)
+            raise RuntimeError("stop after lock proof")
+
+        with mock.patch.object(cli, "ask_topic", side_effect=blocked_provider):
+            start_turn(
+                slug,
+                "Continue to the next concept.",
+                intent="navigation",
+                submission_id=submission_id,
+                expected_revision=0,
+            )
+            self.assertTrue(provider_started.wait(timeout=3))
+
+            writer = threading.Thread(
+                target=lambda: (
+                    cli.update_state_atomic(
+                        slug, lambda state: state.__setitem__("lock_probe", True)
+                    ),
+                    state_writer_done.set(),
+                )
+            )
+            writer.start()
+            self.assertTrue(state_writer_done.wait(timeout=1))
+            release_provider.set()
+            writer.join(timeout=1)
+
+        with tutor_service._FUTURES_GUARD:
+            future = tutor_service._FUTURES.get((slug, submission_id))
+        if future is not None:
+            with self.assertRaises(TutorOperationError):
+                future.result(timeout=3)
+
+    def test_failure_after_saved_intent_resumes_same_payload_then_reserves(self) -> None:
+        slug = self._create_interview_course()
+        submission_id = str(uuid4())
+
+        with mock.patch.object(
+            tutor_service,
+            "_progression_checkpoint",
+            side_effect=lambda stage: (
+                (_ for _ in ()).throw(RuntimeError("crash after saved"))
+                if stage == "after_saved"
+                else None
+            ),
+        ):
+            with self.assertRaises(RuntimeError, msg="crash after saved"):
+                tutor_service._reserve_interview_progression(
+                    slug,
+                    "Continue to the next concept.",
+                    submission_id,
+                    0,
+                    "navigation",
+                    "chat",
+                    progression_intent="continue",
+                )
+        saved = cli.load_state(slug)
+        self.assertEqual(saved["_openlearn_internal"]["course_revision"], 0)
+        self.assertEqual(saved["_openlearn_internal"]["active_turn"]["status"], "saved")
+        self.assertIsNone(saved["interview_curriculum"]["active_operation"])
+
+        revision, replay = tutor_service._reserve_interview_progression(
+            slug,
+            "Continue to the next concept.",
+            submission_id,
+            0,
+            "navigation",
+            "chat",
+            progression_intent="continue",
+        )
+        self.assertIsNone(replay)
+        self.assertEqual(revision, 1)
+        reserved = cli.load_state(slug)
+        self.assertEqual(
+            reserved["interview_curriculum"]["active_operation"]["target"]["skill_ref"][
+                "skill_id"
+            ],
+            "concept.arrays-strings",
+        )
+
+    def test_failure_after_reservation_reloads_exact_target(self) -> None:
+        slug = self._create_interview_course()
+        submission_id = str(uuid4())
+        with mock.patch.object(
+            tutor_service,
+            "_progression_checkpoint",
+            side_effect=lambda stage: (
+                (_ for _ in ()).throw(RuntimeError("crash after reserved"))
+                if stage == "after_reserved"
+                else None
+            ),
+        ):
+            with self.assertRaises(RuntimeError, msg="crash after reserved"):
+                tutor_service._reserve_interview_progression(
+                    slug,
+                    "Continue to the next concept.",
+                    submission_id,
+                    0,
+                    "navigation",
+                    "chat",
+                    progression_intent="continue",
+                )
+        interrupted = cli.load_state(slug)
+        active = interrupted["interview_curriculum"]["active_operation"]
+        self.assertEqual(active["status"], "reserved")
+        self.assertEqual(active["target"]["skill_ref"]["skill_id"], "concept.arrays-strings")
+        self.assertEqual(course_revision(slug), 1)
+
+        revision, replay = tutor_service._reserve_interview_progression(
+            slug,
+            "Continue to the next concept.",
+            submission_id,
+            1,
+            "navigation",
+            "chat",
+            progression_intent="continue",
+        )
+        self.assertIsNone(replay)
+        self.assertEqual(revision, 1)
+        resumed = cli.load_state(slug)["interview_curriculum"]["active_operation"]
+        self.assertEqual(resumed["target"], active["target"])
+        metadata = cli.read_topic(slug).metadata
+        projection = interview_curriculum.compatibility_projection(
+            cli.load_state(slug)["interview_curriculum"]
+        )
+        self.assertEqual(metadata["current_unit"], projection["current_unit"])
+        self.assertEqual(metadata["current_slide"], projection["current_slide"])
+
+    def test_caught_up_navigation_clears_saved_operation_then_practice_commits(self) -> None:
+        slug = self._create_interview_course()
+        state = cli.load_state(slug)
+        canonical = state["interview_curriculum"]
+        skills = canonical["route"]["skills"]
+        skill_ids = [item["skill_ref"]["skill_id"] for item in skills]
+        canonical["evidence"] = {
+            "ready": list(skill_ids),
+            "exposed": list(skill_ids),
+            "weak": [],
+            "due_review": [],
+        }
+        cli.update_state_atomic(
+            slug,
+            lambda current: current.__setitem__("interview_curriculum", canonical),
+        )
+
+        caught_up = submit_turn(
+            slug,
+            "Continue to the next concept.",
+            intent="navigation",
+            progression_intent="continue",
+            submission_id=str(uuid4()),
+            expected_revision=0,
+        )
+        after = cli.load_state(slug)
+        self.assertEqual(caught_up.move.kind, "caught_up")
+        self.assertIsNone(after["_openlearn_internal"].get("active_turn"))
+        self.assertIsNone(after["interview_curriculum"]["active_operation"])
+        self.assertNotIn("pending_learner_prompt", after)
+        caught_id = caught_up.submission_id
+        after["_openlearn_internal"]["turn_results"] = {
+            str(uuid4()): {"placeholder": index} for index in range(51)
+        }
+        cli.save_state(slug, after)
+        replay = tutor_service.operation_result(slug, caught_id)
+        self.assertEqual(replay, caught_up)
+        with self.assertRaises(TutorConflictError):
+            submit_turn(
+                slug,
+                "Use this reused ID for a different action.",
+                intent="navigation",
+                progression_intent="continue",
+                submission_id=caught_id,
+                expected_revision=0,
+            )
+
+        practiced = submit_turn(
+            slug,
+            "Practice now.",
+            intent="navigation",
+            progression_intent="practice",
+            submission_id=str(uuid4()),
+            expected_revision=0,
+        )
+        self.assertEqual(practiced.status, "committed")
+        self.assertEqual(course_revision(slug), 2)
+
+    def test_side_chat_commits_while_progression_provider_is_blocked(self) -> None:
+        slug = self._create_interview_course()
+        progression_started = threading.Event()
+        release_progression = threading.Event()
+        side_done = threading.Event()
+        original = cli.ask_topic
+
+        def controlled(*args: object, **kwargs: object) -> str:
+            if kwargs.get("session_kind") != cli.SIDE_CHAT_SESSION_KIND:
+                progression_started.set()
+                release_progression.wait(timeout=3)
+                raise RuntimeError("end blocked progression")
+            return original(*args, **kwargs)
+
+        with mock.patch.object(cli, "ask_topic", side_effect=controlled):
+            progression_id = str(uuid4())
+            start_turn(
+                slug,
+                "Continue.",
+                intent="navigation",
+                progression_intent="continue",
+                submission_id=progression_id,
+                expected_revision=0,
+            )
+            self.assertTrue(progression_started.wait(timeout=2))
+            side_result: list[object] = []
+
+            def side_chat() -> None:
+                side_result.append(
+                    submit_turn(
+                        slug,
+                        "Why does this matter?",
+                        intent="question",
+                        submission_id=str(uuid4()),
+                        expected_revision=1,
+                        session_kind=cli.SIDE_CHAT_SESSION_KIND,
+                    )
+                )
+                side_done.set()
+
+            thread = threading.Thread(target=side_chat)
+            thread.start()
+            self.assertTrue(side_done.wait(timeout=1))
+            self.assertEqual(side_result[0].status, "committed")
+            self.assertEqual(course_revision(slug), 1)
+            release_progression.set()
+            thread.join(timeout=2)
+
+    def test_side_chat_commits_after_navigation_against_its_captured_lesson(self) -> None:
+        slug = self._create_interview_course()
+        visible = "**Lesson:**\nOriginal visible lesson."
+        cli.append_session(cli.read_topic(slug), "chat", "Begin", visible)
+        side_entered = threading.Event()
+        release_side = threading.Event()
+        captured: dict[str, str] = {}
+        original = cli.ask_topic
+
+        def delayed_side(*args: object, **kwargs: object) -> str:
+            if kwargs.get("session_kind") == cli.SIDE_CHAT_SESSION_KIND:
+                side_entered.set()
+                release_side.wait(timeout=3)
+            return original(*args, **kwargs)
+
+        def generated(_topic: object, prompt: str, *_args: object, **_kwargs: object) -> str:
+            if "Why this lesson?" in prompt:
+                captured["side_prompt"] = prompt
+            return "**Lesson:** Mock reply."
+
+        with (
+            mock.patch.object(cli, "ask_topic", side_effect=delayed_side),
+            mock.patch.object(cli, "generate_validated_tutor_answer", side_effect=generated),
+        ):
+            side_id = str(uuid4())
+            start_turn(
+                slug,
+                "Why this lesson?",
+                intent="question",
+                submission_id=side_id,
+                expected_revision=0,
+                session_kind=cli.SIDE_CHAT_SESSION_KIND,
+            )
+            self.assertTrue(side_entered.wait(timeout=2))
+            navigation = submit_turn(
+                slug,
+                "Continue.",
+                intent="navigation",
+                progression_intent="continue",
+                submission_id=str(uuid4()),
+                expected_revision=0,
+            )
+            self.assertEqual(navigation.status, "committed")
+            release_side.set()
+            with tutor_service._FUTURES_GUARD:
+                future = tutor_service._FUTURES[(slug, side_id)]
+            side = future.result(timeout=3)
+
+        self.assertEqual(side.status, "committed")
+        self.assertEqual(course_revision(slug), 2)
+        self.assertIn("Original visible lesson", captured["side_prompt"])
+
+    def test_tampered_permanent_progression_receipt_fails_closed(self) -> None:
+        slug = self._create_interview_course()
+        submission_id = str(uuid4())
+        submit_turn(
+            slug,
+            "Continue.",
+            intent="navigation",
+            progression_intent="continue",
+            submission_id=submission_id,
+            expected_revision=0,
+        )
+
+        def tamper(state: dict[str, object]) -> None:
+            state["_openlearn_internal"]["turn_results"] = {}
+            receipt = state["_turn_receipts"][
+                f"operation_{submission_id.replace('-', '')}"
+            ]
+            receipt["target"]["skill_ref"]["skill_id"] = "pattern.sliding-window"
+
+        cli.update_state_atomic(slug, tamper)
+        with self.assertRaises(cli.OpenLearnError, msg="receipt integrity"):
+            tutor_service.operation_result(slug, submission_id)
+
+    def test_explicit_progression_intent_does_not_parse_skip_from_prompt(self) -> None:
+        slug = self._create_interview_course()
+        submission_id = str(uuid4())
+        tutor_service._reserve_interview_progression(
+            slug,
+            "Explain why we should not skip prerequisite reasoning.",
+            submission_id,
+            0,
+            "navigation",
+            "chat",
+            progression_intent="continue",
+        )
+        active = cli.load_state(slug)["interview_curriculum"]["active_operation"]
+        self.assertEqual(active["target"]["skill_ref"]["skill_id"], "concept.arrays-strings")
+        self.assertIsNone(active["deferred_skill_id"])
 
     def test_running_turn_publishes_stream_preview_without_persisting_tokens(self) -> None:
         started = threading.Event()
@@ -145,6 +795,7 @@ class TutorServiceTests(TestCase):
         )
 
         self.assertEqual(result.status, "committed")
+        self.assertEqual(course_revision("web-tutor"), 0)
         topic = cli.read_topic("web-tutor")
         _body, log = cli.split_session_log(topic.body)
         self.assertEqual(cli.session_entries(log)[-1]["kind"], "side_chat")
@@ -368,6 +1019,52 @@ class TutorServiceTests(TestCase):
         self.assertIsNotNone(recovered)
         self.assertEqual(recovered.status, "generating")
         self.assertIsNone(recovered.error_code)
+
+    def test_polling_fresh_other_process_owner_does_not_orphan_operation(self) -> None:
+        submission_id = str(uuid4())
+        self._persist_active_turn(submission_id, status="reserved")
+        state = cli.load_state("web-tutor")
+        active = state["_openlearn_internal"]["active_turn"]
+        active["owner_pid"] = 4242
+        cli.save_state("web-tutor", state)
+
+        with (
+            mock.patch("openlearn.tutor_service._future_active", return_value=False),
+            mock.patch("os.kill") as process_alive,
+        ):
+            current = operation_status("web-tutor", submission_id)
+
+        process_alive.assert_called_once_with(4242, 0)
+        self.assertIsNotNone(current)
+        self.assertEqual(current.status, "reserved")
+        self.assertIsNone(current.error_code)
+
+    def test_explicit_resume_does_not_adopt_live_other_process_owner(self) -> None:
+        slug = self._create_interview_course()
+        submission_id = str(uuid4())
+        tutor_service._reserve_interview_progression(
+            slug,
+            "Continue to the next concept.",
+            submission_id,
+            0,
+            "navigation",
+            "chat",
+            progression_intent="continue",
+        )
+        cli.update_state_atomic(
+            slug,
+            lambda state: state["_openlearn_internal"]["active_turn"].__setitem__(
+                "owner_pid", 4242
+            ),
+        )
+
+        with mock.patch("os.kill") as process_alive:
+            with self.assertRaises(TutorConflictError, msg="still running"):
+                tutor_service.resume_interview_progression(slug)
+
+        process_alive.assert_called_once_with(4242, 0)
+        active = cli.load_state(slug)["interview_curriculum"]["active_operation"]
+        self.assertEqual(active["submission_id"], submission_id)
 
     def test_polling_keeps_blocked_live_worker_active_until_provider_returns(self) -> None:
         submission_id = str(uuid4())

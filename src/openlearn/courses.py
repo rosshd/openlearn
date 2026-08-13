@@ -295,6 +295,12 @@ def _position_from_canonical(canonical: dict[str, object]) -> dict[str, object]:
     if not isinstance(ref, dict) or not isinstance(ref.get("skill_id"), str):
         raise ValueError("canonical interview curriculum cursor is malformed")
     skill_id = str(ref["skill_id"])
+    identity_keys = (
+        "graph_id",
+        "graph_version",
+        "mastery_policy_version",
+        "skill_id",
+    )
     skills = route.get("skills")
     selected = (
         next(
@@ -303,7 +309,7 @@ def _position_from_canonical(canonical: dict[str, object]) -> dict[str, object]:
                 for item in skills
                 if isinstance(item, dict)
                 and isinstance(item.get("skill_ref"), dict)
-                and item["skill_ref"].get("skill_id") == skill_id
+                and all(item["skill_ref"].get(key) == ref.get(key) for key in identity_keys)
             ),
             None,
         )
