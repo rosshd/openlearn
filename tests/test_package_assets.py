@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib.util
 import json
 import re
+import subprocess
+import sys
 import tempfile
 import tomllib
 import unittest
@@ -32,6 +34,43 @@ def _wheel(path: Path, *, extra: tuple[str, bytes] | None = None) -> None:
 
 
 class ReleaseArtifactPolicyTests(unittest.TestCase):
+    def test_built_wheel_contains_every_versioned_interview_asset(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            output = Path(raw)
+            subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pip",
+                    "wheel",
+                    ".",
+                    "--no-deps",
+                    "--no-build-isolation",
+                    "--wheel-dir",
+                    str(output),
+                ],
+                cwd=REPOSITORY,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            wheel = next(output.glob("*.whl"))
+            with ZipFile(wheel) as archive:
+                packaged = set(archive.namelist())
+
+        self.assertIn(
+            "openlearn/interview_curricula/technical-interview-v1.json",
+            packaged,
+        )
+        self.assertIn(
+            "openlearn/interview_skill_graphs/coding-interview-v1.json",
+            packaged,
+        )
+        self.assertIn(
+            "openlearn/interview_skill_graphs/technical-interview-supplement-v1.json",
+            packaged,
+        )
+
     def test_installed_web_smoke_bootstraps_session_before_namespaced_reads(self) -> None:
         class Response:
             status = 200

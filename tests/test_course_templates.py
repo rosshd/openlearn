@@ -55,6 +55,20 @@ class CourseTemplateTests(unittest.TestCase):
 
         self.assertEqual(template.entry_mode, "interview_prep")
 
+    def test_technical_interview_template_projects_its_versioned_bundle(self) -> None:
+        self.resource_patch.stop()
+        try:
+            template = course_templates.load_course_template("technical-interview-prep")
+        finally:
+            self.resource_patch.start()
+
+        self.assertIsNotNone(template.curriculum_bundle)
+        assert template.curriculum_bundle is not None
+        self.assertEqual(template.curriculum_bundle.bundle_id, "technical-interview")
+        self.assertEqual(template.curriculum_bundle.bundle_version, "1.0.0")
+        self.assertEqual(template.units[0], "Linear Foundations: Arrays and Hashing")
+        self.assertNotIn("Interview Problem Solving", template.units)
+
     def test_rejects_unknown_or_malformed_entry_mode(self) -> None:
         for entry_mode in ("quiz", " interview_prep", 1, ""):
             with self.subTest(entry_mode=entry_mode):

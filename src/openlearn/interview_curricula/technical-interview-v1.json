@@ -1,0 +1,638 @@
+{
+  "schema_version": 1,
+  "bundle_id": "technical-interview",
+  "bundle_version": "1.0.0",
+  "graphs": [
+    {
+      "alias": "coding-v1",
+      "graph_id": "coding-interview",
+      "graph_version": "1.0.0",
+      "mastery_policy_version": "interview-mastery-v1",
+      "resource": "coding-interview-v1.json"
+    },
+    {
+      "alias": "supplement-v1",
+      "graph_id": "technical-interview-supplement",
+      "graph_version": "1.0.0",
+      "mastery_policy_version": "interview-mastery-v1",
+      "resource": "technical-interview-supplement-v1.json"
+    }
+  ],
+  "confidence_mapping": {
+    "1": "learn",
+    "2": "learn",
+    "3": "practice",
+    "4": "review",
+    "5": "verify"
+  },
+  "legacy_aliases": {
+    "Interview Problem Solving": "arrays-and-hashing",
+    "Complexity and Tradeoffs": "constraints-and-complexity",
+    "Arrays and Hashing": "arrays-and-hashing",
+    "Sliding Window Foundations": "pointer-and-window-invariants",
+    "Two Pointers": "pointer-and-window-invariants",
+    "Stacks and Queues": "linked-stacks-queues",
+    "Linked Lists": "linked-stacks-queues",
+    "Trees and Graphs": "trees-heaps",
+    "Backtracking and Dynamic Programming": "recursive-search",
+    "Timed Interview Practice": "greedy-and-dp"
+  },
+  "units": [
+    {
+      "id": "coding.linear-foundations",
+      "label": "Linear Foundations",
+      "sections": [
+        {
+          "id": "arrays-and-hashing",
+          "label": "Arrays and Hashing",
+          "skill_refs": [
+            {"graph": "coding-v1", "skill_id": "concept.arrays-strings"},
+            {"graph": "coding-v1", "skill_id": "concept.hashing"}
+          ],
+          "applicability": {
+            "required_for": ["coding", "balanced", "system-design"],
+            "optional_for": [],
+            "minimum_required_level": null
+          },
+          "embedded_habit": "Clarify input and output before choosing indexed traversal or hashing.",
+          "python_hooks": ["indexed traversal", "dictionaries", "sets", "counting", "enumerate"],
+          "embedded_skill_refs": [
+            {"graph": "coding-v1", "skill_id": "communication.problem-clarification"},
+            {"graph": "coding-v1", "skill_id": "process.edge-case-design"}
+          ]
+        },
+        {
+          "id": "constraints-and-complexity",
+          "label": "Constraints and Complexity",
+          "skill_refs": [
+            {"graph": "coding-v1", "skill_id": "concept.constraint-reading"},
+            {"graph": "coding-v1", "skill_id": "concept.complexity-analysis"}
+          ],
+          "applicability": {
+            "required_for": ["coding", "balanced", "system-design"],
+            "optional_for": [],
+            "minimum_required_level": null
+          },
+          "embedded_habit": "State viable complexity before implementation and summarize time and space afterward.",
+          "python_hooks": ["input bounds", "collection costs", "iteration costs"],
+          "embedded_skill_refs": [
+            {"graph": "coding-v1", "skill_id": "communication.complexity-explanation"},
+            {"graph": "coding-v1", "skill_id": "process.testing"}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "coding.sequence-patterns",
+      "label": "Sequence Patterns",
+      "sections": [
+        {
+          "id": "pointer-and-window-invariants",
+          "label": "Pointer and Window Invariants",
+          "skill_refs": [
+            {"graph": "coding-v1", "skill_id": "pattern.two-pointers"},
+            {"graph": "coding-v1", "skill_id": "pattern.sliding-window"}
+          ],
+          "applicability": {
+            "required_for": ["coding", "balanced"],
+            "optional_for": ["system-design"],
+            "minimum_required_level": null
+          },
+          "embedded_habit": "Name the invariant and justify every pointer movement.",
+          "python_hooks": ["index loops", "dictionaries", "sets", "collections"],
+          "embedded_skill_refs": [
+            {"graph": "coding-v1", "skill_id": "communication.plan"},
+            {"graph": "coding-v1", "skill_id": "process.debugging"}
+          ]
+        },
+        {
+          "id": "aggregation-intervals-search",
+          "label": "Aggregation, Intervals, and Search",
+          "skill_refs": [
+            {"graph": "coding-v1", "skill_id": "pattern.prefix-suffix-aggregation"},
+            {"graph": "coding-v1", "skill_id": "pattern.intervals"},
+            {"graph": "coding-v1", "skill_id": "pattern.binary-search"}
+          ],
+          "applicability": {
+            "required_for": ["coding", "balanced"],
+            "optional_for": ["system-design"],
+            "minimum_required_level": null
+          },
+          "embedded_habit": "Confirm boundaries and test a counterexample before finalizing the approach.",
+          "python_hooks": ["prefix arrays", "sorting keys", "bisect", "inclusive and exclusive bounds"],
+          "embedded_skill_refs": [
+            {"graph": "coding-v1", "skill_id": "process.counterexample-construction"},
+            {"graph": "coding-v1", "skill_id": "process.edge-case-design"}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "coding.linear-implementation",
+      "label": "Linear Implementation",
+      "sections": [
+        {
+          "id": "linked-stacks-queues",
+          "label": "Linked Structures, Stacks, and Queues",
+          "skill_refs": [
+            {"graph": "coding-v1", "skill_id": "concept.linked-structures"},
+            {"graph": "coding-v1", "skill_id": "concept.stacks-queues"}
+          ],
+          "applicability": {
+            "required_for": ["coding", "balanced"],
+            "optional_for": ["system-design"],
+            "minimum_required_level": null
+          },
+          "embedded_habit": "Walk a small pointer or queue trace aloud.",
+          "python_hooks": ["None", "node objects", "collections.deque"],
+          "embedded_skill_refs": [
+            {"graph": "coding-v1", "skill_id": "communication.plan"},
+            {"graph": "coding-v1", "skill_id": "process.testing"}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "coding.trees-priority",
+      "label": "Trees and Priority Structures",
+      "sections": [
+        {
+          "id": "trees-heaps",
+          "label": "Trees and Heaps",
+          "skill_refs": [
+            {"graph": "coding-v1", "skill_id": "concept.trees"},
+            {"graph": "coding-v1", "skill_id": "concept.heaps"}
+          ],
+          "applicability": {
+            "required_for": ["coding", "balanced"],
+            "optional_for": [],
+            "minimum_required_level": null
+          },
+          "embedded_habit": "Define what each stack, queue, or heap entry means.",
+          "python_hooks": ["recursion", "iterative stacks", "heapq"],
+          "embedded_skill_refs": [
+            {"graph": "coding-v1", "skill_id": "communication.plan"},
+            {"graph": "coding-v1", "skill_id": "process.debugging"}
+          ]
+        },
+        {
+          "id": "tries",
+          "label": "Tries",
+          "skill_refs": [
+            {"graph": "coding-v1", "skill_id": "concept.tries"}
+          ],
+          "applicability": {
+            "required_for": ["coding", "balanced"],
+            "optional_for": [],
+            "minimum_required_level": "mid"
+          },
+          "embedded_habit": "Explain why prefix structure is worth its memory cost.",
+          "python_hooks": ["nested dictionaries", "node types"],
+          "embedded_skill_refs": [
+            {"graph": "coding-v1", "skill_id": "communication.complexity-explanation"}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "coding.graph-traversal",
+      "label": "Graph Traversal",
+      "sections": [
+        {
+          "id": "core-traversal",
+          "label": "Core Traversal",
+          "skill_refs": [
+            {"graph": "coding-v1", "skill_id": "concept.graphs"},
+            {"graph": "coding-v1", "skill_id": "pattern.bfs"},
+            {"graph": "coding-v1", "skill_id": "pattern.dfs"}
+          ],
+          "applicability": {
+            "required_for": ["coding", "balanced"],
+            "optional_for": [],
+            "minimum_required_level": null
+          },
+          "embedded_habit": "State visited-state ownership and why the selected traversal fits.",
+          "python_hooks": ["adjacency dictionaries", "sets", "deque", "explicit stacks"],
+          "embedded_skill_refs": [
+            {"graph": "coding-v1", "skill_id": "communication.plan"},
+            {"graph": "coding-v1", "skill_id": "process.testing"}
+          ]
+        },
+        {
+          "id": "advanced-graphs",
+          "label": "Advanced Graphs",
+          "skill_refs": [
+            {"graph": "coding-v1", "skill_id": "concept.union-find"},
+            {"graph": "coding-v1", "skill_id": "pattern.topological-ordering"},
+            {"graph": "coding-v1", "skill_id": "concept.shortest-paths"}
+          ],
+          "applicability": {
+            "required_for": ["coding", "balanced"],
+            "optional_for": [],
+            "minimum_required_level": "mid"
+          },
+          "embedded_habit": "State the graph property that selects the algorithm.",
+          "python_hooks": ["parent arrays", "indegree maps", "priority queues"],
+          "embedded_skill_refs": [
+            {"graph": "coding-v1", "skill_id": "communication.plan"},
+            {"graph": "coding-v1", "skill_id": "process.counterexample-construction"}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "coding.recursive-optimization",
+      "label": "Recursive Search and Optimization",
+      "sections": [
+        {
+          "id": "recursive-search",
+          "label": "Recursive Search",
+          "skill_refs": [
+            {"graph": "coding-v1", "skill_id": "concept.recursion"},
+            {"graph": "coding-v1", "skill_id": "pattern.backtracking"}
+          ],
+          "applicability": {
+            "required_for": ["coding", "balanced"],
+            "optional_for": [],
+            "minimum_required_level": null
+          },
+          "embedded_habit": "Describe the choice, constraint, base case, and undo step.",
+          "python_hooks": ["nested functions", "mutable-state restoration"],
+          "embedded_skill_refs": [
+            {"graph": "coding-v1", "skill_id": "communication.plan"},
+            {"graph": "coding-v1", "skill_id": "process.debugging"}
+          ]
+        },
+        {
+          "id": "greedy-and-dp",
+          "label": "Greedy and Dynamic Programming",
+          "skill_refs": [
+            {"graph": "coding-v1", "skill_id": "pattern.greedy"},
+            {"graph": "coding-v1", "skill_id": "concept.dynamic-programming-state"},
+            {"graph": "coding-v1", "skill_id": "pattern.dynamic-programming"}
+          ],
+          "applicability": {
+            "required_for": ["coding", "balanced"],
+            "optional_for": [],
+            "minimum_required_level": null
+          },
+          "embedded_habit": "Justify the greedy exchange or derive state and transition first.",
+          "python_hooks": ["sorting", "tables", "functools.cache"],
+          "embedded_skill_refs": [
+            {"graph": "coding-v1", "skill_id": "communication.follow-up-adaptation"},
+            {"graph": "coding-v1", "skill_id": "process.counterexample-construction"}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "design.requirements-interfaces",
+      "label": "Requirements and Interfaces",
+      "sections": [
+        {
+          "id": "scope-scale-contracts",
+          "label": "Scope, Scale, and Contracts",
+          "skill_refs": [
+            {"graph": "supplement-v1", "skill_id": "system.requirements-scope"},
+            {"graph": "supplement-v1", "skill_id": "system.capacity-estimation"},
+            {"graph": "supplement-v1", "skill_id": "system.api-contracts"}
+          ],
+          "applicability": {
+            "required_for": ["balanced", "system-design"],
+            "optional_for": ["coding"],
+            "minimum_required_level": null
+          },
+          "embedded_habit": "Ask which requirements and tradeoffs matter, quantify load, and state the API boundary.",
+          "python_hooks": [],
+          "embedded_skill_refs": [
+            {"graph": "coding-v1", "skill_id": "communication.problem-clarification"}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "design.data-storage",
+      "label": "Data and Storage",
+      "sections": [
+        {
+          "id": "models-indexes-partitions",
+          "label": "Models, Indexes, and Partitions",
+          "skill_refs": [
+            {"graph": "supplement-v1", "skill_id": "system.access-patterns-data-modeling"},
+            {"graph": "supplement-v1", "skill_id": "system.storage-indexing"},
+            {"graph": "supplement-v1", "skill_id": "system.replication-partitioning"}
+          ],
+          "applicability": {
+            "required_for": ["balanced", "system-design"],
+            "optional_for": ["coding"],
+            "minimum_required_level": null
+          },
+          "embedded_habit": "Tie each storage choice to an access pattern and name its failure or consistency tradeoff.",
+          "python_hooks": [],
+          "embedded_skill_refs": [
+            {"graph": "supplement-v1", "skill_id": "communication.system-tradeoffs"}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "design.delivery",
+      "label": "Delivery",
+      "sections": [
+        {
+          "id": "caching-content-delivery",
+          "label": "Caching and Content Delivery",
+          "skill_refs": [
+            {"graph": "supplement-v1", "skill_id": "system.cache-invalidation"},
+            {"graph": "supplement-v1", "skill_id": "system.content-delivery"}
+          ],
+          "applicability": {
+            "required_for": ["balanced", "system-design"],
+            "optional_for": ["coding"],
+            "minimum_required_level": null
+          },
+          "embedded_habit": "State what is cached, where it lives, how it becomes stale, and how hotspots are handled.",
+          "python_hooks": [],
+          "embedded_skill_refs": [
+            {"graph": "supplement-v1", "skill_id": "communication.system-tradeoffs"}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "design.async-workflows",
+      "label": "Asynchronous Workflows",
+      "sections": [
+        {
+          "id": "queues-streams-retries",
+          "label": "Queues, Streams, and Retries",
+          "skill_refs": [
+            {"graph": "supplement-v1", "skill_id": "system.messaging-delivery"},
+            {"graph": "supplement-v1", "skill_id": "system.idempotency-retries"}
+          ],
+          "applicability": {
+            "required_for": ["balanced", "system-design"],
+            "optional_for": ["coding"],
+            "minimum_required_level": null
+          },
+          "embedded_habit": "Trace one request through ordering, retry, duplication, and partial failure.",
+          "python_hooks": [],
+          "embedded_skill_refs": [
+            {"graph": "supplement-v1", "skill_id": "communication.system-tradeoffs"}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "design.reliability",
+      "label": "Reliability",
+      "sections": [
+        {
+          "id": "degradation-observability-tradeoffs",
+          "label": "Degradation, Observability, and Tradeoffs",
+          "skill_refs": [
+            {"graph": "supplement-v1", "skill_id": "system.reliability-backpressure"},
+            {"graph": "supplement-v1", "skill_id": "system.observability"},
+            {"graph": "supplement-v1", "skill_id": "communication.system-tradeoffs"}
+          ],
+          "applicability": {
+            "required_for": ["balanced", "system-design"],
+            "optional_for": ["coding"],
+            "minimum_required_level": null
+          },
+          "embedded_habit": "Close each design segment with the chosen tradeoff and the signal that would validate it.",
+          "python_hooks": [],
+          "embedded_skill_refs": []
+        }
+      ]
+    },
+    {
+      "id": "role.backend",
+      "label": "Backend Role Extension",
+      "sections": [
+        {
+          "id": "backend-role-core",
+          "label": "APIs, Data, Concurrency, and Services",
+          "skill_refs": [
+            {"graph": "supplement-v1", "skill_id": "backend.api-boundaries"},
+            {"graph": "supplement-v1", "skill_id": "backend.data-modeling"},
+            {"graph": "supplement-v1", "skill_id": "backend.concurrency"},
+            {"graph": "supplement-v1", "skill_id": "backend.service-tradeoffs"}
+          ],
+          "applicability": {"required_for": ["balanced", "system-design"], "optional_for": ["coding"], "minimum_required_level": null},
+          "embedded_habit": "Connect each service choice to ownership, concurrency, and failure behavior.",
+          "python_hooks": [],
+          "embedded_skill_refs": []
+        }
+      ]
+    },
+    {
+      "id": "role.frontend",
+      "label": "Frontend Role Extension",
+      "sections": [
+        {
+          "id": "frontend-role-core",
+          "label": "Runtime, State, Rendering, Accessibility, and Architecture",
+          "skill_refs": [
+            {"graph": "supplement-v1", "skill_id": "frontend.browser-runtime"},
+            {"graph": "supplement-v1", "skill_id": "frontend.state-management"},
+            {"graph": "supplement-v1", "skill_id": "frontend.rendering"},
+            {"graph": "supplement-v1", "skill_id": "frontend.accessibility"},
+            {"graph": "supplement-v1", "skill_id": "frontend.ui-architecture"}
+          ],
+          "applicability": {"required_for": ["balanced", "system-design"], "optional_for": ["coding"], "minimum_required_level": null},
+          "embedded_habit": "Explain the user-visible and operational effect of each frontend boundary.",
+          "python_hooks": [],
+          "embedded_skill_refs": []
+        }
+      ]
+    },
+    {
+      "id": "role.mobile",
+      "label": "Mobile Role Extension",
+      "sections": [
+        {
+          "id": "mobile-role-core",
+          "label": "Lifecycle, Offline Data, Constraints, and Architecture",
+          "skill_refs": [
+            {"graph": "supplement-v1", "skill_id": "mobile.lifecycle"},
+            {"graph": "supplement-v1", "skill_id": "mobile.offline-data"},
+            {"graph": "supplement-v1", "skill_id": "mobile.platform-constraints"},
+            {"graph": "supplement-v1", "skill_id": "mobile.client-architecture"}
+          ],
+          "applicability": {"required_for": ["balanced", "system-design"], "optional_for": ["coding"], "minimum_required_level": null},
+          "embedded_habit": "Trace one user action through lifecycle and connectivity changes.",
+          "python_hooks": [],
+          "embedded_skill_refs": []
+        }
+      ]
+    },
+    {
+      "id": "role.data-ml",
+      "label": "Data and ML Role Extension",
+      "sections": [
+        {
+          "id": "data-ml-role-core",
+          "label": "SQL, Pipelines, Evaluation, and ML Systems",
+          "skill_refs": [
+            {"graph": "supplement-v1", "skill_id": "data-ml.sql"},
+            {"graph": "supplement-v1", "skill_id": "data-ml.pipelines"},
+            {"graph": "supplement-v1", "skill_id": "data-ml.model-evaluation"},
+            {"graph": "supplement-v1", "skill_id": "data-ml.ml-system-tradeoffs"}
+          ],
+          "applicability": {"required_for": ["balanced", "system-design"], "optional_for": ["coding"], "minimum_required_level": null},
+          "embedded_habit": "Tie data and model choices to the decision, failure mode, and monitoring signal.",
+          "python_hooks": ["SQL", "iterators", "dataframes"],
+          "embedded_skill_refs": []
+        }
+      ]
+    }
+  ],
+  "routes": [
+    {
+      "id": "coding",
+      "label": "Coding Interviews",
+      "first_session_skill_id": "concept.arrays-strings",
+      "skill_refs": [
+        {"graph": "coding-v1", "skill_id": "concept.arrays-strings"},
+        {"graph": "coding-v1", "skill_id": "concept.hashing"},
+        {"graph": "coding-v1", "skill_id": "concept.constraint-reading"},
+        {"graph": "coding-v1", "skill_id": "concept.complexity-analysis"},
+        {"graph": "coding-v1", "skill_id": "pattern.two-pointers"},
+        {"graph": "coding-v1", "skill_id": "pattern.sliding-window"},
+        {"graph": "coding-v1", "skill_id": "pattern.prefix-suffix-aggregation"},
+        {"graph": "coding-v1", "skill_id": "pattern.intervals"},
+        {"graph": "coding-v1", "skill_id": "pattern.binary-search"},
+        {"graph": "coding-v1", "skill_id": "concept.linked-structures"},
+        {"graph": "coding-v1", "skill_id": "concept.stacks-queues"},
+        {"graph": "coding-v1", "skill_id": "concept.trees"},
+        {"graph": "coding-v1", "skill_id": "concept.heaps"},
+        {"graph": "coding-v1", "skill_id": "concept.tries"},
+        {"graph": "coding-v1", "skill_id": "concept.graphs"},
+        {"graph": "coding-v1", "skill_id": "pattern.bfs"},
+        {"graph": "coding-v1", "skill_id": "pattern.dfs"},
+        {"graph": "coding-v1", "skill_id": "concept.union-find"},
+        {"graph": "coding-v1", "skill_id": "pattern.topological-ordering"},
+        {"graph": "coding-v1", "skill_id": "concept.shortest-paths"},
+        {"graph": "coding-v1", "skill_id": "concept.recursion"},
+        {"graph": "coding-v1", "skill_id": "pattern.backtracking"},
+        {"graph": "coding-v1", "skill_id": "pattern.greedy"},
+        {"graph": "coding-v1", "skill_id": "concept.dynamic-programming-state"},
+        {"graph": "coding-v1", "skill_id": "pattern.dynamic-programming"}
+      ]
+    },
+    {
+      "id": "balanced",
+      "label": "Balanced Interviews",
+      "first_session_skill_id": "concept.arrays-strings",
+      "skill_refs": [
+        {"graph": "coding-v1", "skill_id": "concept.arrays-strings"},
+        {"graph": "coding-v1", "skill_id": "concept.hashing"},
+        {"graph": "coding-v1", "skill_id": "concept.constraint-reading"},
+        {"graph": "coding-v1", "skill_id": "concept.complexity-analysis"},
+        {"graph": "coding-v1", "skill_id": "pattern.two-pointers"},
+        {"graph": "coding-v1", "skill_id": "pattern.sliding-window"},
+        {"graph": "coding-v1", "skill_id": "pattern.prefix-suffix-aggregation"},
+        {"graph": "coding-v1", "skill_id": "pattern.intervals"},
+        {"graph": "coding-v1", "skill_id": "pattern.binary-search"},
+        {"graph": "supplement-v1", "skill_id": "system.requirements-scope"},
+        {"graph": "supplement-v1", "skill_id": "system.capacity-estimation"},
+        {"graph": "supplement-v1", "skill_id": "system.api-contracts"},
+        {"graph": "coding-v1", "skill_id": "concept.linked-structures"},
+        {"graph": "coding-v1", "skill_id": "concept.stacks-queues"},
+        {"graph": "coding-v1", "skill_id": "concept.trees"},
+        {"graph": "coding-v1", "skill_id": "concept.heaps"},
+        {"graph": "coding-v1", "skill_id": "concept.tries"},
+        {"graph": "supplement-v1", "skill_id": "system.access-patterns-data-modeling"},
+        {"graph": "supplement-v1", "skill_id": "system.storage-indexing"},
+        {"graph": "supplement-v1", "skill_id": "system.replication-partitioning"},
+        {"graph": "supplement-v1", "skill_id": "system.cache-invalidation"},
+        {"graph": "supplement-v1", "skill_id": "system.content-delivery"},
+        {"graph": "coding-v1", "skill_id": "concept.graphs"},
+        {"graph": "coding-v1", "skill_id": "pattern.bfs"},
+        {"graph": "coding-v1", "skill_id": "pattern.dfs"},
+        {"graph": "coding-v1", "skill_id": "concept.union-find"},
+        {"graph": "coding-v1", "skill_id": "pattern.topological-ordering"},
+        {"graph": "coding-v1", "skill_id": "concept.shortest-paths"},
+        {"graph": "coding-v1", "skill_id": "concept.recursion"},
+        {"graph": "coding-v1", "skill_id": "pattern.backtracking"},
+        {"graph": "coding-v1", "skill_id": "pattern.greedy"},
+        {"graph": "coding-v1", "skill_id": "concept.dynamic-programming-state"},
+        {"graph": "coding-v1", "skill_id": "pattern.dynamic-programming"},
+        {"graph": "supplement-v1", "skill_id": "system.messaging-delivery"},
+        {"graph": "supplement-v1", "skill_id": "system.idempotency-retries"},
+        {"graph": "supplement-v1", "skill_id": "system.reliability-backpressure"},
+        {"graph": "supplement-v1", "skill_id": "system.observability"},
+        {"graph": "supplement-v1", "skill_id": "communication.system-tradeoffs"}
+      ]
+    },
+    {
+      "id": "system-design",
+      "label": "System Design Interviews",
+      "first_session_skill_id": "system.requirements-scope",
+      "skill_refs": [
+        {"graph": "supplement-v1", "skill_id": "system.requirements-scope"},
+        {"graph": "supplement-v1", "skill_id": "system.capacity-estimation"},
+        {"graph": "supplement-v1", "skill_id": "system.api-contracts"},
+        {"graph": "supplement-v1", "skill_id": "system.access-patterns-data-modeling"},
+        {"graph": "supplement-v1", "skill_id": "system.storage-indexing"},
+        {"graph": "supplement-v1", "skill_id": "system.replication-partitioning"},
+        {"graph": "supplement-v1", "skill_id": "system.cache-invalidation"},
+        {"graph": "supplement-v1", "skill_id": "system.content-delivery"},
+        {"graph": "supplement-v1", "skill_id": "system.messaging-delivery"},
+        {"graph": "supplement-v1", "skill_id": "system.idempotency-retries"},
+        {"graph": "supplement-v1", "skill_id": "system.reliability-backpressure"},
+        {"graph": "supplement-v1", "skill_id": "system.observability"},
+        {"graph": "supplement-v1", "skill_id": "communication.system-tradeoffs"},
+        {"graph": "coding-v1", "skill_id": "concept.constraint-reading"},
+        {"graph": "coding-v1", "skill_id": "concept.complexity-analysis"},
+        {"graph": "coding-v1", "skill_id": "concept.arrays-strings"},
+        {"graph": "coding-v1", "skill_id": "concept.hashing"},
+        {"graph": "coding-v1", "skill_id": "pattern.sliding-window"}
+      ]
+    }
+  ],
+  "role_extensions": [
+    {
+      "role_family": "backend",
+      "section_id": "backend-role-core",
+      "skill_refs": [
+        {"graph": "supplement-v1", "skill_id": "backend.api-boundaries"},
+        {"graph": "supplement-v1", "skill_id": "backend.data-modeling"},
+        {"graph": "supplement-v1", "skill_id": "backend.concurrency"},
+        {"graph": "supplement-v1", "skill_id": "backend.service-tradeoffs"}
+      ]
+    },
+    {
+      "role_family": "frontend",
+      "section_id": "frontend-role-core",
+      "skill_refs": [
+        {"graph": "supplement-v1", "skill_id": "frontend.browser-runtime"},
+        {"graph": "supplement-v1", "skill_id": "frontend.state-management"},
+        {"graph": "supplement-v1", "skill_id": "frontend.rendering"},
+        {"graph": "supplement-v1", "skill_id": "frontend.accessibility"},
+        {"graph": "supplement-v1", "skill_id": "frontend.ui-architecture"}
+      ]
+    },
+    {
+      "role_family": "mobile",
+      "section_id": "mobile-role-core",
+      "skill_refs": [
+        {"graph": "supplement-v1", "skill_id": "mobile.lifecycle"},
+        {"graph": "supplement-v1", "skill_id": "mobile.offline-data"},
+        {"graph": "supplement-v1", "skill_id": "mobile.platform-constraints"},
+        {"graph": "supplement-v1", "skill_id": "mobile.client-architecture"}
+      ]
+    },
+    {
+      "role_family": "data-ml",
+      "section_id": "data-ml-role-core",
+      "skill_refs": [
+        {"graph": "supplement-v1", "skill_id": "data-ml.sql"},
+        {"graph": "supplement-v1", "skill_id": "data-ml.pipelines"},
+        {"graph": "supplement-v1", "skill_id": "data-ml.model-evaluation"},
+        {"graph": "supplement-v1", "skill_id": "data-ml.ml-system-tradeoffs"}
+      ]
+    }
+  ]
+}

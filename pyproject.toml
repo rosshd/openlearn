@@ -64,6 +64,7 @@ version = { attr = "openlearn.__version__" }
 [tool.setuptools.package-data]
 openlearn = [
     "templates/*.json",
+    "interview_curricula/*.json",
     "interview_skill_graphs/*.json",
     "interview_problem_catalogs/*.json",
     "drills.json",

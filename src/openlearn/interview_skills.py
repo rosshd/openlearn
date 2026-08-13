@@ -25,7 +25,17 @@ EVIDENCE_KINDS = (
     "transfer",
     "delayed_retrieval",
 )
-SKILL_CATEGORIES = ("concept", "pattern", "process", "communication")
+SKILL_CATEGORIES = (
+    "concept",
+    "pattern",
+    "process",
+    "communication",
+    "system",
+    "backend",
+    "frontend",
+    "mobile",
+    "data-ml",
+)
 PREREQUISITE_KINDS = ("blocking", "supporting")
 PROBLEM_ROLES = ("primary", "supporting")
 SELECTION_STATUSES = ("ready", "blocked", "weak", "due", "unassessed")
@@ -56,8 +66,9 @@ EVIDENCE_RECORD_FIELDS = frozenset(
         "transfer_family",
     }
 )
+VERSIONED_EVIDENCE_RECORD_FIELDS = EVIDENCE_RECORD_FIELDS | {"graph_id"}
 SKILL_ID_PATTERN = re.compile(
-    r"(?:concept|pattern|process|communication)\.[a-z0-9]+(?:-[a-z0-9]+)*"
+    r"[a-z0-9]+(?:-[a-z0-9]+)*\.[a-z0-9]+(?:-[a-z0-9]+)*"
 )
 
 
@@ -95,7 +106,17 @@ class Prerequisite:
 class InterviewSkill:
     skill_id: str
     name: str
-    category: Literal["concept", "pattern", "process", "communication"]
+    category: Literal[
+        "concept",
+        "pattern",
+        "process",
+        "communication",
+        "system",
+        "backend",
+        "frontend",
+        "mobile",
+        "data-ml",
+    ]
     description: str
     prerequisites: tuple[Prerequisite, ...]
     evidence_policy: EvidencePolicy
@@ -197,6 +218,55 @@ class SkillGraphRegistry:
             self._graphs.get((graph.graph_version, graph.mastery_policy_version))
             is graph
         )
+
+
+@dataclass(frozen=True)
+class SkillGraphBundleRegistry:
+    """Immutable graph registry keyed by the complete evidence identity."""
+
+    _graphs: Mapping[tuple[str, str, str], InterviewSkillGraph]
+
+    @classmethod
+    def from_graphs(
+        cls,
+        graphs: Iterable[InterviewSkillGraph],
+    ) -> SkillGraphBundleRegistry:
+        values = tuple(graphs)
+        if not values:
+            raise SkillGraphError("skill graph bundle registry requires at least one graph")
+        indexed: dict[tuple[str, str, str], InterviewSkillGraph] = {}
+        for graph in values:
+            key = (
+                graph.graph_id,
+                graph.graph_version,
+                graph.mastery_policy_version,
+            )
+            if key in indexed:
+                raise SkillGraphError("skill graph bundle registry contains a duplicate identity")
+            indexed[key] = graph
+        return cls(_graphs=MappingProxyType(indexed))
+
+    def graph(
+        self,
+        graph_id: object,
+        graph_version: object,
+        mastery_policy_version: object,
+    ) -> InterviewSkillGraph:
+        if not all(
+            isinstance(value, str)
+            for value in (graph_id, graph_version, mastery_policy_version)
+        ):
+            raise EvidenceRecordError(
+                "evidence graph_id, graph version, and mastery-policy version must be text"
+            )
+        try:
+            return self._graphs[(graph_id, graph_version, mastery_policy_version)]
+        except KeyError as exc:
+            raise EvidenceRecordError("evidence graph identity is unavailable") from exc
+
+    def contains(self, graph: InterviewSkillGraph) -> bool:
+        key = (graph.graph_id, graph.graph_version, graph.mastery_policy_version)
+        return self._graphs.get(key) is graph
 
 
 @dataclass(frozen=True)
@@ -580,9 +650,13 @@ def _parse_timestamp(value: object) -> datetime | None:
 
 def validate_evidence_record(
     record: Mapping[str, object],
-    registry: SkillGraphRegistry,
+    registry: SkillGraphRegistry | SkillGraphBundleRegistry,
 ) -> ValidatedEvidenceRecord:
-    if set(record) != EVIDENCE_RECORD_FIELDS:
+    record_fields = set(record)
+    if (
+        record_fields != EVIDENCE_RECORD_FIELDS
+        and record_fields != VERSIONED_EVIDENCE_RECORD_FIELDS
+    ):
         raise EvidenceRecordError("evidence record fields are invalid")
     for field in (
         "evidence_id",
@@ -610,9 +684,21 @@ def validate_evidence_record(
             raise EvidenceRecordError(f"evidence {field} must be boolean")
     if _parse_timestamp(record.get("observed_at")) is None:
         raise EvidenceRecordError("evidence timestamp is invalid")
-    graph = registry.graph(
-        record.get("graph_version"), record.get("mastery_policy_version")
-    )
+    if isinstance(registry, SkillGraphBundleRegistry):
+        if "graph_id" not in record:
+            raise EvidenceRecordError("multi-graph evidence requires graph_id")
+        graph = registry.graph(
+            record.get("graph_id"),
+            record.get("graph_version"),
+            record.get("mastery_policy_version"),
+        )
+    else:
+        graph_id = record.get("graph_id")
+        if graph_id is not None and graph_id != registry.graph_id:
+            raise EvidenceRecordError("evidence graph_id does not match its registry")
+        graph = registry.graph(
+            record.get("graph_version"), record.get("mastery_policy_version")
+        )
     try:
         skill = graph.skill(str(record["skill_id"]))
     except SkillGraphError as exc:
