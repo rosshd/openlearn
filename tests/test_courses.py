@@ -171,6 +171,44 @@ class CourseServiceTests(unittest.TestCase):
         self.assertGreater(len(topic.metadata["template_units"]), 0)
         self.assertTrue(cli.interview_profile_path(result.course.slug).exists())
 
+    def test_legacy_route_acceptance_retry_without_submission_id_is_idempotent(self) -> None:
+        result = create_course(
+            CourseCreationRequest(
+                name="Legacy Route Retry",
+                template_id="technical-interview-prep",
+            )
+        )
+
+        first = application.accept_interview_curriculum(
+            result.course.slug, action="skip"
+        )
+        replay = application.accept_interview_curriculum(
+            result.course.slug, action="skip"
+        )
+
+        self.assertFalse(first["replayed"])
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(replay["receipt"], first["receipt"])
+        self.assertEqual(
+            len(cli.load_state(result.course.slug)["_interview_route_receipts"]), 1
+        )
+        events = cli.load_event_log(cli.topic_events_path(result.course.slug))
+        self.assertEqual(
+            sum(
+                event.get("event_id") == f"{first['receipt']['action_id']}:0"
+                for event in events
+            ),
+            1,
+        )
+
+        changed = application.accept_interview_curriculum(
+            result.course.slug,
+            action="change",
+            changes={"target_level": "mid"},
+        )
+        self.assertFalse(changed["replayed"])
+        self.assertNotEqual(changed["receipt"]["action_id"], first["receipt"]["action_id"])
+
     def test_calibration_is_context_only_and_creates_no_evidence(self) -> None:
         calibration = CalibrationContext(
             goal="Pass interviews",
@@ -280,7 +318,13 @@ class CourseServiceTests(unittest.TestCase):
         self.assertIn("Custom legacy exercise", canonical["legacy_context"]["unassessed"])
         self.assertIn("concept.arrays-strings", canonical["evidence"]["ready"])
         self.assertNotIn("concept.arrays-strings", canonical["evidence"]["weak"])
-        self.assertIn("Arrays and Hashing", canonical["evidence"]["due_review"])
+        self.assertEqual(
+            canonical["evidence"]["due_review"],
+            ["concept.arrays-strings", "concept.hashing"],
+        )
+        self.assertEqual(
+            canonical["legacy_context"]["raw_review_due"], ["Arrays and Hashing"]
+        )
         self.assertEqual(state["concept_attempts"]["Arrays and Hashing"]["attempts"], 2)
         self.assertEqual(
             cli.read_topic(slug).metadata["placement_result"], {"legacy_note": "keep me"}

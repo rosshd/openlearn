@@ -325,6 +325,33 @@ def _canonical_progression_state() -> dict[str, object]:
     )
 
 
+def test_legacy_review_labels_map_to_stable_ids_and_preserve_raw_unmatched_context() -> None:
+    bundle = interview_curriculum.load_default_bundle()
+    route = _adaptive_route(interview_date="").to_dict()
+    state = interview_curriculum.build_canonical_curriculum_state(
+        bundle,
+        route,
+        metadata={"review_due": ["Arrays and Hashing", "Mystery legacy topic"]},
+        dynamic_state={},
+        source_fingerprint="source",
+        reconciliation_id="reconcile",
+    )
+
+    assert state["evidence"]["due_review"] == [
+        "concept.arrays-strings",
+        "concept.hashing",
+    ]
+    assert state["legacy_context"]["aliases_applied"]["Arrays and Hashing"] == [
+        "concept.arrays-strings",
+        "concept.hashing",
+    ]
+    assert state["legacy_context"]["raw_review_due"] == [
+        "Arrays and Hashing",
+        "Mystery legacy topic",
+    ]
+    assert "review_due:Mystery legacy topic" in state["legacy_context"]["unassessed"]
+
+
 def test_progression_resolver_selects_uncovered_and_due_targets_deterministically() -> None:
     state = _canonical_progression_state()
 
@@ -447,10 +474,78 @@ def test_judged_evidence_uses_full_identity_and_preserves_due_until_policy_ready
     assert correct["evidence"]["readiness"][identity]["status"] == "provisional"
     assert target_ref["skill_id"] not in correct["evidence"]["ready"]
     assert target_ref["skill_id"] in correct["evidence"]["due_review"]
-    assert correct["evidence"]["answer_evidence"][-1]["kinds"] == [
-        "production",
-        "transfer",
-    ]
+    assert correct["evidence"]["answer_evidence"][-1]["kinds"] == ["explanation"]
+
+
+def test_pinned_evidence_kinds_reach_readiness_once_per_distinct_evidence_id() -> None:
+    resolution = interview_curriculum.resolve_progression_target(
+        _canonical_progression_state(), intent="continue"
+    )
+    assert resolution.target is not None
+    state = resolution.state
+    target_ref = dict(resolution.target.skill_ref)
+
+    for index, kind in enumerate(("explanation", "transfer", "delayed_retrieval")):
+        state = interview_curriculum.apply_answer_judgment(
+            state,
+            {
+                "skill_ref": target_ref,
+                "status": "correct",
+                "score": 1.0,
+                "evidence_kind": kind,
+            },
+            evidence_id=f"turn_{index}",
+            observed_at=f"2026-08-{13 + index:02d}T12:00:00+00:00",
+        )
+    identity = interview_curriculum.target_identity({"skill_ref": target_ref})
+    assert state["evidence"]["readiness"][identity]["status"] == "ready"
+    assert target_ref["skill_id"] in state["evidence"]["ready"]
+
+    replayed = interview_curriculum.apply_answer_judgment(
+        state,
+        {
+            "skill_ref": target_ref,
+            "status": "correct",
+            "score": 1.0,
+            "evidence_kind": "delayed_retrieval",
+        },
+        evidence_id="turn_2",
+        observed_at="2026-08-20T12:00:00+00:00",
+    )
+    assert len(replayed["evidence"]["answer_evidence"]) == 3
+    assert replayed["evidence"]["readiness"][identity]["counts"] == {
+        "recognition": 0,
+        "explanation": 1,
+        "production": 0,
+        "transfer": 1,
+        "delayed_retrieval": 1,
+    }
+
+
+def test_incorrect_required_evidence_remains_due_and_unready() -> None:
+    resolution = interview_curriculum.resolve_progression_target(
+        _canonical_progression_state(), intent="continue"
+    )
+    assert resolution.target is not None
+    state = resolution.state
+    target_ref = dict(resolution.target.skill_ref)
+    state["evidence"]["due_review"] = [target_ref["skill_id"]]
+
+    judged = interview_curriculum.apply_answer_judgment(
+        state,
+        {
+            "skill_ref": target_ref,
+            "status": "needs_work",
+            "score": 0.0,
+            "evidence_kind": resolution.target.evidence_kind,
+        },
+        evidence_id="turn_wrong",
+        observed_at="2026-08-13T12:00:00+00:00",
+    )
+    assert judged["evidence"]["answer_evidence"][-1]["kinds"] == []
+    assert target_ref["skill_id"] in judged["evidence"]["weak"]
+    assert target_ref["skill_id"] in judged["evidence"]["due_review"]
+    assert target_ref["skill_id"] not in judged["evidence"]["ready"]
 
 
 def test_skip_defers_without_mastery_and_returns_only_after_another_commit() -> None:
@@ -555,6 +650,82 @@ def test_caught_up_practice_selects_covered_skill_without_moving_forward_cursor(
     assert practice.target is not None
     assert practice.reason == "practice_now"
     assert practice.state["cursor"] == original_cursor
+
+
+def test_practice_targets_due_then_weak_and_rotates_without_moving_cursor() -> None:
+    state = _canonical_progression_state()
+    route = state["route"]
+    assert isinstance(route, dict)
+    skills = route["skills"]
+    assert isinstance(skills, list)
+    ids = [item["skill_ref"]["skill_id"] for item in skills[:3]]
+    state["evidence"] = {
+        "ready": [],
+        "exposed": ids,
+        "weak": [ids[1]],
+        "due_review": [ids[2]],
+    }
+    cursor = deepcopy(state["cursor"])
+
+    due = interview_curriculum.resolve_progression_target(state, intent="practice")
+    assert due.target is not None and due.target.skill_id == ids[2]
+    state["evidence"]["due_review"] = []
+    weak = interview_curriculum.resolve_progression_target(state, intent="practice")
+    assert weak.target is not None and weak.target.skill_id == ids[1]
+    state["evidence"]["weak"] = []
+    first = interview_curriculum.resolve_progression_target(state, intent="practice")
+    assert first.target is not None
+    committed = interview_curriculum.record_progression_commit(
+        first.state, first.target.skill_id
+    )
+    second = interview_curriculum.resolve_progression_target(
+        committed, intent="practice"
+    )
+    assert second.target is not None
+    assert second.target.skill_id != first.target.skill_id
+    assert second.state["cursor"] == cursor
+
+
+def test_practice_answer_updates_committed_target_not_forward_cursor() -> None:
+    state = _canonical_progression_state()
+    route = state["route"]
+    assert isinstance(route, dict)
+    skills = route["skills"]
+    assert isinstance(skills, list)
+    practice_id = skills[1]["skill_ref"]["skill_id"]
+    state["evidence"]["exposed"] = [practice_id]
+    cursor = deepcopy(state["cursor"])
+    practice = interview_curriculum.resolve_progression_target(state, intent="practice")
+    assert practice.target is not None and practice.target.skill_id == practice_id
+
+    correct = interview_curriculum.apply_answer_judgment(
+        practice.state,
+        {
+            "skill_ref": dict(practice.target.skill_ref),
+            "status": "correct",
+            "score": 1.0,
+            "evidence_kind": practice.target.evidence_kind,
+        },
+        evidence_id="practice_correct",
+        observed_at="2026-08-13T12:00:00+00:00",
+    )
+    assert correct["cursor"] == cursor
+    assert correct["evidence"]["answer_evidence"][-1]["skill_ref"]["skill_id"] == practice_id
+
+    wrong = interview_curriculum.apply_answer_judgment(
+        practice.state,
+        {
+            "skill_ref": dict(practice.target.skill_ref),
+            "status": "needs_work",
+            "score": 0.0,
+            "evidence_kind": practice.target.evidence_kind,
+        },
+        evidence_id="practice_wrong",
+        observed_at="2026-08-13T12:01:00+00:00",
+    )
+    assert wrong["cursor"] == cursor
+    assert practice_id in wrong["evidence"]["weak"]
+    assert cursor["skill_ref"]["skill_id"] not in wrong["evidence"]["weak"]
 
 
 def test_compatibility_projection_uses_full_cursor_identity_within_one_section() -> None:

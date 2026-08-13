@@ -819,7 +819,12 @@ def _reserve_interview_progression(
                     "present": key in canonical,
                     "value": copy.deepcopy(canonical.get(key)),
                 }
-                for key in ("cursor", "deferred", "session_id")
+                for key in (
+                    "cursor",
+                    "deferred",
+                    "session_id",
+                    "committed_check_target",
+                )
             },
             "updated_at": _now(),
         }
@@ -1708,7 +1713,12 @@ def cancel_interview_progression(slug: str, submission_id: str) -> None:
         canonical = copy.deepcopy(canonical)
         rollback = active.get("rollback")
         if isinstance(rollback, dict):
-            for key in ("cursor", "deferred", "session_id"):
+            for key in (
+                "cursor",
+                "deferred",
+                "session_id",
+                "committed_check_target",
+            ):
                 entry = rollback.get(key)
                 if not isinstance(entry, dict) or not isinstance(
                     entry.get("present"), bool

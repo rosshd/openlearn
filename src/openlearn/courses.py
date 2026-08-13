@@ -446,7 +446,7 @@ def accept_interview_curriculum(
             raise ValueError("submission ID must be a canonical UUID")
         action_id = f"route_{parsed.hex}"
     else:
-        action_id = f"route_{uuid4().hex}"
+        action_id = ""
     journal_path = cli.interview_route_journal_path(slug)
     with cli.file_lock(journal_path):
         if journal_path.exists():
@@ -488,6 +488,41 @@ def accept_interview_curriculum(
             revision = internal.get("course_revision", 0)
             if not isinstance(revision, int) or revision < 0:
                 revision = 0
+            if submission_id is None:
+                prior = next(
+                    (
+                        value
+                        for value in receipts.values()
+                        if isinstance(value, dict)
+                        and value.get("submission_mode") == "legacy"
+                        and value.get("payload_hash") == payload_hash
+                        and value.get("final_revision") == revision
+                    ),
+                    None,
+                )
+                if isinstance(prior, dict):
+                    canonical = state.get("interview_curriculum")
+                    if not isinstance(canonical, dict):
+                        raise cli.OpenLearnError(
+                            "saved curriculum acceptance lost its route"
+                        )
+                    return {
+                        "profile": interview_prep.load_profile(
+                            cli.interview_profile_path(slug)
+                        ),
+                        "canonical": canonical,
+                        "receipt": prior,
+                        "replayed": True,
+                    }
+                legacy_identity = interview_curriculum.canonical_fingerprint(
+                    {
+                        "slug": slug,
+                        "topic_generation": cli.current_topic_generation(slug),
+                        "base_revision": revision,
+                        "payload_hash": payload_hash,
+                    }
+                )
+                action_id = f"route_legacy_{legacy_identity[:32]}"
             if expected_revision is not None and expected_revision != revision:
                 raise cli.OpenLearnError("course changed elsewhere; reload before confirming")
             if isinstance(internal.get("active_turn"), dict):
@@ -533,6 +568,9 @@ def accept_interview_curriculum(
                 "schema_version": ROUTE_ACCEPTANCE_SCHEMA_VERSION,
                 "action_id": action_id,
                 "action": action,
+                "submission_mode": (
+                    "explicit" if submission_id is not None else "legacy"
+                ),
                 "payload_hash": payload_hash,
                 "topic_generation": cli.current_topic_generation(slug),
                 "base_revision": revision,

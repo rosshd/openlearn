@@ -294,6 +294,7 @@ class TutorServiceTests(TestCase):
         }
         self.assertEqual(pending["concept_id"], "concept.arrays-strings")
         self.assertEqual(pending["curriculum_target"], expected_ref)
+        self.assertEqual(pending["curriculum_evidence_kind"], "explanation")
 
         def judged(_model: str, system: str, _user: str) -> str:
             if "calibrated JSON judge" in system:
@@ -328,7 +329,7 @@ class TutorServiceTests(TestCase):
         )
         self.assertEqual(
             canonical_evidence["answer_evidence"][-1]["kinds"],
-            ["production", "transfer"],
+            ["explanation"],
         )
         self.assertNotIn("pattern.dynamic-programming", canonical_evidence["ready"])
         judged_events = [
@@ -584,6 +585,10 @@ class TutorServiceTests(TestCase):
         self.assertIsNone(state["interview_curriculum"]["active_operation"])
         self.assertEqual(state["interview_curriculum"]["cursor"], before["cursor"])
         self.assertEqual(
+            state["interview_curriculum"].get("committed_check_target"),
+            before.get("committed_check_target"),
+        )
+        self.assertEqual(
             state["interview_curriculum"].get("deferred"), before.get("deferred")
         )
         self.assertEqual(course_revision(slug), 1)
@@ -667,6 +672,7 @@ class TutorServiceTests(TestCase):
             "weak": [],
             "due_review": [],
         }
+        canonical["commit_index"] = 1
         original_cursor = copy.deepcopy(canonical["cursor"])
         cli.update_state_atomic(
             slug,
@@ -687,6 +693,14 @@ class TutorServiceTests(TestCase):
         reserved = cli.load_state(slug)["interview_curriculum"]
         self.assertEqual(reserved["active_operation"]["reason"], "practice_now")
         self.assertEqual(reserved["cursor"], original_cursor)
+        self.assertNotEqual(
+            reserved["committed_check_target"]["skill_ref"],
+            reserved["cursor"]["skill_ref"],
+        )
+        self.assertEqual(
+            reserved["active_operation"]["target"]["skill_ref"],
+            reserved["committed_check_target"]["skill_ref"],
+        )
 
     def test_interview_reservation_releases_store_locks_before_provider(self) -> None:
         slug = self._create_interview_course()

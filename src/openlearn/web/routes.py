@@ -43,6 +43,29 @@ async def _call(request: Request, method: str, *args: Any, **kwargs: Any) -> Any
     return await run_in_threadpool(operation, *args, **kwargs)
 
 
+async def _call_skip_placement(
+    request: Request, slug: str, payload: PlacementRequest
+) -> Any:
+    """Call current and legacy adapters without swallowing service TypeErrors."""
+    operation = getattr(request.app.state.services, "skip_placement", None)
+    if operation is None:
+        raise HTTPException(
+            status_code=503, detail="This application operation is unavailable."
+        )
+    try:
+        inspect.signature(operation).bind(slug, payload)
+    except TypeError:
+        try:
+            inspect.signature(operation).bind(slug)
+        except TypeError:
+            raise HTTPException(
+                status_code=503,
+                detail="The placement operation has an incompatible interface.",
+            ) from None
+        return await _call(request, "skip_placement", slug)
+    return await _call(request, "skip_placement", slug, payload)
+
+
 def _templates(request: Request) -> Any:
     return request.app.state.templates
 
@@ -362,7 +385,7 @@ async def update_placement(request: Request, slug: str) -> JSONResponse:
             next_path=request.url_for("placement", slug=slug).path,
         )
     if payload.action == "skip":
-        result = public_mapping(await _call(request, "skip_placement", slug, payload))
+        result = public_mapping(await _call_skip_placement(request, slug, payload))
     else:
         result = public_mapping(await _call(request, "update_placement", slug, payload))
     if result.get("state") == "conflict":

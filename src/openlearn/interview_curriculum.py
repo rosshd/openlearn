@@ -256,6 +256,7 @@ class ProgressionTarget:
     skill_description: str
     requirement: str
     depth_mode: str
+    evidence_kind: str
     evidence_goal: str
     embedded_habit: str
     python_hooks: tuple[str, ...]
@@ -277,6 +278,7 @@ class ProgressionTarget:
             "skill_description": self.skill_description,
             "requirement": self.requirement,
             "depth_mode": self.depth_mode,
+            "evidence_kind": self.evidence_kind,
             "evidence_goal": self.evidence_goal,
             "embedded_habit": self.embedded_habit,
             "python_hooks": list(self.python_hooks),
@@ -312,7 +314,10 @@ def _progression_route_items(
 
 
 def _progression_target(
-    item: Mapping[str, object], bundle: "InterviewCurriculumBundle"
+    item: Mapping[str, object],
+    bundle: "InterviewCurriculumBundle",
+    *,
+    evidence_kind: str,
 ) -> ProgressionTarget:
     ref = item.get("skill_ref")
     if not isinstance(ref, Mapping):
@@ -343,6 +348,7 @@ def _progression_target(
         skill_description=skill.description,
         requirement=str(item.get("requirement") or "required"),
         depth_mode=depth_mode,
+        evidence_kind=evidence_kind,
         evidence_goal=evidence_goals.get(depth_mode, evidence_goals["learn"]),
         embedded_habit=str(item.get("embedded_habit") or "Explain the key decision aloud."),
         python_hooks=tuple(
@@ -351,6 +357,53 @@ def _progression_target(
             if isinstance(value, str) and value.strip()
         ),
     )
+
+
+def _next_evidence_kind(
+    state: Mapping[str, object],
+    item: Mapping[str, object],
+    bundle: "InterviewCurriculumBundle",
+) -> str:
+    """Choose the next pinned-policy check kind without trusting model labels."""
+    ref = item.get("skill_ref")
+    if not isinstance(ref, Mapping):
+        raise CurriculumBundleError("canonical interview target is malformed")
+    graph = bundle.graph_registry.graph(
+        str(ref.get("graph_id") or ""),
+        str(ref.get("graph_version") or ""),
+        str(ref.get("mastery_policy_version") or ""),
+    )
+    skill = graph.skill(str(ref.get("skill_id") or ""))
+    evidence = state.get("evidence")
+    records = evidence.get("answer_evidence") if isinstance(evidence, Mapping) else None
+    matching = [
+        record
+        for record in records
+        if isinstance(record, Mapping)
+        and record.get("status") == "correct"
+        and isinstance(record.get("skill_ref"), Mapping)
+        and all(
+            record["skill_ref"].get(key) == ref.get(key)
+            for key in (
+                "graph_id",
+                "graph_version",
+                "mastery_policy_version",
+                "skill_id",
+            )
+        )
+    ] if isinstance(records, list) else []
+    counts = {
+        kind: sum(kind in record.get("kinds", []) for record in matching)
+        for kind in interview_skills.EVIDENCE_KINDS
+    }
+    required = dict(skill.evidence_policy.minimum)
+    required["transfer"] = max(
+        required["transfer"], skill.evidence_policy.transfer.minimum_novel_contexts
+    )
+    for kind in interview_skills.EVIDENCE_KINDS:
+        if counts[kind] < required[kind]:
+            return kind
+    return "production"
 
 
 def target_identity(target: Mapping[str, object]) -> str:
@@ -501,8 +554,16 @@ def apply_answer_judgment(
         raise CurriculumBundleError("answer judgment target is absent from the pinned route")
     cursor = state.get("cursor")
     cursor_ref = cursor.get("skill_ref") if isinstance(cursor, Mapping) else None
-    if not isinstance(cursor_ref, Mapping) or not all(
-        cursor_ref.get(key) == skill_ref[key] for key in identity_keys
+    check_target = state.get("committed_check_target")
+    check_ref = (
+        check_target.get("skill_ref") if isinstance(check_target, Mapping) else None
+    )
+    reserved_refs = [
+        ref for ref in (check_ref, cursor_ref) if isinstance(ref, Mapping)
+    ]
+    if not any(
+        all(ref.get(key) == skill_ref[key] for key in identity_keys)
+        for ref in reserved_refs
     ):
         raise CurriculumBundleError("answer judgment does not match the reserved target")
     graph = bundle.graph_registry.graph(
@@ -518,16 +579,22 @@ def apply_answer_judgment(
         raise CurriculumBundleError("answer judgment evidence id is malformed")
     if not isinstance(observed_at, str) or not observed_at:
         raise CurriculumBundleError("answer judgment timestamp is malformed")
-    answer_kind = event_data.get("answer_kind")
     kinds: list[str] = []
     if status == "correct":
-        if answer_kind in interview_skills.EVIDENCE_KINDS:
-            kinds.append(str(answer_kind))
-        if event_data.get("is_transfer") is True and "transfer" not in kinds:
-            kinds.append("transfer")
-        if event_data.get("is_retrieval") is True and "delayed_retrieval" not in kinds:
-            kinds.append("delayed_retrieval")
-        kinds.sort(key=interview_skills.EVIDENCE_KINDS.index)
+        evidence_kind = event_data.get("evidence_kind")
+        if evidence_kind not in interview_skills.EVIDENCE_KINDS:
+            route_item = next(
+                item
+                for item, _skill_id in route_items
+                if isinstance(item.get("skill_ref"), Mapping)
+                and all(item["skill_ref"].get(key) == skill_ref[key] for key in identity_keys)
+            )
+            evidence_kind = _next_evidence_kind(state, route_item, bundle)
+        if evidence_kind not in skill.evidence_policy.explicit_check_kinds:
+            raise CurriculumBundleError(
+                "answer judgment evidence kind is not allowed by the pinned policy"
+            )
+        kinds = [str(evidence_kind)]
     evidence = state.get("evidence")
     if not isinstance(evidence, dict):
         raise CurriculumBundleError("canonical interview evidence is malformed")
@@ -564,9 +631,11 @@ def apply_answer_judgment(
     if status in {"partial", "needs_work"}:
         weak.add(skill_id_value)
         ready.discard(skill_id_value)
-        if isinstance(cursor, dict):
+        if isinstance(cursor, dict) and isinstance(cursor_ref, Mapping) and all(
+            cursor_ref.get(key) == skill_ref[key] for key in identity_keys
+        ):
             cursor["instruction_status"] = "needs_work"
-    elif "production" in kinds or "transfer" in kinds:
+    else:
         weak.discard(skill_id_value)
         matching_records = [
             item
@@ -613,20 +682,33 @@ def deterministic_target_fallback(target: Mapping[str, object]) -> str:
     label = str(target.get("skill_label") or "this skill")
     description = str(target.get("skill_description") or "Build the core technical model.")
     depth = str(target.get("depth_mode") or "learn")
+    evidence_kind = str(target.get("evidence_kind") or "production")
     habit = str(target.get("embedded_habit") or "Explain the key decision aloud.")
     hooks = target.get("python_hooks")
     python_text = ""
     if isinstance(hooks, list) and hooks:
         python_text = f" In Python, use {str(hooks[0]).rstrip('.')} where it supports the approach."
     if depth == "verify":
+        check_move = {
+            "recognition": "identify the correct representation and justify the choice",
+            "explanation": "explain the invariant or core representation in your own words",
+            "production": "produce or trace the approach on one concrete input",
+            "transfer": "apply the skill to a new concrete input",
+            "delayed_retrieval": "retrieve the approach and apply it without a refresher",
+        }.get(evidence_kind, "produce or trace the approach on one concrete input")
         return (
-            f"**Check:**\nVerify {label} without a refresher: explain the invariant or core "
-            f"representation, then apply it to one concrete input. {habit}"
+            f"**Check:**\nVerify {label} without a refresher: {check_move}. {habit}"
         )
     if depth == "practice":
+        check_move = {
+            "recognition": "identify the right representation and justify it",
+            "explanation": "explain the key invariant in your own words",
+            "production": "trace or produce the key implementation step",
+            "transfer": "apply the approach to a new small example",
+            "delayed_retrieval": "retrieve and apply the approach without a refresher",
+        }.get(evidence_kind, "trace or produce the key implementation step")
         return (
-            f"**Check:**\nApply {label} to a small example and state the key implementation "
-            f"decision. {habit}{python_text}"
+            f"**Check:**\nFor {label}, {check_move}. {habit}{python_text}"
         )
     if depth == "review":
         return (
@@ -702,11 +784,32 @@ def resolve_progression_target(
         selected = by_id[str(explicit_skill_id)]
         reason = "explicit_revisit"
     elif intent == "practice":
-        selected = next((item for item, skill_id in route_items if skill_id in exposed), None)
+        candidates = [(item, skill_id) for item, skill_id in route_items if skill_id in exposed]
+        due_candidates = [pair for pair in candidates if pair[1] in due]
+        weak_candidates = [
+            pair for pair in candidates if pair[1] in weak and pair[1] not in ready | due
+        ]
+        unready_candidates = [
+            pair
+            for pair in candidates
+            if pair[1] not in ready | due | weak
+        ]
+        remaining = [
+            pair for pair in candidates if pair[1] not in due | weak and pair[1] in ready
+        ]
+        pool = due_candidates or weak_candidates or unready_candidates or remaining
+        selected = pool[commit_index % len(pool)][0] if pool else None
         if selected is None:
             return ProgressionResolution(state, None, "caught_up", caught_up=True)
+        evidence_kind = _next_evidence_kind(state, selected, bundle)
+        target = _progression_target(selected, bundle, evidence_kind=evidence_kind)
+        state["committed_check_target"] = {
+            "skill_ref": dict(target.skill_ref),
+            "evidence_kind": evidence_kind,
+            "practice": True,
+        }
         return ProgressionResolution(
-            state, _progression_target(selected, bundle), "practice_now"
+            state, target, "practice_now"
         )
     else:
         excluded = {deferred_skill_id} if deferred_skill_id else set()
@@ -775,12 +878,17 @@ def resolve_progression_target(
                 deferred_skill_id=deferred_skill_id,
             )
 
-    target = _progression_target(selected, bundle)
+    evidence_kind = _next_evidence_kind(state, selected, bundle)
+    target = _progression_target(selected, bundle, evidence_kind=evidence_kind)
     state["cursor"] = {
         "unit_id": target.unit_id,
         "section_id": target.section_id,
         "skill_ref": dict(target.skill_ref),
         "instruction_status": "reserved",
+    }
+    state["committed_check_target"] = {
+        "skill_ref": dict(target.skill_ref),
+        "evidence_kind": evidence_kind,
     }
     state["session_id"] = current_session
     return ProgressionResolution(
@@ -814,11 +922,45 @@ def record_progression_commit(
     state["commit_index"] = (
         commit_index + 1 if isinstance(commit_index, int) and commit_index >= 0 else 1
     )
+    route_item = next(
+        (item for item, route_skill_id in _progression_route_items(state) if route_skill_id == skill_id),
+        None,
+    )
+    if route_item is not None:
+        ref = route_item.get("skill_ref")
+        if isinstance(ref, Mapping):
+            existing = state.get("committed_check_target")
+            evidence_kind = (
+                existing.get("evidence_kind")
+                if isinstance(existing, Mapping)
+                and isinstance(existing.get("skill_ref"), Mapping)
+                and existing["skill_ref"].get("skill_id") == skill_id
+                else None
+            )
+            state["committed_check_target"] = {
+                "skill_ref": dict(ref),
+                "evidence_kind": (
+                    evidence_kind
+                    if evidence_kind in interview_skills.EVIDENCE_KINDS
+                    else "production"
+                ),
+                **(
+                    {"practice": True}
+                    if isinstance(existing, Mapping)
+                    and existing.get("practice") is True
+                    else {}
+                ),
+            }
     cursor = state.get("cursor")
     cursor_ref = cursor.get("skill_ref") if isinstance(cursor, dict) else None
-    if isinstance(cursor, dict) and isinstance(cursor_ref, Mapping) and cursor_ref.get(
-        "skill_id"
-    ) == skill_id:
+    check_target = state.get("committed_check_target")
+    is_practice = isinstance(check_target, Mapping) and check_target.get("practice") is True
+    if (
+        not is_practice
+        and isinstance(cursor, dict)
+        and isinstance(cursor_ref, Mapping)
+        and cursor_ref.get("skill_id") == skill_id
+    ):
         cursor["instruction_status"] = "covered"
     return state
 
@@ -1010,6 +1152,16 @@ def build_canonical_curriculum_state(
                 ):
                     weak.add(target)
 
+    due_review: set[str] = set()
+    raw_review_due = _legacy_labels(metadata.get("review_due"))
+    for label in raw_review_due:
+        targets = _legacy_label_target(bundle, route, label)
+        if targets:
+            due_review.update(targets)
+            aliases_applied.setdefault(label, list(targets))
+        else:
+            unassessed.append(f"review_due:{label}")
+
     for key in ("slide_coverage", "placement_result"):
         value = metadata.get(key)
         if value not in (None, {}, []):
@@ -1051,11 +1203,12 @@ def build_canonical_curriculum_state(
             "ready": sorted(ready),
             "exposed": sorted(exposed),
             "weak": sorted(weak),
-            "due_review": list(_legacy_labels(metadata.get("review_due"))),
+            "due_review": sorted(due_review),
         },
         "legacy_context": {
             "aliases_applied": {key: aliases_applied[key] for key in sorted(aliases_applied)},
             "unassessed": sorted(set(unassessed)),
+            "raw_review_due": list(raw_review_due),
         },
         "reconciliation": {
             "reconciliation_id": reconciliation_id,

@@ -45,6 +45,7 @@ from openlearn import __version__, code_runner
 from openlearn import data_management
 from openlearn import interview_attempts
 from openlearn import interview_prep
+from openlearn import interview_skills
 from openlearn import stats as stats_metrics
 from openlearn.activities import (
     ActivityContractError,
@@ -9533,6 +9534,9 @@ def ask_topic(
             )
             if isinstance(target_ref, dict):
                 pending_question["curriculum_target"] = copy.deepcopy(target_ref)
+                evidence_kind = interview_target.get("evidence_kind")
+                if evidence_kind in interview_skills.EVIDENCE_KINDS:
+                    pending_question["curriculum_evidence_kind"] = evidence_kind
         projected_metadata["pending_question"] = pending_question
         log_pending_question_transition(
             topic.slug,
@@ -14827,6 +14831,11 @@ def update_learning_metadata(
                     event_data["skill_ref"] = copy.deepcopy(
                         pending_curriculum_target
                     )
+                    evidence_kind = pending_at_answer.get(
+                        "curriculum_evidence_kind"
+                    )
+                    if evidence_kind in interview_skills.EVIDENCE_KINDS:
+                        event_data["evidence_kind"] = evidence_kind
                 if not is_review_session and due_review_matches_answer(
                     metadata,
                     due_review_items_at_answer,
@@ -17929,11 +17938,19 @@ def interview_target_prompt(target: dict[str, object] | None) -> str:
     hooks = target.get("python_hooks")
     python_hooks = ", ".join(str(value) for value in hooks) if isinstance(hooks, list) else "(none)"
     depth = str(target.get("depth_mode") or "learn")
+    evidence_kind = str(target.get("evidence_kind") or "production")
     depth_rules = {
         "learn": "Give a concise first explanation and one concrete example. Assume no mastery.",
         "practice": "Give only a minimal reminder, then require production or application.",
         "review": "Use retrieval and correction without replaying a beginner lecture.",
         "verify": "Use one unassisted production or transfer Check with no answer leakage.",
+    }
+    evidence_rules = {
+        "recognition": "identify or distinguish the right concept",
+        "explanation": "explain the reasoning or invariant in their own words",
+        "production": "produce or trace the approach without answer leakage",
+        "transfer": "apply the skill in a genuinely new context",
+        "delayed_retrieval": "retrieve and apply the skill without a refresher",
     }
     return textwrap.dedent(
         f"""
@@ -17944,6 +17961,7 @@ def interview_target_prompt(target: dict[str, object] | None) -> str:
         - Unit: {target.get("unit_label")} ({target.get("unit_id")})
         - Section: {target.get("section_label")} ({target.get("section_id")})
         - Depth mode: {depth}
+        - Required check evidence: {evidence_kind}
         - Evidence goal: {target.get("evidence_goal")}
         - Applicable Python idioms: {python_hooks}
         - Embedded interview habit: {target.get("embedded_habit")}
@@ -17953,6 +17971,7 @@ def interview_target_prompt(target: dict[str, object] | None) -> str:
         reorder the route, claim mastery, or invent a learner choice. Embed the one interview
         habit briefly inside the technical move, not as a separate etiquette lesson. Python
         idioms support this skill and are not a second target. {depth_rules.get(depth, depth_rules["learn"])}
+        If you include a Check, it must ask the learner to {evidence_rules.get(evidence_kind, evidence_rules["production"])}.
         Do not reveal this target metadata or internal reasoning in the learner-facing answer.
         """
     ).strip()

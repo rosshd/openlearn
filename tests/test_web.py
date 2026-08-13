@@ -1815,6 +1815,60 @@ def test_course_creation_supports_legacy_adapter_without_entry_mode() -> None:
     assert response.json()["slug"] == "legacy-course"
 
 
+def test_skip_placement_supports_legacy_one_argument_adapter() -> None:
+    class LegacyPlacementServices:
+        def provider_status(self) -> dict[str, object]:
+            return {"ready": True}
+
+        def ensure_provider_ready(self) -> dict[str, object]:
+            return {"ready": True}
+
+        def placement(self, slug: str) -> dict[str, object]:
+            return {"slug": slug, "missing": False}
+
+        def interview_placement_exists(self, _slug: str) -> bool:
+            return True
+
+        def skip_placement(self, slug: str) -> dict[str, object]:
+            return {"slug": slug, "status": "provisional"}
+
+        def start_course_initialization(self, _slug: str) -> dict[str, object]:
+            return {"operation_id": "legacy-init"}
+
+    legacy = TestClient(create_app(LegacyPlacementServices(), testing=True))
+    token = csrf(legacy, "/setup")
+    response = legacy.post(
+        "/api/courses/legacy-course/placement",
+        headers={"x-csrf-token": token},
+        json={"action": "skip", "submission_id": str(uuid4())},
+    )
+
+    assert response.status_code == 202
+    assert response.json()["slug"] == "legacy-course"
+    assert response.json()["operation_id"] == "legacy-init"
+
+
+def test_skip_placement_does_not_hide_adapter_internal_type_error() -> None:
+    class BrokenPlacementServices:
+        def provider_status(self) -> dict[str, object]:
+            return {"ready": True}
+
+        def ensure_provider_ready(self) -> dict[str, object]:
+            return {"ready": True}
+
+        def skip_placement(self, _slug: str, _request: object) -> dict[str, object]:
+            raise TypeError("service implementation bug")
+
+    broken = TestClient(create_app(BrokenPlacementServices(), testing=True))
+    token = csrf(broken, "/setup")
+    with pytest.raises(TypeError, match="service implementation bug"):
+        broken.post(
+            "/api/courses/legacy-course/placement",
+            headers={"x-csrf-token": token},
+            json={"action": "skip", "submission_id": str(uuid4())},
+        )
+
+
 def test_video_preparation_ignores_out_of_order_responses() -> None:
     javascript = (
         Path(__file__).resolve().parents[1]
