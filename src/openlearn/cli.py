@@ -2639,7 +2639,11 @@ def handle_repl_command(
     elif name == "progress":
         slug = resolve_topic_slug(None)
         if not args:
-            output_func(topic_progress_line(read_topic(slug)) or "Progress is not set.")
+            if not (
+                interview_profile_path(slug).exists()
+                and print_interview_curriculum_status(slug, output_func)
+            ):
+                output_func(topic_progress_line(read_topic(slug)) or "Progress is not set.")
         elif len(args) == 2:
             set_course_progress(slug, args[0], args[1])
             output_func(topic_progress_line(read_topic(slug)) or "Progress updated.")
@@ -4264,7 +4268,6 @@ def _continue_after_reasoning_placement(
     slug: str,
     value: dict[str, object],
     *,
-    input_func=input,
     output_func=print,
 ) -> int:
     if not provider_is_configured():
@@ -4278,7 +4281,6 @@ def _continue_after_reasoning_placement(
     return _resume_interview_course_transition(
         read_topic(slug),
         value,
-        input_func=input_func,
         output_func=output_func,
         model=configured_model(),
     )
@@ -4422,7 +4424,6 @@ def _run_reasoning_interview_placement(
     return _continue_after_reasoning_placement(
         slug,
         value,
-        input_func=input_func,
         output_func=output_func,
     )
 
@@ -5264,17 +5265,20 @@ def start_course(
     topic_value: str | None = None,
 ) -> int:
     topic = read_topic(resolve_topic_slug(topic_value))
-    interview_value = None
     if interview_profile_path(topic.slug).exists():
         interview_value = (
             _read_interview_profile_without_recovery(topic.slug)
             if _DRY_RUN
             else sync_interview_placement(topic.slug)
         )
-        _preflight_interview_provider(topic, interview_value, output_func)
+        return _resume_interview_course_transition(
+            topic,
+            interview_value,
+            output_func=output_func,
+            model=model,
+        )
     return _start_course(
         topic,
-        interview_value,
         input_func=input_func,
         output_func=output_func,
         model=model,
@@ -5283,7 +5287,6 @@ def start_course(
 
 def _start_course(
     topic: Topic,
-    interview_value: dict[str, object] | None,
     *,
     input_func=input,
     output_func=print,
@@ -5294,27 +5297,14 @@ def _start_course(
     model = model or str(topic.metadata.get("model") or configured_model())
     feedback = ""
     rejected_outline = ""
-    placement_context = (
-        interview_planning_context(topic.slug, interview_value)
-        if interview_value is not None
-        else placement_context_prompt(topic.slug)
+    placement_context = placement_context_prompt(topic.slug)
+    placement_answer = (
+        input_func("Run optional placement quiz before planning? [y/N]: ").strip().lower()
     )
-    first_activity = None
-    if interview_value is not None:
-        placement = interview_value.get("placement")
-        result = placement.get("result") if isinstance(placement, dict) else None
-        passport = result.get("passport") if isinstance(result, dict) else None
-        if isinstance(passport, dict) and passport.get("first_activity"):
-            first_activity = one_line(str(passport["first_activity"]))
-
-    if interview_value is None:
-        placement_answer = (
-            input_func("Run optional placement quiz before planning? [y/N]: ").strip().lower()
-        )
-        output_func("")
-        if placement_answer in {"y", "yes"}:
-            run_placement_quiz(topic, model, input_func, output_func)
-            topic = read_topic(topic.slug)
+    output_func("")
+    if placement_answer in {"y", "yes"}:
+        run_placement_quiz(topic, model, input_func, output_func)
+        topic = read_topic(topic.slug)
 
     while True:
         outline_prompt = course_outline_prompt(
@@ -5349,7 +5339,6 @@ def _start_course(
         outline,
         model,
         output_func,
-        first_activity=first_activity,
     )
     return 0
 
@@ -5359,11 +5348,9 @@ def teach_first_lesson(
     outline: str,
     model: str,
     output_func=print,
-    *,
-    first_activity: str | None = None,
 ) -> None:
     print_section("First lesson", output_func)
-    lesson_prompt = first_lesson_prompt(outline, first_activity=first_activity)
+    lesson_prompt = first_lesson_prompt(outline)
     global _LAST_RESPONSE_ANSWER_KEY
     raw_lesson = call_openai_with_status(
         model,
@@ -7207,6 +7194,11 @@ def claim_blank_input_advance() -> bool:
 
 
 def set_course_progress(slug: str, unit_value: str, slide_value: str) -> None:
+    if interview_profile_path(slug).exists():
+        raise OpenLearnError(
+            "Technical Interview Prep position is owned by its canonical curriculum. "
+            "Use Continue, Skip for now, or Practice now."
+        )
     try:
         unit = int(unit_value)
         slide = int(slide_value)
@@ -7284,6 +7276,12 @@ def select_chapter(
     output_func=print,
 ) -> ChapterSelectionResult:
     slug = resolve_topic_slug(getattr(args, "topic", None))
+    if interview_profile_path(slug).exists():
+        output_func(
+            "Technical Interview Prep chapters follow the accepted canonical route. "
+            "Use the bounded course-outline editor to change its scope."
+        )
+        return ChapterSelectionResult.ERROR
     topic = read_topic(slug)
     units = topic.metadata.get("course_units")
     if not isinstance(units, list) or not units:
@@ -7443,6 +7441,23 @@ def change_course_scope(
 ) -> int:
     topic = read_topic(resolve_topic_slug(None))
     set_active_topic(topic.slug)
+    if interview_profile_path(topic.slug).exists():
+        canonical = load_state(topic.slug).get("interview_curriculum")
+        if isinstance(canonical, dict):
+            output_func(
+                "Technical Interview Prep uses bounded curriculum controls so the "
+                "model cannot rewrite prerequisites or progress."
+            )
+            return _run_interview_curriculum_change(
+                topic.slug,
+                acceptance_action="change",
+                input_func=input_func,
+                output_func=output_func,
+            )
+        output_func(
+            "Complete or skip interview placement before changing this course outline."
+        )
+        return 0
     model = model or str(topic.metadata.get("model") or configured_model())
     current_plan = accepted_course_plan(topic) or "(no saved plan)"
     prompt = textwrap.dedent(
@@ -13551,23 +13566,62 @@ def _resume_interview_course_transition(
     topic: Topic,
     value: dict[str, object],
     *,
-    input_func=input,
     output_func=print,
     model: str | None = None,
 ) -> int:
+    from openlearn import application, tutor_service
+
     _print_interview_continuity(topic, value, output_func)
-    _preflight_interview_provider(
-        topic,
-        value,
-        output_func,
-        show_continuity=False,
+    placement_before = value.get("placement")
+    legacy_deferred = (
+        isinstance(placement_before, dict)
+        and placement_before.get("status") == "deferred"
     )
-    return _start_course(
-        topic,
-        value,
-        input_func=input_func,
+    if legacy_deferred:
+        _preflight_interview_provider(
+            topic,
+            value,
+            output_func,
+            show_continuity=False,
+        )
+    if topic.metadata.get("course_started") is not True:
+        lifecycle = (
+            placement_before.get("lifecycle_version")
+            if isinstance(placement_before, dict)
+            else None
+        )
+        status = (
+            placement_before.get("status")
+            if isinstance(placement_before, dict)
+            else None
+        )
+        action: Literal["skip", "change"] = (
+            "change"
+            if lifecycle == interview_prep.PLACEMENT_V4 and status == "provisional"
+            else "skip"
+        )
+        accepted = application.accept_interview_curriculum(
+            topic.slug,
+            action=action,
+            submission_id=str(uuid4()),
+            expected_revision=tutor_service.course_revision(topic.slug),
+        )
+        accepted_profile = accepted.get("profile")
+        if not isinstance(accepted_profile, dict):
+            raise OpenLearnError("accepted interview curriculum lost its profile")
+        value = accepted_profile
+    current_topic = read_topic(topic.slug)
+    if not legacy_deferred:
+        _preflight_interview_provider(
+            current_topic,
+            value,
+            output_func,
+            show_continuity=False,
+        )
+    return _continue_canonical_interview_course(
+        current_topic,
+        model=model or str(current_topic.metadata.get("model") or configured_model()),
         output_func=output_func,
-        model=model,
     )
 
 
@@ -13582,8 +13636,8 @@ def _resume_unstarted_interview(
     _print_interview_continuity(topic, value, output_func)
     try:
         choice = input_func(
-            "Start offline placement now, defer and continue to course planning, "
-            "or exit? [Y/d/q]: "
+            "Start offline placement now, skip placement with a broad route, "
+            "or exit? [Y/s/q]: "
         ).strip().lower()
     except (EOFError, KeyboardInterrupt):
         output_func(f"\nCourse saved. Run openlearn resume {topic.slug} to continue.")
@@ -13594,16 +13648,10 @@ def _resume_unstarted_interview(
             input_func=input_func,
             output_func=output_func,
         )
-    if choice in {"d", "defer"}:
-        cmd_interview_placement(
-            argparse.Namespace(topic=topic.slug, action="defer"),
-            output_func=output_func,
-        )
-        deferred = sync_interview_placement(topic.slug)
+    if choice in {"s", "skip", "d", "defer"}:
         return _resume_interview_course_transition(
             topic,
-            deferred,
-            input_func=input_func,
+            value,
             output_func=output_func,
             model=model,
         )
@@ -13622,10 +13670,10 @@ def _resume_stale_interview(
     _print_interview_continuity(topic, value, output_func)
     output_func(
         "Profile changes invalidated the prior placement recommendations. "
-        "Choose a new offline placement or explicitly defer it for profile-only planning."
+        "Choose a new offline placement or skip it for a conservative baseline route."
     )
     try:
-        choice = input_func("New placement, defer, or exit? [Y/d/q]: ").strip().lower()
+        choice = input_func("New placement, skip placement, or exit? [Y/s/q]: ").strip().lower()
     except (EOFError, KeyboardInterrupt):
         output_func(f"\nCourse saved. Run openlearn resume {topic.slug} to continue.")
         return 0
@@ -13635,16 +13683,10 @@ def _resume_stale_interview(
             input_func=input_func,
             output_func=output_func,
         )
-    if choice in {"d", "defer"}:
-        cmd_interview_placement(
-            argparse.Namespace(topic=topic.slug, action="defer"),
-            output_func=output_func,
-        )
-        deferred = sync_interview_placement(topic.slug)
+    if choice in {"s", "skip", "d", "defer"}:
         return _resume_interview_course_transition(
             topic,
-            deferred,
-            input_func=input_func,
+            value,
             output_func=output_func,
             model=model,
         )
@@ -13678,6 +13720,48 @@ def _print_interview_dry_run_guidance(
         )
     output_func("Dry run does not advance or change offline interview state.")
     output_func(f"Run openlearn resume {topic.slug} without --dry-run to continue.")
+
+
+def _continue_canonical_interview_course(
+    topic: Topic,
+    *,
+    model: str,
+    output_func=print,
+) -> int:
+    """Continue one accepted interview route after provider preflight."""
+    from openlearn import application, tutor_service
+
+    canonical = load_state(topic.slug).get("interview_curriculum")
+    if not isinstance(canonical, dict):
+        raise OpenLearnError("interview curriculum is not prepared")
+    print_interview_curriculum_status(topic.slug, output_func)
+    projection = application.interview_learning(topic.slug)
+    if projection is not None and projection.operation.state == "caught-up":
+        output_func(
+            "All accepted route skills have a first pass. Use /practice in "
+            "the CLI learning session to start a retrieval without moving "
+            "the forward cursor."
+        )
+        return 0
+    try:
+        if isinstance(canonical.get("active_operation"), dict):
+            result = application.resume_interview_progression(topic.slug, model=model)
+        else:
+            result = application.advance_interview_curriculum(
+                topic.slug,
+                "Resume at the next curriculum concept.",
+                submission_id=str(uuid4()),
+                expected_revision=tutor_service.course_revision(topic.slug),
+                model=model,
+            )
+    except (
+        tutor_service.TutorConflictError,
+        tutor_service.TutorOperationError,
+    ) as exc:
+        raise OpenLearnError(str(exc)) from exc
+    if result.move is not None:
+        output_func(result.move.content)
+    return 0
 
 
 def cmd_resume(args: argparse.Namespace, input_func=input, output_func=print) -> int:
@@ -13734,7 +13818,6 @@ def cmd_resume(args: argparse.Namespace, input_func=input, output_func=print) ->
             return _resume_interview_course_transition(
                 topic,
                 interview_value,
-                input_func=input_func,
                 output_func=output_func,
                 model=model,
             )
@@ -13748,42 +13831,11 @@ def cmd_resume(args: argparse.Namespace, input_func=input, output_func=print) ->
             return 0
         _preflight_interview_provider(topic, interview_value, output_func)
         if isinstance(canonical, dict):
-            from openlearn import application, tutor_service
-
-            print_interview_curriculum_status(topic.slug, output_func)
-            projection = application.interview_learning(topic.slug)
-            if (
-                projection is not None
-                and projection.operation.state == "caught-up"
-            ):
-                output_func(
-                    "All accepted route skills have a first pass. Use /practice in "
-                    "the CLI learning session to start a retrieval without moving "
-                    "the forward cursor."
-                )
-                return 0
-
-            try:
-                if isinstance(canonical.get("active_operation"), dict):
-                    result = application.resume_interview_progression(
-                        topic.slug, model=model
-                    )
-                else:
-                    result = application.advance_interview_curriculum(
-                        topic.slug,
-                        "Resume at the next curriculum concept.",
-                        submission_id=str(uuid4()),
-                        expected_revision=tutor_service.course_revision(topic.slug),
-                        model=model,
-                    )
-            except (
-                tutor_service.TutorConflictError,
-                tutor_service.TutorOperationError,
-            ) as exc:
-                raise OpenLearnError(str(exc)) from exc
-            if result.move is not None:
-                output_func(result.move.content)
-            return 0
+            return _continue_canonical_interview_course(
+                topic,
+                model=model,
+                output_func=output_func,
+            )
     if not _DRY_RUN:
         topic = restore_learner_preferences_from_history(topic)
         set_active_topic(topic.slug)
@@ -13815,6 +13867,8 @@ def cmd_resume(args: argparse.Namespace, input_func=input, output_func=print) ->
 
 def cmd_next(args: argparse.Namespace, output_func=print) -> int:
     topic = read_topic(resolve_topic_slug(args.topic))
+    if interview_profile_path(topic.slug).exists():
+        return cmd_resume(args, output_func=output_func)
     set_active_topic(topic.slug)
     set_review_session_active(topic.slug, False)
     print_status_bar(topic, output_func)

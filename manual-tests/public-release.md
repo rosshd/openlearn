@@ -23,8 +23,8 @@ Assign the supplemental journeys before testing:
 
 | Tester | Required supplemental journey |
 | --- | --- |
-| A | Defer Technical Interview Prep placement, then begin the baseline lesson. |
-| B | Complete the short Technical Interview Prep reasoning placement. |
+| A | Skip Technical Interview Prep placement, then begin the baseline lesson. |
+| B | Complete the rapid Technical Interview Prep confidence placement. |
 | C | Create and begin a broad custom course outside the bundled templates. |
 | D | Complete Quick Learn from a small non-sensitive local file. |
 | E | Recover from an unavailable optional code runtime and continue with text-only learning. |
@@ -69,7 +69,7 @@ Documentation links are allowed because documentation discoverability is part of
 4. Start `openlearn web` and reach Maker Bench through the printed or opened loopback URL.
 5. Read the Community cost and privacy explanation.
 6. Configure a learner-owned hosted provider or a local keyless endpoint, or intentionally defer setup where the chosen offline flow allows it.
-7. Find Technical Interview Prep in starter courses and complete the assigned defer or reasoning-placement route.
+7. Find Technical Interview Prep in starter courses and complete the assigned skip or rapid confidence-placement route.
 8. Reach one useful teaching interaction and respond once.
 9. Leave the course, reopen Openlearn, and resume without losing the active objective.
 10. Find progress, identify the recommended next action, and locate provider settings.
@@ -87,7 +87,7 @@ Use only the probes assigned in the roster and never sacrifice real learner data
 - Rejected key: enter an obvious non-secret placeholder, verify setup stays incomplete, then recover with the tester's own valid credential or switch providers.
 - Unreachable provider: stop the local endpoint or use an unused loopback port, verify the error offers retry, switch, or defer, then recover.
 - Optional runtime: open the code tool without Docker or Podman available, verify actionable setup guidance appears, then continue the text-only lesson.
-- Placement: verify the interface distinguishes saved draft text from submitted sections and offers skip, stop, resume, and completion without an editor.
+- Placement: verify rapid confidence answers advance one topic at a time, review is editable, skip creates a baseline route, and leaving then resuming preserves progress without an editor.
 
 ## Evidence template
 
@@ -139,7 +139,7 @@ Linux coverage: pass/pending
 Five fresh testers: pass/pending
 Custom course: pass/pending
 Quick Learn: pass/pending
-Placement defer: pass/pending
+Placement skip: pass/pending
 Placement completion: pass/pending
 Rejected or unreachable provider recovery: pass/pending
 Unavailable optional tool recovery: pass/pending

@@ -309,6 +309,69 @@ class CliStorageTests(unittest.TestCase):
         with self.assertRaises(cli.OpenLearnError):
             cli.slugify("!!!")
 
+    def test_interview_scope_change_uses_bounded_curriculum_editor(self) -> None:
+        from openlearn import application
+
+        slug = self.create_interview_topic("Bounded Scope")
+        application.accept_interview_curriculum(
+            slug,
+            action="skip",
+            submission_id="00000000-0000-4000-8000-000000000004",
+        )
+        cli.set_active_topic(slug)
+        output: list[str] = []
+
+        with (
+            mock.patch.object(
+                cli,
+                "_run_interview_curriculum_change",
+                return_value=0,
+            ) as bounded,
+            mock.patch.object(
+                cli,
+                "call_openai_streaming",
+                side_effect=AssertionError("the model cannot rewrite an interview route"),
+            ),
+        ):
+            result = cli.change_course_scope(
+                "let the model invent a different course",
+                input_func=lambda _prompt: "",
+                output_func=output.append,
+            )
+
+        self.assertEqual(result, 0)
+        bounded.assert_called_once()
+        self.assertEqual(bounded.call_args.kwargs["acceptance_action"], "change")
+        self.assertTrue(any("bounded curriculum controls" in line for line in output))
+
+    def test_interview_next_and_manual_position_use_only_canonical_progression(self) -> None:
+        from openlearn import application
+
+        slug = self.create_interview_topic("Canonical Commands")
+        application.accept_interview_curriculum(
+            slug,
+            action="skip",
+            submission_id="00000000-0000-4000-8000-000000000005",
+        )
+
+        with (
+            mock.patch.object(cli, "cmd_resume", return_value=0) as resume,
+            mock.patch.object(
+                cli,
+                "call_openai_streaming",
+                side_effect=AssertionError("generic slide generation must not run"),
+            ),
+        ):
+            result = cli.cmd_next(
+                Namespace(topic=slug, model=None),
+                output_func=lambda _line: None,
+            )
+
+        self.assertEqual(result, 0)
+        resume.assert_called_once()
+        with self.assertRaisesRegex(cli.OpenLearnError, "canonical curriculum"):
+            cli.set_course_progress(slug, "2", "1")
+
     def test_initial_cli_outline_can_be_changed_before_confirmation(self) -> None:
         from openlearn import application
 
@@ -1638,7 +1701,7 @@ class CliStorageTests(unittest.TestCase):
         ):
             self.assertNotIn(private_text, prompt)
 
-    def test_interview_course_start_skips_legacy_quiz(self) -> None:
+    def test_interview_course_start_skips_legacy_quiz_and_model_outline(self) -> None:
         call_silent(
             cli.cmd_new,
             Namespace(
@@ -1664,8 +1727,9 @@ class CliStorageTests(unittest.TestCase):
             result = cli.start_course(input_func=input_func, output_func=lambda _line: None)
 
         self.assertEqual(result, 0)
-        self.assertEqual(prompts, ["Is this an acceptable course outline? [y/N]: "])
+        self.assertEqual(prompts, [])
         self.assertTrue(cli.read_topic("algorithms").metadata["course_started"])
+        self.assertIn("interview_curriculum", cli.load_state("algorithms"))
 
     def test_missing_provider_resume_is_contextual_and_non_mutating(self) -> None:
         call_silent(
@@ -1741,7 +1805,7 @@ class CliStorageTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         self.assertIn("Start offline placement now", prompts[0])
-        self.assertIn("defer and continue", prompts[0])
+        self.assertIn("skip placement with a broad route", prompts[0])
         self.assertIn("Placement: not_started (0/2)", output)
 
     def test_not_started_and_stale_resume_start_placement_before_provider(self) -> None:
@@ -1800,7 +1864,7 @@ class CliStorageTests(unittest.TestCase):
                 self.assertTrue(cli.read_topic(slug).metadata["course_started"])
                 self.assertIn("interview_curriculum", cli.load_state(slug))
 
-    def test_not_started_and_stale_resume_defer_before_provider_and_skip_legacy_quiz(
+    def test_not_started_and_stale_resume_skip_accepts_baseline_without_model_outline(
         self,
     ) -> None:
         for initial_status in ("not_started", "stale"):
@@ -1824,7 +1888,7 @@ class CliStorageTests(unittest.TestCase):
                     )
                 provider_states: list[str] = []
                 prompts: list[str] = []
-                answers = iter(["d", "y"])
+                answers = iter(["s"])
 
                 def input_func(prompt: str) -> str:
                     prompts.append(prompt)
@@ -1857,13 +1921,13 @@ class CliStorageTests(unittest.TestCase):
                     cli.interview_profile_path(slug)
                 )
                 self.assertEqual(result, 0)
-                self.assertEqual(provider_states, ["deferred"])
-                self.assertEqual(profile["placement"]["status"], "deferred")
+                self.assertEqual(provider_states, ["provisional"])
+                self.assertEqual(profile["placement"]["status"], "provisional")
                 self.assertTrue(cli.read_topic(slug).metadata["course_started"])
                 self.assertFalse(
                     any("Run optional placement quiz" in prompt for prompt in prompts)
                 )
-                self.assertIn(
+                self.assertNotIn(
                     "Is this an acceptable course outline? [y/N]: ",
                     prompts,
                 )
@@ -1920,7 +1984,7 @@ class CliStorageTests(unittest.TestCase):
         transcript = "\n".join(output)
         self.assertIn("Placement: stale", transcript)
         self.assertIn("invalidated", transcript)
-        self.assertIn("profile-only planning", transcript)
+        self.assertIn("conservative baseline route", transcript)
 
     def test_started_interview_course_uses_normal_tutor_resume(self) -> None:
         call_silent(

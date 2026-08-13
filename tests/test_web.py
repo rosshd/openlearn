@@ -25,6 +25,7 @@ from openlearn.web.schemas import PlacementRequest, TutorSubmissionRequest
 from openlearn.web.services import (
     COURSE_INITIALIZATION_PROMPT,
     OpenLearnWebServices,
+    _course_initialization_prompt,
     _focus_progress,
     _plain_text,
     _present_response,
@@ -2074,6 +2075,7 @@ def test_interview_focus_uses_curriculum_labels_not_turn_steps(
     application.accept_interview_curriculum(
         slug, action="skip", submission_id=str(uuid4())
     )
+    assert _course_initialization_prompt(slug) == COURSE_INITIALIZATION_PROMPT
     initialized = OpenLearnWebServices().start_course_initialization(slug)
     wait_for_operation(client, slug, initialized["operation_id"])
     state = cli.load_state(slug)

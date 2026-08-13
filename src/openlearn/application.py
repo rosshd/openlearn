@@ -862,17 +862,12 @@ def sync_interview_placement(slug: str) -> dict[str, object]:
 
 
 def start_interview_placement(slug: str) -> dict[str, object]:
-    """Start a reasoning-placement activity and bind it to the local profile."""
+    """Start the current rapid confidence placement without presentation code."""
     from openlearn import cli, interview_prep
 
-    activity = cli._begin_interview_activity(
-        slug, lifecycle_version=interview_prep.PLACEMENT_V3
-    )
     with cli.interview_profile_write_lock(slug):
-        return interview_prep.start_placement(
+        return interview_prep.start_confidence_placement(
             cli.interview_profile_path(slug),
-            activity_id=str(activity["activity_id"]),
-            lifecycle_version=interview_prep.PLACEMENT_V3,
         )
 
 

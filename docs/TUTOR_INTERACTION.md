@@ -75,18 +75,44 @@ The durable manual dogfood flow for Neovim and a graphical IDE is in `manual-tes
 
 ## Interview Placement Boundary
 
-Initial technical-interview placement is a short offline routing conversation, not a coding test.
-It asks for clarification questions and a complete solution route covering the approach, data structure or technique, edge cases and tests, and time and space complexity.
-Each stage accepts multiple saved lines and advances only when the learner uses `/done` or explicitly skips it.
-Stop, EOF, and interruption preserve the current stage draft for the next `openlearn resume`.
+Initial technical-interview placement is a rapid offline confidence survey, not a coding test or tutor judgment.
+It asks about the target role family, level, interview mix, and confidence with the coding or system-design topics relevant to that mix.
+Each answer uses a bounded 1-5 scale and the interface advances immediately to the next topic.
+The learner then reviews one versioned route outline and may confirm it, change bounded preferences, skip placement for a conservative baseline, or leave and resume later.
 
-The course-start passport may use reasoning evidence to recommend a first activity, but it must keep coding fluency unobserved and cannot grant mastery or interview readiness.
-Provider access begins at course planning, not placement.
+Confidence changes lesson depth and time allocation only.
+It cannot mark a skill known, ready, mastered, or complete.
+The first technical target comes from the accepted pinned route, while communication habits, edge cases, complexity, testing, and Python guidance are embedded alongside the relevant technical work.
+Provider access begins when teaching starts, not during the survey or route preview.
 The placement path must not open an editor, create a coding workspace, run learner code, or inspect Docker or Podman.
 
 Real coding evidence is collected later through accepted course activities.
 Normal coding practice may use the learner's configured editor and secure runner, while a controlled-editor timed mock interview is a separate later experience.
 Neither later path changes the conservative evidence rules below.
+
+## Canonical Interview Progression
+
+The accepted versioned curriculum route is the only authority for the next interview concept.
+The model teaches an application-selected target and cannot choose a different unit, infer progress from prose, or rewrite the course outline.
+CLI and Maker Bench consume the same canonical projection of unit, section, skill, course revision, committed lesson, reserved target, coverage, and readiness.
+
+Continue reserves exactly one next target before generation.
+Provider generation happens outside the storage lock, and the generated response is captured before one revision-checked final commit.
+A timeout or process exit never advances to another concept.
+Retry resumes the saved target, a recovered generated response is reused without another provider call, and a repeated operation ID with different input is rejected.
+
+The learner may explicitly use `Skip for now` to defer the current target without mastery credit.
+Ordinary Continue never creates a deferred record.
+When every accepted route skill has a first pass, ordinary Continue is disabled and `Practice now` selects bounded retrieval work without moving the forward cursor.
+
+Showing a lesson records first-pass exposure, not readiness.
+Readiness changes only from qualifying judged evidence under the pinned graph and mastery policy.
+An incorrect answer keeps or weakens the exact skill that owned the pending check, and model-authored focus labels cannot redirect that evidence.
+First-pass coverage and readiness work are therefore separate learner-visible measures.
+
+Side chat is a separate operation namespace.
+Its durable source reference includes the visible lesson occurrence, curriculum identity, and course revision.
+A question may finish while another lesson is generating, but it cannot advance the course or silently attach itself to the newer lesson.
 
 ## Interview Skill Evidence
 

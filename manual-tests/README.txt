@@ -30,6 +30,11 @@ Files
   Defines the five-person fresh-user release gate, required platform and journey
   coverage, privacy-safe evidence, blocker triage, and the final GO/NO-GO record.
 
+- interview-placement.md
+  Exercises the accelerated Technical Interview Prep survey, canonical first
+  lesson, provider retry, Maker Bench to CLI handoff, side chat, and caught-up
+  practice behavior in an isolated learner home.
+
 Fast Workflows
 0. Shortest built-in workflow:
    openlearn test

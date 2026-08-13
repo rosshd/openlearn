@@ -85,36 +85,15 @@ def _course_initialization_prompt(slug: str) -> str:
         topic = cli.read_topic(slug)
     except cli.OpenLearnError:
         return COURSE_INITIALIZATION_PROMPT
+    if cli.interview_profile_path(slug).exists():
+        return COURSE_INITIALIZATION_PROMPT
     if topic.metadata.get("course_started") is not True:
         return COURSE_INITIALIZATION_PROMPT
     _context, log = cli.split_session_log(topic.body)
     plans = [entry for entry in cli.session_entries(log) if entry.get("kind") == "course_plan"]
     if not plans:
         return COURSE_INITIALIZATION_PROMPT
-    first_activity: str | None = None
-    try:
-        profile = interview_prep.load_profile(cli.interview_profile_path(slug))
-        placement = profile.get("placement")
-        result = placement.get("result") if isinstance(placement, dict) else None
-        passport = result.get("passport") if isinstance(result, dict) else None
-        if isinstance(passport, dict) and passport.get("first_activity"):
-            first_activity = str(passport["first_activity"])
-    except (OSError, ValueError):
-        pass
-    return cli.first_lesson_prompt(str(plans[-1]["response"]), first_activity=first_activity)
-
-
-def _course_has_accepted_plan(slug: str, outline: str) -> bool:
-    """Return whether the topic already contains this accepted course plan."""
-    try:
-        topic = cli.read_topic(slug)
-    except cli.OpenLearnError:
-        return False
-    if topic.metadata.get("course_started") is not True:
-        return False
-    _context, log = cli.split_session_log(topic.body)
-    plans = [entry for entry in cli.session_entries(log) if entry.get("kind") == "course_plan"]
-    return bool(plans and str(plans[-1].get("response") or "").strip() == outline.strip())
+    return cli.first_lesson_prompt(str(plans[-1]["response"]))
 
 
 def _card(card: CourseCard) -> dict[str, object]:

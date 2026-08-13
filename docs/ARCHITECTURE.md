@@ -54,35 +54,55 @@ Quick Learn topics also store `learning_mode`, `quick_source_type`, `quick_sourc
 Interview prep is explicitly opt-in and stores its learner-owned profile in `<slug>.interview.json`, separate from shareable topic metadata, general learner preferences, and concept mastery.
 The file contains a versioned profile revision, resumable placement status, an optional current-stage draft, opaque activity and evidence references, derived tri-state observations, recorded lifecycle and rubric versions, a provisional gap assessment, target-horizon-aware recommendations, and a course-start passport.
 Legacy records without `lifecycle_version` are interpreted only as coding placement v1 when their recorded rubric is v1, while unknown or mismatched versions fail closed without rewriting evidence.
-The compact v2 contract contains conversation, implementation, and an optional debrief, and omitting that debrief does not create placeholder evidence.
-The production CLI starts new attempts with reasoning-placement v3, whose durable stages are clarification and reasoning.
-Accepted draft lines are saved in the profile until `/done` publishes one joined observation through append-only namespaced activity evidence and clears the matching draft.
-The v3 activity is non-executable and never creates a coding attempt, opens an editor, or invokes a runner.
-Its course-start passport can route the learner from deterministic reasoning signals, but coding fluency always remains unobserved and no mastery update is applied.
-Historical coding-placement v1 and v2 records retain their recorded lifecycle and rubric semantics.
-An active historical attempt is never silently converted: resume offers new reasoning placement, continued legacy placement, or a safe exit, and confirms before abandoning the active legacy activity.
-Legacy Python placement code remains in a persistent learner-owned drill workspace with durable attempt snapshots, while trusted hidden-test outcomes remain append-only execution evidence.
-Coding placement rubric v1 accepts only secure Python runner evidence for scored implementation and testing observations; skipped dependent stages and runner infrastructure failures remain uncertain rather than being treated as failed evidence.
-Interrupted activity transactions recover through the activity journal, and placement resume idempotently projects any recovered evidence into the profile before asking for the next stage.
+Historical coding-placement v1 and v2 records and reasoning-placement v3 records retain their recorded lifecycle and rubric semantics.
+An active historical attempt is never silently converted.
+Resume offers the current rapid placement, the recorded legacy flow, or a safe exit, and confirms before abandoning an active legacy activity.
+New courses use confidence-placement v4.
+It collects role family, target level, interview focus, and rapid 1-5 confidence ratings for the relevant coding or system-design topics.
+The survey is planning context only, runs offline, opens no editor, executes no code, and awards no mastery.
+Its reviewed outline is a projection of the same pinned curriculum bundle and materialized route that later progression uses.
+Skipping placement creates a conservative baseline route through the same acceptance transaction.
 Profile publication takes the topic identity lock before the profile lock, so concurrent topic deletion cannot recreate an orphan profile.
 Effective profile edits are validated before mutation and publish a topic-generation-aware edit journal while holding the topic identity lock, allowing an interrupted activity abandonment and profile reset to finish on the next profile read.
 Recovery verifies that same generation again under the topic lock immediately before profile publication, so a stale edit cannot mutate a deleted and recreated topic with the same slug.
 Profile edits invalidate affected recommendations and mark completed placement stale without deleting attempt events.
 Generic resume inspects and synchronizes this adjacent state before model-backed tutor or source-refresh work.
-An in-progress v3 placement resumes offline at its exact next stage, active legacy attempts use the migration chooser, not-started and stale states require an explicit learner route, and deferred or provisional states transition into course planning.
-Completed v3 placement enters course planning immediately when a provider is ready; otherwise it succeeds offline and prints the exact setup and resume action.
-Course-outline construction derives a bounded interview summary from canonical profile and placement projections.
-The summary includes target, schedule, provisional gap statuses, uncertainty, and at most three priorities, while raw activity evidence remains excluded from provider prompts and topic metadata.
-Interview-prep course planning skips the ordinary optional placement quiz because the bounded placement already owns that learner decision.
+An in-progress v4 placement resumes its exact confidence-survey stage, active legacy attempts use the migration chooser, and provisional placement resumes the accepted canonical route.
+Course-outline construction is deterministic and versioned.
+The model never chooses, reorders, or rewrites interview curriculum units.
+Interview-prep course setup skips the ordinary optional placement quiz because the bounded survey already owns that learner decision.
 Before an interview-prep course plan or tutor resume can call a remote provider, a deterministic preflight accepts mock mode, dry-run mode, saved or environment keys, and keyless localhost endpoints.
 A failed preflight prints compact adjacent continuity and returns before source refresh, tutor output, active-topic mutation, or course mutation.
 Topics without the adjacent file behave exactly as ordinary topics and receive no interview prompts.
-The `technical-interview-prep` course template declares its interview entry mode, while ordinary starter templates retain the normal course-creation path.
+The `technical-interview-prep` course template pins a curriculum bundle and declares its interview entry mode, while ordinary starter templates retain the normal course-creation path.
+
+## Interview Curriculum Authority
+
+`openlearn.interview_curriculum` owns the immutable bundle, adaptive route materialization, stable skill cursor, evidence projection, and deterministic next-target resolver.
+Each accepted course remains pinned to one bundle ID and version.
+Its route stores full graph ID, graph version, mastery-policy version, and skill ID references rather than model-authored labels or unit ordinals.
+Role, level, focus, date horizon, study time, confidence, pacing override, and versioned optional selections may change allocation depth and ordering within the validated bundle.
+They cannot remove locked prerequisites or establish mastery.
+
+`openlearn.courses` owns the crash-safe storage transactions for route acceptance and legacy reconciliation.
+Route acceptance publishes the profile, canonical state, compatibility topic projection, event, and permanent receipt through a generation-fenced journal.
+Recovery validates the journal and completes one generation before any canonical interview read.
+Legacy transcript and metadata fields are preserved conservatively, and ambiguous prose remains unassessed.
+
+`openlearn.tutor_service` owns progression reservations.
+One operation reserves a stable target at revision N to N+1, releases the filesystem lock during provider generation, durably captures generated content, and finalizes the lesson at N+1 to N+2.
+The operation ID and payload hash make same-intent retries idempotent and conflicting reuse fail closed.
+Provider failure leaves the target reserved, generated-response recovery does not call the provider again, and cancellation restores the pre-reservation curriculum projection without awarding evidence.
+
+`openlearn.application.interview_learning` is the shared typed read model for CLI and Maker Bench.
+It separates the last committed lesson from a reserved next target, exposes operation recovery actions, and reports first-pass route coverage separately from readiness work.
+Side chat binds to the visible committed lesson identity and uses a separate revision namespace, so a question cannot advance or silently rebind to a newer lesson.
+Ordinary courses continue to use the existing slide-based compatibility path and do not acquire interview-only state.
 
 ## Interview Skill Graph
 
-`openlearn.interview_skills` owns the versioned static interview-readiness model.
-The bundled `coding-interview-v1.json` graph is canonical, while the algorithms course template is only a presentation seed.
+`openlearn.interview_skills` owns each versioned static interview-readiness graph.
+The pinned interview curriculum bundle selects the exact coding and supplemental graphs used by a course, while the JSON course template only selects that bundle and entry mode.
 The graph uses stable category-prefixed IDs for concepts, patterns, process skills, and communication skills.
 It declares blocking and supporting prerequisite edges, versioned evidence policies, transfer expectations, and primary or supporting problem references.
 Validation rejects unknown references, duplicate identities, invalid problem roles, and cycles before the graph can be used.
@@ -196,7 +216,8 @@ Non-local provider base URLs require an API key, while localhost OpenAI-compatib
 When no key is configured for a keyless endpoint, requests omit the `Authorization` header; a 401 response is reported as an API-key-required endpoint.
 `openlearn cli` skips first-run onboarding for saved keys, environment keys, `OPENLEARN_MOCK=1`, or keyless localhost providers with a configured model.
 For `chat`, `resume`, `next`, and `review`, `--dry-run` prints the rendered system and user messages instead of calling the provider or mutating local files.
-For an unstarted interview-prep topic, `resume` first follows the adjacent placement routing table; for a started course, it preserves normal tutor continuity after the provider preflight.
+For an unstarted interview-prep topic, `resume` first follows the adjacent placement routing table.
+For a started interview course, `resume`, `next`, `/done`, and natural continuation all use the canonical progression reservation after provider preflight.
 Learner-metadata extraction can use `OPENLEARN_EXTRACTOR_MODEL` or `extractor_model`; otherwise it uses the tutor model.
 Extractor calls send a reduced metadata snapshot limited to pending checks, focus, known concepts, weak spots, and review due items.
 

@@ -161,14 +161,19 @@ class InterviewPrepTests(unittest.TestCase):
 
         survey = saved["placement"]["survey"]
         self.assertEqual(saved["placement"]["next_stage"], "outline")
-        self.assertIn("Requirements, Scale, and Interfaces", survey["outline"])
-        self.assertIn("Reliability, Observability, and Tradeoffs", survey["outline"])
-        self.assertIn("Frontend Interview Foundations", survey["outline"])
-        self.assertIn("Two Pointers and Sliding Window", survey["outline"])
+        preview = interview_prep.preview_curriculum_change(
+            saved,
+            current_date=NOW.date(),
+        )
+        self.assertEqual(survey["outline"], preview["outline"])
+        self.assertIn("Linear Foundations", survey["outline"])
+        self.assertIn("Sequence Patterns", survey["outline"])
+        self.assertIn("Requirements and Interfaces", survey["outline"])
+        self.assertIn("Frontend Role Extension", survey["outline"])
         self.assertIn("Emphasis: Learn", survey["outline"])
-        self.assertIn("Interview habit:", survey["outline"])
-        self.assertIn("Integrated Mock Interview Rounds", survey["outline"])
-        self.assertNotIn("Timed and Behavioral Interview Practice", survey["outline"])
+        self.assertIn("Locked prerequisite", survey["outline"])
+        self.assertNotIn("Interview Communication and Problem Framing", survey["outline"])
+        self.assertNotIn("Integrated Mock Interview Rounds", survey["outline"])
         self.assertEqual(saved["profile_revision"], 2)
         self.assertEqual(saved["placement"]["profile_revision"], 2)
 
@@ -332,10 +337,13 @@ class InterviewPrepTests(unittest.TestCase):
         )
 
         outline = saved["placement"]["survey"]["outline"]
-        self.assertIn("Coding Pattern Maintenance", outline)
-        self.assertIn("Requirements, Scale, and Interfaces", outline)
+        self.assertIn("Linear Foundations", outline)
+        self.assertIn("Requirements and Interfaces", outline)
         self.assertIn("Emphasis: Learn", outline)
-        self.assertNotIn("Two Pointers and Sliding Window", outline)
+        self.assertLess(
+            outline.index("Requirements and Interfaces"),
+            outline.index("Linear Foundations"),
+        )
 
     def test_curriculum_preview_is_a_pure_projection_of_the_versioned_route(self) -> None:
         value = self.create()

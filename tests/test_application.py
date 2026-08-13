@@ -82,7 +82,7 @@ class ApplicationQueryTests(unittest.TestCase):
         cleared = application.remove_provider_api_key()
         self.assertFalse(cleared.key_configured)
 
-    def test_interview_placement_lifecycle_is_available_without_a_presentation(self) -> None:
+    def test_interview_placement_lifecycle_starts_the_rapid_confidence_route(self) -> None:
         created = application.create_course(
             application.CourseCreationRequest(
                 name="Technical Interview Prep",
@@ -97,16 +97,10 @@ class ApplicationQueryTests(unittest.TestCase):
         started = application.start_interview_placement(slug)
         placement = started["placement"]
         self.assertEqual(placement["status"], "in_progress")
-        evidence_id = interview_prep.placement_evidence_id(placement, "clarification")
-        recorded = application.record_interview_placement_response(
-            slug,
-            stage="clarification",
-            response="What constraints and edge cases should I cover?",
-            evidence_id=evidence_id,
-        )
-        self.assertIsNotNone(recorded)
-        assert recorded is not None
-        self.assertEqual(recorded["placement"]["next_stage"], "reasoning")
+        self.assertEqual(placement["lifecycle_version"], interview_prep.PLACEMENT_V4)
+        self.assertEqual(placement["next_stage"], "confidence")
+        self.assertIsNone(placement["activity_id"])
+        self.assertEqual(placement["evidence_refs"], [])
 
         discarded = application.discard_interview_placement(slug)
         self.assertEqual(discarded["placement"]["status"], "not_started")
