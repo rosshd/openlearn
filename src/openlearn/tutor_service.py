@@ -978,7 +978,7 @@ def _prepare_turn(
     return revision, None
 
 
-def _execute_prepared_turn(
+def _execute_prepared_turn_inner(
     slug: str,
     normalized: str,
     sid: str,
@@ -1342,6 +1342,7 @@ def _execute_prepared_turn(
                 result=result,
                 error_code="course_revision_changed",
                 payload_hash=payload_hash,
+                session_kind=session_kind,
             )
         raise TutorConflictError(result.error_message) from exc
     except Exception as exc:
@@ -1379,6 +1380,85 @@ def _execute_prepared_turn(
         if isinstance(exc, TutorOperationError):
             raise
         raise TutorOperationError(result.error_message) from exc
+
+
+def _execute_prepared_turn(
+    slug: str,
+    normalized: str,
+    sid: str,
+    revision: int,
+    intent: TurnIntent,
+    model: str | None,
+    session_kind: TutorSessionKind,
+    progression_intent: ProgressionIntent | None,
+) -> TutorTurnResult:
+    """Run a prepared turn with a durable failure boundary around all setup."""
+    from openlearn import cli
+
+    try:
+        return _execute_prepared_turn_inner(
+            slug,
+            normalized,
+            sid,
+            revision,
+            intent,
+            model,
+            session_kind,
+            progression_intent,
+        )
+    except Exception as exc:
+        _clear_live_turn((slug, sid))
+        current: TutorTurnResult | None = None
+        try:
+            current = operation_result(slug, sid)
+        except Exception:
+            pass
+        if current is not None and current.status in {
+            "committed",
+            "retryable_error",
+            "conflict",
+        }:
+            raise
+        payload_hash = _turn_payload_hash(
+            normalized, intent, session_kind, progression_intent
+        )
+        try:
+            internal = _internal_state(cli.load_state(slug))
+            active = internal.get(_active_operation_key(session_kind))
+            if (
+                isinstance(active, dict)
+                and active.get("submission_id") == sid
+                and isinstance(active.get("payload_hash"), str)
+            ):
+                payload_hash = str(active["payload_hash"])
+        except Exception:
+            pass
+        error_code, error_message = _turn_failure(exc)
+        result = TutorTurnResult(
+            submission_id=sid,
+            status="retryable_error",
+            input_status="saved",
+            message_kind=_message_kind(intent),
+            move=None,
+            error_code=error_code,
+            error_message=error_message,
+            payload_hash=payload_hash,
+        )
+        with _course_lock(slug):
+            _save_operation(
+                slug,
+                submission_id=sid,
+                status="retryable_error",
+                expected_revision=revision,
+                prompt=normalized,
+                result=result,
+                error_code=error_code,
+                payload_hash=payload_hash,
+                session_kind=session_kind,
+            )
+        if isinstance(exc, (TutorConflictError, TutorOperationError)):
+            raise
+        raise TutorOperationError(error_message) from exc
 
 
 def submit_turn(
@@ -1529,6 +1609,7 @@ def start_turn(
                 result=failed,
                 error_code="executor_unavailable",
                 payload_hash=failed.payload_hash,
+                session_kind=session_kind,
             )
             with _FUTURES_GUARD:
                 _RUNNING.discard(operation_key)
@@ -1598,8 +1679,11 @@ def cancel_interview_progression(slug: str, submission_id: str) -> None:
 
     cli.recover_turn_commit(slug)
     with cli.topic_store_locks(slug):
-        state = cli._load_state_unlocked(slug)
-        canonical = state.get("interview_curriculum")
+        before_state = cli._load_state_unlocked(slug)
+        cancellations = before_state.get("_interview_cancellation_receipts")
+        if isinstance(cancellations, dict) and submission_id in cancellations:
+            return
+        canonical = before_state.get("interview_curriculum")
         active = canonical.get("active_operation") if isinstance(canonical, dict) else None
         if not isinstance(active, dict) or active.get("submission_id") != submission_id:
             raise TutorConflictError("The saved interview reservation changed.")
@@ -1619,19 +1703,34 @@ def cancel_interview_progression(slug: str, submission_id: str) -> None:
                 else:
                     canonical.pop(key, None)
         canonical["active_operation"] = None
-        state["interview_curriculum"] = canonical
-        state.pop("pending_learner_prompt", None)
-        internal = _internal_state(state)
+        after_state = copy.deepcopy(before_state)
+        after_state["interview_curriculum"] = canonical
+        after_state.pop("pending_learner_prompt", None)
+        internal = _internal_state(after_state)
         current_active = internal.get("active_turn")
         if isinstance(current_active, dict) and current_active.get("submission_id") == submission_id:
             internal["active_turn"] = None
-        state["_openlearn_internal"] = internal
-        cli.write_text_atomic(
-            cli.topic_state_path(slug),
-            json.dumps(state, indent=2, sort_keys=True) + "\n",
-        )
+        after_state["_openlearn_internal"] = internal
+        cancellations = dict(cancellations) if isinstance(cancellations, dict) else {}
+        cancellations[submission_id] = {
+            "course_revision": internal.get("course_revision", 0),
+            "cancelled_at": _now(),
+        }
+        after_state["_interview_cancellation_receipts"] = cancellations
         topic_text = cli.topic_path(slug).read_text(encoding="utf-8")
-        metadata, body = cli.parse_topic(topic_text)
-        metadata = dict(metadata)
-        metadata.update(interview_curriculum.compatibility_projection(canonical))
-        cli.write_text_atomic(cli.topic_path(slug), cli.format_topic(metadata, body))
+        before_metadata, _body = cli.parse_topic(topic_text)
+        after_metadata = dict(before_metadata)
+        after_metadata.update(interview_curriculum.compatibility_projection(canonical))
+    mutation_id = "turn_" + hashlib.sha256(
+        f"interview-cancel:{submission_id}".encode("utf-8")
+    ).hexdigest()[:32]
+    cli._commit_projected_turn(
+        slug,
+        before_state,
+        after_state,
+        f"<!-- openlearn-turn:{mutation_id} -->",
+        [],
+        mutation_id,
+        before_metadata=before_metadata,
+        after_metadata=after_metadata,
+    )

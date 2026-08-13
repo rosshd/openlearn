@@ -3078,25 +3078,34 @@ def interview_profile_values(args: argparse.Namespace) -> dict[str, object]:
 def interview_profile_write_lock(
     slug: str, *, expected_generation: str | None = None
 ):
-    """Serialize profile writes after the topic identity lock.
+    """Serialize profile writes behind pending curriculum publication.
 
-    Topic deletion takes the same first lock, so it cannot race a profile write
-    into recreating adjacent state after the topic and tombstone are published.
+    Route acceptance publishes its journal before taking the topic and profile
+    locks. Taking that journal lock first lets a public profile mutation finish
+    an interrupted acceptance before it can invalidate the transaction's
+    profile fingerprint. Topic deletion still shares the topic lock, so it
+    cannot race a profile write into recreating adjacent state.
     """
-    with file_lock(topic_path(slug)), file_lock(interview_profile_path(slug)):
-        if (
-            not topic_path(slug).exists()
-            or topic_deletion_tombstone_path(slug).exists()
-        ):
-            raise OpenLearnError("topic was deleted during the interview-prep update")
-        if (
-            expected_generation is not None
-            and current_topic_generation(slug) != expected_generation
-        ):
-            raise OpenLearnError(
-                "topic generation changed during the interview-prep update"
-            )
-        yield
+    route_journal = interview_route_journal_path(slug)
+    with file_lock(route_journal):
+        if route_journal.exists():
+            from openlearn import courses
+
+            courses.recover_interview_route_acceptance(slug)
+        with file_lock(topic_path(slug)), file_lock(interview_profile_path(slug)):
+            if (
+                not topic_path(slug).exists()
+                or topic_deletion_tombstone_path(slug).exists()
+            ):
+                raise OpenLearnError("topic was deleted during the interview-prep update")
+            if (
+                expected_generation is not None
+                and current_topic_generation(slug) != expected_generation
+            ):
+                raise OpenLearnError(
+                    "topic generation changed during the interview-prep update"
+                )
+            yield
 
 
 def _validated_interview_edit_journal(
@@ -10257,6 +10266,7 @@ def _validated_projection_patch(value: object, *, label: str) -> list[dict[str, 
                 "_openlearn_internal",
                 "_turn_receipts",
                 "_turn_receipts_schema",
+                "_interview_cancellation_receipts",
             }
         ):
             raise OpenLearnError("saved tutor turn journal targets unsupported state")
@@ -16607,6 +16617,7 @@ def save_state(slug: str, state: dict[str, object]) -> None:
             "_legacy_turn_receipts",
             "_legacy_turn_receipts_schema",
             "_interview_route_receipts",
+            "_interview_cancellation_receipts",
             "interview_curriculum",
         ):
             if internal_key in existing:

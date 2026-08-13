@@ -616,26 +616,155 @@ def _route_for_profile(profile_value: dict[str, object]) -> dict[str, object]:
     return route.to_dict()
 
 
-def _event_has_reconciliation(events_path: Path, reconciliation_id: str) -> bool:
-    if not events_path.exists():
-        return False
-    for line in events_path.read_text(encoding="utf-8").splitlines():
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
+def _load_authoritative_state_unlocked(slug: str) -> dict[str, object]:
+    """Read reconciliation input without the display layer's corrupt-as-empty fallback."""
+    cli = _cli()
+    path = cli.topic_state_path(slug)
+    if not path.exists():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise cli.OpenLearnError(
+            "interview curriculum source state is unreadable; repair it before continuing"
+        ) from exc
+    if not isinstance(value, dict):
+        raise cli.OpenLearnError(
+            "interview curriculum source state is malformed; repair it before continuing"
+        )
+    return value
+
+
+def _load_authoritative_events(path: Path) -> list[dict[str, object]]:
+    """Read the complete append-only authority or fail without publishing."""
+    cli = _cli()
+    if not path.exists():
+        return []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise cli.OpenLearnError(
+            "interview curriculum source events are unreadable; repair them before continuing"
+        ) from exc
+    events: list[dict[str, object]] = []
+    for line_number, line in enumerate(lines, start=1):
+        if not line.strip():
             continue
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise cli.OpenLearnError(
+                "interview curriculum source events are malformed at "
+                f"line {line_number}; repair them before continuing"
+            ) from exc
+        if not isinstance(value, dict):
+            raise cli.OpenLearnError(
+                "interview curriculum source events are malformed at "
+                f"line {line_number}; repair them before continuing"
+            )
+        events.append(value)
+    return events
+
+
+_RECONCILIATION_METADATA_KEYS = (
+    "template_id",
+    "template_units",
+    "course_units",
+    "current_unit",
+    "current_slide",
+    "current_focus",
+    "known",
+    "weak_spots",
+    "review_due",
+    "placement_result",
+    "slide_coverage",
+)
+_RECONCILIATION_STATE_KEYS = (
+    "concept_attempts",
+    "review_history",
+    "assessment_history",
+)
+
+
+def _reconciliation_source_payload(
+    slug: str,
+    *,
+    profile_value: dict[str, object],
+    journal: dict[str, object] | None = None,
+) -> tuple[dict[str, object], dict[str, object], dict[str, object], str]:
+    """Capture mutable legacy authorities while normalizing our own partial writes."""
+    cli = _cli()
+    topic_text = cli.topic_path(slug).read_text(encoding="utf-8")
+    raw_metadata, body = cli.parse_topic(topic_text)
+    state = _load_authoritative_state_unlocked(slug)
+    metadata = cli.merge_topic_state(cli.normalize_topic_metadata(raw_metadata, slug), state)
+    events = _load_authoritative_events(cli.topic_events_path(slug))
+    if journal is not None:
+        source_before = journal.get("source_payload")
+        projections = [
+            value
+            for value in (
+                journal.get("metadata_projection"),
+                journal.get("superseded_projection"),
+            )
+            if isinstance(value, dict)
+        ]
+        source_metadata = (
+            source_before.get("metadata") if isinstance(source_before, dict) else None
+        )
+        if projections and isinstance(source_metadata, dict):
+            metadata = dict(metadata)
+            for key in ("course_units", "current_unit", "current_slide", "current_focus"):
+                if any(raw_metadata.get(key) == projection.get(key) for projection in projections):
+                    if key in source_metadata:
+                        metadata[key] = copy.deepcopy(source_metadata[key])
+                    else:
+                        metadata.pop(key, None)
+        reconciliation_ids = {
+            value
+            for value in (
+                journal.get("reconciliation_id"),
+                journal.get("superseded_reconciliation_id"),
+            )
+            if isinstance(value, str)
+        }
+        events = [
+            event
+            for event in events
+            if not (
+                isinstance(event.get("data"), dict)
+                and event["data"].get("reconciliation_id") in reconciliation_ids
+            )
+        ]
+    payload = {
+        "topic_generation": cli.topic_generation_from_metadata(slug, raw_metadata),
+        "metadata": {key: metadata.get(key) for key in _RECONCILIATION_METADATA_KEYS},
+        "state": {key: state.get(key) for key in _RECONCILIATION_STATE_KEYS},
+        "transcript_fingerprint": interview_curriculum.canonical_fingerprint(body),
+        "profile_context": {
+            "profile": profile_value.get("profile"),
+            "placement": profile_value.get("placement"),
+        },
+        "events": events,
+        "allocation": profile_value.get("curriculum_allocation"),
+    }
+    return payload, raw_metadata, state, body
+
+
+def _event_has_reconciliation(events_path: Path, reconciliation_id: str) -> bool:
+    for event in _load_authoritative_events(events_path):
         data = event.get("data") if isinstance(event, dict) else None
         if isinstance(data, dict) and data.get("reconciliation_id") == reconciliation_id:
             return True
     return False
 
 
-def _apply_reconciliation_journal(slug: str, journal: dict[str, object]) -> None:
+def _apply_reconciliation_journal(slug: str, journal: dict[str, object]) -> bool:
     cli = _cli()
     generation = cli.current_topic_generation(slug)
     if generation != journal.get("topic_generation"):
         cli.durable_unlink(cli.interview_reconciliation_journal_path(slug))
-        return
+        return False
     canonical_state = journal.get("canonical_state")
     metadata_projection = journal.get("metadata_projection")
     event = journal.get("event")
@@ -645,6 +774,19 @@ def _apply_reconciliation_journal(slug: str, journal: dict[str, object]) -> None
         for item in (canonical_state, metadata_projection, event, receipt)
     ):
         raise cli.OpenLearnError("interview curriculum reconciliation journal is malformed")
+    source_payload = journal.get("source_payload")
+    if not isinstance(source_payload, dict):
+        raise cli.OpenLearnError("interview curriculum reconciliation journal is malformed")
+    profile_value = interview_prep.load_profile(cli.interview_profile_path(slug))
+    current_source, _raw_metadata, _state, _body = _reconciliation_source_payload(
+        slug, profile_value=profile_value, journal=journal
+    )
+    if (
+        interview_curriculum.canonical_fingerprint(current_source)
+        != journal.get("source_fingerprint")
+    ):
+        cli.durable_unlink(cli.interview_reconciliation_journal_path(slug))
+        return False
     reconciliation_id = str(journal["reconciliation_id"])
     state_path = cli.topic_state_path(slug)
     topic_path = cli.topic_path(slug)
@@ -681,6 +823,7 @@ def _apply_reconciliation_journal(slug: str, journal: dict[str, object]) -> None
         receipt_path.chmod(0o600)
     _reconciliation_checkpoint("after_receipt")
     cli.durable_unlink(cli.interview_reconciliation_journal_path(slug))
+    return True
 
 
 def _position_from_canonical(canonical: dict[str, object]) -> dict[str, object]:
@@ -733,10 +876,15 @@ def prepare_interview_curriculum(slug: str, *, boundary: str = "resume") -> dict
     canonical_slug = cli.slugify(slug)
     if canonical_slug != slug or not cli.interview_profile_path(slug).exists():
         raise cli.OpenLearnError(f"interview course not found: {slug}")
-    profile_value = interview_prep.load_profile(cli.interview_profile_path(slug))
     journal_path = cli.interview_reconciliation_journal_path(slug)
-    with cli.file_lock(journal_path), cli.topic_store_locks(slug):
+    profile_path = cli.interview_profile_path(slug)
+    with (
+        cli.file_lock(journal_path),
+        cli.topic_store_locks(slug),
+        cli.file_lock(profile_path),
+    ):
         cli.raise_if_topic_tombstoned(slug)
+        stale_journal: dict[str, object] | None = None
         if journal_path.exists():
             try:
                 pending = json.loads(journal_path.read_text(encoding="utf-8"))
@@ -746,14 +894,23 @@ def prepare_interview_curriculum(slug: str, *, boundary: str = "resume") -> dict
                 ) from exc
             if not isinstance(pending, dict):
                 raise cli.OpenLearnError("interview curriculum reconciliation journal is malformed")
-            _apply_reconciliation_journal(slug, pending)
+            if not _apply_reconciliation_journal(slug, pending) and pending.get(
+                "topic_generation"
+            ) == cli.current_topic_generation(slug):
+                stale_journal = pending
 
-        state = cli._load_state_unlocked(slug)
+        profile_value = interview_prep.load_profile(profile_path)
+        state = _load_authoritative_state_unlocked(slug)
         existing = state.get("interview_curriculum")
-        if isinstance(existing, dict):
+        stale_canonical = (
+            stale_journal.get("canonical_state")
+            if isinstance(stale_journal, dict)
+            else None
+        )
+        if isinstance(existing, dict) and existing != stale_canonical:
             return _position_from_canonical(existing)
         receipt_path = cli.interview_reconciliation_receipt_path(slug)
-        if receipt_path.exists():
+        if receipt_path.exists() and stale_journal is None:
             try:
                 receipt_value = json.loads(receipt_path.read_text(encoding="utf-8"))
             except json.JSONDecodeError as exc:
@@ -782,44 +939,13 @@ def prepare_interview_curriculum(slug: str, *, boundary: str = "resume") -> dict
                 )
                 return _position_from_canonical(receipt_canonical)
         route = _route_for_profile(profile_value)
-        topic_text = cli.topic_path(slug).read_text(encoding="utf-8")
-        raw_metadata, body = cli.parse_topic(topic_text)
+        source_payload, raw_metadata, state, body = _reconciliation_source_payload(
+            slug,
+            profile_value=profile_value,
+            journal=stale_journal,
+        )
         metadata = cli.merge_topic_state(cli.normalize_topic_metadata(raw_metadata, slug), state)
-        events_path = cli.topic_events_path(slug)
-        legacy_events = cli.load_event_log(events_path) if events_path.exists() else []
-        source_payload = {
-            "topic_generation": cli.topic_generation_from_metadata(slug, raw_metadata),
-            "metadata": {
-                key: metadata.get(key)
-                for key in (
-                    "template_id",
-                    "template_units",
-                    "course_units",
-                    "current_unit",
-                    "current_slide",
-                    "known",
-                    "weak_spots",
-                    "review_due",
-                    "placement_result",
-                    "slide_coverage",
-                )
-            },
-            "state": {
-                key: state.get(key)
-                for key in (
-                    "concept_attempts",
-                    "review_history",
-                    "assessment_history",
-                )
-            },
-            "transcript_fingerprint": interview_curriculum.canonical_fingerprint(body),
-            "profile_context": {
-                "profile": profile_value.get("profile"),
-                "placement": profile_value.get("placement"),
-            },
-            "events": legacy_events,
-            "allocation": profile_value.get("curriculum_allocation"),
-        }
+        legacy_events = cast(list[dict[str, object]], source_payload["events"])
         source_fingerprint = interview_curriculum.canonical_fingerprint(source_payload)
         generation = cli.topic_generation_from_metadata(slug, raw_metadata)
         reconciliation_id = "reconcile_" + interview_curriculum.canonical_fingerprint(
@@ -879,11 +1005,19 @@ def prepare_interview_curriculum(slug: str, *, boundary: str = "resume") -> dict
             "topic_generation": generation,
             "reconciliation_id": reconciliation_id,
             "source_fingerprint": source_fingerprint,
+            "source_payload": source_payload,
             "canonical_state": canonical,
             "metadata_projection": projection,
             "event": event,
             "receipt": receipt,
         }
+        if stale_journal is not None:
+            journal["superseded_projection"] = stale_journal.get(
+                "metadata_projection"
+            )
+            journal["superseded_reconciliation_id"] = stale_journal.get(
+                "reconciliation_id"
+            )
         cli.write_text_atomic(journal_path, json.dumps(journal, indent=2, sort_keys=True) + "\n")
         journal_path.chmod(0o600)
         _reconciliation_checkpoint("after_journal")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import tempfile
@@ -334,6 +335,124 @@ class CourseServiceTests(unittest.TestCase):
                 cli.delete_topic_files(slug)
                 self.assertFalse(cli.interview_reconciliation_journal_path(slug).exists())
                 self.assertFalse(cli.interview_reconciliation_receipt_path(slug).exists())
+
+    def test_profile_edit_recovers_route_acceptance_interrupted_after_profile_write(self) -> None:
+        result = create_course(
+            CourseCreationRequest(
+                name="Route Then Edit",
+                template_id="technical-interview-prep",
+            )
+        )
+        slug = result.course.slug
+        with mock.patch(
+            "openlearn.courses._route_acceptance_checkpoint",
+            side_effect=lambda stage: (
+                (_ for _ in ()).throw(RuntimeError(stage))
+                if stage == "after_profile"
+                else None
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "after_profile"):
+                application.accept_interview_curriculum(
+                    slug,
+                    action="skip",
+                    submission_id=str(uuid4()),
+                    expected_revision=0,
+                )
+
+        self.assertTrue(cli.interview_route_journal_path(slug).exists())
+        cli.cmd_interview_edit(
+            argparse.Namespace(
+                topic=slug,
+                field="target_level",
+                value="mid",
+            ),
+            output_func=lambda _text="": None,
+        )
+
+        self.assertFalse(cli.interview_route_journal_path(slug).exists())
+        state = cli.load_state(slug)
+        self.assertIn("interview_curriculum", state)
+        self.assertEqual(state["_openlearn_internal"]["course_revision"], 1)
+        profile = cli._load_interview_profile(slug)
+        self.assertEqual(profile["profile"]["target_level"], "mid")
+        self.assertEqual(profile["profile_revision"], 2)
+
+    def test_reconciliation_rebuilds_when_evidence_changes_after_journal(self) -> None:
+        slug = self._legacy_interview_course()
+        with mock.patch(
+            "openlearn.courses._reconciliation_checkpoint",
+            side_effect=lambda stage: (
+                (_ for _ in ()).throw(RuntimeError(stage))
+                if stage == "after_state"
+                else None
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "after_state"):
+                application.prepare_interview_curriculum(slug, boundary="resume")
+        stale = json.loads(
+            cli.interview_reconciliation_journal_path(slug).read_text(encoding="utf-8")
+        )
+        cli.update_state_atomic(
+            slug,
+            lambda state: state.__setitem__(
+                "assessment_history",
+                [{"concept": "Graphs", "correct": False}],
+            ),
+        )
+
+        application.prepare_interview_curriculum(slug, boundary="resume")
+
+        state = cli.load_state(slug)
+        self.assertEqual(
+            state["assessment_history"],
+            [{"concept": "Graphs", "correct": False}],
+        )
+        canonical = state["interview_curriculum"]
+        self.assertNotEqual(
+            canonical["reconciliation"]["source_fingerprint"],
+            stale["source_fingerprint"],
+        )
+        self.assertFalse(cli.interview_reconciliation_journal_path(slug).exists())
+
+    def test_reconciliation_fails_closed_on_malformed_authoritative_state(self) -> None:
+        slug = self._legacy_interview_course()
+        state_path = cli.topic_state_path(slug)
+        state_path.write_text('{"concept_attempts":', encoding="utf-8")
+        before = {
+            path: path.read_bytes()
+            for path in (
+                cli.topic_path(slug),
+                state_path,
+                cli.interview_profile_path(slug),
+            )
+        }
+
+        with self.assertRaisesRegex(cli.OpenLearnError, "source state is unreadable"):
+            application.prepare_interview_curriculum(slug, boundary="resume")
+
+        self.assertEqual(before, {path: path.read_bytes() for path in before})
+        self.assertFalse(cli.interview_reconciliation_journal_path(slug).exists())
+
+    def test_reconciliation_fails_closed_on_truncated_authoritative_events(self) -> None:
+        slug = self._legacy_interview_course()
+        events_path = cli.topic_events_path(slug)
+        events_path.write_text('{"event_type":"answer_judged"', encoding="utf-8")
+        before = {
+            path: path.read_bytes()
+            for path in (
+                cli.topic_path(slug),
+                cli.topic_state_path(slug),
+                cli.interview_profile_path(slug),
+                events_path,
+            )
+        }
+
+        with self.assertRaisesRegex(cli.OpenLearnError, "source events are malformed"):
+            application.prepare_interview_curriculum(slug, boundary="resume")
+
+        self.assertEqual(before, {path: path.read_bytes() for path in before})
+        self.assertFalse(cli.interview_reconciliation_journal_path(slug).exists())
 
     def test_pinned_canonical_state_does_not_rematerialize_against_new_default(self) -> None:
         slug = self._legacy_interview_course()

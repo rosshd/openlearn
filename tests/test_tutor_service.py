@@ -71,10 +71,10 @@ class TutorServiceTests(TestCase):
         }
         cli.save_state("web-tutor", state)
 
-    def _create_interview_course(self) -> str:
+    def _create_interview_course(self, topic: str = "Interview Curriculum") -> str:
         cli.cmd_new(
             argparse.Namespace(
-                topic="Interview Curriculum",
+                topic=topic,
                 goal="Prepare for technical interviews",
                 mastery_profile="efficient",
                 template=None,
@@ -82,10 +82,9 @@ class TutorServiceTests(TestCase):
             ),
             output_func=lambda _text="": None,
         )
-        application.prepare_interview_curriculum(
-            "interview-curriculum", boundary="resume"
-        )
-        return "interview-curriculum"
+        slug = cli.slugify(topic)
+        application.prepare_interview_curriculum(slug, boundary="resume")
+        return slug
 
     def test_submit_turn_returns_structured_move_and_replays(self) -> None:
         submission_id = str(uuid4())
@@ -602,6 +601,59 @@ class TutorServiceTests(TestCase):
         metadata = cli.read_topic(slug).metadata
         self.assertEqual(metadata["current_unit"], projection["current_unit"])
         self.assertEqual(metadata["current_slide"], projection["current_slide"])
+
+    def test_cancellation_recovers_every_projection_write_boundary(self) -> None:
+        checkpoints = (
+            "before_journal",
+            "after_journal",
+            "before_topic_write",
+            "after_topic",
+            "after_state",
+            "after_events",
+            "before_cleanup",
+        )
+        for checkpoint in checkpoints:
+            with self.subTest(checkpoint=checkpoint):
+                slug = self._create_interview_course(
+                    f"Interview Cancellation {checkpoint}"
+                )
+                submission_id = str(uuid4())
+                before = copy.deepcopy(cli.load_state(slug)["interview_curriculum"])
+                tutor_service._reserve_interview_progression(
+                    slug,
+                    "Cancel this reservation.",
+                    submission_id,
+                    0,
+                    "navigation",
+                    "chat",
+                    progression_intent="skip",
+                )
+
+                with mock.patch.object(
+                    cli,
+                    "_turn_commit_checkpoint",
+                    side_effect=lambda stage: (
+                        (_ for _ in ()).throw(RuntimeError(stage))
+                        if stage == checkpoint
+                        else None
+                    ),
+                ):
+                    with self.assertRaisesRegex(RuntimeError, checkpoint):
+                        tutor_service.cancel_interview_progression(slug, submission_id)
+
+                cli.recover_turn_commit(slug)
+                tutor_service.cancel_interview_progression(slug, submission_id)
+                state = cli.load_state(slug)
+                canonical = state["interview_curriculum"]
+                self.assertIsNone(canonical["active_operation"])
+                self.assertEqual(canonical["cursor"], before["cursor"])
+                self.assertEqual(canonical.get("deferred"), before.get("deferred"))
+                self.assertEqual(course_revision(slug), 1)
+                self.assertEqual(canonical["evidence"], before["evidence"])
+                projection = interview_curriculum.compatibility_projection(canonical)
+                metadata = cli.read_topic(slug).metadata
+                self.assertEqual(metadata["current_unit"], projection["current_unit"])
+                self.assertEqual(metadata["current_slide"], projection["current_slide"])
 
     def test_practice_now_reserves_covered_skill_without_moving_cursor(self) -> None:
         slug = self._create_interview_course()
@@ -1233,6 +1285,71 @@ class TutorServiceTests(TestCase):
                 expected_revision=0,
             )
         self.assertEqual(retried.status, "committed")
+
+    def test_pre_generation_setup_failure_is_durable_and_retryable(self) -> None:
+        submission_id = str(uuid4())
+        original = tutor_service._interview_progression_state
+        with mock.patch.object(
+            tutor_service,
+            "_interview_progression_state",
+            side_effect=RuntimeError("setup failed before provider"),
+        ):
+            with self.assertRaises(TutorOperationError):
+                submit_turn(
+                    "web-tutor",
+                    "Explain registers.",
+                    submission_id=submission_id,
+                    expected_revision=0,
+                )
+
+        failed = operation_status("web-tutor", submission_id)
+        self.assertIsNotNone(failed)
+        self.assertEqual(failed.status, "retryable_error")
+        self.assertEqual(failed.error_code, "turn_failure")
+        self.assertIsNone(
+            cli.load_state("web-tutor")["_openlearn_internal"].get("active_turn")
+        )
+
+        with mock.patch.object(
+            tutor_service, "_interview_progression_state", wraps=original
+        ):
+            retried = submit_turn(
+                "web-tutor",
+                "Explain registers.",
+                submission_id=submission_id,
+                expected_revision=0,
+            )
+        self.assertEqual(retried.status, "committed")
+
+    def test_side_chat_executor_failure_does_not_clear_navigation_operation(self) -> None:
+        navigation_id = str(uuid4())
+        tutor_service._save_operation(
+            "web-tutor",
+            submission_id=navigation_id,
+            status="saved",
+            expected_revision=0,
+            prompt="Continue.",
+        )
+        side_id = str(uuid4())
+        with mock.patch.object(
+            tutor_service._EXECUTOR,
+            "submit",
+            side_effect=RuntimeError("executor unavailable"),
+        ):
+            with self.assertRaises(TutorOperationError):
+                start_turn(
+                    "web-tutor",
+                    "Why does this matter?",
+                    intent="question",
+                    submission_id=side_id,
+                    expected_revision=0,
+                    session_kind=cli.SIDE_CHAT_SESSION_KIND,
+                )
+
+        internal = cli.load_state("web-tutor")["_openlearn_internal"]
+        self.assertEqual(internal["active_turn"]["submission_id"], navigation_id)
+        self.assertIsNone(internal.get("active_side_chat"))
+        self.assertEqual(internal["turn_results"][side_id]["status"], "retryable_error")
 
     def test_status_converts_restart_orphan_to_retryable_receipt(self) -> None:
         submission_id = str(uuid4())
