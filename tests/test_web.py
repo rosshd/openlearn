@@ -4,6 +4,7 @@ import argparse
 import json
 from pathlib import Path
 import time
+from types import SimpleNamespace
 from datetime import date, datetime, timedelta, timezone
 from uuid import uuid4
 
@@ -156,6 +157,8 @@ def test_default_web_app_runs_setup_dashboard_course_and_tutor_flow(
         "Can you explain the tradeoff with an example?"
     )
     assert chat["conversation"][0]["blocks"]
+    assert chat["conversation"][0]["source_lesson_id"].startswith("lesson_")
+    assert chat["conversation"][0]["source_lesson_title"]
     history = client.get(f"/courses/{slug}/history", headers={"accept": "application/json"})
     assert history.status_code == 200
     assert len(history.json()["items"]) == 1
@@ -636,6 +639,47 @@ def test_route_acceptance_recovers_every_publication_checkpoint_on_read(
     assert list(state["_interview_route_receipts"]) == [receipt_id]
     events = cli.load_event_log(cli.topic_events_path(slug))
     assert sum(event.get("event_id") == f"{receipt_id}:0" for event in events) == 1
+    assert not cli.interview_route_journal_path(slug).exists()
+
+
+def test_metadata_repair_recovers_pending_route_acceptance_instead_of_deleting_it(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    token = csrf(client, "/courses/new")
+    created = client.post(
+        "/api/courses",
+        headers={"x-csrf-token": token},
+        json={
+            "title": "Repair Pending Route",
+            "goal": "Prepare for interviews.",
+            "experience": "",
+            "template_id": "technical-interview-prep",
+            "submission_id": str(uuid4()),
+        },
+    ).json()
+    slug = created["slug"]
+    submission_id = str(uuid4())
+
+    def interrupt(stage: str) -> None:
+        if stage == "after_state":
+            raise cli.OpenLearnError("interrupt after_state")
+
+    monkeypatch.setattr(courses, "_route_acceptance_checkpoint", interrupt)
+    failed = client.post(
+        f"/api/courses/{slug}/placement",
+        headers={"x-csrf-token": token},
+        json={"action": "skip", "submission_id": submission_id},
+    )
+    assert failed.status_code == 422
+    assert cli.interview_route_journal_path(slug).exists()
+    monkeypatch.setattr(courses, "_route_acceptance_checkpoint", lambda _stage: None)
+
+    cli.repair_topic_metadata(slug)
+
+    receipt_id = f"route_{submission_id.replace('-', '')}"
+    state = cli.load_state(slug)
+    assert list(state["_interview_route_receipts"]) == [receipt_id]
+    assert cli.read_topic(slug).metadata["course_started"] is True
     assert not cli.interview_route_journal_path(slug).exists()
 
 
@@ -1280,6 +1324,53 @@ def test_focus_recovers_saved_turn_for_explicit_retry(client: TestClient) -> Non
     assert saved_text in focus.text
 
 
+def test_non_interview_side_chat_does_not_require_curriculum_source_fields(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    token = csrf(client, "/courses/new")
+    created = client.post(
+        "/api/courses",
+        headers={"x-csrf-token": token},
+        json={
+            "title": "General Course Chat",
+            "goal": "Learn a general topic.",
+            "experience": "",
+            "template_id": None,
+            "submission_id": str(uuid4()),
+        },
+    ).json()
+    slug = created["slug"]
+    wait_for_operation(client, slug, created["operation_id"], "committed")
+    captured: dict[str, object] = {}
+
+    def start_turn(*args: object, **kwargs: object) -> tutor_service.TutorTurnResult:
+        captured.update(kwargs)
+        return tutor_service.TutorTurnResult(
+            submission_id=str(kwargs["submission_id"]),
+            status="saved",
+            input_status="saved",
+            message_kind="question",
+            move=None,
+        )
+
+    monkeypatch.setattr(tutor_service, "start_turn", start_turn)
+    response = client.post(
+        f"/api/courses/{slug}/turns",
+        headers={"x-csrf-token": token},
+        json={
+            "intent": "question",
+            "text": "Can you clarify this lesson?",
+            "submission_id": str(uuid4()),
+            "expected_revision": tutor_service.course_revision(slug),
+        },
+    )
+
+    assert response.status_code == 202
+    assert captured["source_lesson_id"] is None
+    assert captured["source_lesson_title"] is None
+    assert captured["source_lesson_revision"] is None
+
+
 def test_invalid_course_template_is_a_validation_error(client: TestClient) -> None:
     token = csrf(client, "/courses/new")
     response = client.post(
@@ -1848,6 +1939,64 @@ def test_initialization_failure_preserves_course_and_retries_same_operation(
     assert "Begin the course now" not in client.get(f"/courses/{slug}").text
 
 
+def test_interview_initialization_retry_adopts_exact_canonical_reservation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    operation_id = str(uuid4())
+    projection = SimpleNamespace(
+        operation=SimpleNamespace(
+            submission_id=operation_id,
+            state="provider-error",
+        ),
+        revision=4,
+    )
+    resumed = tutor_service.TutorTurnResult(
+        submission_id=operation_id,
+        status="generating",
+        input_status="generating",
+        message_kind="lesson",
+        move=None,
+    )
+    monkeypatch.setattr(
+        "openlearn.web.services._initialization_id_for_slug",
+        lambda _slug: operation_id,
+    )
+    monkeypatch.setattr(application, "interview_learning", lambda _slug: projection)
+    monkeypatch.setattr(
+        application,
+        "resume_interview_progression",
+        lambda slug, *, model=None: resumed,
+    )
+    monkeypatch.setattr(
+        tutor_service,
+        "start_turn",
+        lambda *_args, **_kwargs: pytest.fail(
+            "interview retry must not reserve a replacement target"
+        ),
+    )
+
+    result = OpenLearnWebServices().retry_course_initialization(
+        "technical-interview-prep", operation_id
+    )
+
+    assert result["state"] == "generating"
+    assert result["operation_id"] == operation_id
+
+
+def test_cancelling_saved_progression_does_not_require_provider_setup() -> None:
+    client = TestClient(create_app(services=PlaceholderServices(), testing=True))
+    token = csrf(client, "/dashboard")
+
+    response = client.post(
+        "/api/courses/technical-interview-prep/progression",
+        headers={"x-csrf-token": token},
+        json={"action": "cancel", "operation_id": str(uuid4())},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["state"] == "missing"
+
+
 def test_focus_renders_safe_structured_lesson_blocks() -> None:
     class RichFocusServices(PlaceholderServices):
         def provider_status(self) -> dict[str, object]:
@@ -1904,6 +2053,198 @@ def test_focus_progress_uses_an_empty_state_until_concepts_are_tracked() -> None
         "summary": "Progress will appear after your first learning check.",
         "has_concepts": False,
     }
+
+
+def test_interview_focus_uses_curriculum_labels_not_turn_steps(
+    client: TestClient,
+) -> None:
+    token = csrf(client, "/courses/new")
+    created = client.post(
+        "/api/courses",
+        headers={"x-csrf-token": token},
+        json={
+            "title": "Curriculum Position UI",
+            "goal": "Prepare for interviews.",
+            "experience": "",
+            "template_id": "technical-interview-prep",
+            "submission_id": str(uuid4()),
+        },
+    ).json()
+    slug = created["slug"]
+    application.accept_interview_curriculum(
+        slug, action="skip", submission_id=str(uuid4())
+    )
+    initialized = OpenLearnWebServices().start_course_initialization(slug)
+    wait_for_operation(client, slug, initialized["operation_id"])
+    state = cli.load_state(slug)
+    canonical = state["interview_curriculum"]
+    first, second = canonical["route"]["skills"][:2]
+    canonical["evidence"]["exposed"] = [first["skill_ref"]["skill_id"]]
+    operation_id = str(uuid4())
+    canonical["active_operation"] = {
+        "submission_id": operation_id,
+        "status": "reserved",
+        "target": second,
+        "reason": "uncovered_required",
+        "rollback": {
+            "cursor": {
+                "present": True,
+                "value": {
+                    "unit_id": first["unit_id"],
+                    "section_id": first["section_id"],
+                    "skill_ref": first["skill_ref"],
+                    "instruction_status": "covered",
+                },
+            }
+        },
+    }
+    canonical["cursor"] = {
+        "unit_id": second["unit_id"],
+        "section_id": second["section_id"],
+        "skill_ref": second["skill_ref"],
+        "instruction_status": "reserved",
+    }
+    state["interview_curriculum"] = canonical
+    state["_openlearn_internal"]["active_turn"] = {
+        "submission_id": operation_id,
+        "status": "reserved",
+        "owner_pid": __import__("os").getpid(),
+    }
+    cli.write_text_atomic(
+        cli.topic_state_path(slug), json.dumps(state, indent=2, sort_keys=True) + "\n"
+    )
+    cli.append_session(
+        cli.read_topic(slug),
+        "next",
+        "Teach the first concept.",
+        "**Lesson:** Keep this committed lesson visible.",
+    )
+
+    page = client.get(f"/courses/{slug}")
+
+    assert page.status_code == 200
+    assert "Keep this committed lesson visible" in page.text
+    assert first["section_label"] in page.text
+    assert second["section_label"] in page.text
+    assert "Next target" in page.text
+    assert "Step " not in page.text
+
+
+def test_stale_visible_lesson_question_is_rejected_after_another_lesson_commits(
+    client: TestClient,
+) -> None:
+    token = csrf(client, "/courses/new")
+    created = client.post(
+        "/api/courses",
+        headers={"x-csrf-token": token},
+        json={
+            "title": "Bound Side Chat",
+            "goal": "Prepare for interviews.",
+            "experience": "",
+            "template_id": "technical-interview-prep",
+            "submission_id": str(uuid4()),
+        },
+    ).json()
+    slug = created["slug"]
+    application.accept_interview_curriculum(
+        slug, action="skip", submission_id=str(uuid4())
+    )
+    initialized = OpenLearnWebServices().start_course_initialization(slug)
+    wait_for_operation(client, slug, initialized["operation_id"])
+    first_page = client.get(f"/courses/{slug}")
+    source_id = first_page.text.split('name="source_lesson_id" value="', 1)[1].split(
+        '"', 1
+    )[0]
+    source_title = first_page.text.split(
+        'name="source_lesson_title" value="', 1
+    )[1].split('"', 1)[0]
+    source_revision = int(
+        first_page.text.split('name="source_lesson_revision" value="', 1)[1].split(
+            '"', 1
+        )[0]
+    )
+
+    advanced = client.post(
+        f"/api/courses/{slug}/turns",
+        headers={"x-csrf-token": token},
+        json={
+            "intent": "next",
+            "text": "",
+            "submission_id": str(uuid4()),
+            "expected_revision": source_revision,
+        },
+    )
+    assert advanced.status_code == 202
+    wait_for_operation(client, slug, advanced.json()["operation_id"])
+    current_revision = tutor_service.course_revision(slug)
+
+    stale_question = client.post(
+        f"/api/courses/{slug}/turns",
+        headers={"x-csrf-token": token},
+        json={
+            "intent": "question",
+            "text": "Explain the lesson I still have open.",
+            "submission_id": str(uuid4()),
+            "expected_revision": current_revision,
+            "source_lesson_id": source_id,
+            "source_lesson_title": source_title,
+            "source_lesson_revision": source_revision,
+        },
+    )
+
+    assert stale_question.status_code == 409
+    assert stale_question.json()["state"] == "conflict"
+    assert "visible lesson changed" in stale_question.json()["error"].lower()
+    assert cli.load_state(slug).get("pending_learner_prompt") != (
+        "Explain the lesson I still have open."
+    )
+
+
+def test_passive_interview_lesson_offers_skip_without_awarding_readiness(
+    client: TestClient,
+) -> None:
+    token = csrf(client, "/courses/new")
+    created = client.post(
+        "/api/courses",
+        headers={"x-csrf-token": token},
+        json={
+            "title": "Passive Interview Lesson",
+            "goal": "Prepare for interviews.",
+            "experience": "",
+            "template_id": "technical-interview-prep",
+            "submission_id": str(uuid4()),
+        },
+    ).json()
+    slug = created["slug"]
+    application.accept_interview_curriculum(
+        slug, action="skip", submission_id=str(uuid4())
+    )
+    initialized = OpenLearnWebServices().start_course_initialization(slug)
+    wait_for_operation(client, slug, initialized["operation_id"])
+    page = client.get(f"/courses/{slug}")
+    assert 'data-navigation-intent="next"' in page.text
+    assert 'data-navigation-intent="skip"' in page.text
+    assert 'data-tool-open="chat"' in page.text
+    before = cli.load_state(slug)["interview_curriculum"]
+    ready_before = list(before["evidence"]["ready"])
+    cursor_id = before["cursor"]["skill_ref"]["skill_id"]
+
+    skipped = client.post(
+        f"/api/courses/{slug}/turns",
+        headers={"x-csrf-token": token},
+        json={
+            "intent": "skip",
+            "text": "",
+            "submission_id": str(uuid4()),
+            "expected_revision": tutor_service.course_revision(slug),
+        },
+    )
+    assert skipped.status_code == 202
+    wait_for_operation(client, slug, skipped.json()["operation_id"])
+    after = cli.load_state(slug)["interview_curriculum"]
+    assert after["evidence"]["ready"] == ready_before
+    assert cursor_id not in after["evidence"]["ready"]
+    assert any(item["skill_id"] == cursor_id for item in after["deferred"])
 
 
 def test_focus_progress_clamps_invalid_internal_percentages() -> None:

@@ -6,6 +6,7 @@ import json
 import os
 import re
 import threading
+from collections.abc import Mapping
 from contextlib import nullcontext
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, dataclass
@@ -93,6 +94,32 @@ def _active_operation_key(session_kind: TutorSessionKind) -> str:
     return "active_side_chat" if session_kind == "side_chat" else "active_turn"
 
 
+def _visible_curriculum_skill_ref(
+    state: Mapping[str, object],
+) -> dict[str, str] | None:
+    canonical = state.get("interview_curriculum")
+    if not isinstance(canonical, Mapping):
+        return None
+    cursor = canonical.get("cursor")
+    active = canonical.get("active_operation")
+    if isinstance(active, Mapping):
+        rollback = active.get("rollback")
+        rollback_cursor = rollback.get("cursor") if isinstance(rollback, Mapping) else None
+        rollback_value = (
+            rollback_cursor.get("value")
+            if isinstance(rollback_cursor, Mapping)
+            and rollback_cursor.get("present") is True
+            else None
+        )
+        if isinstance(rollback_value, Mapping):
+            cursor = rollback_value
+    ref = cursor.get("skill_ref") if isinstance(cursor, Mapping) else None
+    keys = ("graph_id", "graph_version", "mastery_policy_version", "skill_id")
+    if not isinstance(ref, Mapping) or not all(isinstance(ref.get(key), str) for key in keys):
+        return None
+    return {key: str(ref[key]) for key in keys}
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -102,12 +129,18 @@ def _turn_payload_hash(
     intent: TurnIntent,
     session_kind: TutorSessionKind,
     progression_intent: ProgressionIntent | None = None,
+    source_lesson_id: str | None = None,
+    source_lesson_title: str | None = None,
+    source_lesson_revision: int | None = None,
 ) -> str:
     payload = {
         "text": text,
         "intent": intent,
         "session_kind": session_kind,
         "progression_intent": progression_intent,
+        "source_lesson_id": source_lesson_id,
+        "source_lesson_title": source_lesson_title,
+        "source_lesson_revision": source_lesson_revision,
     }
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -370,6 +403,10 @@ def _save_operation(
     session_kind: TutorSessionKind = "chat",
     source_course_revision: int | None = None,
     source_lesson: str | None = None,
+    source_lesson_id: str | None = None,
+    source_lesson_title: str | None = None,
+    source_lesson_revision: int | None = None,
+    source_lesson_skill_ref: Mapping[str, str] | None = None,
 ) -> None:
     from openlearn import cli
 
@@ -397,6 +434,26 @@ def _save_operation(
                     source_lesson
                     if source_lesson is not None
                     else previous_active.get("source_lesson")
+                ),
+                "source_lesson_id": (
+                    source_lesson_id
+                    if source_lesson_id is not None
+                    else previous_active.get("source_lesson_id")
+                ),
+                "source_lesson_title": (
+                    source_lesson_title
+                    if source_lesson_title is not None
+                    else previous_active.get("source_lesson_title")
+                ),
+                "source_lesson_revision": (
+                    source_lesson_revision
+                    if source_lesson_revision is not None
+                    else previous_active.get("source_lesson_revision")
+                ),
+                "source_lesson_skill_ref": (
+                    dict(source_lesson_skill_ref)
+                    if source_lesson_skill_ref is not None
+                    else previous_active.get("source_lesson_skill_ref")
                 ),
                 "updated_at": _now(),
             }
@@ -801,11 +858,20 @@ def _prepare_turn(
     intent: TurnIntent,
     session_kind: TutorSessionKind,
     progression_intent: ProgressionIntent | None,
+    source_lesson_id: str | None,
+    source_lesson_title: str | None,
+    source_lesson_revision: int | None,
 ) -> tuple[int, TutorTurnResult | None]:
     from openlearn import cli
 
     payload_hash = _turn_payload_hash(
-        normalized, intent, session_kind, progression_intent
+        normalized,
+        intent,
+        session_kind,
+        progression_intent,
+        source_lesson_id,
+        source_lesson_title,
+        source_lesson_revision,
     )
     if (
         intent == "navigation"
@@ -857,10 +923,41 @@ def _prepare_turn(
         return course_revision_value, replay
     revision = course_revision_value
     source_lesson: str | None = None
+    source_lesson_skill_ref: dict[str, str] | None = None
     if session_kind == cli.SIDE_CHAT_SESSION_KIND:
+        source_values = (
+            source_lesson_id,
+            source_lesson_title,
+            source_lesson_revision,
+        )
+        if any(value is not None for value in source_values) and any(
+            value is None for value in source_values
+        ):
+            raise TutorConflictError(
+                "The visible lesson changed. Your question was not submitted; refresh and retry."
+            )
         side_revision = internal.get("side_chat_revision")
         revision = side_revision if isinstance(side_revision, int) and side_revision >= 0 else 0
-        source_lesson = cli.last_tutor_lesson_response(cli.read_topic(slug))
+        source_topic = cli.read_topic(slug)
+        source_entry = cli.last_tutor_lesson_entry(source_topic)
+        source_lesson = source_entry[1]["response"].strip() if source_entry else ""
+        expected_source_id = (
+            cli.tutor_lesson_entry_id(source_entry[1]) if source_entry else ""
+        )
+        if all(value is None for value in source_values):
+            source_lesson_id = expected_source_id
+            source_lesson_title = (
+                cli.tutor_response_focus_title(source_lesson) or "Saved lesson"
+            )
+            source_lesson_revision = course_revision_value
+        elif (
+            source_lesson_revision != course_revision_value
+            or source_lesson_id != expected_source_id
+        ):
+            raise TutorConflictError(
+                "The visible lesson changed. Your question was not submitted; refresh and retry."
+            )
+        source_lesson_skill_ref = _visible_curriculum_skill_ref(state)
     cli.save_pending_learner_prompt(slug, normalized)
     _save_operation(
         slug,
@@ -873,6 +970,10 @@ def _prepare_turn(
         session_kind=session_kind,
         source_course_revision=course_revision_value,
         source_lesson=source_lesson,
+        source_lesson_id=source_lesson_id,
+        source_lesson_title=source_lesson_title,
+        source_lesson_revision=source_lesson_revision,
+        source_lesson_skill_ref=source_lesson_skill_ref,
     )
     return revision, None
 
@@ -915,10 +1016,40 @@ def _execute_prepared_turn(
                     replay.error_message or "Tutor turn must be retried."
                 )
             raise TutorOperationError("Tutor turn is no longer active. Retry it.")
+        payload_hash = active.get("payload_hash")
+        if not isinstance(payload_hash, str) or not payload_hash:
+            raise TutorOperationError("Tutor turn payload identity is missing. Retry it.")
         source_lesson = (
             str(active.get("source_lesson"))
             if session_kind == cli.SIDE_CHAT_SESSION_KIND
             and isinstance(active.get("source_lesson"), str)
+            else None
+        )
+        source_lesson_id = (
+            str(active.get("source_lesson_id"))
+            if session_kind == cli.SIDE_CHAT_SESSION_KIND
+            and isinstance(active.get("source_lesson_id"), str)
+            else None
+        )
+        source_lesson_title = (
+            str(active.get("source_lesson_title"))
+            if session_kind == cli.SIDE_CHAT_SESSION_KIND
+            and isinstance(active.get("source_lesson_title"), str)
+            else None
+        )
+        source_lesson_revision = (
+            int(active["source_lesson_revision"])
+            if session_kind == cli.SIDE_CHAT_SESSION_KIND
+            and isinstance(active.get("source_lesson_revision"), int)
+            else None
+        )
+        source_lesson_skill_ref = (
+            {
+                str(key): str(value)
+                for key, value in active["source_lesson_skill_ref"].items()
+            }
+            if session_kind == cli.SIDE_CHAT_SESSION_KIND
+            and isinstance(active.get("source_lesson_skill_ref"), dict)
             else None
         )
         if generated_override is None:
@@ -928,9 +1059,7 @@ def _execute_prepared_turn(
                 status="generating",
                 expected_revision=revision,
                 prompt=normalized,
-                payload_hash=_turn_payload_hash(
-                    normalized, intent, session_kind, progression_intent
-                ),
+                payload_hash=payload_hash,
                 owner_pid=os.getpid(),
                 session_kind=session_kind,
             )
@@ -1064,9 +1193,7 @@ def _execute_prepared_turn(
                 input_status="committed",
                 message_kind=_message_kind(intent),
                 move=move,
-                payload_hash=_turn_payload_hash(
-                    normalized, intent, session_kind, progression_intent
-                ),
+                payload_hash=payload_hash,
             )
             results = internal.get("turn_results")
             results = dict(results) if isinstance(results, dict) else {}
@@ -1134,9 +1261,7 @@ def _execute_prepared_turn(
                 "interview_curriculum_advanced",
                 {
                     "submission_id": sid,
-                    "payload_hash": _turn_payload_hash(
-                        normalized, intent, session_kind, progression_intent
-                    ),
+                    "payload_hash": payload_hash,
                     "base_revision": revision - 1,
                     "reservation_revision": revision,
                     "final_revision": revision + 1,
@@ -1166,6 +1291,10 @@ def _execute_prepared_turn(
                 session_kind=session_kind,
                 increment_course_revision=(session_kind != cli.SIDE_CHAT_SESSION_KIND),
                 side_chat_lesson_override=source_lesson,
+                side_chat_source_id=source_lesson_id,
+                side_chat_source_title=source_lesson_title,
+                side_chat_source_revision=source_lesson_revision,
+                side_chat_source_skill_ref=source_lesson_skill_ref,
                 message_kind_override=(
                     _message_kind(intent) if intent != "answer" else None
                 ),
@@ -1202,9 +1331,7 @@ def _execute_prepared_turn(
                 error_message=(
                     "This course changed elsewhere. Refresh before retrying your saved response."
                 ),
-                payload_hash=_turn_payload_hash(
-                    normalized, intent, session_kind, progression_intent
-                ),
+                payload_hash=payload_hash,
             )
             _save_operation(
                 slug,
@@ -1214,9 +1341,7 @@ def _execute_prepared_turn(
                 prompt=normalized,
                 result=result,
                 error_code="course_revision_changed",
-                payload_hash=_turn_payload_hash(
-                    normalized, intent, session_kind, progression_intent
-                ),
+                payload_hash=payload_hash,
             )
         raise TutorConflictError(result.error_message) from exc
     except Exception as exc:
@@ -1238,9 +1363,7 @@ def _execute_prepared_turn(
                 move=None,
                 error_code=error_code,
                 error_message=error_message,
-                payload_hash=_turn_payload_hash(
-                    normalized, intent, session_kind, progression_intent
-                ),
+                payload_hash=payload_hash,
             )
             _save_operation(
                 slug,
@@ -1250,9 +1373,7 @@ def _execute_prepared_turn(
                 prompt=normalized,
                 result=result,
                 error_code=error_code,
-                payload_hash=_turn_payload_hash(
-                    normalized, intent, session_kind, progression_intent
-                ),
+                payload_hash=payload_hash,
                 session_kind=session_kind,
             )
         if isinstance(exc, TutorOperationError):
@@ -1270,6 +1391,9 @@ def submit_turn(
     model: str | None = None,
     session_kind: TutorSessionKind = "chat",
     progression_intent: ProgressionIntent | None = None,
+    source_lesson_id: str | None = None,
+    source_lesson_title: str | None = None,
+    source_lesson_revision: int | None = None,
 ) -> TutorTurnResult:
     """Run one durable, presentation-independent learner turn.
 
@@ -1289,6 +1413,9 @@ def submit_turn(
             intent,
             session_kind,
             progression_intent,
+            source_lesson_id,
+            source_lesson_title,
+            source_lesson_revision,
         )
         if replay is not None:
             return replay
@@ -1320,6 +1447,9 @@ def start_turn(
     model: str | None = None,
     session_kind: TutorSessionKind = "chat",
     progression_intent: ProgressionIntent | None = None,
+    source_lesson_id: str | None = None,
+    source_lesson_title: str | None = None,
+    source_lesson_revision: int | None = None,
 ) -> TutorTurnResult:
     """Persist a turn, then execute it in the bounded tutor worker pool."""
     sid, normalized = _validate_turn(text, submission_id)
@@ -1334,6 +1464,9 @@ def start_turn(
             intent,
             session_kind,
             progression_intent,
+            source_lesson_id,
+            source_lesson_title,
+            source_lesson_revision,
         )
         if replay is not None:
             return replay
@@ -1344,7 +1477,13 @@ def start_turn(
             message_kind=_message_kind(intent),
             move=None,
             payload_hash=_turn_payload_hash(
-                normalized, intent, session_kind, progression_intent
+                normalized,
+                intent,
+                session_kind,
+                progression_intent,
+                source_lesson_id,
+                source_lesson_title,
+                source_lesson_revision,
             ),
         )
         operation_key = (slug, sid)
@@ -1372,7 +1511,13 @@ def start_turn(
                 error_code="executor_unavailable",
                 error_message="Your response is saved. Retry after restarting openlearn.",
                 payload_hash=_turn_payload_hash(
-                    normalized, intent, session_kind, progression_intent
+                    normalized,
+                    intent,
+                    session_kind,
+                    progression_intent,
+                    source_lesson_id,
+                    source_lesson_title,
+                    source_lesson_revision,
                 ),
             )
             _save_operation(
@@ -1383,9 +1528,7 @@ def start_turn(
                 prompt=normalized,
                 result=failed,
                 error_code="executor_unavailable",
-                payload_hash=_turn_payload_hash(
-                    normalized, intent, session_kind, progression_intent
-                ),
+                payload_hash=failed.payload_hash,
             )
             with _FUTURES_GUARD:
                 _RUNNING.discard(operation_key)

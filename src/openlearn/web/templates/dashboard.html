@@ -16,7 +16,7 @@
       <p><strong>Current objective:</strong> {{ dashboard.active_course.next_move or dashboard.active_course.summary }}</p>
     </div>
     <div class="resume-meta">
-      <span>{{ dashboard.active_course.progress or 0 }}% complete</span>
+      <span>{{ dashboard.active_course.progress or 0 }}% {% if dashboard.active_course.is_interview %}first-pass coverage{% else %}complete{% endif %}</span>
       <a class="primary-action" href="{{ url_for('focus', slug=dashboard.active_course.slug) }}">Recommended next action: return to the bench <span aria-hidden="true">→</span></a>
       <a class="quiet-link" href="{{ url_for('progress') }}">View detailed progress</a>
     </div>
@@ -42,7 +42,7 @@
       {% for course in dashboard.courses %}
       <a class="course-row" href="{{ url_for('focus', slug=course.slug) }}">
         <span><strong>{{ course.title }}</strong><small>{{ course.current_unit or 'Ready to learn' }}</small></span>
-        <span class="course-progress">{{ course.progress or 0 }}%</span>
+        <span class="course-progress">{{ course.progress or 0 }}%{% if course.is_interview %} covered{% endif %}</span>
       </a>
       {% else %}
       <p class="quiet-copy">Your active courses will stay here, ready on this machine.</p>

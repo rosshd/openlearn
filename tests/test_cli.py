@@ -179,6 +179,42 @@ class CliStorageTests(unittest.TestCase):
                 lifecycle_version=cli.interview_prep.PLACEMENT_V1,
             )
 
+    def start_reasoning_placement(self, slug: str = "algorithms") -> None:
+        activity = cli._begin_interview_activity(
+            slug, lifecycle_version=cli.interview_prep.PLACEMENT_V3
+        )
+        with cli.interview_profile_write_lock(slug):
+            cli.interview_prep.start_placement(
+                cli.interview_profile_path(slug),
+                activity_id=str(activity["activity_id"]),
+                lifecycle_version=cli.interview_prep.PLACEMENT_V3,
+            )
+
+    def complete_confidence_placement(self, slug: str = "algorithms") -> None:
+        path = cli.interview_profile_path(slug)
+        ratings = {
+            topic_id: 2
+            for topic_id, _label in cli.interview_prep.confidence_topics_for_focus(
+                "coding"
+            )
+        }
+        with cli.interview_profile_write_lock(slug):
+            cli.interview_prep.start_confidence_placement(path)
+            value = cli.interview_prep.save_confidence_survey(
+                path,
+                role_family="general SWE",
+                target_level="entry",
+                interview_focus="coding",
+                ratings=ratings,
+            )
+            placement = value["placement"]
+            assert isinstance(placement, dict)
+            survey = placement["survey"]
+            assert isinstance(survey, dict)
+            cli.interview_prep.confirm_confidence_placement(
+                path, outline=str(survey["outline"])
+            )
+
     def pause_interview_at_implementation(self, slug: str = "algorithms") -> None:
         self.start_legacy_placement(slug)
         cli.cmd_interview_placement(
@@ -325,6 +361,40 @@ class CliStorageTests(unittest.TestCase):
         self.assertNotIn("optional", {item["requirement"] for item in route["skills"]})
         preview = application.preview_interview_curriculum_change(slug)
         self.assertEqual(preview["selected_optional_skill_ids"], [])
+
+    def test_repl_practice_uses_canonical_caught_up_action_without_moving_cursor(
+        self,
+    ) -> None:
+        from openlearn import application
+
+        slug = self.create_interview_topic("CLI Caught Up Practice")
+        application.accept_interview_curriculum(
+            slug,
+            action="skip",
+            submission_id="00000000-0000-4000-8000-000000000004",
+        )
+        state = cli.load_state(slug)
+        canonical = state["interview_curriculum"]
+        canonical["evidence"]["exposed"] = [
+            item["skill_ref"]["skill_id"] for item in canonical["route"]["skills"]
+        ]
+        cursor_before = json.loads(json.dumps(canonical["cursor"]))
+        cli.save_state(slug, state)
+        cli.set_active_topic(slug)
+        output: list[str] = []
+
+        with mock.patch.object(
+            cli,
+            "call_openai_streaming",
+            return_value=(
+                "**Lesson:** Arrays and strings practice uses one explicit invariant."
+            ),
+        ):
+            cli.handle_repl_command("practice", output_func=output.append)
+
+        canonical_after = cli.load_state(slug)["interview_curriculum"]
+        self.assertEqual(canonical_after["cursor"], cursor_before)
+        self.assertTrue(output)
 
     def test_version_flag_reports_package_version(self) -> None:
         from openlearn import __version__
@@ -777,18 +847,11 @@ class CliStorageTests(unittest.TestCase):
                 0,
             ),
             (
-                "multiline",
-                [
-                    *default_profile_answers,
-                    "y",
-                    "y",
-                    "What should I return?",
-                    "/done",
-                    "Use a sliding window.",
-                ],
+                "survey",
+                [*default_profile_answers, "y", "y", "1", "2", "1", "3"],
                 True,
                 "in_progress",
-                1,
+                0,
             ),
         )
         for interruption in (EOFError, KeyboardInterrupt):
@@ -847,18 +910,9 @@ class CliStorageTests(unittest.TestCase):
                         )
                         self.assertIn("Course saved", "\n".join(output))
                     else:
-                        self.assertEqual(
-                            placement["next_stage"],
-                            "reasoning",
-                        )
-                        self.assertEqual(
-                            list(placement["observations"]),
-                            ["clarification"],
-                        )
-                        self.assertIn(
-                            "Placement saved at reasoning (1/2)",
-                            "\n".join(output),
-                        )
+                        self.assertEqual(placement["next_stage"], "confidence")
+                        self.assertEqual(list(placement["observations"]), [])
+                        self.assertIn("Placement saved", "\n".join(output))
 
     def test_interview_profile_commands_create_edit_inspect_defer_and_clear(self) -> None:
         call_silent(
@@ -1082,6 +1136,7 @@ class CliStorageTests(unittest.TestCase):
 
     def test_reasoning_placement_resumes_multiline_drafts_without_coding_tools(self) -> None:
         slug = self.create_interview_topic()
+        self.start_reasoning_placement(slug)
         first_output: list[str] = []
         coding_seams = (
             mock.patch.object(
@@ -1102,7 +1157,7 @@ class CliStorageTests(unittest.TestCase):
         )
         with coding_seams[0], coding_seams[1], coding_seams[2]:
             cli.cmd_interview_placement(
-                Namespace(topic=slug, action="start"),
+                Namespace(topic=slug, action="resume"),
                 input_func=iter_input(
                     [
                         "Can width exceed the text length?",
@@ -1189,9 +1244,10 @@ class CliStorageTests(unittest.TestCase):
 
     def test_reasoning_placement_commands_are_safe_and_explicit(self) -> None:
         slug = self.create_interview_topic("Reasoning Commands")
+        self.start_reasoning_placement(slug)
         output: list[str] = []
         cli.cmd_interview_placement(
-            Namespace(topic=slug, action="start"),
+            Namespace(topic=slug, action="resume"),
             input_func=iter_input(["/baseline", "/skip", "/skip"]),
             output_func=output.append,
         )
@@ -1202,8 +1258,9 @@ class CliStorageTests(unittest.TestCase):
         self.assertIn("available only in legacy coding placements", "\n".join(output))
 
         discard_slug = self.create_interview_topic("Reasoning Discard")
+        self.start_reasoning_placement(discard_slug)
         cli.cmd_interview_placement(
-            Namespace(topic=discard_slug, action="start"),
+            Namespace(topic=discard_slug, action="resume"),
             input_func=iter_input(["A saved question", "/discard", "no", "/stop"]),
             output_func=lambda _line: None,
         )
@@ -1222,6 +1279,7 @@ class CliStorageTests(unittest.TestCase):
 
     def test_reasoning_placement_continues_directly_when_provider_is_ready(self) -> None:
         slug = self.create_interview_topic("Direct Placement Continuation")
+        self.start_reasoning_placement(slug)
         output: list[str] = []
         with (
             mock.patch.object(cli, "provider_is_configured", return_value=True),
@@ -1230,7 +1288,7 @@ class CliStorageTests(unittest.TestCase):
             ) as transition,
         ):
             result = cli.cmd_interview_placement(
-                Namespace(topic=slug, action="start"),
+                Namespace(topic=slug, action="resume"),
                 input_func=iter_input(
                     [
                         "What should I return when no window exists?",
@@ -1248,10 +1306,11 @@ class CliStorageTests(unittest.TestCase):
 
     def test_reasoning_placement_providerless_completion_is_successful(self) -> None:
         slug = self.create_interview_topic("Offline Placement Completion")
+        self.start_reasoning_placement(slug)
         output: list[str] = []
         with mock.patch.object(cli, "provider_is_configured", return_value=False):
             result = cli.cmd_interview_placement(
-                Namespace(topic=slug, action="start"),
+                Namespace(topic=slug, action="resume"),
                 input_func=iter_input(["/skip", "/skip"]),
                 output_func=output.append,
             )
@@ -1286,21 +1345,36 @@ class CliStorageTests(unittest.TestCase):
             ref["evidence_id"] for ref in old_activity["evidence_refs"]
         }
         output: list[str] = []
+        confidence_answers = [
+            "",
+            "yes",
+            "1",
+            "2",
+            "1",
+            *(
+                ["3"]
+                * len(cli.interview_prep.confidence_topics_for_focus("coding"))
+            ),
+            "y",
+        ]
 
         cli.cmd_interview_placement(
             Namespace(topic=slug, action="resume"),
-            input_func=iter_input(["", "yes", "/stop"]),
+            input_func=iter_input(confidence_answers),
             output_func=output.append,
         )
 
         migrated = cli.interview_prep.load_profile(path)
         self.assertEqual(
             migrated["placement"]["lifecycle_version"],
-            cli.interview_prep.PLACEMENT_V3,
+            cli.interview_prep.PLACEMENT_V4,
         )
         new_activity = cli._current_interview_activity(slug)
-        assert new_activity is not None
-        self.assertNotEqual(new_activity["activity_id"], old_activity_id)
+        self.assertTrue(
+            new_activity is None
+            or new_activity["activity_id"] == old_activity_id
+            and new_activity["status"] != "active"
+        )
         durable_evidence_ids = {
             event["data"]["evidence_id"]
             for event in cli.load_event_log(cli.topic_events_path(slug))
@@ -1308,13 +1382,14 @@ class CliStorageTests(unittest.TestCase):
         }
         self.assertTrue(old_evidence_ids <= durable_evidence_ids)
         rendered = "\n".join(output)
-        self.assertIn("new short reasoning placement", rendered)
+        self.assertIn("rapid confidence placement", rendered)
         self.assertIn("Published evidence was preserved", rendered)
 
     def test_reasoning_done_recovers_after_activity_event_interruption(self) -> None:
         slug = self.create_interview_topic("Reasoning Event Recovery")
+        self.start_reasoning_placement(slug)
         cli.cmd_interview_placement(
-            Namespace(topic=slug, action="start"),
+            Namespace(topic=slug, action="resume"),
             input_func=iter_input(["What should I return?", "/stop"]),
             output_func=lambda _line: None,
         )
@@ -1358,8 +1433,9 @@ class CliStorageTests(unittest.TestCase):
     ) -> None:
         slug = self.create_interview_topic("Reasoning Discard Recovery")
         path = cli.interview_profile_path(slug)
+        self.start_reasoning_placement(slug)
         cli.cmd_interview_placement(
-            Namespace(topic=slug, action="start"),
+            Namespace(topic=slug, action="resume"),
             input_func=iter_input(["What should I return?", "/stop"]),
             output_func=lambda _line: None,
         )
@@ -1520,8 +1596,17 @@ class CliStorageTests(unittest.TestCase):
                 template=None,
             ),
         )
+        activity = cli._begin_interview_activity(
+            "algorithms", lifecycle_version=cli.interview_prep.PLACEMENT_V3
+        )
+        with cli.interview_profile_write_lock("algorithms"):
+            cli.interview_prep.start_placement(
+                cli.interview_profile_path("algorithms"),
+                activity_id=str(activity["activity_id"]),
+                lifecycle_version=cli.interview_prep.PLACEMENT_V3,
+            )
         cli.cmd_interview_placement(
-            Namespace(topic="algorithms", action="start"),
+            Namespace(topic="algorithms", action="resume"),
             input_func=iter_input(
                 [
                     "PRIVATE CLARIFICATION RESPONSE?",
@@ -1674,20 +1759,29 @@ class CliStorageTests(unittest.TestCase):
                     ),
                 )
                 if initial_status == "stale":
-                    cli.cmd_interview_placement(
-                        Namespace(topic=slug, action="start"),
-                        input_func=iter_input(["/skip", "/skip"]),
-                        output_func=lambda _line: None,
-                    )
+                    self.complete_confidence_placement(slug)
                     cli.cmd_interview_edit(
                         Namespace(topic=slug, field="role_family", value="backend"),
                         output_func=lambda _line: None,
                     )
 
+                placement_answers = [
+                    "y",
+                    "",
+                    "",
+                    "",
+                    *(
+                        ["2"]
+                        * len(
+                            cli.interview_prep.confidence_topics_for_focus("coding")
+                        )
+                    ),
+                    "",
+                ]
                 with mock.patch.object(cli, "provider_is_configured") as provider:
                     result = cli.cmd_resume(
                         Namespace(topic=slug, model=None),
-                        input_func=iter_input(["y", "/stop"]),
+                        input_func=iter_input(placement_answers),
                         output_func=lambda _line: None,
                     )
 
@@ -1696,10 +1790,15 @@ class CliStorageTests(unittest.TestCase):
                 )
                 self.assertEqual(result, 0)
                 provider.assert_not_called()
-                self.assertEqual(profile["placement"]["status"], "in_progress")
-                self.assertEqual(profile["placement"]["next_stage"], "clarification")
+                self.assertEqual(profile["placement"]["status"], "provisional")
+                self.assertEqual(
+                    profile["placement"]["lifecycle_version"],
+                    cli.interview_prep.PLACEMENT_V4,
+                )
+                self.assertIsNone(profile["placement"]["next_stage"])
                 self.assertEqual(profile["placement"]["evidence_refs"], [])
-                self.assertFalse(cli.read_topic(slug).metadata["course_started"])
+                self.assertTrue(cli.read_topic(slug).metadata["course_started"])
+                self.assertIn("interview_curriculum", cli.load_state(slug))
 
     def test_not_started_and_stale_resume_defer_before_provider_and_skip_legacy_quiz(
         self,
@@ -1718,11 +1817,7 @@ class CliStorageTests(unittest.TestCase):
                     ),
                 )
                 if initial_status == "stale":
-                    cli.cmd_interview_placement(
-                        Namespace(topic=slug, action="start"),
-                        input_func=iter_input(["/skip", "/skip"]),
-                        output_func=lambda _line: None,
-                    )
+                    self.complete_confidence_placement(slug)
                     cli.cmd_interview_edit(
                         Namespace(topic=slug, field="role_family", value="backend"),
                         output_func=lambda _line: None,
@@ -1784,11 +1879,26 @@ class CliStorageTests(unittest.TestCase):
                 template=None,
             ),
         )
-        cli.cmd_interview_placement(
-            Namespace(topic="algorithms", action="start"),
-            input_func=iter_input(["/skip", "/skip"]),
-            output_func=lambda _line: None,
-        )
+        path = cli.interview_profile_path("algorithms")
+        with cli.interview_profile_write_lock("algorithms"):
+            cli.interview_prep.start_confidence_placement(path)
+            ratings = {
+                topic_id: 2
+                for topic_id, _label in cli.interview_prep.confidence_topics_for_focus(
+                    "coding"
+                )
+            }
+            value = cli.interview_prep.save_confidence_survey(
+                path,
+                role_family="general SWE",
+                target_level="entry",
+                interview_focus="coding",
+                ratings=ratings,
+            )
+            survey = value["placement"]["survey"]
+            cli.interview_prep.confirm_confidence_placement(
+                path, outline=str(survey["outline"])
+            )
         cli.cmd_interview_edit(
             Namespace(topic="algorithms", field="role_family", value="backend"),
             output_func=lambda _line: None,
@@ -1859,8 +1969,7 @@ class CliStorageTests(unittest.TestCase):
             ),
         )
         cli.cmd_interview_placement(
-            Namespace(topic="algorithms", action="start"),
-            input_func=iter_input(["/skip", "/skip"]),
+            Namespace(topic="algorithms", action="skip"),
             output_func=lambda _line: None,
         )
         root = Path(self.home.name)
@@ -1883,7 +1992,8 @@ class CliStorageTests(unittest.TestCase):
         self.assertEqual(after, before)
         transcript = output.getvalue()
         self.assertIn("dry run: request not sent", transcript)
-        self.assertIn("Interview placement: provisional", transcript)
+        self.assertIn("Current concept: Arrays and strings", transcript)
+        self.assertIn("First-pass route coverage:", transcript)
         self.assertNotIn("Learner selected a less demanding baseline", transcript)
 
     def test_interview_resume_dry_run_does_not_recover_pending_profile_edit(
@@ -1929,18 +2039,10 @@ class CliStorageTests(unittest.TestCase):
                 template=None,
             ),
         )
-        cli.cmd_interview_placement(
-            Namespace(topic="algorithms", action="start"),
-            input_func=iter_input(
-                [
-                    "Recent coding practice.",
-                    "What should I return?",
-                    "Use a sliding window.",
-                    "/stop",
-                ]
-            ),
-            output_func=lambda _line: None,
-        )
+        with cli.interview_profile_write_lock("algorithms"):
+            cli.interview_prep.start_confidence_placement(
+                cli.interview_profile_path("algorithms")
+            )
         before = snapshot_files(Path(self.home.name))
         output: list[str] = []
 
@@ -1960,8 +2062,8 @@ class CliStorageTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(snapshot_files(Path(self.home.name)), before)
         transcript = "\n".join(output)
-        self.assertIn("Placement: in_progress (0/2)", transcript)
-        self.assertIn("clarification", transcript)
+        self.assertIn("Placement: in_progress", transcript)
+        self.assertIn("confidence", transcript)
         self.assertIn("Run openlearn resume algorithms", transcript)
 
     def test_resume_refreshes_expired_provisional_placement_before_routing(self) -> None:
@@ -2059,10 +2161,17 @@ class CliStorageTests(unittest.TestCase):
         self.assertEqual(old_activity["status"], "active")
         self.assertEqual(len(interrupted["placement"]["evidence_refs"]), 7)
         make_interview_placement_expired("algorithms")
+        restart_answers = iter(["y"])
+
+        def interrupt_restarted_survey(_prompt: str) -> str:
+            try:
+                return next(restart_answers)
+            except StopIteration:
+                raise EOFError from None
 
         cli.cmd_resume(
             Namespace(topic="algorithms", model=None),
-            input_func=iter_input(["y", "/stop"]),
+            input_func=interrupt_restarted_survey,
             output_func=lambda _line: None,
         )
 
@@ -2073,13 +2182,16 @@ class CliStorageTests(unittest.TestCase):
         self.assertEqual(restarted["placement"]["status"], "in_progress")
         self.assertEqual(
             restarted["placement"]["lifecycle_version"],
-            cli.interview_prep.PLACEMENT_V3,
+            cli.interview_prep.PLACEMENT_V4,
         )
-        self.assertEqual(restarted["placement"]["next_stage"], "clarification")
+        self.assertEqual(restarted["placement"]["next_stage"], "confidence")
         self.assertEqual(restarted["placement"]["evidence_refs"], [])
         self.assertNotEqual(restarted["placement"]["attempt_id"], old_attempt_id)
-        self.assertNotEqual(new_activity["activity_id"], old_activity_id)
-        self.assertEqual(new_activity["evidence_refs"], [])
+        self.assertTrue(
+            new_activity is None
+            or new_activity["activity_id"] == old_activity_id
+            and new_activity["status"] != "active"
+        )
         synchronized = cli.sync_interview_placement("algorithms")
         self.assertEqual(synchronized["placement"]["evidence_refs"], [])
 
@@ -3038,11 +3150,15 @@ class CliStorageTests(unittest.TestCase):
                 template=None,
             ),
         )
-        cli.cmd_interview_placement(
-            Namespace(topic="algorithms", action="start"),
-            input_func=lambda _prompt: "/stop",
-            output_func=lambda _line: None,
+        activity = cli._begin_interview_activity(
+            "algorithms", lifecycle_version=cli.interview_prep.PLACEMENT_V3
         )
+        with cli.interview_profile_write_lock("algorithms"):
+            cli.interview_prep.start_placement(
+                cli.interview_profile_path("algorithms"),
+                activity_id=str(activity["activity_id"]),
+                lifecycle_version=cli.interview_prep.PLACEMENT_V3,
+            )
         before = cli.interview_prep.load_profile(
             cli.interview_profile_path("algorithms")
         )
@@ -3074,11 +3190,15 @@ class CliStorageTests(unittest.TestCase):
                 template=None,
             ),
         )
-        cli.cmd_interview_placement(
-            Namespace(topic="algorithms", action="start"),
-            input_func=lambda _prompt: "/stop",
-            output_func=lambda _line: None,
+        activity = cli._begin_interview_activity(
+            "algorithms", lifecycle_version=cli.interview_prep.PLACEMENT_V3
         )
+        with cli.interview_profile_write_lock("algorithms"):
+            cli.interview_prep.start_placement(
+                cli.interview_profile_path("algorithms"),
+                activity_id=str(activity["activity_id"]),
+                lifecycle_version=cli.interview_prep.PLACEMENT_V3,
+            )
         before = cli.interview_prep.load_profile(
             cli.interview_profile_path("algorithms")
         )
@@ -3109,11 +3229,15 @@ class CliStorageTests(unittest.TestCase):
                 template=None,
             ),
         )
-        cli.cmd_interview_placement(
-            Namespace(topic="algorithms", action="start"),
-            input_func=lambda _prompt: "/stop",
-            output_func=lambda _line: None,
+        activity = cli._begin_interview_activity(
+            "algorithms", lifecycle_version=cli.interview_prep.PLACEMENT_V3
         )
+        with cli.interview_profile_write_lock("algorithms"):
+            cli.interview_prep.start_placement(
+                cli.interview_profile_path("algorithms"),
+                activity_id=str(activity["activity_id"]),
+                lifecycle_version=cli.interview_prep.PLACEMENT_V3,
+            )
         original_checkpoint = cli._interview_edit_checkpoint
 
         def fail_after_abandonment(stage: str) -> None:
@@ -3160,11 +3284,15 @@ class CliStorageTests(unittest.TestCase):
             ),
         )
         generation_a = cli.current_topic_generation("algorithms")
-        cli.cmd_interview_placement(
-            Namespace(topic="algorithms", action="start"),
-            input_func=lambda _prompt: "/stop",
-            output_func=lambda _line: None,
+        activity = cli._begin_interview_activity(
+            "algorithms", lifecycle_version=cli.interview_prep.PLACEMENT_V3
         )
+        with cli.interview_profile_write_lock("algorithms"):
+            cli.interview_prep.start_placement(
+                cli.interview_profile_path("algorithms"),
+                activity_id=str(activity["activity_id"]),
+                lifecycle_version=cli.interview_prep.PLACEMENT_V3,
+            )
         abandoned = threading.Event()
         release = threading.Event()
         errors: list[BaseException] = []
@@ -3323,11 +3451,15 @@ class CliStorageTests(unittest.TestCase):
 
         def run_placement() -> None:
             try:
-                cli.cmd_interview_placement(
-                    Namespace(topic="algorithms", action="start"),
-                    input_func=lambda _prompt: "/stop",
-                    output_func=lambda _line: None,
+                activity = cli._begin_interview_activity(
+                    "algorithms", lifecycle_version=cli.interview_prep.PLACEMENT_V3
                 )
+                with cli.interview_profile_write_lock("algorithms"):
+                    cli.interview_prep.start_placement(
+                        cli.interview_profile_path("algorithms"),
+                        activity_id=str(activity["activity_id"]),
+                        lifecycle_version=cli.interview_prep.PLACEMENT_V3,
+                    )
             except BaseException as exc:
                 errors.append(exc)
 
@@ -6330,11 +6462,15 @@ class InteractiveTests(unittest.TestCase):
                 template=None,
             ),
         )
-        cli.cmd_interview_placement(
-            Namespace(topic="algorithms", action="start"),
-            input_func=lambda _prompt: "/stop",
-            output_func=lambda _line: None,
+        activity = cli._begin_interview_activity(
+            "algorithms", lifecycle_version=cli.interview_prep.PLACEMENT_V3
         )
+        with cli.interview_profile_write_lock("algorithms"):
+            cli.interview_prep.start_placement(
+                cli.interview_profile_path("algorithms"),
+                activity_id=str(activity["activity_id"]),
+                lifecycle_version=cli.interview_prep.PLACEMENT_V3,
+            )
         action = cli.parse_tutor_coding_drill_action(
             {
                 "action": "start_coding_drill",
@@ -6677,13 +6813,13 @@ class InteractiveTests(unittest.TestCase):
 
         self.assertEqual(create.call_args.args[0].slug, "technical-interview-prep")
 
-    def test_interview_template_defer_uses_defaults_without_questionnaire(self) -> None:
+    def test_interview_template_skip_uses_defaults_without_questionnaire(self) -> None:
         template = cli.load_course_template("technical-interview-prep")
         prompts: list[str] = []
 
         def input_func(prompt: str) -> str:
             prompts.append(prompt)
-            return "d"
+            return "s"
 
         result = cli.create_interview_course_from_template(
             template,
@@ -6692,7 +6828,7 @@ class InteractiveTests(unittest.TestCase):
         )
 
         self.assertEqual(result, 0)
-        self.assertEqual(prompts, ["Start placement, defer it, or go back? [Y/d/b]: "])
+        self.assertEqual(prompts, ["Start placement, skip it, or go back? [Y/s/b]: "])
         topic = cli.read_topic("technical-interview-prep")
         profile = cli.interview_prep.load_profile(
             cli.interview_profile_path("technical-interview-prep")
@@ -6700,7 +6836,8 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(topic.metadata["goal"], template.goal)
         self.assertEqual(topic.metadata["template_units"], list(template.units))
         self.assertEqual(profile["profile"], cli.default_interview_profile_values())
-        self.assertEqual(profile["placement"]["status"], "deferred")
+        self.assertEqual(profile["placement"]["status"], "provisional")
+        self.assertIn("interview_curriculum", cli.load_state("technical-interview-prep"))
 
     def test_interview_template_start_creates_then_starts_reasoning_placement(self) -> None:
         template = cli.load_course_template("technical-interview-prep")
@@ -8043,6 +8180,31 @@ class InteractiveTests(unittest.TestCase):
 
         self.assertIn("Unit 1", output[0])
         self.assertIn("not set", output[0])
+
+    def test_interview_status_bar_uses_typed_curriculum_labels(self) -> None:
+        topic = cli.Topic(
+            slug="technical-interview-prep",
+            path=Path("technical-interview-prep.md"),
+            metadata={"topic": "Technical Interview Prep"},
+            body="# Technical Interview Prep\n",
+        )
+        projection = types.SimpleNamespace(
+            position=types.SimpleNamespace(
+                unit_label="Coding Foundations",
+                section_label="Arrays and hashing",
+                skill_label="Array traversal",
+            ),
+            readiness=types.SimpleNamespace(due=2),
+        )
+        output: list[str] = []
+
+        with mock.patch(
+            "openlearn.application.interview_learning", return_value=projection
+        ):
+            cli.print_status_bar(topic, output.append)
+
+        self.assertIn("Coding Foundations / Arrays", output[0])
+        self.assertNotIn("Slide", output[0])
 
     def test_repl_plain_text_asks_active_topic_and_appends_session(self) -> None:
         call_silent(cli.cmd_init, Namespace())
@@ -9853,6 +10015,33 @@ class InteractiveTests(unittest.TestCase):
                 ]
                 self.assertEqual(len(matching), 1)
                 self.assertFalse(cli.topic_turn_journal_path(slug).exists())
+
+    def test_identical_lesson_text_keeps_distinct_turn_identities(self) -> None:
+        response = "**Lesson:** The same wording can appear in another lesson."
+        log = "\n\n".join(
+            (
+                cli._session_entry(
+                    "next",
+                    "Continue",
+                    response,
+                    created="2026-07-25 12:00 UTC",
+                    mutation_id="turn_first",
+                ),
+                cli._session_entry(
+                    "next",
+                    "Continue",
+                    response,
+                    created="2026-07-25 12:01 UTC",
+                    mutation_id="turn_second",
+                ),
+            )
+        )
+
+        entries = cli.session_entries(log)
+
+        self.assertEqual(entries[0]["response"], entries[1]["response"])
+        self.assertEqual(cli.tutor_lesson_entry_id(entries[0]), "lesson_turn_first")
+        self.assertEqual(cli.tutor_lesson_entry_id(entries[1]), "lesson_turn_second")
 
     def test_turn_failure_before_journal_publishes_nothing(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Pre Journal", goal="Learn safely"))
@@ -18577,6 +18766,39 @@ class PromptInstructionTests(unittest.TestCase):
         self.assertNotIn("Tutor:", rendered)
         self.assertNotIn("This second paragraph must remain visible.", rendered)
         self.assertNotIn("Check: What should happen next?", rendered)
+
+    def test_interview_resume_context_keeps_last_learner_message(self) -> None:
+        body = textwrap.dedent(
+            """\
+            # Interview
+
+            ## Session Log
+
+            ### 2026-01-01 10:00 UTC - chat
+
+            **Prompt**
+
+            I would use a hash map.
+
+            **Response**
+
+            Feedback: Good start.
+            """
+        )
+        topic = cli.Topic(
+            slug="technical-interview-prep",
+            path=Path("technical-interview-prep.md"),
+            metadata={"topic": "Technical Interview Prep"},
+            body=body,
+        )
+        output: list[str] = []
+
+        with mock.patch.object(
+            cli, "print_interview_curriculum_status", return_value=True
+        ):
+            cli.print_resume_context(topic, "", output.append)
+
+        self.assertIn("You: I would use a hash map.", "\n".join(output))
 
     def test_print_and_append_model_answer_does_not_add_display_spacing(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Spacing", goal="test spacing"))

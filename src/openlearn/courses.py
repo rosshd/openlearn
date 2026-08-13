@@ -158,6 +158,42 @@ def course_snapshot(slug: str, *, today: date | None = None) -> CourseSnapshot:
     )
 
 
+def interview_learning_source(slug: str) -> dict[str, object] | None:
+    """Read one recovery-fenced interview lesson generation for presentation."""
+    cli = _cli()
+    canonical_slug = cli.slugify(slug)
+    if canonical_slug != slug:
+        raise cli.OpenLearnError(f"invalid topic slug: {slug}")
+    route_journal = cli.interview_route_journal_path(slug)
+    turn_journal = cli.topic_turn_journal_path(slug)
+    while True:
+        recover_interview_route_acceptance(slug)
+        cli.recover_turn_commit(slug)
+        # Hold both journal creation locks through the store snapshot. Writers
+        # use journal-before-topic order, so no new recovery authority can
+        # appear between the recovery checks and these reads.
+        with (
+            cli.file_lock(route_journal),
+            cli.file_lock(turn_journal),
+            cli.topic_store_locks(slug),
+        ):
+            if route_journal.exists() or turn_journal.exists():
+                continue
+            cli.raise_if_topic_tombstoned(slug)
+            state = cli._load_state_unlocked(slug)
+            canonical = state.get("interview_curriculum")
+            if not isinstance(canonical, dict):
+                return None
+            topic_text = cli.topic_path(slug).read_text(encoding="utf-8")
+            metadata, body = cli.parse_topic(topic_text)
+            return {
+                "slug": slug,
+                "metadata": copy.deepcopy(metadata),
+                "body": body,
+                "state": copy.deepcopy(state),
+            }
+
+
 def list_course_snapshots(*, today: date | None = None) -> tuple[CourseSnapshot, ...]:
     cli = _cli()
     if not cli.topics_dir().exists():

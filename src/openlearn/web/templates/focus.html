@@ -12,7 +12,7 @@
 {% endblock %}
 {% block content %}
 <div class="focus-shell" data-focus-shell data-course-slug="{{ course.slug }}" data-revision="{{ course.revision or 0 }}"
-  {% if course.operation %}data-operation-id="{{ course.operation.id }}" data-operation-state="{{ course.operation.state }}" data-operation-error="{{ course.operation.error }}" data-operation-provider-recovery="{{ 'true' if course.operation.show_provider_recovery else 'false' }}"{% endif %}>
+  {% if course.operation %}data-operation-id="{{ course.operation.id or '' }}" data-operation-state="{{ course.operation.state }}" data-operation-message="{{ course.operation.message }}" data-operation-error="{{ course.operation.error }}" data-operation-provider-recovery="{{ 'true' if course.operation.show_provider_recovery else 'false' }}"{% endif %}>
   <aside class="tool-rail" aria-label="Lesson tools">
     <button type="button" class="rail-button" data-tool-open="chat" aria-expanded="false" aria-controls="learning-tool-surface"><span aria-hidden="true">?</span> Chat</button>
     <button type="button" class="rail-button" data-tool-open="code" aria-expanded="false" aria-controls="learning-tool-surface"><span aria-hidden="true">{ }</span> Code</button>
@@ -53,7 +53,28 @@
       </div>
     </article>
 
-    {% if course.requires_response %}
+    {% if course.curriculum and course.curriculum.next_target %}
+    <aside class="next-target" aria-labelledby="next-target-title" data-next-target>
+      <p class="eyebrow">Next target</p>
+      <h2 id="next-target-title">{{ course.curriculum.next_target.skill_label }}</h2>
+      <p>{{ course.curriculum.next_target.unit_label }} · {{ course.curriculum.next_target.section_label }} · {{ course.curriculum.next_target.emphasis }}</p>
+    </aside>
+    {% endif %}
+    {% if course.curriculum and course.curriculum.deferred_skill %}
+    <aside class="deferred-notice" role="status">
+      <strong>{{ course.curriculum.deferred_skill.skill_label }} is scheduled to return.</strong>
+      <p>{{ course.curriculum.deferred_explanation }}</p>
+    </aside>
+    {% endif %}
+
+    {% if course.is_interview and course.operation %}
+      {% if course.caught_up %}
+      <div class="lesson-actions">
+        <button class="primary-action" type="button" data-navigation-intent="practice">Practice now</button>
+        <button class="tool-button" type="button" data-tool-open="chat" aria-expanded="false" aria-controls="learning-tool-surface">Ask a question</button>
+      </div>
+      {% endif %}
+    {% elif course.requires_response %}
     <form class="composer" data-turn-form>
       <input type="hidden" name="submission_id" data-uuid value="{{ course.operation.id if course.operation else '' }}">
       <input type="hidden" name="expected_revision" value="{{ course.revision or 0 }}">
@@ -72,12 +93,21 @@
     {% else %}
     <div class="lesson-actions">
       <button class="primary-action" type="button" data-navigation-intent="next">Continue <span aria-hidden="true">→</span></button>
+      {% if course.is_interview %}<button type="button" data-navigation-intent="skip">Skip for now</button>{% endif %}
       <button class="tool-button" type="button" data-tool-open="chat" aria-expanded="false" aria-controls="learning-tool-surface">Ask a question</button>
     </div>
     {% endif %}
     <div class="operation-state" data-operation-state role="status" aria-live="polite" aria-atomic="true" tabindex="-1" hidden>
       <span data-operation-message></span>
       <a href="{{ url_for('setup') }}" data-provider-recovery hidden>Review provider settings</a>
+      {% if course.operation %}
+      <div class="operation-actions" data-operation-actions>
+        {% if 'retry' in course.operation.actions %}<button type="button" data-progression-action="resume">Retry saved target</button>{% endif %}
+        {% if 'adopt' in course.operation.actions %}<button type="button" data-progression-action="resume">Resume saved target</button>{% endif %}
+        {% if 'cancel' in course.operation.actions %}<button type="button" data-progression-action="cancel">Cancel saved target</button>{% endif %}
+        {% if 'refresh' in course.operation.actions %}<button type="button" data-progression-action="refresh">Refresh position</button>{% endif %}
+      </div>
+      {% endif %}
     </div>
   </section>
 
@@ -103,6 +133,11 @@
         <input type="hidden" name="submission_id" data-uuid value="">
         <input type="hidden" name="expected_revision" value="{{ course.revision or 0 }}">
         <input type="hidden" name="intent" value="question">
+        {% if course.is_interview %}
+        <input type="hidden" name="source_lesson_id" value="{{ course.lesson_id }}">
+        <input type="hidden" name="source_lesson_title" value="{{ course.move.title }}">
+        <input type="hidden" name="source_lesson_revision" value="{{ course.revision or 0 }}">
+        {% endif %}
         <label for="chat-question">Your question</label>
         <textarea id="chat-question" name="text" rows="4" maxlength="32000" autocomplete="off" required placeholder="What would you like clarified?"></textarea>
         <div class="tool-actions">
@@ -171,7 +206,14 @@
   <aside class="drawer" id="progress-drawer" aria-labelledby="progress-title" hidden>
     <button class="drawer-close" type="button" data-drawer-close aria-label="Close progress">×</button>
     <p class="eyebrow">Course progress</p>
-    {% if course.progress.has_concepts %}
+    {% if course.is_interview %}
+    <h2 id="progress-title">First-pass route coverage</h2>
+    <p>{{ course.progress.coverage.summary }}</p>
+    <progress max="100" value="{{ course.progress.coverage.percent }}">{{ course.progress.coverage.percent }}%</progress>
+    <h3>Readiness work</h3>
+    <p>{{ course.progress.readiness.summary }}</p>
+    {% if course.progress.readiness.next_retrieval %}<p>Next retrieval: {{ course.progress.readiness.next_retrieval }}</p>{% endif %}
+    {% elif course.progress.has_concepts %}
     <h2 id="progress-title">{{ course.progress.percent }}% complete</h2>
     <p>{{ course.progress.summary }}</p>
     <progress max="100" value="{{ course.progress.percent }}">{{ course.progress.percent }}%</progress>

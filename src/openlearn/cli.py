@@ -27,7 +27,7 @@ import textwrap
 import threading
 import time
 import webbrowser
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -297,13 +297,14 @@ REPL_HELP_LINES = [
     "  /n       get the next lesson",
     "  /r       resume learning",
     "  /done    explicitly advance (compatibility command)",
+    "  /practice start a retrieval when an interview route is caught up",
     "  /status  show progress",
     "  /q       quit",
     "",
     "Use /help --all for every command.",
 ]
 REPL_HELP_ALL = (
-    "Commands: /resume (/r), /next (/n), /done, /review, /status, /summary, "
+    "Commands: /resume (/r), /next (/n), /done, /practice, /review, /status, /summary, "
     "/options, /plan, /progress [unit slide], /chapter [N], /scope <change>, /repair, "
     "/drill [--leetcode], /check [--reduced-isolation], /attempt <action>, "
     "/videos [--n N] [query], /active [topic], /recent, "
@@ -2277,7 +2278,15 @@ def run_repl(
 
 def learner_requests_advance(prompt: str) -> bool:
     value = one_line(prompt).lower()
-    if value in {"continue", "next", "next slide", "move on", "skip"}:
+    if value in {
+        "continue",
+        "next",
+        "next slide",
+        "move on",
+        "skip",
+        "practice",
+        "practice now",
+    }:
         return True
     patterns = (
         r"\b(?:let'?s|lets)\s+(?:continue|move on|go on|go to (?:the )?next)",
@@ -2418,10 +2427,15 @@ def handle_natural_advance(prompt: str, model: str | None = None, output_func=pr
         from openlearn import application, tutor_service
 
         try:
+            intent: Literal["continue", "skip", "practice"] = "continue"
+            if re.search(r"\bskip\b", prompt, re.IGNORECASE):
+                intent = "skip"
+            elif re.search(r"\bpractice\b", prompt, re.IGNORECASE):
+                intent = "practice"
             result = application.advance_interview_curriculum(
                 slug,
                 prompt,
-                intent=("skip" if re.search(r"\bskip\b", prompt, re.IGNORECASE) else "continue"),
+                intent=intent,
                 submission_id=str(uuid4()),
                 expected_revision=tutor_service.course_revision(slug),
                 model=model,
@@ -2503,6 +2517,11 @@ def handle_repl_command(
             else:
                 output_func("Loading next slide...")
                 cmd_next(argparse.Namespace(topic=slug, model=model), output_func=output_func)
+    elif name == "practice":
+        slug = resolve_topic_slug(args[0] if args else None)
+        if not isinstance(load_state(slug).get("interview_curriculum"), dict):
+            raise OpenLearnError("/practice is available for interview curriculum courses")
+        handle_natural_advance("Practice now", model, output_func)
     elif name == "review":
         due_only = "--due" in args
         topic_args = [arg for arg in args if arg != "--due"]
@@ -4417,7 +4436,7 @@ def _choose_legacy_placement_route(
 ) -> str:
     output_func("An older coding placement is still in progress.")
     output_func(
-        "1. Start the new short reasoning placement (recommended; published evidence is preserved)"
+        "1. Start the rapid confidence placement (recommended; published evidence is preserved)"
     )
     output_func("2. Continue the older coding placement")
     output_func("d. Decide later and keep the older placement saved")
@@ -4436,7 +4455,7 @@ def _choose_legacy_placement_route(
         return "exit"
     try:
         confirmation = input_func(
-            "Replace the active coding placement with the short reasoning placement? [y/N]: "
+            "Replace the active coding placement with the rapid confidence placement? [y/N]: "
         ).strip().lower()
     except (EOFError, KeyboardInterrupt):
         output_func(f"\nOlder placement saved. Run openlearn resume {slug} to continue.")
@@ -4445,7 +4464,7 @@ def _choose_legacy_placement_route(
         output_func("Switch cancelled. The older placement is still saved.")
         return "exit"
     _discard_interview_placement(slug, path)
-    output_func("Published evidence was preserved. Starting the short placement.")
+    output_func("Published evidence was preserved. Starting the rapid confidence placement.")
     return "new"
 
 
@@ -4477,6 +4496,29 @@ def _run_confidence_interview_placement(
     output_func=print,
 ) -> int:
     """Run the same bounded V4 route setup used by the Maker Bench."""
+    try:
+        return _run_confidence_interview_placement_unchecked(
+            slug,
+            path,
+            input_func=input_func,
+            output_func=output_func,
+        )
+    except (EOFError, KeyboardInterrupt):
+        output_func(
+            f"\nPlacement saved. Run 'openlearn interview placement {slug} resume' "
+            "to continue."
+        )
+        return 0
+
+
+def _run_confidence_interview_placement_unchecked(
+    slug: str,
+    path: Path,
+    *,
+    input_func=input,
+    output_func=print,
+) -> int:
+    """Run V4 after the public wrapper establishes interruption recovery."""
     from openlearn import application
 
     value = interview_prep.load_profile(path)
@@ -4701,7 +4743,8 @@ def cmd_interview_placement(
             return result
         if (
             placement.get("status") == "in_progress"
-            and placement.get("lifecycle_version") != interview_prep.PLACEMENT_V3
+            and placement.get("lifecycle_version")
+            not in {interview_prep.PLACEMENT_V3, interview_prep.PLACEMENT_V4}
         ):
             route = _choose_legacy_placement_route(
                 slug,
@@ -6289,6 +6332,44 @@ def structured_progress_line(topic: Topic) -> str:
     return f"Unit {min(current_unit, total_units)}/{total_units} · Slide {min(slide, slide_count)}/{slide_count}"
 
 
+def interview_curriculum_status_lines(slug: str) -> list[str]:
+    """Render the shared typed interview projection without turn-count labels."""
+    from openlearn import application
+
+    projection = application.interview_learning(slug)
+    if projection is None:
+        return []
+    position = projection.position
+    lines = [
+        f"Current concept: {position.skill_label}",
+        f"Position: {position.unit_label} / {position.section_label}",
+        f"Emphasis: {position.emphasis}",
+        f"First-pass route coverage: {projection.coverage.summary}",
+        f"Readiness work: {projection.readiness.summary}",
+    ]
+    if projection.next_target is not None:
+        lines.append(
+            "Next target: "
+            f"{projection.next_target.skill_label} "
+            f"({projection.next_target.section_label})"
+        )
+    if projection.deferred_skill is not None:
+        lines.append(
+            f"Deferred: {projection.deferred_skill.skill_label}. "
+            f"{projection.deferred_explanation or ''}".strip()
+        )
+    if projection.operation.state != "committed":
+        lines.append(f"Course state: {projection.operation.message}")
+    return lines
+
+
+def print_interview_curriculum_status(slug: str, output_func=print) -> bool:
+    lines = interview_curriculum_status_lines(slug)
+    for line in lines:
+        output_func(line)
+    return bool(lines)
+
+
 def course_unit_at(metadata: dict[str, object], unit_number: int) -> dict[str, object] | None:
     units = metadata.get("course_units")
     if not isinstance(units, list):
@@ -7250,6 +7331,8 @@ def cmd_chapter_select(
 
 
 def print_course_plan(topic: Topic, output_func=print) -> None:
+    if print_interview_curriculum_status(topic.slug, output_func):
+        return
     units = topic.metadata.get("course_units")
     if isinstance(units, list) and units:
         print_section("Course plan", output_func)
@@ -7276,15 +7359,18 @@ def print_course_summary(topic: Topic, output_func=print) -> None:
     print_status_bar(topic, output_func)
     print_section("Course summary", output_func)
     output_func(f"Course: {metadata.get('topic', topic.slug)}")
-    progress = topic_progress_line(topic)
-    output_func(progress or "Progress: not set")
-    completed, total = course_completion_counts(metadata)
-    if total:
-        output_func(f"Chapters completed: {completed}/{total}")
+    interview_status = print_interview_curriculum_status(topic.slug, output_func)
+    if not interview_status:
+        progress = topic_progress_line(topic)
+        output_func(progress or "Progress: not set")
+        completed, total = course_completion_counts(metadata)
+        if total:
+            output_func(f"Chapters completed: {completed}/{total}")
     status = metadata.get("last_answer_status")
     output_func(f"Last answer: {status if isinstance(status, str) and status else 'not evaluated'}")
-    print_list_to("Weak spots", metadata.get("weak_spots", []), output_func)
-    print_list_to("Review due", metadata.get("review_due", []), output_func)
+    if not interview_status:
+        print_list_to("Weak spots", metadata.get("weak_spots", []), output_func)
+        print_list_to("Review due", metadata.get("review_due", []), output_func)
     quiz_history = metadata.get("quiz_history")
     if isinstance(quiz_history, list) and quiz_history:
         output_func(f"Quizzes completed: {len(quiz_history)}")
@@ -8467,22 +8553,25 @@ def cmd_status(args: argparse.Namespace) -> int:
     if metadata.get("learning_mode") == "quick":
         print(f"Mode: Quick Learn ({metadata.get('quick_source_type', 'source')})")
     print(f"Goal: {metadata.get('goal', '')}")
-    structured_progress = structured_progress_line(topic)
-    if structured_progress:
-        print(structured_progress)
-    progress = topic_progress_line(topic)
-    if progress:
-        print(progress)
-    print(f"Current focus: {metadata.get('current_focus', '') or 'not set'}")
+    interview_status = print_interview_curriculum_status(topic.slug)
+    if not interview_status:
+        structured_progress = structured_progress_line(topic)
+        if structured_progress:
+            print(structured_progress)
+        progress = topic_progress_line(topic)
+        if progress:
+            print(progress)
+        print(f"Current focus: {metadata.get('current_focus', '') or 'not set'}")
     print(f"Level: {metadata.get('level', '') or 'not set'}")
     print(f"Model: {metadata.get('model', DEFAULT_MODEL)}")
     answer_status = metadata.get("last_answer_status")
     print(f"Last answer: {answer_status if answer_status else 'not evaluated'}")
-    quiz_history = metadata.get("quiz_history")
-    print(f"Quizzes completed: {len(quiz_history) if isinstance(quiz_history, list) else 0}")
-    print(f"Known: {count_list(metadata.get('known', []))}")
-    print(f"Weak spots: {count_list(metadata.get('weak_spots', []))}")
-    print(f"Review due: {count_list(metadata.get('review_due', []))}")
+    if not interview_status:
+        quiz_history = metadata.get("quiz_history")
+        print(f"Quizzes completed: {len(quiz_history) if isinstance(quiz_history, list) else 0}")
+        print(f"Known: {count_list(metadata.get('known', []))}")
+        print(f"Weak spots: {count_list(metadata.get('weak_spots', []))}")
+        print(f"Review due: {count_list(metadata.get('review_due', []))}")
     print("Details: use /summary for lists and next action; /options for course options.")
     return 0
 
@@ -9174,6 +9263,10 @@ def ask_topic(
     generated_answer_override: str | None = None,
     increment_course_revision: bool = True,
     side_chat_lesson_override: str | None = None,
+    side_chat_source_id: str | None = None,
+    side_chat_source_title: str | None = None,
+    side_chat_source_revision: int | None = None,
+    side_chat_source_skill_ref: Mapping[str, str] | None = None,
     commit_events_hook: (
         Callable[
             [str, dict[str, object], dict[str, object]],
@@ -9439,8 +9532,25 @@ def ask_topic(
                     observed_at=turn_moment.isoformat(),
                 )
             )
+    source_lesson_id = None
+    source_lesson_title = None
+    if session_kind == SIDE_CHAT_SESSION_KIND and side_chat_lesson_override:
+        source_lesson_id = side_chat_source_id or tutor_lesson_entry_id(
+            {"response": side_chat_lesson_override}
+        )
+        source_lesson_title = side_chat_source_title or (
+            tutor_response_focus_title(side_chat_lesson_override) or "Saved lesson"
+        )
     session_entry = _session_entry(
-        session_kind, prompt, answer, created=created, mutation_id=mutation_id
+        session_kind,
+        prompt,
+        answer,
+        created=created,
+        mutation_id=mutation_id,
+        source_lesson_id=source_lesson_id,
+        source_lesson_title=source_lesson_title,
+        source_lesson_revision=side_chat_source_revision,
+        source_lesson_skill_ref=side_chat_source_skill_ref,
     )
     projected_body = topic.body.rstrip() + "\n\n" + session_entry + "\n"
     if tutor_response_has_enter_advance_cue(answer):
@@ -9840,12 +9950,32 @@ def _session_entry(
     *,
     created: str,
     mutation_id: str,
+    source_lesson_id: str | None = None,
+    source_lesson_title: str | None = None,
+    source_lesson_revision: int | None = None,
+    source_lesson_skill_ref: Mapping[str, str] | None = None,
 ) -> str:
     # Build around model-controlled multiline text without letting its
     # indentation affect the structural Markdown markers.
+    markers = [f"<!-- openlearn-turn:{mutation_id} -->"]
+    if source_lesson_id and source_lesson_title:
+        source_identity: dict[str, object] = {
+            "lesson_id": source_lesson_id,
+            "title": source_lesson_title,
+        }
+        if source_lesson_revision is not None:
+            source_identity["course_revision"] = source_lesson_revision
+        if source_lesson_skill_ref:
+            source_identity["skill_ref"] = dict(source_lesson_skill_ref)
+        source = json.dumps(
+            source_identity,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        markers.append(f"<!-- openlearn-side-chat-source:{source} -->")
     return "\n".join(
         [
-            f"<!-- openlearn-turn:{mutation_id} -->",
+            *markers,
             f"### {created} - {kind}",
             "",
             "**Prompt**",
@@ -10801,7 +10931,14 @@ def _commit_projected_turn(
             break
     _turn_commit_checkpoint("after_journal")
     if not recover_turn_commit(slug):
-        raise OpenLearnError("topic changed or was deleted before the tutor turn could be saved")
+        # Another recovery-fenced reader may have durably applied this exact
+        # journal after it was published but before this writer resumed.
+        with topic_store_locks(slug):
+            receipts = _validated_turn_receipts(_load_state_unlocked(slug))
+            if mutation_id not in receipts:
+                raise OpenLearnError(
+                    "topic changed or was deleted before the tutor turn could be saved"
+                )
 
 
 def built_in_activity_registry() -> ActivityRegistry:
@@ -13604,10 +13741,27 @@ def cmd_resume(args: argparse.Namespace, input_func=input, output_func=print) ->
         raise OpenLearnError(f"unsupported interview placement state: {status}")
 
     if interview_value is not None:
-        _preflight_interview_provider(topic, interview_value, output_func)
         canonical = load_state(topic.slug).get("interview_curriculum")
+        if _DRY_RUN and isinstance(canonical, dict):
+            print_interview_curriculum_status(topic.slug, output_func)
+            output_func("dry run: request not sent")
+            return 0
+        _preflight_interview_provider(topic, interview_value, output_func)
         if isinstance(canonical, dict):
             from openlearn import application, tutor_service
+
+            print_interview_curriculum_status(topic.slug, output_func)
+            projection = application.interview_learning(topic.slug)
+            if (
+                projection is not None
+                and projection.operation.state == "caught-up"
+            ):
+                output_func(
+                    "All accepted route skills have a first pass. Use /practice in "
+                    "the CLI learning session to start a retrieval without moving "
+                    "the forward cursor."
+                )
+                return 0
 
             try:
                 if isinstance(canonical.get("active_operation"), dict):
@@ -17056,12 +17210,16 @@ def repair_topic_metadata(slug: str) -> bool:
     path = topic_path(slug)
     if not path.exists():
         raise OpenLearnError(f"topic not found: {slug}")
+    # A route-acceptance journal is recovery authority, not disposable repair
+    # debris. Finish that transaction before normalizing either projection.
+    from . import courses
+
+    courses.recover_interview_route_acceptance(slug)
     reconciliation_journal = interview_reconciliation_journal_path(slug)
     route_journal = interview_route_journal_path(slug)
     with file_lock(reconciliation_journal), file_lock(route_journal), file_lock(path):
         durable_unlink(reconciliation_journal)
         durable_unlink(interview_reconciliation_receipt_path(slug))
-        durable_unlink(route_journal)
         current_text = path.read_text(encoding="utf-8")
         try:
             metadata, body = parse_topic(current_text)
@@ -18279,7 +18437,8 @@ def print_resume_context(topic: Topic, context: str, output_func=print) -> None:
     print_section("Where you left off", output_func)
     metadata = topic.metadata
 
-    progress = structured_progress_line(topic)
+    interview_status = print_interview_curriculum_status(topic.slug, output_func)
+    progress = "" if interview_status else structured_progress_line(topic)
     if progress:
         current_unit = metadata.get("current_unit")
         unit_data = (
@@ -18288,7 +18447,7 @@ def print_resume_context(topic: Topic, context: str, output_func=print) -> None:
         unit_title = unit_data.get("title", "") if isinstance(unit_data, dict) else ""
         line = f"Position: {progress}"
         if unit_title:
-            line += f" — {unit_title}"
+            line += f" - {unit_title}"
         emit_resume_line(line, output_func)
     else:
         focus = metadata.get("current_focus")
@@ -18309,7 +18468,7 @@ def print_resume_context(topic: Topic, context: str, output_func=print) -> None:
         if last_interaction:
             learner_context = snippet(last_interaction["prompt"], 180).replace("**", "")
             emit_resume_line(f"You: {learner_context}", output_func)
-    elif not progress:
+    elif not interview_status:
         emit_resume_line("No previous session yet.", output_func)
 
 
@@ -18322,14 +18481,64 @@ def session_entries(session_log: str) -> list[dict[str, str]]:
         prompt_match = re.search(r"(?s)\*\*Prompt\*\*\s*(.*?)\s*\*\*Response\*\*\s*(.*)", block)
         if not prompt_match:
             continue
-        entries.append(
-            {
-                "kind": heading.group(1),
-                "prompt": prompt_match.group(1).strip(),
-                "response": prompt_match.group(2).strip(),
-            }
+        response = prompt_match.group(2).strip()
+        while True:
+            cleaned = re.sub(
+                r"\n+<!--\s*openlearn-(?:turn:[^>]+|side-chat-source:\{.*?\})\s*-->\s*$",
+                "",
+                response,
+                flags=re.DOTALL,
+            ).rstrip()
+            if cleaned == response:
+                break
+            response = cleaned
+        entry = {
+            "kind": heading.group(1),
+            "prompt": prompt_match.group(1).strip(),
+            "response": response,
+        }
+        marker_block = session_log[
+            headings[index - 1].end() if index > 0 else 0 : heading.start()
+        ]
+        turn_match = re.search(
+            r"<!--\s*openlearn-turn:([^>\s]+)\s*-->", marker_block
         )
+        if turn_match:
+            entry["mutation_id"] = turn_match.group(1)
+        source_match = re.search(
+            r"<!--\s*openlearn-side-chat-source:(\{.*?\})\s*-->",
+            marker_block,
+        )
+        if source_match:
+            try:
+                source = json.loads(source_match.group(1))
+            except json.JSONDecodeError:
+                source = None
+            if isinstance(source, dict):
+                lesson_id = source.get("lesson_id")
+                title = source.get("title")
+                if isinstance(lesson_id, str) and isinstance(title, str):
+                    entry["source_lesson_id"] = lesson_id
+                    entry["source_lesson_title"] = title
+                    revision = source.get("course_revision")
+                    if isinstance(revision, int) and revision >= 0:
+                        entry["source_lesson_revision"] = str(revision)
+                    skill_ref = source.get("skill_ref")
+                    if isinstance(skill_ref, dict):
+                        entry["source_lesson_skill_ref"] = json.dumps(
+                            skill_ref, sort_keys=True, separators=(",", ":")
+                        )
+        entries.append(entry)
     return entries
+
+
+def tutor_lesson_entry_id(entry: Mapping[str, str]) -> str:
+    """Return a stable per-turn lesson identity, with a legacy content fallback."""
+    mutation_id = entry.get("mutation_id")
+    if isinstance(mutation_id, str) and mutation_id:
+        return f"lesson_{mutation_id}"
+    response = entry.get("response", "")
+    return "lesson_" + hashlib.sha256(response.encode("utf-8")).hexdigest()[:24]
 
 
 def _mock_openai_response(model: str, system: str, user: str) -> str:
@@ -18832,6 +19041,26 @@ def extract_response_text(data: dict[str, object]) -> str:
 
 def print_status_bar(topic: Topic, output_func=print) -> None:
     metadata = topic.metadata
+    try:
+        from openlearn import application
+
+        interview = application.interview_learning(topic.slug)
+    except (OpenLearnError, OSError, ValueError):
+        interview = None
+    if interview is not None:
+        label = str(metadata.get("topic") or topic.slug)
+        position = interview.position
+        progress = f"{position.unit_label} / {position.section_label}"
+        emit(
+            status_bar(
+                label + _status_suffix(metadata),
+                progress,
+                position.skill_label,
+                interview.readiness.due,
+            ),
+            output_func,
+        )
+        return
     progress = structured_progress_line(topic) or topic_progress_line(topic).removeprefix(
         "Progress: "
     )

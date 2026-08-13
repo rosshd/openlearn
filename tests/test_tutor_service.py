@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import threading
 import time
@@ -928,6 +929,19 @@ class TutorServiceTests(TestCase):
         self.assertEqual(side.status, "committed")
         self.assertEqual(course_revision(slug), 2)
         self.assertIn("Original visible lesson", captured["side_prompt"])
+        topic = cli.read_topic(slug)
+        _body, log = cli.split_session_log(topic.body)
+        side_entry = next(
+            entry
+            for entry in reversed(cli.session_entries(log))
+            if entry["kind"] == cli.SIDE_CHAT_SESSION_KIND
+        )
+        self.assertEqual(side_entry["source_lesson_revision"], "0")
+        source_ref = json.loads(side_entry["source_lesson_skill_ref"])
+        initial_ref = cli.load_state(slug)["interview_curriculum"]["route"]["skills"][0][
+            "skill_ref"
+        ]
+        self.assertEqual(source_ref, initial_ref)
 
     def test_tampered_permanent_progression_receipt_fails_closed(self) -> None:
         slug = self._create_interview_course()
@@ -1059,6 +1073,7 @@ class TutorServiceTests(TestCase):
         current = "**Lesson:**\nTrace two examples before choosing an approach."
         cli.append_session(cli.read_topic("web-tutor"), "chat", "Continue", current)
         captured: dict[str, str] = {}
+        submission_id = str(uuid4())
 
         def answer(*_args: object, **kwargs: object) -> str:
             captured["user"] = str(kwargs["user"])
@@ -1072,7 +1087,7 @@ class TutorServiceTests(TestCase):
                 "web-tutor",
                 "Can you explain this slide more?",
                 intent="question",
-                submission_id=str(uuid4()),
+                submission_id=submission_id,
                 expected_revision=0,
                 session_kind=cli.SIDE_CHAT_SESSION_KIND,
             )
@@ -1080,6 +1095,33 @@ class TutorServiceTests(TestCase):
         self.assertEqual(result.status, "committed")
         self.assertIn("Trace two examples before choosing an approach", captured["user"])
         self.assertIn("Can you explain this slide more?", captured["user"])
+        topic = cli.read_topic("web-tutor")
+        _body, log = cli.split_session_log(topic.body)
+        side_entry = cli.session_entries(log)[-1]
+        self.assertEqual(side_entry["source_lesson_title"], "Saved lesson")
+        self.assertEqual(
+            side_entry["source_lesson_id"],
+            "lesson_" + hashlib.sha256(current.encode("utf-8")).hexdigest()[:24],
+        )
+        self.assertEqual(side_entry["source_lesson_revision"], "0")
+        replay = submit_turn(
+            "web-tutor",
+            "Can you explain this slide more?",
+            intent="question",
+            submission_id=submission_id,
+            expected_revision=0,
+            session_kind=cli.SIDE_CHAT_SESSION_KIND,
+        )
+        self.assertEqual(replay, result)
+        replay_topic = cli.read_topic("web-tutor")
+        _body, replay_log = cli.split_session_log(replay_topic.body)
+        self.assertEqual(
+            sum(
+                entry["kind"] == cli.SIDE_CHAT_SESSION_KIND
+                for entry in cli.session_entries(replay_log)
+            ),
+            1,
+        )
         finish.assert_not_called()
 
     def test_navigation_after_two_passive_lessons_generates_a_check(self) -> None:

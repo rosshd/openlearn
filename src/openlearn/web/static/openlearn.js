@@ -859,12 +859,6 @@ function renderTutorPreview(preview) {
   const visible = (preview || "").trimStart();
   if (!surface.dataset.streaming) {
     surface.style.height = `${Math.ceil(surface.getBoundingClientRect().height)}px`;
-    surface.querySelector("[data-move-content]")?.setAttribute("hidden", "");
-    surface.querySelector("[data-move-prompt]")?.setAttribute("hidden", "");
-    const kind = surface.querySelector("[data-move-kind]");
-    const title = surface.querySelector("#move-title");
-    if (kind) kind.textContent = "Tutor is responding";
-    if (title) title.textContent = "Your next learning move";
     region.hidden = false;
     surface.dataset.streaming = "true";
     text.textContent = "Thinking through your answer…";
@@ -1033,11 +1027,15 @@ function clearTurnComposer() {
   textarea.defaultValue = "";
 }
 
-if (focusShell?.dataset.operationId) {
-  if (focusShell.dataset.operationState === "retryable_error") {
+if (focusShell?.dataset.operationState) {
+  if (["provider-error", "busy", "stale-conflict", "caught-up"].includes(
+    focusShell.dataset.operationState,
+  )) {
     setOperationState(
-      focusShell.dataset.operationError || "Your response is saved. Retry when the provider is available.",
-      true,
+      focusShell.dataset.operationMessage
+        || focusShell.dataset.operationError
+        || "Your saved course position needs attention.",
+      ["provider-error", "stale-conflict"].includes(focusShell.dataset.operationState),
       { show_provider_recovery: focusShell.dataset.operationProviderRecovery === "true" },
     );
   } else {
@@ -1048,6 +1046,40 @@ if (focusShell?.dataset.operationId) {
       lockTurnForm(false);
     });
   }
+}
+
+for (const button of document.querySelectorAll("[data-progression-action]")) {
+  button.addEventListener("click", async () => {
+    const action = button.dataset.progressionAction;
+    if (action === "refresh") {
+      window.location.reload();
+      return;
+    }
+    const operationId = focusShell?.dataset.operationId;
+    if (!operationId) return;
+    button.disabled = true;
+    setOperationState(
+      action === "cancel" ? "Cancelling the saved target…" : "Resuming the saved target…",
+    );
+    try {
+      const result = await requestJson(
+        `/api/courses/${encodeURIComponent(focusShell.dataset.courseSlug)}/progression`,
+        {
+          method: "POST",
+          body: JSON.stringify({ action, operation_id: operationId }),
+        },
+      );
+      if (result.state === "busy") {
+        setOperationState(result.error || "Another interface is still finishing this target.");
+        button.disabled = false;
+        return;
+      }
+      window.location.reload();
+    } catch (error) {
+      setOperationState(error.message, true);
+      button.disabled = false;
+    }
+  });
 }
 
 async function submitTurn(overrideIntent = null) {
@@ -1154,6 +1186,10 @@ function appendPresentationBlocks(container, blocks) {
 function chatExchange(exchange) {
   const article = document.createElement("article");
   article.className = "chat-exchange";
+  article.dataset.sourceLessonId = exchange.source_lesson_id || "";
+  const source = document.createElement("p");
+  source.className = "chat-source-label quiet-copy";
+  source.textContent = `About: ${exchange.source_lesson_title || "Saved lesson"}`;
   const learner = document.createElement("div");
   learner.className = "chat-learner";
   const learnerLabel = document.createElement("span");
@@ -1167,7 +1203,7 @@ function chatExchange(exchange) {
   tutorLabel.textContent = "Tutor";
   tutor.append(tutorLabel);
   appendPresentationBlocks(tutor, exchange.blocks || []);
-  article.append(learner, tutor);
+  article.append(source, learner, tutor);
   return article;
 }
 

@@ -495,6 +495,43 @@ def test_instructional_commit_does_not_clear_due_or_weak_evidence() -> None:
     assert committed["evidence"]["weak"] == ["concept.arrays-strings"]
 
 
+def test_practice_commit_does_not_cover_the_forward_cursor() -> None:
+    state = _canonical_progression_state()
+    cursor_before = deepcopy(state["cursor"])
+
+    committed = interview_curriculum.record_progression_commit(
+        state, "concept.hashing"
+    )
+
+    assert committed["cursor"] == cursor_before
+    assert "concept.hashing" in committed["evidence"]["exposed"]
+
+
+def test_route_change_returns_to_exposed_but_unready_prerequisite() -> None:
+    state = _canonical_progression_state()
+    route = deepcopy(state["route"])
+    first = route["skills"][0]
+    evidence = state["evidence"]
+    assert isinstance(evidence, dict)
+    evidence["exposed"] = [first["skill_ref"]["skill_id"]]
+    evidence["ready"] = []
+    removed_ref = deepcopy(first["skill_ref"])
+    removed_ref["skill_id"] = "removed-skill"
+    state["cursor"] = {
+        "unit_id": "removed-unit",
+        "section_id": "removed-section",
+        "skill_ref": removed_ref,
+        "instruction_status": "covered",
+    }
+
+    changed, decision = interview_curriculum.rematerialize_canonical_state(
+        state, route, change_id="change-exposed-unready"
+    )
+
+    assert decision == "earliest-eligible-unmet-prerequisite"
+    assert changed["cursor"]["skill_ref"] == first["skill_ref"]
+
+
 def test_caught_up_practice_selects_covered_skill_without_moving_forward_cursor() -> None:
     state = _canonical_progression_state()
     route = state["route"]

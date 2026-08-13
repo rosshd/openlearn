@@ -61,6 +61,9 @@ class TutorSubmissionRequest(BaseModel):
     text: str = Field(default="", max_length=32000)
     submission_id: str = Field(min_length=1, max_length=64)
     expected_revision: int = Field(ge=0)
+    source_lesson_id: str | None = Field(default=None, min_length=1, max_length=96)
+    source_lesson_title: str | None = Field(default=None, min_length=1, max_length=160)
+    source_lesson_revision: int | None = Field(default=None, ge=0)
 
     @field_validator("intent")
     @classmethod
@@ -72,6 +75,16 @@ class TutorSubmissionRequest(BaseModel):
     @field_validator("submission_id")
     @classmethod
     def valid_submission_id(cls, value: str) -> str:
+        return canonical_uuid(value)
+
+
+class ProgressionActionRequest(BaseModel):
+    action: Literal["resume", "cancel"]
+    operation_id: str
+
+    @field_validator("operation_id")
+    @classmethod
+    def valid_operation_id(cls, value: str) -> str:
         return canonical_uuid(value)
 
 

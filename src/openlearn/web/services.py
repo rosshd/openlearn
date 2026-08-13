@@ -39,6 +39,7 @@ from .schemas import (
     DataManagementRequest,
     ProviderSetupRequest,
     PlacementRequest,
+    ProgressionActionRequest,
     ReviewGradeRequest,
     TutorSubmissionRequest,
     VideoToolRequest,
@@ -117,6 +118,22 @@ def _course_has_accepted_plan(slug: str, outline: str) -> bool:
 
 
 def _card(card: CourseCard) -> dict[str, object]:
+    try:
+        interview = application.interview_learning(card.slug)
+    except (cli.OpenLearnError, OSError, ValueError):
+        interview = None
+    if interview is not None:
+        return {
+            "slug": card.slug,
+            "title": card.title,
+            "summary": card.goal,
+            "current_unit": interview.position.unit_label,
+            "next_move": interview.position.skill_label,
+            "progress": interview.coverage.percent,
+            "is_interview": True,
+            "coverage": vars(interview.coverage),
+            "readiness": vars(interview.readiness),
+        }
     return {
         "slug": card.slug,
         "title": card.title,
@@ -142,6 +159,77 @@ def _focus_progress(progress: CourseProgress) -> dict[str, object]:
         "percent": percent,
         "summary": f"{known} of {total} tracked concepts are known.",
         "has_concepts": True,
+    }
+
+
+def _interview_focus_projection(
+    projection: application.InterviewLearningProjection,
+) -> dict[str, object]:
+    prompt = _plain_text(projection.pending_prompt) if projection.pending_prompt else ""
+    answer = projection.committed_lesson.content
+    presented = _without_check_section(answer) if prompt else answer
+    response_kind, blocks = _present_response(presented)
+    position = projection.position
+    operation = projection.operation
+    next_target = projection.next_target
+    return {
+        "slug": projection.slug,
+        "title": projection.title,
+        "current_unit": position.unit_label,
+        "revision": projection.revision,
+        "saved_state": "Saved locally",
+        "is_interview": True,
+        "lesson_id": projection.committed_lesson.lesson_id,
+        "curriculum": {
+            "position": vars(position),
+            "next_target": vars(next_target) if next_target is not None else None,
+            "deferred_skill": (
+                vars(projection.deferred_skill)
+                if projection.deferred_skill is not None
+                else None
+            ),
+            "deferred_explanation": projection.deferred_explanation or "",
+        },
+        "move": {
+            "kind": "Current lesson" if response_kind == "Lesson" else response_kind,
+            "title": position.skill_label,
+            "blocks": blocks,
+            "content": (
+                "Your first technical lesson is ready to begin."
+                if not answer
+                else ""
+            ),
+            "prompt": prompt,
+            "position": (
+                f"{position.unit_label} · {position.section_label} · "
+                f"{position.emphasis}"
+            ),
+        },
+        "progress": {
+            "percent": projection.coverage.percent,
+            "summary": projection.coverage.summary,
+            "has_concepts": projection.coverage.total > 0,
+            "coverage": vars(projection.coverage),
+            "readiness": vars(projection.readiness),
+        },
+        "feedback": None,
+        "requires_response": bool(prompt),
+        "operation": (
+            {
+                "id": operation.submission_id,
+                "state": operation.state,
+                "message": operation.message,
+                "actions": list(operation.actions),
+                "error": operation.message if operation.state == "provider-error" else "",
+                "error_code": operation.error_code or "",
+                "show_provider_recovery": "provider-settings" in operation.actions,
+            }
+            if operation.state != "committed"
+            else None
+        ),
+        "caught_up": operation.state == "caught-up",
+        "saved_response": projection.saved_response,
+        "initialization": None,
     }
 
 
@@ -377,6 +465,10 @@ def _side_conversation(entries: list[dict[str, str]]) -> list[dict[str, object]]
             {
                 "question": _plain_text(str(entry.get("prompt") or "")),
                 "blocks": blocks,
+                "source_lesson_id": str(entry.get("source_lesson_id") or ""),
+                "source_lesson_title": _plain_text(
+                    str(entry.get("source_lesson_title") or "Saved lesson")
+                ),
             }
         )
     return conversation
@@ -1196,18 +1288,33 @@ class OpenLearnWebServices:
         return self._placement_view(slug, value)
 
     def progress(self) -> dict[str, object]:
-        return {
-            "courses": [
-                {
-                    **_card(card),
-                    "known": card.progress.known,
-                    "total": card.progress.total,
-                    "units": [vars(unit) for unit in card.progress.units],
-                    "due_reviews": card.progress.reviews.due_today,
-                }
-                for card in application.dashboard().courses
-            ]
-        }
+        courses: list[dict[str, object]] = []
+        for card in application.dashboard().courses:
+            projected = _card(card)
+            if projected.get("is_interview"):
+                coverage = projected["coverage"]
+                readiness = projected["readiness"]
+                assert isinstance(coverage, dict) and isinstance(readiness, dict)
+                courses.append(
+                    {
+                        **projected,
+                        "known": coverage["covered"],
+                        "total": coverage["total"],
+                        "units": [],
+                        "due_reviews": readiness["due"],
+                    }
+                )
+            else:
+                courses.append(
+                    {
+                        **projected,
+                        "known": card.progress.known,
+                        "total": card.progress.total,
+                        "units": [vars(unit) for unit in card.progress.units],
+                        "due_reviews": card.progress.reviews.due_today,
+                    }
+                )
+        return {"courses": courses}
 
     def due_reviews(self) -> dict[str, object]:
         items: list[dict[str, object]] = []
@@ -1341,14 +1448,29 @@ class OpenLearnWebServices:
         if expected_id is None or operation_id != expected_id:
             return {"state": "missing", "error": "Course initialization was not found."}
         try:
-            result = tutor_service.start_turn(
-                slug,
-                _course_initialization_prompt(slug),
-                intent="question",
-                submission_id=operation_id,
-                expected_revision=0,
-                model=config.configured_model(),
-            )
+            projection = application.interview_learning(slug)
+        except (cli.OpenLearnError, OSError, ValueError):
+            projection = None
+        try:
+            if projection is not None:
+                operation = projection.operation
+                if operation.submission_id != operation_id:
+                    return {
+                        "state": "conflict",
+                        "error": "The saved curriculum target changed. Reload the course.",
+                    }
+                result = application.resume_interview_progression(
+                    slug, model=config.configured_model()
+                )
+            else:
+                result = tutor_service.start_turn(
+                    slug,
+                    _course_initialization_prompt(slug),
+                    intent="question",
+                    submission_id=operation_id,
+                    expected_revision=0,
+                    model=config.configured_model(),
+                )
         except tutor_service.TutorConflictError as error:
             return {"state": "conflict", "error": str(error)}
         except tutor_service.TutorOperationError:
@@ -1366,6 +1488,12 @@ class OpenLearnWebServices:
         }
 
     def focus(self, slug: str) -> dict[str, object]:
+        try:
+            interview_projection = application.interview_learning(slug)
+        except (cli.OpenLearnError, OSError, ValueError):
+            interview_projection = None
+        if interview_projection is not None:
+            return _interview_focus_projection(interview_projection)
         try:
             snapshot = application.course(slug)
             topic = cli.read_topic(slug)
@@ -1468,6 +1596,40 @@ class OpenLearnWebServices:
             text = "Continue to the next useful concept."
         elif request.intent == "practice":
             text = "Practice now using a covered curriculum concept."
+        source_fields = (
+            request.source_lesson_id,
+            request.source_lesson_title,
+            request.source_lesson_revision,
+        )
+        if request.intent in {"question", "stuck"}:
+            projection = application.interview_learning(slug)
+            if projection is not None and any(value is None for value in source_fields):
+                return {
+                    "state": "conflict",
+                    "error": "The visible lesson reference is missing. Refresh before asking.",
+                }
+            if projection is not None and (
+                request.source_lesson_id
+                != projection.committed_lesson.lesson_id
+                or request.source_lesson_title != projection.committed_lesson.title
+                or request.source_lesson_revision != projection.revision
+            ):
+                return {
+                    "state": "conflict",
+                    "error": (
+                        "The visible lesson changed. Your question was not submitted; "
+                        "refresh and retry."
+                    ),
+                }
+            if projection is None:
+                source_fields = (None, None, None)
+        else:
+            source_fields = (None, None, None)
+        progression_intent: tutor_service.ProgressionIntent | None = None
+        if request.intent in {"skip", "practice"}:
+            progression_intent = request.intent
+        elif request.intent == "next":
+            progression_intent = "continue"
         try:
             result = tutor_service.start_turn(
                 slug,
@@ -1481,11 +1643,10 @@ class OpenLearnWebServices:
                     if request.intent in {"question", "stuck"}
                     else "chat"
                 ),
-                progression_intent=(
-                    request.intent
-                    if request.intent in {"skip", "practice"}
-                    else ("continue" if request.intent == "next" else None)
-                ),
+                progression_intent=progression_intent,
+                source_lesson_id=source_fields[0],
+                source_lesson_title=source_fields[1],
+                source_lesson_revision=source_fields[2],
             )
         except tutor_service.TutorConflictError as error:
             return {"state": "conflict", "error": str(error)}
@@ -1521,6 +1682,35 @@ class OpenLearnWebServices:
             "preview_text": _operation_preview(
                 result.preview or (result.move.content if result.move is not None else None)
             ),
+        }
+
+    def progression_action(
+        self, slug: str, request: ProgressionActionRequest
+    ) -> dict[str, object]:
+        projection = application.interview_learning(slug)
+        if projection is None:
+            return {"state": "missing", "error": "Interview curriculum is not prepared."}
+        active_id = projection.operation.submission_id
+        if active_id != request.operation_id:
+            return {
+                "state": "stale-conflict",
+                "error": "The saved curriculum operation changed. Refresh the lesson.",
+            }
+        try:
+            if request.action == "cancel":
+                application.cancel_interview_progression(slug, request.operation_id)
+                return {"state": "cancelled"}
+            result = application.resume_interview_progression(
+                slug, model=config.configured_model()
+            )
+        except tutor_service.TutorConflictError as error:
+            return {"state": "busy", "error": str(error)}
+        except tutor_service.TutorOperationError as error:
+            return {"state": "provider-error", "error": str(error)}
+        return {
+            "state": result.status,
+            "operation_id": result.submission_id,
+            "move": _move(result.move),
         }
 
     def history(self, slug: str, *, page: int) -> dict[str, object]:

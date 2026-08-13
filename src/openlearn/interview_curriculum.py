@@ -15,6 +15,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
+from functools import lru_cache
 from importlib.resources.abc import Traversable
 from types import MappingProxyType
 from typing import Literal
@@ -814,7 +815,10 @@ def record_progression_commit(
         commit_index + 1 if isinstance(commit_index, int) and commit_index >= 0 else 1
     )
     cursor = state.get("cursor")
-    if isinstance(cursor, dict):
+    cursor_ref = cursor.get("skill_ref") if isinstance(cursor, dict) else None
+    if isinstance(cursor, dict) and isinstance(cursor_ref, Mapping) and cursor_ref.get(
+        "skill_id"
+    ) == skill_id:
         cursor["instruction_status"] = "covered"
     return state
 
@@ -1159,9 +1163,6 @@ def rematerialize_canonical_state(
     ready = {
         value for value in evidence.get("ready", []) if isinstance(value, str)
     }
-    exposed = {
-        value for value in evidence.get("exposed", []) if isinstance(value, str)
-    }
     current = route_identities.get(old_identity) if old_identity else None
     cursor_decision = "retained-eligible-cursor"
     if current is None:
@@ -1170,7 +1171,7 @@ def rematerialize_canonical_state(
                 item
                 for item in skills
                 if isinstance(item.get("skill_ref"), Mapping)
-                and item["skill_ref"].get("skill_id") not in ready | exposed
+                and item["skill_ref"].get("skill_id") not in ready
                 and item.get("requirement") == "required"
             ),
             skills[0],
@@ -1348,6 +1349,7 @@ def bundle_resource() -> Traversable:
     )
 
 
+@lru_cache(maxsize=None)
 def load_pinned_bundle(bundle_id: str, bundle_version: str) -> InterviewCurriculumBundle:
     """Load the immutable package asset matching an existing course binding."""
     resources = importlib.resources.files("openlearn").joinpath("interview_curricula")

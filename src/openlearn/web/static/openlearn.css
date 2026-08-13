@@ -402,11 +402,16 @@ h2 { font-size: clamp(1.35rem, 3vw, 2rem); line-height: 1.1; letter-spacing: -0.
 .composer textarea { min-height: 8rem; border: 0; border-radius: 0; }
 .composer-footer { padding: 0.7rem; border-top: 1px solid var(--line); }
 .lesson-actions { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }
+.next-target, .deferred-notice { padding: 1rem 1.1rem; border: 1px solid var(--line); border-left: 4px solid var(--teal); background: var(--surface-raised); }
+.next-target h2, .next-target p, .deferred-notice p { margin: 0.25rem 0 0; }
+.deferred-notice { border-left-color: var(--orange); }
 .operation-state { padding: 0.8rem; border-top: 1px solid var(--line); color: var(--teal); display: flex; gap: 0.8rem; align-items: center; justify-content: space-between; flex-wrap: wrap; }
 .operation-state.error { color: var(--danger); }
 .operation-state a { color: inherit; font-weight: 720; }
+.operation-actions { display: flex; gap: 0.6rem; flex-wrap: wrap; }
 .secondary-actions { display: flex; gap: 1rem; justify-content: center; }
 .secondary-actions button { min-height: 2.75rem; border: 0; background: transparent; text-decoration: underline; text-underline-offset: 0.25rem; cursor: pointer; }
+.chat-source-label { margin: 0 0 0.45rem; font-size: 0.75rem; font-weight: 720; }
 .learning-tool {
   min-width: 0;
   width: 0;

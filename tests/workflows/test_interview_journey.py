@@ -46,7 +46,7 @@ def test_interview_prep_public_cli_journey(spawn_openlearn) -> None:
             first.sendline("3")
         first.expect("Suggested course outline")
         first.expect("Linear Foundations")
-        first.expect("Confirm this course outline")
+        first.expect("Confirm, change, or leave this course outline for later")
         first.sendline("")
         first.expect("Course outline confirmed")
         first.expect("First technical target: concept.arrays-strings")

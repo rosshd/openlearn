@@ -21,6 +21,7 @@ from .schemas import (
     FolderSourceRequest,
     GitHubSourceRequest,
     PlacementRequest,
+    ProgressionActionRequest,
     ProviderSetupRequest,
     ReviewGradeRequest,
     TutorSubmissionRequest,
@@ -468,6 +469,20 @@ async def submit_turn(request: Request, slug: str) -> JSONResponse:
         return _json_error("Check your response and try again.", errors=str(error))
     result = public_mapping(await _call(request, "submit_turn", slug, payload))
     status = 409 if result.get("state") == "conflict" else 202
+    return JSONResponse(result, status_code=status)
+
+
+@router.post("/api/courses/{slug}/progression", response_class=JSONResponse)
+async def progression_action(request: Request, slug: str) -> JSONResponse:
+    try:
+        slug = canonical_slug(slug)
+        payload = ProgressionActionRequest.model_validate(await request.json())
+    except (ValidationError, ValueError) as error:
+        return _json_error("Check the saved progression action.", errors=str(error))
+    if payload.action == "resume" and not await _provider_ready(request):
+        return _setup_required(request)
+    result = public_mapping(await _call(request, "progression_action", slug, payload))
+    status = 409 if result.get("state") in {"busy", "stale-conflict"} else 200
     return JSONResponse(result, status_code=status)
 
 

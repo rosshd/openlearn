@@ -83,6 +83,8 @@ class WebServices(Protocol):
 
     def operation_status(self, slug: str, operation_id: str) -> Any: ...
 
+    def progression_action(self, slug: str, request: Any) -> Any: ...
+
     def history(self, slug: str, *, page: int) -> Any: ...
 
 
@@ -191,6 +193,9 @@ class PlaceholderServices:
 
     def operation_status(self, slug: str, operation_id: str) -> dict[str, Any]:
         return {"state": "retryable_error", "error": "Tutor services are not available yet."}
+
+    def progression_action(self, slug: str, request: Any) -> dict[str, Any]:
+        return {"state": "missing", "slug": slug, "action": request.action}
 
     def history(self, slug: str, *, page: int) -> dict[str, Any]:
         return {"items": [], "page": page, "has_more": False}
