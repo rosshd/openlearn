@@ -593,14 +593,11 @@ def test_dashboard_reuses_lightweight_interview_card_without_parsing_sessions(
     application.accept_interview_curriculum(
         slug, action="skip", submission_id=str(uuid4())
     )
-    original = application.interview_learning_card
-    calls: list[str] = []
-
-    def card_projection(requested_slug: str) -> application.InterviewCardProjection | None:
-        calls.append(requested_slug)
-        return original(requested_slug)
-
-    monkeypatch.setattr(application, "interview_learning_card", card_projection)
+    monkeypatch.setattr(
+        application,
+        "interview_learning_card",
+        lambda _slug: pytest.fail("dashboard must reuse the snapshot card projection"),
+    )
     monkeypatch.setattr(
         application,
         "interview_learning",
@@ -616,7 +613,6 @@ def test_dashboard_reuses_lightweight_interview_card_without_parsing_sessions(
 
     assert response.status_code == 200
     assert "Dashboard Interview Card" in response.text
-    assert calls == [slug]
 
 
 def test_later_outline_change_preserves_evidence_and_rehomes_ineligible_cursor(

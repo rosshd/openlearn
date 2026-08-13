@@ -98,10 +98,7 @@ def _course_initialization_prompt(slug: str) -> str:
 
 
 def _card(card: CourseCard) -> dict[str, object]:
-    try:
-        interview = application.interview_learning_card(card.slug)
-    except (cli.OpenLearnError, OSError, ValueError):
-        interview = None
+    interview = card.interview
     if interview is not None:
         return {
             "slug": card.slug,

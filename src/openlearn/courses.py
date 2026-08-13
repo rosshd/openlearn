@@ -23,6 +23,7 @@ from openlearn.application import (
     TemplateCatalog,
     TemplateSummary,
     UnitProgress,
+    interview_learning_card_projection,
 )
 from openlearn.course_templates import available_course_templates, load_course_template
 
@@ -132,10 +133,26 @@ def course_snapshot(slug: str, *, today: date | None = None) -> CourseSnapshot:
     canonical = cli.slugify(slug)
     if canonical != slug:
         raise cli.OpenLearnError(f"invalid topic slug: {slug}")
-    topic = cli.read_topic_stats(canonical)
-    metadata = topic.metadata
-    state = cli.load_state(canonical)
-    modified = datetime.fromtimestamp(topic.path.stat().st_mtime, timezone.utc).isoformat()
+    interview_source = (
+        interview_learning_source(canonical)
+        if cli.interview_profile_path(canonical).exists()
+        else None
+    )
+    if interview_source is None:
+        topic = cli.read_topic_stats(canonical)
+        metadata = topic.metadata
+        state = cli.load_state(canonical)
+        topic_path = topic.path
+        interview_card = None
+    else:
+        source_metadata = cast(dict[str, object], interview_source["metadata"])
+        state = cast(dict[str, object], interview_source["state"])
+        metadata = cli.merge_topic_state(
+            cli.normalize_topic_metadata(source_metadata, canonical), state
+        )
+        topic_path = cli.topic_path(canonical)
+        interview_card = interview_learning_card_projection(state, metadata)
+    modified = datetime.fromtimestamp(topic_path.stat().st_mtime, timezone.utc).isoformat()
     card = CourseCard(
         slug=canonical,
         title=str(metadata.get("topic") or canonical.replace("-", " ").title()),
@@ -148,6 +165,7 @@ def course_snapshot(slug: str, *, today: date | None = None) -> CourseSnapshot:
         template_id=(
             str(metadata["template_id"]) if isinstance(metadata.get("template_id"), str) else None
         ),
+        interview=interview_card,
     )
     return CourseSnapshot(
         card=card,

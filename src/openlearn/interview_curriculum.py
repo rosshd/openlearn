@@ -376,6 +376,20 @@ def _next_evidence_kind(
     skill = graph.skill(str(ref.get("skill_id") or ""))
     evidence = state.get("evidence")
     records = evidence.get("answer_evidence") if isinstance(evidence, Mapping) else None
+    counts, required = _evidence_policy_progress(records, ref, skill)
+    for kind in interview_skills.EVIDENCE_KINDS:
+        if counts[kind] < required[kind]:
+            return kind
+    return "production"
+
+
+def _evidence_policy_progress(
+    records_value: object,
+    skill_ref: Mapping[str, object],
+    skill: interview_skills.InterviewSkill,
+) -> tuple[dict[str, int], dict[str, int]]:
+    """Count trusted evidence against one pinned skill policy."""
+    records = records_value if isinstance(records_value, list) else []
     matching = [
         record
         for record in records
@@ -383,7 +397,7 @@ def _next_evidence_kind(
         and record.get("status") == "correct"
         and isinstance(record.get("skill_ref"), Mapping)
         and all(
-            record["skill_ref"].get(key) == ref.get(key)
+            record["skill_ref"].get(key) == skill_ref.get(key)
             for key in (
                 "graph_id",
                 "graph_version",
@@ -391,7 +405,7 @@ def _next_evidence_kind(
                 "skill_id",
             )
         )
-    ] if isinstance(records, list) else []
+    ]
     counts = {
         kind: sum(kind in record.get("kinds", []) for record in matching)
         for kind in interview_skills.EVIDENCE_KINDS
@@ -400,10 +414,7 @@ def _next_evidence_kind(
     required["transfer"] = max(
         required["transfer"], skill.evidence_policy.transfer.minimum_novel_contexts
     )
-    for kind in interview_skills.EVIDENCE_KINDS:
-        if counts[kind] < required[kind]:
-            return kind
-    return "production"
+    return counts, required
 
 
 def target_identity(target: Mapping[str, object]) -> str:
@@ -637,21 +648,7 @@ def apply_answer_judgment(
             cursor["instruction_status"] = "needs_work"
     else:
         weak.discard(skill_id_value)
-        matching_records = [
-            item
-            for item in records
-            if item.get("status") == "correct"
-            and isinstance(item.get("skill_ref"), Mapping)
-            and all(item["skill_ref"].get(key) == skill_ref[key] for key in identity_keys)
-        ]
-        counts = {
-            kind: sum(kind in item.get("kinds", []) for item in matching_records)
-            for kind in interview_skills.EVIDENCE_KINDS
-        }
-        required = dict(skill.evidence_policy.minimum)
-        required["transfer"] = max(
-            required["transfer"], skill.evidence_policy.transfer.minimum_novel_contexts
-        )
+        counts, required = _evidence_policy_progress(records, skill_ref, skill)
         is_ready = all(counts[kind] >= required[kind] for kind in interview_skills.EVIDENCE_KINDS)
         readiness = evidence.get("readiness")
         readiness = copy.deepcopy(dict(readiness)) if isinstance(readiness, Mapping) else {}
@@ -1532,6 +1529,7 @@ def load_bundle_dict() -> dict[str, object]:
     return value
 
 
+@lru_cache(maxsize=1)
 def load_default_bundle() -> InterviewCurriculumBundle:
     return validate_bundle(load_bundle_dict())
 

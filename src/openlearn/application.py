@@ -68,6 +68,7 @@ class CourseCard:
     updated_at: str
     progress: CourseProgress
     template_id: str | None = None
+    interview: InterviewCardProjection | None = None
 
     @property
     def incomplete(self) -> bool:
@@ -624,11 +625,20 @@ def interview_learning_card(slug: str) -> InterviewCardProjection | None:
     source = interview_learning_source(slug)
     if source is None:
         return None
-    state = source["state"]
-    metadata = source["metadata"]
-    assert isinstance(state, dict) and isinstance(metadata, dict)
+    return interview_learning_card_projection(source["state"], source["metadata"])
+
+
+def interview_learning_card_projection(
+    state_value: object, metadata_value: object
+) -> InterviewCardProjection:
+    """Project dashboard metrics from an already recovery-fenced course read."""
+    if not isinstance(state_value, dict) or not isinstance(metadata_value, dict):
+        raise ValueError("interview learning card source is malformed")
+    state = state_value
+    metadata = metadata_value
     canonical = state["interview_curriculum"]
-    assert isinstance(canonical, dict)
+    if not isinstance(canonical, dict):
+        raise ValueError("canonical interview curriculum is malformed")
     position, _next_target, _active = _learning_positions(canonical)
     coverage, readiness, _route_skills, _deferred_values = _learning_progress(
         canonical, metadata
