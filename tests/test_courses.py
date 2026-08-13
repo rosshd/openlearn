@@ -8,7 +8,7 @@ import unittest
 from unittest import mock
 from uuid import uuid4
 
-from openlearn import cli
+from openlearn import application, cli
 from openlearn.application import CalibrationContext, CourseCreationRequest
 from openlearn.courses import create_course
 
@@ -213,6 +213,185 @@ class CourseServiceTests(unittest.TestCase):
 
         self.assertEqual(snapshot.slug, result.course.slug)
         self.assertEqual(profile.read_bytes(), before)
+
+    def _legacy_interview_course(self) -> str:
+        result = create_course(
+            CourseCreationRequest(
+                name="Legacy Interview",
+                template_id="technical-interview-prep",
+            )
+        )
+        slug = result.course.slug
+        topic = cli.read_topic(slug)
+        metadata = dict(topic.metadata)
+        metadata["known"] = ["Interview Problem Solving", "Custom legacy exercise"]
+        metadata["weak_spots"] = ["Arrays and Hashing"]
+        metadata["review_due"] = [
+            {
+                "concept": "Arrays and Hashing",
+                "due": "2026-08-13",
+                "difficulty": "hard",
+            }
+        ]
+        metadata["placement_result"] = {"legacy_note": "keep me"}
+        cli.write_topic(topic.path, metadata, topic.body + "\nLegacy transcript stays.\n")
+        cli.update_state_atomic(
+            slug,
+            lambda state: state.__setitem__(
+                "concept_attempts",
+                {
+                    "Arrays and Hashing": {
+                        "attempts": 2,
+                        "correct_sum": 2.0,
+                        "last_correct_at": "2026-08-12T10:00:00+00:00",
+                    }
+                },
+            ),
+        )
+        return slug
+
+    def test_explicit_resume_reconciles_legacy_state_once_and_preserves_history(self) -> None:
+        slug = self._legacy_interview_course()
+        topic_before = cli.topic_path(slug).read_text(encoding="utf-8")
+        _metadata_before, body_before = cli.parse_topic(topic_before)
+        profile_before = cli.interview_profile_path(slug).read_bytes()
+
+        first = application.prepare_interview_curriculum(slug, boundary="resume")
+        state_bytes = cli.topic_state_path(slug).read_bytes()
+        events_bytes = cli.topic_events_path(slug).read_bytes()
+        second = application.prepare_interview_curriculum(slug, boundary="resume")
+
+        self.assertEqual(first, second)
+        self.assertEqual(state_bytes, cli.topic_state_path(slug).read_bytes())
+        self.assertEqual(events_bytes, cli.topic_events_path(slug).read_bytes())
+        topic_after = cli.topic_path(slug).read_text(encoding="utf-8")
+        _metadata_after, body_after = cli.parse_topic(topic_after)
+        self.assertEqual(body_after, body_before)
+        self.assertEqual(profile_before, cli.interview_profile_path(slug).read_bytes())
+        self.assertIn("Interview Problem Solving", topic_before)
+        state = cli.load_state(slug)
+        canonical = state["interview_curriculum"]
+        self.assertEqual(canonical["bundle_version"], "1.0.0")
+        self.assertEqual(first.unit_id, canonical["cursor"]["unit_id"])
+        self.assertEqual(first.section_id, canonical["cursor"]["section_id"])
+        self.assertEqual(first.skill_id, canonical["cursor"]["skill_ref"]["skill_id"])
+        self.assertIn("Interview Problem Solving", canonical["legacy_context"]["unassessed"])
+        self.assertIn("Custom legacy exercise", canonical["legacy_context"]["unassessed"])
+        self.assertIn("concept.arrays-strings", canonical["evidence"]["ready"])
+        self.assertNotIn("concept.arrays-strings", canonical["evidence"]["weak"])
+        self.assertIn("Arrays and Hashing", canonical["evidence"]["due_review"])
+        self.assertEqual(state["concept_attempts"]["Arrays and Hashing"]["attempts"], 2)
+        self.assertEqual(
+            cli.read_topic(slug).metadata["placement_result"], {"legacy_note": "keep me"}
+        )
+
+    def test_dashboard_does_not_reconcile_legacy_interview_course(self) -> None:
+        slug = self._legacy_interview_course()
+        watched = [
+            cli.topic_path(slug),
+            cli.topic_state_path(slug),
+            cli.interview_profile_path(slug),
+            cli.topic_events_path(slug),
+        ]
+        before = {path: path.read_bytes() if path.exists() else None for path in watched}
+
+        application.dashboard()
+
+        self.assertEqual(
+            before,
+            {path: path.read_bytes() if path.exists() else None for path in watched},
+        )
+        self.assertNotIn("interview_curriculum", cli.load_state(slug))
+
+    def test_reconciliation_recovers_each_publication_boundary_exactly_once(self) -> None:
+        for boundary in ("after_journal", "after_state", "after_event", "after_receipt"):
+            with self.subTest(boundary=boundary):
+                slug = self._legacy_interview_course()
+                with mock.patch(
+                    "openlearn.courses._reconciliation_checkpoint",
+                    side_effect=lambda stage: (
+                        (_ for _ in ()).throw(RuntimeError(stage)) if stage == boundary else None
+                    ),
+                ):
+                    with self.assertRaises(RuntimeError):
+                        application.prepare_interview_curriculum(slug, boundary="resume")
+
+                application.prepare_interview_curriculum(slug, boundary="resume")
+                events = [
+                    json.loads(line)
+                    for line in cli.topic_events_path(slug).read_text().splitlines()
+                    if line
+                ]
+                reconciled = [
+                    event
+                    for event in events
+                    if event.get("event_type") == "interview_curriculum_reconciled"
+                ]
+                self.assertEqual(len(reconciled), 1)
+                self.assertFalse(cli.interview_reconciliation_journal_path(slug).exists())
+                self.assertTrue(cli.interview_reconciliation_receipt_path(slug).exists())
+
+                cli.delete_topic_files(slug)
+                self.assertFalse(cli.interview_reconciliation_journal_path(slug).exists())
+                self.assertFalse(cli.interview_reconciliation_receipt_path(slug).exists())
+
+    def test_pinned_canonical_state_does_not_rematerialize_against_new_default(self) -> None:
+        slug = self._legacy_interview_course()
+        first = application.prepare_interview_curriculum(slug, boundary="resume")
+
+        with mock.patch(
+            "openlearn.courses._route_for_profile",
+            side_effect=AssertionError("pinned course must not consult a newer default"),
+        ):
+            resumed = application.prepare_interview_curriculum(slug, boundary="resume")
+
+        self.assertEqual(resumed, first)
+
+    def test_journal_recovery_preserves_unrelated_state_written_after_crash(self) -> None:
+        slug = self._legacy_interview_course()
+        with mock.patch(
+            "openlearn.courses._reconciliation_checkpoint",
+            side_effect=lambda stage: (
+                (_ for _ in ()).throw(RuntimeError(stage))
+                if stage == "after_journal"
+                else None
+            ),
+        ):
+            with self.assertRaises(RuntimeError):
+                application.prepare_interview_curriculum(slug, boundary="resume")
+        cli.update_state_atomic(
+            slug, lambda state: state.__setitem__("pending_learner_prompt", "keep this")
+        )
+
+        application.prepare_interview_curriculum(slug, boundary="resume")
+
+        self.assertEqual(cli.load_state(slug)["pending_learner_prompt"], "keep this")
+
+    def test_receipt_recovers_missing_canonical_state_before_fallback(self) -> None:
+        slug = self._legacy_interview_course()
+        first = application.prepare_interview_curriculum(slug, boundary="resume")
+        cli.update_state_atomic(slug, lambda state: state.pop("interview_curriculum"))
+
+        with mock.patch(
+            "openlearn.courses._route_for_profile",
+            side_effect=AssertionError("receipt recovery must precede route fallback"),
+        ):
+            recovered = application.prepare_interview_curriculum(slug, boundary="resume")
+
+        self.assertEqual(recovered, first)
+        self.assertIn("interview_curriculum", cli.load_state(slug))
+
+    def test_manual_repair_removes_stale_reconciliation_artifacts(self) -> None:
+        slug = self._legacy_interview_course()
+        application.prepare_interview_curriculum(slug, boundary="resume")
+        journal = cli.interview_reconciliation_journal_path(slug)
+        journal.write_text("{}\n", encoding="utf-8")
+
+        cli.repair_topic_metadata(slug)
+
+        self.assertFalse(journal.exists())
+        self.assertFalse(cli.interview_reconciliation_receipt_path(slug).exists())
+        self.assertIn("interview_curriculum", cli.load_state(slug))
 
 
 if __name__ == "__main__":

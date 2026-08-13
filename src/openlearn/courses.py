@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import copy
+import json
 from datetime import date, datetime, timezone
+from pathlib import Path
 from typing import cast
 from uuid import UUID, uuid4
 
-from openlearn import interview_prep
+from openlearn import interview_curriculum, interview_prep
 from openlearn import stats as stats_metrics
 from openlearn.application import (
     CalibrationContext,
@@ -27,6 +30,7 @@ CALIBRATION_STATE_KEY = "progressive_calibration"
 CREATION_SUBMISSION_STATE_KEY = "course_creation_submission_id"
 CREATION_SUBMISSION_METADATA_KEY = "course_creation_submission_id"
 CALIBRATION_TEXT_LIMIT = 4_000
+RECONCILIATION_SCHEMA_VERSION = 1
 
 
 def _cli():
@@ -182,6 +186,305 @@ def dashboard_snapshot(*, now: datetime | None = None) -> DashboardSnapshot:
         reviews=reviews,
         generated_at=moment.astimezone(timezone.utc).isoformat(),
     )
+
+
+def _reconciliation_checkpoint(_stage: str) -> None:
+    """Fault-injection seam for the curriculum reconciliation publication stages."""
+
+
+def _route_for_profile(profile_value: dict[str, object]) -> dict[str, object]:
+    allocation = profile_value.get("curriculum_allocation")
+    if isinstance(allocation, dict) and isinstance(allocation.get("route"), dict):
+        return copy.deepcopy(cast(dict[str, object], allocation["route"]))
+    profile = profile_value.get("profile")
+    placement = profile_value.get("placement")
+    if not isinstance(profile, dict):
+        raise ValueError("interview-prep profile is missing")
+    survey = placement.get("survey") if isinstance(placement, dict) else None
+    survey = survey if isinstance(survey, dict) else {}
+    ratings = survey.get("ratings")
+    ratings = ratings if isinstance(ratings, dict) else {}
+    route = interview_curriculum.materialize_adaptive_route(
+        interview_curriculum.load_default_bundle(),
+        role_family=str(survey.get("role_family") or profile.get("role_family") or "general SWE"),
+        target_level=str(survey.get("target_level") or profile.get("target_level") or "entry"),
+        interview_focus=str(survey.get("interview_focus") or "coding"),
+        interview_date=str(profile.get("interview_date") or ""),
+        weekly_minutes=int(cast(int, profile.get("weekly_minutes") or 120)),
+        session_minutes=int(cast(int, profile.get("session_minutes") or 45)),
+        confidence_ratings={str(key): int(value) for key, value in ratings.items()},
+        pacing_posture_override=None,
+        current_date=date.today(),
+    )
+    return route.to_dict()
+
+
+def _event_has_reconciliation(events_path: Path, reconciliation_id: str) -> bool:
+    if not events_path.exists():
+        return False
+    for line in events_path.read_text(encoding="utf-8").splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        data = event.get("data") if isinstance(event, dict) else None
+        if isinstance(data, dict) and data.get("reconciliation_id") == reconciliation_id:
+            return True
+    return False
+
+
+def _apply_reconciliation_journal(slug: str, journal: dict[str, object]) -> None:
+    cli = _cli()
+    generation = cli.current_topic_generation(slug)
+    if generation != journal.get("topic_generation"):
+        cli.durable_unlink(cli.interview_reconciliation_journal_path(slug))
+        return
+    canonical_state = journal.get("canonical_state")
+    metadata_projection = journal.get("metadata_projection")
+    event = journal.get("event")
+    receipt = journal.get("receipt")
+    if not all(
+        isinstance(item, dict)
+        for item in (canonical_state, metadata_projection, event, receipt)
+    ):
+        raise cli.OpenLearnError("interview curriculum reconciliation journal is malformed")
+    reconciliation_id = str(journal["reconciliation_id"])
+    state_path = cli.topic_state_path(slug)
+    topic_path = cli.topic_path(slug)
+    raw_metadata, body = cli.parse_topic(topic_path.read_text(encoding="utf-8"))
+    current_state = cli._load_state_unlocked(slug)
+    current_canonical = current_state.get("interview_curriculum")
+    if current_canonical != canonical_state:
+        merged_state = dict(current_state)
+        merged_state["interview_curriculum"] = canonical_state
+        cli.write_text_atomic(
+            state_path,
+            json.dumps(merged_state, indent=2, sort_keys=True) + "\n",
+        )
+    projection_keys = ("course_units", "current_unit", "current_slide", "current_focus")
+    if any(raw_metadata.get(key) != metadata_projection.get(key) for key in projection_keys):
+        merged_metadata = dict(raw_metadata)
+        for key in projection_keys:
+            merged_metadata[key] = metadata_projection[key]
+        cli.write_text_atomic(topic_path, cli.format_topic(merged_metadata, body))
+    _reconciliation_checkpoint("after_state")
+
+    events_path = cli.topic_events_path(slug)
+    if not _event_has_reconciliation(events_path, reconciliation_id):
+        existing = events_path.read_text(encoding="utf-8") if events_path.exists() else ""
+        if existing and not existing.endswith("\n"):
+            existing += "\n"
+        cli.write_text_atomic(events_path, existing + json.dumps(event, sort_keys=True) + "\n")
+    _reconciliation_checkpoint("after_event")
+
+    receipt_path = cli.interview_reconciliation_receipt_path(slug)
+    expected_receipt = json.dumps(receipt, indent=2, sort_keys=True) + "\n"
+    if not receipt_path.exists() or receipt_path.read_text(encoding="utf-8") != expected_receipt:
+        cli.write_text_atomic(receipt_path, expected_receipt)
+        receipt_path.chmod(0o600)
+    _reconciliation_checkpoint("after_receipt")
+    cli.durable_unlink(cli.interview_reconciliation_journal_path(slug))
+
+
+def _position_from_canonical(canonical: dict[str, object]) -> dict[str, object]:
+    cursor = canonical.get("cursor")
+    route = canonical.get("route")
+    if not isinstance(cursor, dict) or not isinstance(route, dict):
+        raise ValueError("canonical interview curriculum state is malformed")
+    ref = cursor.get("skill_ref")
+    if not isinstance(ref, dict) or not isinstance(ref.get("skill_id"), str):
+        raise ValueError("canonical interview curriculum cursor is malformed")
+    skill_id = str(ref["skill_id"])
+    skills = route.get("skills")
+    selected = (
+        next(
+            (
+                item
+                for item in skills
+                if isinstance(item, dict)
+                and isinstance(item.get("skill_ref"), dict)
+                and item["skill_ref"].get("skill_id") == skill_id
+            ),
+            None,
+        )
+        if isinstance(skills, list)
+        else None
+    )
+    return {
+        "unit_id": cursor["unit_id"],
+        "section_id": cursor["section_id"],
+        "skill_id": skill_id,
+        "emphasis": selected.get("depth_mode", "learn") if isinstance(selected, dict) else "learn",
+        "review_reason": (
+            "legacy weak spot" if cursor.get("instruction_status") == "review" else None
+        ),
+    }
+
+
+def prepare_interview_curriculum(slug: str, *, boundary: str = "resume") -> dict[str, object]:
+    """Explicitly reconcile a legacy interview course into its pinned route."""
+    if boundary not in {"preparation", "resume"}:
+        raise ValueError("interview curriculum preparation boundary is invalid")
+    cli = _cli()
+    canonical_slug = cli.slugify(slug)
+    if canonical_slug != slug or not cli.interview_profile_path(slug).exists():
+        raise cli.OpenLearnError(f"interview course not found: {slug}")
+    profile_value = interview_prep.load_profile(cli.interview_profile_path(slug))
+    journal_path = cli.interview_reconciliation_journal_path(slug)
+    with cli.file_lock(journal_path), cli.topic_store_locks(slug):
+        cli.raise_if_topic_tombstoned(slug)
+        if journal_path.exists():
+            try:
+                pending = json.loads(journal_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as exc:
+                raise cli.OpenLearnError(
+                    "interview curriculum reconciliation journal is unreadable"
+                ) from exc
+            if not isinstance(pending, dict):
+                raise cli.OpenLearnError("interview curriculum reconciliation journal is malformed")
+            _apply_reconciliation_journal(slug, pending)
+
+        state = cli._load_state_unlocked(slug)
+        existing = state.get("interview_curriculum")
+        if isinstance(existing, dict):
+            return _position_from_canonical(existing)
+        receipt_path = cli.interview_reconciliation_receipt_path(slug)
+        if receipt_path.exists():
+            try:
+                receipt_value = json.loads(receipt_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as exc:
+                raise cli.OpenLearnError(
+                    "interview curriculum reconciliation receipt is unreadable"
+                ) from exc
+            receipt_canonical = (
+                receipt_value.get("canonical_state")
+                if isinstance(receipt_value, dict)
+                and receipt_value.get("topic_generation") == cli.current_topic_generation(slug)
+                else None
+            )
+            if isinstance(receipt_canonical, dict):
+                state["interview_curriculum"] = receipt_canonical
+                cli.write_text_atomic(
+                    cli.topic_state_path(slug),
+                    json.dumps(state, indent=2, sort_keys=True) + "\n",
+                )
+                projection = interview_curriculum.compatibility_projection(receipt_canonical)
+                current_text = cli.topic_path(slug).read_text(encoding="utf-8")
+                current_metadata, current_body = cli.parse_topic(current_text)
+                current_metadata.update(projection)
+                cli.write_text_atomic(
+                    cli.topic_path(slug),
+                    cli.format_topic(current_metadata, current_body),
+                )
+                return _position_from_canonical(receipt_canonical)
+        route = _route_for_profile(profile_value)
+        topic_text = cli.topic_path(slug).read_text(encoding="utf-8")
+        raw_metadata, body = cli.parse_topic(topic_text)
+        metadata = cli.merge_topic_state(cli.normalize_topic_metadata(raw_metadata, slug), state)
+        events_path = cli.topic_events_path(slug)
+        legacy_events = cli.load_event_log(events_path) if events_path.exists() else []
+        source_payload = {
+            "topic_generation": cli.topic_generation_from_metadata(slug, raw_metadata),
+            "metadata": {
+                key: metadata.get(key)
+                for key in (
+                    "template_id",
+                    "template_units",
+                    "course_units",
+                    "current_unit",
+                    "current_slide",
+                    "known",
+                    "weak_spots",
+                    "review_due",
+                    "placement_result",
+                    "slide_coverage",
+                )
+            },
+            "state": {
+                key: state.get(key)
+                for key in (
+                    "concept_attempts",
+                    "review_history",
+                    "assessment_history",
+                )
+            },
+            "transcript_fingerprint": interview_curriculum.canonical_fingerprint(body),
+            "profile_context": {
+                "profile": profile_value.get("profile"),
+                "placement": profile_value.get("placement"),
+            },
+            "events": legacy_events,
+            "allocation": profile_value.get("curriculum_allocation"),
+        }
+        source_fingerprint = interview_curriculum.canonical_fingerprint(source_payload)
+        generation = cli.topic_generation_from_metadata(slug, raw_metadata)
+        reconciliation_id = "reconcile_" + interview_curriculum.canonical_fingerprint(
+            {
+                "generation": generation,
+                "source_fingerprint": source_fingerprint,
+                "bundle_id": route["bundle_id"],
+                "bundle_version": route["bundle_version"],
+            }
+        )
+        bundle = interview_curriculum.load_default_bundle()
+        canonical = interview_curriculum.build_canonical_curriculum_state(
+            bundle,
+            route,
+            metadata=metadata,
+            dynamic_state={**state, "legacy_events": legacy_events},
+            source_fingerprint=source_fingerprint,
+            reconciliation_id=reconciliation_id,
+        )
+        projection = interview_curriculum.compatibility_projection(canonical)
+        timestamp = datetime.now(timezone.utc).isoformat()
+        event = {
+            "schema_version": cli.EVENT_SCHEMA_VERSION,
+            "ts": timestamp,
+            "event_type": "interview_curriculum_reconciled",
+            "slug": slug,
+            "data": {
+                "reconciliation_id": reconciliation_id,
+                "source_fingerprint": source_fingerprint,
+                "from_version": "legacy-unversioned",
+                "to_version": route["bundle_version"],
+                "aliases_applied": canonical["legacy_context"]["aliases_applied"],
+                "unmatched_references": canonical["legacy_context"]["unassessed"],
+                "pinned_destination": {
+                    "bundle_id": route["bundle_id"],
+                    "bundle_version": route["bundle_version"],
+                    "route_id": route["route_id"],
+                },
+            },
+        }
+        receipt = {
+            "schema_version": RECONCILIATION_SCHEMA_VERSION,
+            "slug": slug,
+            "topic_generation": generation,
+            "reconciliation_id": reconciliation_id,
+            "source_fingerprint": source_fingerprint,
+            "from_version": "legacy-unversioned",
+            "to_version": route["bundle_version"],
+            "aliases_applied": canonical["legacy_context"]["aliases_applied"],
+            "unmatched_references": canonical["legacy_context"]["unassessed"],
+            "pinned_destination": event["data"]["pinned_destination"],
+            "canonical_state": canonical,
+        }
+        journal = {
+            "schema_version": RECONCILIATION_SCHEMA_VERSION,
+            "slug": slug,
+            "topic_generation": generation,
+            "reconciliation_id": reconciliation_id,
+            "source_fingerprint": source_fingerprint,
+            "canonical_state": canonical,
+            "metadata_projection": projection,
+            "event": event,
+            "receipt": receipt,
+        }
+        cli.write_text_atomic(journal_path, json.dumps(journal, indent=2, sort_keys=True) + "\n")
+        journal_path.chmod(0o600)
+        _reconciliation_checkpoint("after_journal")
+        _apply_reconciliation_journal(slug, journal)
+        return _position_from_canonical(canonical)
 
 
 def _validate_request(request: CourseCreationRequest) -> None:

@@ -201,6 +201,7 @@ DYNAMIC_METADATA_KEYS = {
     "rolling_pass_rate",
     "course_completed",
     "slide_coverage",
+    "interview_curriculum",
 }
 
 _LAST_RESPONSE_COVERED_CONCEPTS: list[str] = []
@@ -8145,6 +8146,8 @@ def delete_topic_files(slug: str) -> None:
         durable_unlink(topic_events_path(slug))
         _topic_delete_checkpoint("after_events")
         durable_unlink(topic_turn_journal_path(slug))
+        durable_unlink(interview_reconciliation_journal_path(slug))
+        durable_unlink(interview_reconciliation_receipt_path(slug))
         _topic_delete_checkpoint("after_journals")
         data_dir = topic_data_dir(slug)
         if data_dir.exists():
@@ -14735,6 +14738,14 @@ def topic_turn_journal_path(slug: str) -> Path:
     return topics_dir() / f".{slug}.turn-commit.json"
 
 
+def interview_reconciliation_journal_path(slug: str) -> Path:
+    return topics_dir() / f".{slug}.interview-reconciliation.json"
+
+
+def interview_reconciliation_receipt_path(slug: str) -> Path:
+    return topics_dir() / f".{slug}.interview-reconciliation-receipt.json"
+
+
 def topic_deletion_tombstone_path(slug: str) -> Path:
     return topics_dir() / f".{slug}.deleted.json"
 
@@ -15880,6 +15891,7 @@ def save_state(slug: str, state: dict[str, object]) -> None:
             "_turn_receipts_schema",
             "_legacy_turn_receipts",
             "_legacy_turn_receipts_schema",
+            "interview_curriculum",
         ):
             if internal_key in existing:
                 updated[internal_key] = existing[internal_key]
@@ -16536,7 +16548,10 @@ def repair_topic_metadata(slug: str) -> bool:
     path = topic_path(slug)
     if not path.exists():
         raise OpenLearnError(f"topic not found: {slug}")
-    with file_lock(path):
+    reconciliation_journal = interview_reconciliation_journal_path(slug)
+    with file_lock(reconciliation_journal), file_lock(path):
+        durable_unlink(reconciliation_journal)
+        durable_unlink(interview_reconciliation_receipt_path(slug))
         current_text = path.read_text(encoding="utf-8")
         try:
             metadata, body = parse_topic(current_text)

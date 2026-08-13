@@ -235,6 +235,303 @@ class MaterializedInterviewRoute:
         }
 
 
+CANONICAL_STATE_SCHEMA_VERSION = 1
+
+
+def _canonical_fingerprint(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+
+
+def canonical_fingerprint(value: object) -> str:
+    """Return the stable digest used by allocation and migration receipts."""
+    return _canonical_fingerprint(value)
+
+
+def _legacy_label_target(
+    bundle: "InterviewCurriculumBundle", route: Mapping[str, object], label: str
+) -> tuple[str, ...] | None:
+    normalized = label.strip().casefold()
+    skills = route.get("skills")
+    if not isinstance(skills, list):
+        return None
+    direct: dict[str, tuple[str, ...]] = {}
+    sections: dict[str, list[str]] = {}
+    for item in skills:
+        if not isinstance(item, Mapping):
+            continue
+        ref = item.get("skill_ref")
+        skill_id = ref.get("skill_id") if isinstance(ref, Mapping) else None
+        section_id = item.get("section_id")
+        if not isinstance(skill_id, str) or not isinstance(section_id, str):
+            continue
+        direct[skill_id.casefold()] = (skill_id,)
+        section_label = item.get("section_label")
+        if isinstance(section_label, str):
+            sections.setdefault(section_label.casefold(), []).append(skill_id)
+        sections.setdefault(section_id.casefold(), []).append(skill_id)
+    if normalized in direct:
+        return direct[normalized]
+    target_section = next(
+        (
+            section_id
+            for alias, section_id in bundle.legacy_aliases.items()
+            if alias.casefold() == normalized
+        ),
+        None,
+    )
+    if target_section is not None:
+        return tuple(sections.get(target_section.casefold(), ())) or None
+    return tuple(sections.get(normalized, ())) or None
+
+
+def _legacy_labels(value: object) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        return ()
+    labels: list[str] = []
+    for item in value:
+        if isinstance(item, str) and item.strip():
+            labels.append(item)
+        elif isinstance(item, Mapping):
+            label = item.get("concept") or item.get("label") or item.get("skill_id")
+            if isinstance(label, str) and label.strip():
+                labels.append(label)
+    return tuple(labels)
+
+
+def build_canonical_curriculum_state(
+    bundle: "InterviewCurriculumBundle",
+    route: Mapping[str, object],
+    *,
+    metadata: Mapping[str, object],
+    dynamic_state: Mapping[str, object],
+    source_fingerprint: str,
+    reconciliation_id: str,
+) -> dict[str, object]:
+    """Conservatively map legacy state onto one pinned materialized route.
+
+    Free-text and historical labels remain context only. Only structured scored
+    attempts are admitted as readiness evidence in this compatibility migration.
+    """
+    ready: set[str] = set()
+    ready_at: dict[str, str] = {}
+    exposed: set[str] = set()
+    weak: set[str] = set()
+    aliases_applied: dict[str, list[str]] = {}
+    unassessed: list[str] = []
+
+    for source in (
+        metadata.get("known"),
+        metadata.get("weak_spots"),
+        metadata.get("review_due"),
+    ):
+        for label in _legacy_labels(source):
+            targets = _legacy_label_target(bundle, route, label)
+            if targets:
+                aliases_applied[label] = list(targets)
+            if label not in unassessed:
+                unassessed.append(label)
+
+    attempts = dynamic_state.get("concept_attempts")
+    if isinstance(attempts, Mapping):
+        for label, record in attempts.items():
+            if not isinstance(label, str) or not isinstance(record, Mapping):
+                continue
+            targets = _legacy_label_target(bundle, route, label)
+            if not targets:
+                if label not in unassessed:
+                    unassessed.append(label)
+                continue
+            aliases_applied[label] = list(targets)
+            attempts_count = record.get("attempts")
+            correct_sum = record.get("correct_sum")
+            if (
+                isinstance(attempts_count, (int, float))
+                and not isinstance(attempts_count, bool)
+                and attempts_count > 0
+                and isinstance(correct_sum, (int, float))
+                and not isinstance(correct_sum, bool)
+            ):
+                exposed.update(targets)
+                if float(correct_sum) / float(attempts_count) >= 0.7:
+                    ready.update(targets)
+                    observed_at = record.get("last_correct_at") or record.get("updated_at")
+                    if isinstance(observed_at, str):
+                        for target in targets:
+                            ready_at[target] = observed_at
+            elif label not in unassessed:
+                unassessed.append(label)
+
+    events = dynamic_state.get("legacy_events")
+    if isinstance(events, list):
+        for event in events:
+            if not isinstance(event, Mapping):
+                continue
+            data = event.get("data")
+            if not isinstance(data, Mapping):
+                continue
+            label = data.get("concept_id") or data.get("concept") or data.get("current_focus")
+            if not isinstance(label, str):
+                continue
+            targets = _legacy_label_target(bundle, route, label)
+            if not targets:
+                continue
+            event_type = event.get("event_type")
+            timestamp = event.get("ts")
+            passed = False
+            failed = False
+            if event_type == "review_graded":
+                passed = data.get("difficulty") == "easy"
+                failed = data.get("difficulty") == "missed"
+            elif event_type == "answer_judged":
+                score = data.get("score")
+                passed = data.get("status") == "correct" or (
+                    isinstance(score, (int, float))
+                    and not isinstance(score, bool)
+                    and float(score) >= 0.8
+                )
+                failed = data.get("status") == "needs_work"
+            if passed:
+                exposed.update(targets)
+                ready.update(targets)
+                weak.difference_update(targets)
+                if isinstance(timestamp, str):
+                    for target in targets:
+                        ready_at[target] = timestamp
+            elif failed:
+                exposed.update(targets)
+                weak.update(targets)
+                ready.difference_update(targets)
+
+    weak_value = metadata.get("weak_spots")
+    weak_items = weak_value if isinstance(weak_value, list) else []
+    for item in weak_items:
+        label = (
+            item
+            if isinstance(item, str)
+            else (item.get("concept") or item.get("label") if isinstance(item, Mapping) else None)
+        )
+        if not isinstance(label, str):
+            continue
+        targets = _legacy_label_target(bundle, route, label)
+        if targets:
+            weak_at = item.get("updated_at") if isinstance(item, Mapping) else None
+            for target in targets:
+                if (
+                    target not in ready
+                    or isinstance(weak_at, str)
+                    and weak_at > ready_at.get(target, "")
+                ):
+                    weak.add(target)
+
+    for key in ("slide_coverage", "placement_result"):
+        value = metadata.get(key)
+        if value not in (None, {}, []):
+            unassessed.append(f"{key}:{_canonical_fingerprint(value)}")
+
+    skills = route.get("skills")
+    route_skills = (
+        [item for item in skills if isinstance(item, Mapping)] if isinstance(skills, list) else []
+    )
+    current = next(
+        (
+            item
+            for item in route_skills
+            if isinstance(item.get("skill_ref"), Mapping)
+            and item["skill_ref"].get("skill_id") not in ready
+        ),
+        route_skills[-1] if route_skills else None,
+    )
+    if current is None:
+        raise CurriculumBundleError("materialized route has no skills")
+    current_ref = current["skill_ref"]
+    assert isinstance(current_ref, Mapping)
+    cursor = {
+        "unit_id": current["unit_id"],
+        "section_id": current["section_id"],
+        "skill_ref": dict(current_ref),
+        "instruction_status": "review" if current_ref.get("skill_id") in weak else "uncovered",
+    }
+    return {
+        "schema_version": CANONICAL_STATE_SCHEMA_VERSION,
+        "bundle_id": route["bundle_id"],
+        "bundle_version": route["bundle_version"],
+        "route_id": route["route_id"],
+        "route_fingerprint": route["route_fingerprint"],
+        "allocation_fingerprint": route["allocation_fingerprint"],
+        "route": dict(route),
+        "cursor": cursor,
+        "evidence": {
+            "ready": sorted(ready),
+            "exposed": sorted(exposed),
+            "weak": sorted(weak),
+            "due_review": list(_legacy_labels(metadata.get("review_due"))),
+        },
+        "legacy_context": {
+            "aliases_applied": {key: aliases_applied[key] for key in sorted(aliases_applied)},
+            "unassessed": sorted(set(unassessed)),
+        },
+        "reconciliation": {
+            "reconciliation_id": reconciliation_id,
+            "source_fingerprint": source_fingerprint,
+            "from_version": "legacy-unversioned",
+            "to_version": route["bundle_version"],
+        },
+        "active_operation": None,
+    }
+
+
+def compatibility_projection(state: Mapping[str, object]) -> dict[str, object]:
+    route = state.get("route")
+    cursor = state.get("cursor")
+    if not isinstance(route, Mapping) or not isinstance(cursor, Mapping):
+        raise CurriculumBundleError("canonical interview curriculum state is malformed")
+    skills = route.get("skills")
+    if not isinstance(skills, list):
+        raise CurriculumBundleError("canonical interview route is malformed")
+    units: list[dict[str, object]] = []
+    unit_indexes: dict[str, int] = {}
+    current_unit_id = cursor.get("unit_id")
+    current_section_id = cursor.get("section_id")
+    current_unit = 1
+    current_slide = 1
+    current_focus = ""
+    for item in skills:
+        if not isinstance(item, Mapping):
+            continue
+        unit_id = item.get("unit_id")
+        if not isinstance(unit_id, str):
+            continue
+        if unit_id not in unit_indexes:
+            unit_indexes[unit_id] = len(units)
+            units.append(
+                {
+                    "unit": len(units) + 1,
+                    "title": str(item.get("unit_label") or unit_id),
+                    "slide_count": 0,
+                    "concepts": [],
+                }
+            )
+        unit = units[unit_indexes[unit_id]]
+        unit["slide_count"] = int(unit["slide_count"]) + 1
+        concepts = unit["concepts"]
+        assert isinstance(concepts, list)
+        ref = item.get("skill_ref")
+        skill_id = ref.get("skill_id") if isinstance(ref, Mapping) else ""
+        concepts.append({"id": skill_id, "label": str(item.get("section_label") or skill_id)})
+        if unit_id == current_unit_id and item.get("section_id") == current_section_id:
+            current_unit = int(unit["unit"])
+            current_slide = int(unit["slide_count"])
+            current_focus = str(item.get("section_label") or skill_id)
+    return {
+        "course_units": units,
+        "current_unit": current_unit,
+        "current_slide": current_slide,
+        "current_focus": current_focus,
+    }
+
+
 @dataclass(frozen=True)
 class InterviewCurriculumBundle:
     schema_version: int

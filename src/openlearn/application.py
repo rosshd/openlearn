@@ -96,6 +96,15 @@ class DashboardSnapshot:
 
 
 @dataclass(frozen=True)
+class InterviewCurriculumPosition:
+    unit_id: str
+    section_id: str
+    skill_id: str
+    emphasis: str
+    review_reason: str | None = None
+
+
+@dataclass(frozen=True)
 class TemplateSummary:
     template_id: str
     name: str
@@ -235,6 +244,24 @@ def create_course(request: CourseCreationRequest) -> CourseCreationResult:
     from openlearn.courses import create_course as create
 
     return create(request)
+
+
+def prepare_interview_curriculum(
+    slug: str, *, boundary: Literal["preparation", "resume"] = "resume"
+) -> InterviewCurriculumPosition:
+    """Explicitly prepare or resume one canonical interview curriculum."""
+    from openlearn.courses import prepare_interview_curriculum as prepare
+
+    value = prepare(slug, boundary=boundary)
+    return InterviewCurriculumPosition(
+        unit_id=str(value["unit_id"]),
+        section_id=str(value["section_id"]),
+        skill_id=str(value["skill_id"]),
+        emphasis=str(value["emphasis"]),
+        review_reason=(
+            str(value["review_reason"]) if isinstance(value.get("review_reason"), str) else None
+        ),
+    )
 
 
 def sync_interview_placement(slug: str) -> dict[str, object]:
