@@ -806,6 +806,7 @@ def _reserve_interview_progression(
         reserved["active_operation"] = {
             "submission_id": sid,
             "payload_hash": payload_hash,
+            "learner_prompt": normalized,
             "status": "reserved",
             "base_revision": revision,
             "reservation_revision": reservation_revision,
@@ -958,7 +959,8 @@ def _prepare_turn(
                 "The visible lesson changed. Your question was not submitted; refresh and retry."
             )
         source_lesson_skill_ref = _visible_curriculum_skill_ref(state)
-    cli.save_pending_learner_prompt(slug, normalized)
+    if session_kind != cli.SIDE_CHAT_SESSION_KIND:
+        cli.save_pending_learner_prompt(slug, normalized)
     _save_operation(
         slug,
         submission_id=sid,
@@ -994,7 +996,9 @@ def _execute_prepared_turn_inner(
     canonical_before = _interview_progression_state(slug)
     active_progression_before = (
         canonical_before.get("active_operation")
-        if isinstance(canonical_before, dict)
+        if intent == "navigation"
+        and session_kind != cli.SIDE_CHAT_SESSION_KIND
+        and isinstance(canonical_before, dict)
         else None
     )
     generated_override = (
@@ -1118,13 +1122,15 @@ def _execute_prepared_turn_inner(
     def commit_receipt(
         answer: str,
         metadata: dict[str, object],
+        state_before: dict[str, object],
         state_after: dict[str, object],
         mutation_id: str,
     ) -> None:
         from openlearn import interview_curriculum
 
         with _course_lock(slug):
-            current_internal = _internal_state(cli.load_state(slug))
+            current_state = cli.load_state(slug)
+            current_internal = _internal_state(current_state)
             current_active = current_internal.get(active_key)
             active_age = (
                 _active_turn_age(current_active)
@@ -1151,11 +1157,15 @@ def _execute_prepared_turn_inner(
                 raise cli.TurnCommitConflictError(
                     "tutor operation namespace changed while preparing a response"
                 )
-            internal = (
-                copy.deepcopy(current_internal)
-                if session_kind == cli.SIDE_CHAT_SESSION_KIND
-                else _internal_state(state_after)
-            )
+            if session_kind == cli.SIDE_CHAT_SESSION_KIND:
+                # Side chat owns only its independent operation namespace. Rebase
+                # its final journal on the latest course state so an overlapping
+                # navigation commit remains authoritative.
+                state_before.clear()
+                state_before.update(copy.deepcopy(current_state))
+                state_after.clear()
+                state_after.update(copy.deepcopy(current_state))
+            internal = copy.deepcopy(current_internal)
             move_revision = (
                 current_course_revision
                 if session_kind == cli.SIDE_CHAT_SESSION_KIND
@@ -1286,7 +1296,11 @@ def _execute_prepared_turn_inner(
                 normalized,
                 model=model,
                 output_func=lambda _text="": None,
-                pending_learner_prompt=normalized,
+                pending_learner_prompt=(
+                    None
+                    if session_kind == cli.SIDE_CHAT_SESSION_KIND
+                    else normalized
+                ),
                 allow_specialized_actions=False,
                 session_kind=session_kind,
                 increment_course_revision=(session_kind != cli.SIDE_CHAT_SESSION_KIND),
@@ -1640,9 +1654,15 @@ def resume_interview_progression(
     if not isinstance(active, dict):
         raise TutorOperationError("This interview course has no reserved turn to resume.")
     sid = active.get("submission_id")
-    prompt = state.get("pending_learner_prompt")
+    prompt = active.get("learner_prompt")
     revision = active.get("reservation_revision")
     progression_intent = active.get("progression_intent")
+    internal = _internal_state(state)
+    active_turn = internal.get("active_turn")
+    if not isinstance(prompt, str) and isinstance(active_turn, dict):
+        prompt = active_turn.get("prompt")
+    if not isinstance(prompt, str):
+        prompt = state.get("pending_learner_prompt")
     if (
         not isinstance(sid, str)
         or not isinstance(prompt, str)
@@ -1652,8 +1672,6 @@ def resume_interview_progression(
         raise TutorOperationError("The saved interview reservation is incomplete.")
     if _future_active(slug, sid):
         raise TutorConflictError("This interview turn is still running.")
-    internal = _internal_state(state)
-    active_turn = internal.get("active_turn")
     owner_pid = active_turn.get("owner_pid") if isinstance(active_turn, dict) else None
     if isinstance(owner_pid, int) and owner_pid > 0 and owner_pid != os.getpid():
         try:

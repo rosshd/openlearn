@@ -188,6 +188,16 @@ class SourceSnapshot:
     checksum: str
 
 
+@dataclass(frozen=True)
+class TutorResponseMetadata:
+    """Request-local metadata extracted from one generated tutor response."""
+
+    answer_key: str = ""
+    coding_drill_action: CodingDrillAction | None = None
+    covered_concepts: tuple[str, ...] = ()
+    focus_title: str = ""
+
+
 DYNAMIC_METADATA_KEYS = {
     "concept_attempts",
     "consecutive_correct",
@@ -9281,7 +9291,17 @@ def ask_topic(
     session_kind: TutorSessionKind = "chat",
     message_kind_override: str | None = None,
     commit_state_hook: (
-        Callable[[str, dict[str, object], dict[str, object], str], None] | None
+        Callable[
+            [
+                str,
+                dict[str, object],
+                dict[str, object],
+                dict[str, object],
+                str,
+            ],
+            None,
+        ]
+        | None
     ) = None,
     generated_state_hook: Callable[[str], None] | None = None,
     generated_answer_override: str | None = None,
@@ -9300,8 +9320,6 @@ def ask_topic(
     ) = None,
     interview_target: dict[str, object] | None = None,
 ) -> str:
-    global _LAST_RESPONSE_ANSWER_KEY, _LAST_RESPONSE_CODING_DRILL_ACTION
-    global _LAST_RESPONSE_FOCUS_TITLE
     topic = read_topic(
         resolve_topic_slug(topic_value) if topic_value is None else slugify(topic_value)
     )
@@ -9420,7 +9438,12 @@ def ask_topic(
         if session_kind == SIDE_CHAT_SESSION_KIND
         else prompt
     )
-    _LAST_RESPONSE_FOCUS_TITLE = ""
+    response_metadata = TutorResponseMetadata()
+
+    def capture_response_metadata(value: TutorResponseMetadata) -> None:
+        nonlocal response_metadata
+        response_metadata = value
+
     if turn_observer is not None:
         turn_observer.publish_phase("generating")
     generated_answer = (
@@ -9435,8 +9458,13 @@ def ask_topic(
             stream_sink=(turn_observer.publish_preview if turn_observer is not None else None),
             engagement_check_due=engagement_check_due,
             interview_target=interview_target,
+            response_metadata_sink=capture_response_metadata,
         )
     )
+    if generated_answer_override is not None or response_metadata == TutorResponseMetadata():
+        _visible_override, response_metadata = tutor_response_metadata(
+            generated_answer
+        )
     if generated_answer_override is not None and interview_target is not None:
         from openlearn import interview_curriculum
 
@@ -9444,7 +9472,9 @@ def ask_topic(
             generated_answer = interview_curriculum.deterministic_target_fallback(
                 interview_target
             )
-    focus_title = _LAST_RESPONSE_FOCUS_TITLE or tutor_response_focus_title(generated_answer)
+    focus_title = response_metadata.focus_title or tutor_response_focus_title(
+        generated_answer
+    )
     if interview_target is not None:
         focus_title = str(interview_target.get("skill_label") or "")
     answer = sanitize_model_output(generated_answer)
@@ -9452,11 +9482,8 @@ def ask_topic(
         answer = enforce_first_lesson_response(topic, prompt, answer)
     if turn_observer is not None:
         turn_observer.publish_phase("validating")
-    answer_key = _LAST_RESPONSE_ANSWER_KEY
-    coding_drill_action = _LAST_RESPONSE_CODING_DRILL_ACTION
-    _LAST_RESPONSE_ANSWER_KEY = ""
-    _LAST_RESPONSE_CODING_DRILL_ACTION = None
-    _LAST_RESPONSE_FOCUS_TITLE = ""
+    answer_key = response_metadata.answer_key
+    coding_drill_action = response_metadata.coding_drill_action
     if generated_state_hook is not None and generated_answer_override is None:
         generated_state_hook(answer)
         state_before = copy.deepcopy(load_state(topic.slug))
@@ -9595,7 +9622,13 @@ def ask_topic(
         internal["course_revision"] = revision + 1 if isinstance(revision, int) else 1
     state_after["_openlearn_internal"] = internal
     if commit_state_hook is not None:
-        commit_state_hook(answer, projected_metadata, state_after, mutation_id)
+        commit_state_hook(
+            answer,
+            projected_metadata,
+            state_before,
+            state_after,
+            mutation_id,
+        )
     if commit_events_hook is not None:
         queued_events.extend(commit_events_hook(answer, projected_metadata, state_after))
     _commit_projected_turn(
@@ -9656,6 +9689,7 @@ def generate_validated_tutor_answer(
     stream_sink: Callable[[str], object] | None = None,
     engagement_check_due: bool = False,
     interview_target: dict[str, object] | None = None,
+    response_metadata_sink: Callable[[TutorResponseMetadata], object] | None = None,
 ) -> str:
     """Generate, validate, then reveal one tutor response."""
     message_kind = topic.metadata.get("current_turn_message_kind")
@@ -9689,6 +9723,12 @@ def generate_validated_tutor_answer(
     buffered_output: list[str] = []
     for attempt in range(2):
         buffered_output = []
+        candidate_metadata = TutorResponseMetadata()
+
+        def capture_candidate_metadata(value: TutorResponseMetadata) -> None:
+            nonlocal candidate_metadata
+            candidate_metadata = value
+
         if stream_sink is not None:
             stream_sink("")
         user = (
@@ -9707,8 +9747,11 @@ def generate_validated_tutor_answer(
             system=system,
             user=user,
             output_func=buffered_output.append,
+            response_metadata_sink=capture_candidate_metadata,
             **stream_options,
         )
+        if candidate_metadata == TutorResponseMetadata():
+            _visible_candidate, candidate_metadata = tutor_response_metadata(candidate)
         if interview_target is not None:
             from openlearn import interview_curriculum
 
@@ -9721,6 +9764,11 @@ def generate_validated_tutor_answer(
                 )
                 if stream_sink is not None:
                     stream_sink(fallback)
+                if response_metadata_sink is not None:
+                    _visible_fallback, fallback_metadata = tutor_response_metadata(
+                        fallback
+                    )
+                    response_metadata_sink(fallback_metadata)
                 output_func(fallback)
                 return fallback
         error = tutor_answer_contract_error(
@@ -9731,6 +9779,8 @@ def generate_validated_tutor_answer(
             forbid_choice_claim=forbid_choice_claim,
         )
         if error is None:
+            if response_metadata_sink is not None:
+                response_metadata_sink(candidate_metadata)
             for line in buffered_output:
                 output_func(line)
             return candidate
@@ -10152,7 +10202,9 @@ def _assert_turn_internal_preconditions(
     """Fence revision and active-turn changes before a journal publishes anything."""
     guarded_paths = {
         ("_openlearn_internal", "course_revision"),
+        ("_openlearn_internal", "side_chat_revision"),
         ("_openlearn_internal", "active_turn"),
+        ("_openlearn_internal", "active_side_chat"),
     }
     missing = object()
     for operation in patch:
@@ -18862,6 +18914,7 @@ def call_openai_streaming(
     retry_jitter: Callable[[float, float], float] = random.uniform,
     retry_status: Callable[[str], object] | None = None,
     stream_sink: Callable[[str], object] | None = None,
+    response_metadata_sink: Callable[[TutorResponseMetadata], object] | None = None,
 ) -> str:
     global _LAST_RESPONSE_ANSWER_KEY, _LAST_RESPONSE_FOCUS_TITLE
     global _LAST_RESPONSE_CODING_DRILL_ACTION, _LAST_RESPONSE_COVERED_CONCEPTS
@@ -18876,17 +18929,12 @@ def call_openai_streaming(
     # If call_openai has been monkeypatched, prefer it (test hook).
     if call_openai.__name__ != "call_openai":
         raw_text = call_openai(model, system, user)
-        _LAST_RESPONSE_COVERED_CONCEPTS = extract_covered_concepts(raw_text)
-        _LAST_RESPONSE_FOCUS_TITLE = tutor_response_focus_title(raw_text)
-        if capture_answer_key:
-            _LAST_RESPONSE_ANSWER_KEY = extract_answer_key(raw_text)
-        try:
-            visible_text, _LAST_RESPONSE_CODING_DRILL_ACTION = extract_coding_drill_action(
-                raw_text
-            )
-        except ActivityContractError:
-            visible_text = suppress_coding_drill_action(raw_text)
-            _LAST_RESPONSE_CODING_DRILL_ACTION = None
+        visible_text, metadata = tutor_response_metadata(
+            raw_text, capture_answer_key=capture_answer_key
+        )
+        _publish_legacy_response_metadata(metadata, capture_answer_key=capture_answer_key)
+        if response_metadata_sink is not None:
+            response_metadata_sink(metadata)
         text = sanitize_model_output(visible_text)
         if not text:
             raise OpenLearnError(
@@ -18900,15 +18948,12 @@ def call_openai_streaming(
     # Mock mode support: return a canned response without contacting the network.
     if _openlearn_mock_enabled():
         raw = _mock_openai_response(model, system, user)
-        _LAST_RESPONSE_COVERED_CONCEPTS = extract_covered_concepts(raw)
-        _LAST_RESPONSE_FOCUS_TITLE = tutor_response_focus_title(raw)
-        if capture_answer_key:
-            _LAST_RESPONSE_ANSWER_KEY = extract_answer_key(raw)
-        try:
-            visible_text, _LAST_RESPONSE_CODING_DRILL_ACTION = extract_coding_drill_action(raw)
-        except ActivityContractError:
-            visible_text = suppress_coding_drill_action(raw)
-            _LAST_RESPONSE_CODING_DRILL_ACTION = None
+        visible_text, metadata = tutor_response_metadata(
+            raw, capture_answer_key=capture_answer_key
+        )
+        _publish_legacy_response_metadata(metadata, capture_answer_key=capture_answer_key)
+        if response_metadata_sink is not None:
+            response_metadata_sink(metadata)
         text = sanitize_model_output(visible_text)
         if not text:
             raise OpenLearnError(
@@ -19023,15 +19068,12 @@ def call_openai_streaming(
         final_preview = sanitize_stream_preview(raw_text)
         if final_preview != published_preview:
             stream_sink(final_preview)
-    _LAST_RESPONSE_COVERED_CONCEPTS = extract_covered_concepts(raw_text)
-    _LAST_RESPONSE_FOCUS_TITLE = tutor_response_focus_title(raw_text)
-    if capture_answer_key:
-        _LAST_RESPONSE_ANSWER_KEY = extract_answer_key(raw_text)
-    try:
-        visible_text, _LAST_RESPONSE_CODING_DRILL_ACTION = extract_coding_drill_action(raw_text)
-    except ActivityContractError:
-        visible_text = suppress_coding_drill_action(raw_text)
-        _LAST_RESPONSE_CODING_DRILL_ACTION = None
+    visible_text, metadata = tutor_response_metadata(
+        raw_text, capture_answer_key=capture_answer_key
+    )
+    _publish_legacy_response_metadata(metadata, capture_answer_key=capture_answer_key)
+    if response_metadata_sink is not None:
+        response_metadata_sink(metadata)
     text = sanitize_model_output(visible_text)
     if not text:
         raise OpenLearnError(
@@ -19043,6 +19085,37 @@ def call_openai_streaming(
     else:
         emit_tutor_output(text, output_func)
     return text.strip()
+
+
+def tutor_response_metadata(
+    raw_text: str, *, capture_answer_key: bool = True
+) -> tuple[str, TutorResponseMetadata]:
+    """Extract one response's hidden fields without shared mutable state."""
+    try:
+        visible_text, coding_action = extract_coding_drill_action(raw_text)
+    except ActivityContractError:
+        visible_text = suppress_coding_drill_action(raw_text)
+        coding_action = None
+    return visible_text, TutorResponseMetadata(
+        answer_key=extract_answer_key(raw_text) if capture_answer_key else "",
+        coding_drill_action=coding_action,
+        covered_concepts=tuple(extract_covered_concepts(raw_text)),
+        focus_title=tutor_response_focus_title(raw_text),
+    )
+
+
+def _publish_legacy_response_metadata(
+    metadata: TutorResponseMetadata, *, capture_answer_key: bool
+) -> None:
+    """Keep legacy command helpers compatible without using globals for turns."""
+    global _LAST_RESPONSE_ANSWER_KEY, _LAST_RESPONSE_CODING_DRILL_ACTION
+    global _LAST_RESPONSE_COVERED_CONCEPTS, _LAST_RESPONSE_FOCUS_TITLE
+
+    if capture_answer_key:
+        _LAST_RESPONSE_ANSWER_KEY = metadata.answer_key
+    _LAST_RESPONSE_CODING_DRILL_ACTION = metadata.coding_drill_action
+    _LAST_RESPONSE_COVERED_CONCEPTS = list(metadata.covered_concepts)
+    _LAST_RESPONSE_FOCUS_TITLE = metadata.focus_title
 
 
 def emit_tutor_output(text: str, output_func=print) -> None:

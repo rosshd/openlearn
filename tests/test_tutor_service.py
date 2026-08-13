@@ -887,16 +887,17 @@ class TutorServiceTests(TestCase):
         progression_started = threading.Event()
         release_progression = threading.Event()
         side_done = threading.Event()
-        original = cli.ask_topic
+        original = cli.generate_validated_tutor_answer
 
         def controlled(*args: object, **kwargs: object) -> str:
-            if kwargs.get("session_kind") != cli.SIDE_CHAT_SESSION_KIND:
+            if len(args) > 1 and args[1] == "Continue.":
                 progression_started.set()
                 release_progression.wait(timeout=3)
-                raise RuntimeError("end blocked progression")
             return original(*args, **kwargs)
 
-        with mock.patch.object(cli, "ask_topic", side_effect=controlled):
+        with mock.patch.object(
+            cli, "generate_validated_tutor_answer", side_effect=controlled
+        ):
             progression_id = str(uuid4())
             start_turn(
                 slug,
@@ -929,6 +930,24 @@ class TutorServiceTests(TestCase):
             self.assertEqual(course_revision(slug), 1)
             release_progression.set()
             thread.join(timeout=2)
+
+            with tutor_service._FUTURES_GUARD:
+                future = tutor_service._FUTURES.get((slug, progression_id))
+            if future is not None:
+                progression = future.result(timeout=3)
+                self.assertEqual(progression.status, "committed")
+
+        state = cli.load_state(slug)
+        internal = state["_openlearn_internal"]
+        self.assertEqual(internal["course_revision"], 2)
+        self.assertEqual(internal["side_chat_revision"], 1)
+        self.assertIsNone(internal.get("active_turn"))
+        self.assertIsNone(internal.get("active_side_chat"))
+        self.assertNotIn("pending_learner_prompt", state)
+        _body, log = cli.split_session_log(cli.read_topic(slug).body)
+        entries = cli.session_entries(log)
+        self.assertEqual(sum(entry["kind"] == "side_chat" for entry in entries), 1)
+        self.assertEqual(sum(entry["prompt"] == "Continue." for entry in entries), 1)
 
     def test_side_chat_commits_after_navigation_against_its_captured_lesson(self) -> None:
         slug = self._create_interview_course()
@@ -994,6 +1013,140 @@ class TutorServiceTests(TestCase):
             "skill_ref"
         ]
         self.assertEqual(source_ref, initial_ref)
+        state = cli.load_state(slug)
+        internal = state["_openlearn_internal"]
+        self.assertEqual(internal["course_revision"], 2)
+        self.assertEqual(internal["side_chat_revision"], 1)
+        self.assertIsNone(internal.get("active_turn"))
+        self.assertIsNone(internal.get("active_side_chat"))
+        self.assertEqual(
+            sum(entry["kind"] == "side_chat" for entry in cli.session_entries(log)),
+            1,
+        )
+
+    def test_side_chat_cannot_replace_saved_navigation_prompt(self) -> None:
+        slug = self._create_interview_course()
+        navigation_id = str(uuid4())
+        tutor_service._reserve_interview_progression(
+            slug,
+            "Continue with the exact original navigation request.",
+            navigation_id,
+            0,
+            "navigation",
+            "chat",
+            progression_intent="continue",
+        )
+        tutor_service._prepare_turn(
+            slug,
+            "Why does the current lesson matter?",
+            str(uuid4()),
+            1,
+            "question",
+            cli.SIDE_CHAT_SESSION_KIND,
+            None,
+            None,
+            None,
+            None,
+        )
+
+        with mock.patch.object(tutor_service, "submit_turn") as resumed:
+            tutor_service.resume_interview_progression(slug)
+
+        self.assertEqual(
+            resumed.call_args.args[1],
+            "Continue with the exact original navigation request.",
+        )
+
+    def test_concurrent_generations_keep_response_metadata_request_local(self) -> None:
+        cli.cmd_new(
+            argparse.Namespace(
+                topic="Side Metadata",
+                goal="Keep response metadata isolated",
+                mastery_profile="efficient",
+                template="vim",
+                interview_prep=False,
+            ),
+            output_func=lambda _text="": None,
+        )
+        main_started = threading.Event()
+        side_finished = threading.Event()
+
+        def generated(
+            topic: object,
+            _prompt: str,
+            *_args: object,
+            **kwargs: object,
+        ) -> str:
+            sink = kwargs.get("response_metadata_sink")
+            slug = getattr(topic, "slug")
+            if slug == "web-tutor":
+                cli._LAST_RESPONSE_ANSWER_KEY = "A"
+                cli._LAST_RESPONSE_FOCUS_TITLE = "Main response"
+                main_started.set()
+                self.assertTrue(side_finished.wait(timeout=3))
+                metadata = cli.TutorResponseMetadata(
+                    answer_key="A",
+                    focus_title="Main response",
+                )
+                if callable(sink):
+                    sink(metadata)
+                return (
+                    "**Check:**\nWhich answer belongs to the main turn?\n"
+                    "A) Main\nB) Side\n<!-- answer: A --><!-- focus: Main response -->"
+                )
+            self.assertTrue(main_started.wait(timeout=3))
+            cli._LAST_RESPONSE_ANSWER_KEY = "D"
+            cli._LAST_RESPONSE_FOCUS_TITLE = "Side response"
+            metadata = cli.TutorResponseMetadata(
+                answer_key="D",
+                focus_title="Side response",
+            )
+            if callable(sink):
+                sink(metadata)
+            return "**Lesson:**\nSide answer.<!-- answer: D --><!-- focus: Side response -->"
+
+        main_result: list[object] = []
+
+        def main_turn() -> None:
+            main_result.append(
+                submit_turn(
+                    "web-tutor",
+                    "Teach the main check.",
+                    submission_id=str(uuid4()),
+                    expected_revision=0,
+                )
+            )
+
+        with (
+            mock.patch.object(
+                cli, "generate_validated_tutor_answer", side_effect=generated
+            ),
+            mock.patch.object(cli, "_LAST_RESPONSE_ANSWER_KEY", ""),
+            mock.patch.object(cli, "_LAST_RESPONSE_FOCUS_TITLE", ""),
+        ):
+            main_thread = threading.Thread(target=main_turn)
+            main_thread.start()
+            self.assertTrue(main_started.wait(timeout=3))
+            side = submit_turn(
+                "side-metadata",
+                "Why does this matter?",
+                intent="question",
+                submission_id=str(uuid4()),
+                expected_revision=0,
+                session_kind=cli.SIDE_CHAT_SESSION_KIND,
+            )
+            self.assertEqual(side.status, "committed")
+            self.assertIn("Side answer", side.move.content)
+            side_finished.set()
+            main_thread.join(timeout=3)
+
+        self.assertFalse(main_thread.is_alive())
+        self.assertEqual(main_result[0].status, "committed")
+        state = cli.load_state("web-tutor")
+        self.assertEqual(state["pending_question"]["answer_key"], "A")
+        self.assertIn(
+            "Which answer belongs to the main turn?", main_result[0].move.prompt
+        )
 
     def test_tampered_permanent_progression_receipt_fails_closed(self) -> None:
         slug = self._create_interview_course()
@@ -1126,6 +1279,7 @@ class TutorServiceTests(TestCase):
         cli.append_session(cli.read_topic("web-tutor"), "chat", "Continue", current)
         captured: dict[str, str] = {}
         submission_id = str(uuid4())
+        source_id = "lesson_" + hashlib.sha256(current.encode("utf-8")).hexdigest()[:24]
 
         def answer(*_args: object, **kwargs: object) -> str:
             captured["user"] = str(kwargs["user"])
@@ -1142,6 +1296,9 @@ class TutorServiceTests(TestCase):
                 submission_id=submission_id,
                 expected_revision=0,
                 session_kind=cli.SIDE_CHAT_SESSION_KIND,
+                source_lesson_id=source_id,
+                source_lesson_title="Saved lesson",
+                source_lesson_revision=0,
             )
 
         self.assertEqual(result.status, "committed")
@@ -1153,7 +1310,7 @@ class TutorServiceTests(TestCase):
         self.assertEqual(side_entry["source_lesson_title"], "Saved lesson")
         self.assertEqual(
             side_entry["source_lesson_id"],
-            "lesson_" + hashlib.sha256(current.encode("utf-8")).hexdigest()[:24],
+            source_id,
         )
         self.assertEqual(side_entry["source_lesson_revision"], "0")
         replay = submit_turn(
@@ -1163,6 +1320,9 @@ class TutorServiceTests(TestCase):
             submission_id=submission_id,
             expected_revision=0,
             session_kind=cli.SIDE_CHAT_SESSION_KIND,
+            source_lesson_id=source_id,
+            source_lesson_title="Saved lesson",
+            source_lesson_revision=0,
         )
         self.assertEqual(replay, result)
         replay_topic = cli.read_topic("web-tutor")
@@ -1174,6 +1334,18 @@ class TutorServiceTests(TestCase):
             ),
             1,
         )
+        with self.assertRaises(TutorConflictError, msg="source tuple changed"):
+            submit_turn(
+                "web-tutor",
+                "Can you explain this slide more?",
+                intent="question",
+                submission_id=submission_id,
+                expected_revision=0,
+                session_kind=cli.SIDE_CHAT_SESSION_KIND,
+                source_lesson_id=source_id,
+                source_lesson_title="Different lesson title",
+                source_lesson_revision=0,
+            )
         finish.assert_not_called()
 
     def test_navigation_after_two_passive_lessons_generates_a_check(self) -> None:
