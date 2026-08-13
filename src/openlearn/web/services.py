@@ -31,6 +31,7 @@ from openlearn.course_templates import CourseTemplateError
 from openlearn.courses import (
     CREATION_SUBMISSION_METADATA_KEY,
     CREATION_SUBMISSION_STATE_KEY,
+    RouteAcceptanceConflictError,
 )
 
 from .schemas import (
@@ -98,7 +99,7 @@ def _course_initialization_prompt(slug: str) -> str:
 
 def _card(card: CourseCard) -> dict[str, object]:
     try:
-        interview = application.interview_learning(card.slug)
+        interview = application.interview_learning_card(card.slug)
     except (cli.OpenLearnError, OSError, ValueError):
         interview = None
     if interview is not None:
@@ -654,9 +655,13 @@ class OpenLearnWebServices:
 
     def dashboard(self) -> dict[str, object]:
         snapshot = application.dashboard()
+        courses = [_card(card) for card in snapshot.courses]
+        courses_by_slug = {str(card["slug"]): card for card in courses}
         return {
-            "courses": [_card(card) for card in snapshot.courses],
-            "active_course": _card(snapshot.resume) if snapshot.resume else None,
+            "courses": courses,
+            "active_course": (
+                courses_by_slug.get(snapshot.resume.slug) if snapshot.resume else None
+            ),
             "due_reviews": snapshot.reviews.due_today,
         }
 
@@ -1140,6 +1145,8 @@ class OpenLearnWebServices:
                     "receipt": accepted["receipt"],
                     **self._placement_view(slug, accepted["profile"]),
                 }
+            except RouteAcceptanceConflictError as error:
+                return {"state": "conflict", "error": str(error)}
             except (ValueError, cli.OpenLearnError) as error:
                 return {"invalid": True, "error": str(error)}
         elif request.action == "confirm_outline":
@@ -1173,6 +1180,8 @@ class OpenLearnWebServices:
                     expected_revision=request.expected_revision,
                 )
                 value = accepted["profile"]
+            except RouteAcceptanceConflictError as error:
+                return {"state": "conflict", "error": str(error)}
             except (ValueError, cli.OpenLearnError) as error:
                 return {"invalid": True, "error": str(error)}
         else:
@@ -1262,6 +1271,8 @@ class OpenLearnWebServices:
                 expected_revision=request.expected_revision if request is not None else None,
             )
             value = accepted["profile"]
+        except RouteAcceptanceConflictError as error:
+            return {"state": "conflict", "error": str(error)}
         except (ValueError, cli.OpenLearnError) as error:
             return {"invalid": True, "error": str(error)}
         return self._placement_view(slug, value)
@@ -1582,12 +1593,17 @@ class OpenLearnWebServices:
         )
         if request.intent in {"question", "stuck"}:
             projection = application.interview_learning(slug)
-            if projection is not None and any(value is None for value in source_fields):
+            supplied_source_fields = tuple(value is not None for value in source_fields)
+            if projection is not None and any(supplied_source_fields) and not all(
+                supplied_source_fields
+            ):
                 return {
                     "state": "conflict",
-                    "error": "The visible lesson reference is missing. Refresh before asking.",
+                    "error": (
+                        "The visible lesson reference is incomplete. Refresh before asking."
+                    ),
                 }
-            if projection is not None and (
+            if projection is not None and all(supplied_source_fields) and (
                 request.source_lesson_id
                 != projection.committed_lesson.lesson_id
                 or request.source_lesson_title != projection.committed_lesson.title

@@ -223,6 +223,7 @@ const focusShell = document.querySelector("[data-focus-shell]");
 const initializationShell = document.querySelector("[data-initialization-shell]");
 const toolSurface = document.querySelector("[data-tool-surface]");
 let turnInFlight = false;
+let progressionInFlight = false;
 
 let activeToolOpener = null;
 let preparedVideo = null;
@@ -977,11 +978,20 @@ function lockTurnForm(locked) {
     for (const control of turnForm.elements) control.disabled = locked;
     turnForm.setAttribute("aria-busy", String(locked));
   }
-  for (const control of document.querySelectorAll("[data-navigation-intent]")) control.disabled = locked;
+  for (const control of document.querySelectorAll(
+    "[data-navigation-intent], [data-progression-action]",
+  )) control.disabled = locked;
   turnInFlight = locked;
 }
 
-async function waitForOperation(operationId, setStatus) {
+function lockProgressionControls(locked) {
+  for (const control of document.querySelectorAll(
+    "[data-progression-action], [data-navigation-intent]",
+  )) control.disabled = locked;
+  progressionInFlight = locked;
+}
+
+async function waitForOperation(operationId, setStatus, previewSink = null) {
   const slug = focusShell.dataset.courseSlug;
   for (;;) {
     await new Promise((resolve) => window.setTimeout(resolve, 250));
@@ -993,8 +1003,8 @@ async function waitForOperation(operationId, setStatus) {
       generating: "Preparing the next useful move…",
       validating: "Checking the lesson before showing it…",
     };
-    if (state === "generating" || result.preview_text) {
-      renderTutorPreview(result.preview_text || "");
+    if (previewSink && (state === "generating" || result.preview_text)) {
+      previewSink(result.preview_text || "");
     }
     setStatus(labels[state] || result.message || "Working…", false, result);
     if (["committed", "conflict", "retryable_error"].includes(state)) return result;
@@ -1002,7 +1012,11 @@ async function waitForOperation(operationId, setStatus) {
 }
 
 async function pollOperation(operationId) {
-  const result = await waitForOperation(operationId, setOperationState);
+  const result = await waitForOperation(
+    operationId,
+    setOperationState,
+    (preview) => renderTutorPreview(preview),
+  );
   if (result.state === "committed") {
     clearTurnComposer();
     await finishTutorPreview(result.preview_text || "");
@@ -1050,6 +1064,7 @@ if (focusShell?.dataset.operationState) {
 
 for (const button of document.querySelectorAll("[data-progression-action]")) {
   button.addEventListener("click", async () => {
+    if (progressionInFlight || turnInFlight) return;
     const action = button.dataset.progressionAction;
     if (action === "refresh") {
       window.location.reload();
@@ -1057,7 +1072,7 @@ for (const button of document.querySelectorAll("[data-progression-action]")) {
     }
     const operationId = focusShell?.dataset.operationId;
     if (!operationId) return;
-    button.disabled = true;
+    lockProgressionControls(true);
     setOperationState(
       action === "cancel" ? "Cancelling the saved target…" : "Resuming the saved target…",
     );
@@ -1071,19 +1086,24 @@ for (const button of document.querySelectorAll("[data-progression-action]")) {
       );
       if (result.state === "busy") {
         setOperationState(result.error || "Another interface is still finishing this target.");
-        button.disabled = false;
+        lockProgressionControls(false);
+        return;
+      }
+      if (["provider-error", "stale-conflict"].includes(result.state)) {
+        setOperationState(result.error || "The saved target could not be resumed.", true, result);
+        lockProgressionControls(false);
         return;
       }
       window.location.reload();
     } catch (error) {
       setOperationState(error.message, true);
-      button.disabled = false;
+      lockProgressionControls(false);
     }
   });
 }
 
 async function submitTurn(overrideIntent = null) {
-  if (!focusShell || turnInFlight) return;
+  if (!focusShell || turnInFlight || progressionInFlight) return;
   const payload = turnForm
     ? formPayload(turnForm)
     : {
@@ -1656,6 +1676,36 @@ placementShell?.querySelector("[data-outline-form]")?.addEventListener("submit",
 });
 
 let pendingOutlineChange = null;
+const outlineList = placementShell?.querySelector("[data-outline-list]");
+const committedOutlineMarkup = outlineList?.innerHTML || "";
+const committedOutlineText = placementShell?.querySelector("#placement-outline")?.value || "";
+
+function renderOutlineItems(items) {
+  if (!outlineList || !Array.isArray(items)) return;
+  outlineList.replaceChildren();
+  for (const item of items) {
+    const row = document.createElement("li");
+    if (item.locked) row.classList.add("outline-locked");
+    const details = document.createElement("div");
+    const title = document.createElement("strong");
+    title.textContent = item.title || "Course unit";
+    const outcome = document.createElement("p");
+    outcome.textContent = item.outcome || "";
+    const habit = document.createElement("p");
+    habit.className = "outline-habit";
+    const habitLabel = document.createElement("span");
+    habitLabel.textContent = "Interview habit";
+    habit.append(habitLabel, ` ${item.interview_habit || ""}`);
+    details.append(title, outcome, habit);
+    const emphasis = document.createElement("span");
+    const emphasisLabel = item.emphasis || "Learn";
+    emphasis.className = `outline-emphasis ${emphasisLabel.toLowerCase()}`;
+    emphasis.textContent = `${emphasisLabel}${item.locked ? " · locked" : ""}`;
+    row.append(details, emphasis);
+    outlineList.append(row);
+  }
+}
+
 async function previewPlacementOutline(form) {
   const values = outlineChangeValues(form);
   lockPlacement(true);
@@ -1668,10 +1718,13 @@ async function previewPlacementOutline(form) {
     pendingOutlineChange = values;
     const previewText = placementShell.querySelector("#placement-outline");
     if (previewText) previewText.value = result.outline || "";
+    renderOutlineItems(result.outline_items);
     outlineEditor.hidden = true;
     outlineActions.hidden = true;
-    placementShell.querySelector("[data-outline-preview-confirm]").hidden = false;
+    const confirmation = placementShell.querySelector("[data-outline-preview-confirm]");
+    confirmation.hidden = false;
     if (placementStatus) placementStatus.textContent = "Preview ready. Confirm to save it.";
+    confirmation.querySelector("[data-outline-preview-heading], button")?.focus();
   } catch (error) {
     if (placementStatus) placementStatus.textContent = error.message;
   } finally {
@@ -1691,8 +1744,14 @@ placementShell?.querySelector("[data-accept-outline-preview]")?.addEventListener
 placementShell?.querySelector("[data-cancel-outline-preview]")?.addEventListener("click", () => {
   pendingOutlineChange = null;
   placementShell.querySelector("[data-outline-preview-confirm]").hidden = true;
+  if (outlineList) outlineList.innerHTML = committedOutlineMarkup;
+  outlineEditor.querySelector("form")?.reset();
+  const outlineText = placementShell.querySelector("#placement-outline");
+  if (outlineText) outlineText.value = committedOutlineText;
+  updateOutlineConfidenceFields();
+  outlineEditor.hidden = true;
   outlineActions.hidden = false;
-  window.location.reload();
+  outlineActions.querySelector("[data-change-outline]")?.focus();
 });
 
 placementShell?.querySelector("[data-confirm-outline]")?.addEventListener("click", () => {

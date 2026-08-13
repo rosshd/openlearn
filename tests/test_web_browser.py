@@ -178,11 +178,34 @@ def test_real_browser_course_polling_theme_conflict_and_keyboard_submit(
                     first.get_by_role("heading", name="Your suggested course outline")
                 ).to_be_visible()
                 playwright.expect(
-                    first.get_by_text("Requirements, Scale, and Interfaces", exact=True)
+                    first.get_by_text("Requirements and Interfaces", exact=True)
                 ).to_be_visible()
                 playwright.expect(first.get_by_text("Tutor feedback", exact=True)).to_have_count(0)
                 playwright.expect(first.get_by_text("Workshop this outline", exact=True)).to_have_count(0)
                 playwright.expect(first.get_by_role("button", name="Change course outline")).to_be_visible()
+                first.get_by_role("button", name="Change course outline").click()
+                first.get_by_label("Interview mix").select_option("coding")
+                first.get_by_role("button", name="Preview changes").click()
+                preview_heading = first.get_by_role(
+                    "heading", name="Review changed course outline"
+                )
+                playwright.expect(preview_heading).to_be_visible()
+                assert preview_heading.evaluate(
+                    "heading => heading === document.activeElement"
+                )
+                playwright.expect(
+                    first.get_by_text("Requirements and Interfaces", exact=True)
+                ).to_have_count(0)
+                playwright.expect(first.locator("[data-outline-list]")).to_contain_text(
+                    "locked"
+                )
+                first.get_by_role("button", name="Keep current outline").click()
+                playwright.expect(
+                    first.get_by_text("Requirements and Interfaces", exact=True)
+                ).to_be_visible()
+                assert first.get_by_role(
+                    "button", name="Change course outline"
+                ).evaluate("button => button === document.activeElement")
                 assert first.url.endswith("/placement")
                 _assert_no_page_overflow(first)
                 first.get_by_role("button", name="Confirm course outline").click()
@@ -211,6 +234,7 @@ def test_real_browser_course_polling_theme_conflict_and_keyboard_submit(
                 playwright.expect(first.locator(".chat-exchange")).to_have_count(1)
                 playwright.expect(first.locator("#chat-question")).to_have_value("")
                 assert first.locator("#move-title").inner_text() == lesson_title
+                assert first.locator("[data-tutor-stream-preview]").is_hidden()
                 assert "tool=chat" in first.url
                 first.get_by_role("button", name="Close learning tool").click()
 
@@ -472,6 +496,137 @@ def test_real_browser_course_polling_theme_conflict_and_keyboard_submit(
                 process.kill()
                 process.wait(timeout=5)
             cli.clear_config_cache()
+
+
+def test_progression_action_locks_every_competing_control_until_handled() -> None:
+    playwright = pytest.importorskip("playwright.sync_api")
+    javascript = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "openlearn"
+        / "web"
+        / "static"
+        / "openlearn.js"
+    )
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch()
+        page = browser.new_page()
+        page.set_content(
+            """
+            <meta name="csrf-token" content="test-token">
+            <main data-focus-shell data-course-slug="technical-interview-prep"
+                  data-operation-id="00000000-0000-4000-8000-000000000001">
+              <button data-progression-action="resume">Resume</button>
+              <button data-progression-action="cancel">Cancel</button>
+              <button data-navigation-intent="next">Continue</button>
+              <button data-navigation-intent="skip">Skip</button>
+              <button data-navigation-intent="practice">Practice</button>
+              <p data-operation-state hidden tabindex="-1">
+                <span data-operation-message></span>
+              </p>
+            </main>
+            """
+        )
+        page.evaluate(
+            """
+            window.progressionFetches = 0;
+            window.fetch = () => {
+              window.progressionFetches += 1;
+              return new Promise((resolve) => { window.resolveProgression = resolve; });
+            };
+            """
+        )
+        page.add_script_tag(path=str(javascript))
+
+        page.get_by_role("button", name="Resume").click()
+        controls = page.locator(
+            "[data-progression-action], [data-navigation-intent]"
+        )
+        assert controls.evaluate_all("items => items.every(item => item.disabled)")
+        page.locator('[data-progression-action="cancel"]').evaluate(
+            "button => button.click()"
+        )
+        assert page.evaluate("window.progressionFetches") == 1
+        page.evaluate(
+            """
+            window.resolveProgression(new Response(
+              JSON.stringify({state: "busy", error: "Another action is active."}),
+              {status: 200, headers: {"Content-Type": "application/json"}},
+            ));
+            """
+        )
+        playwright.expect(page.locator("[data-operation-message]")).to_have_text(
+            "Another action is active."
+        )
+        assert controls.evaluate_all("items => items.every(item => !item.disabled)")
+
+        concurrent = browser.new_page()
+        concurrent.set_content(
+            """
+            <meta name="csrf-token" content="test-token">
+            <main data-focus-shell data-course-slug="technical-interview-prep"
+                  data-operation-id="main-operation" data-operation-state="generating"
+                  data-revision="2">
+              <article data-current-move>
+                <div data-tutor-stream-preview hidden>
+                  <p data-tutor-stream-text></p>
+                </div>
+                <div data-move-content>Main lesson</div>
+              </article>
+              <p data-operation-state hidden tabindex="-1">
+                <span data-operation-message></span>
+              </p>
+              <div data-chat-conversation></div>
+              <form data-chat-form>
+                <input name="submission_id" value="side-submission">
+                <input name="expected_revision" value="2">
+                <input name="intent" value="question">
+                <textarea name="text" required>Explain this</textarea>
+                <button type="submit">Ask tutor</button>
+                <p data-chat-status></p>
+              </form>
+            </main>
+            """
+        )
+        concurrent.evaluate(
+            """
+            window.fetch = async (url, options = {}) => {
+              if (url.includes("/turns") && options.method === "POST") {
+                return new Response(JSON.stringify({
+                  state: "saved", operation_id: "side-operation",
+                }), {status: 200, headers: {"Content-Type": "application/json"}});
+              }
+              if (url.includes("/operations/side-operation")) {
+                return new Response(JSON.stringify({
+                  state: "committed", preview_text: "SIDE ANSWER",
+                }), {status: 200, headers: {"Content-Type": "application/json"}});
+              }
+              if (url.endsWith("/chat")) {
+                return new Response(JSON.stringify({conversation: [], revision: 2}), {
+                  status: 200, headers: {"Content-Type": "application/json"},
+                });
+              }
+              return new Response(JSON.stringify({
+                state: "generating", preview_text: "MAIN PREVIEW",
+              }), {status: 200, headers: {"Content-Type": "application/json"}});
+            };
+            """
+        )
+        concurrent.add_script_tag(path=str(javascript))
+        playwright.expect(
+            concurrent.locator("[data-tutor-stream-text]")
+        ).to_contain_text("MAIN PREVIEW")
+        concurrent.get_by_role("button", name="Ask tutor").click()
+        playwright.expect(concurrent.locator("[data-chat-status]")).to_have_text(
+            "Answered. Your lesson is still open."
+        )
+        assert "SIDE ANSWER" not in concurrent.locator(
+            "[data-tutor-stream-text]"
+        ).inner_text()
+        assert "MAIN PREVIEW" in concurrent.locator(
+            "[data-tutor-stream-text]"
+        ).inner_text()
+        browser.close()
 
 
 def test_real_browser_unverified_provider_stays_in_setup(

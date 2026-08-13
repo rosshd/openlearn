@@ -532,6 +532,93 @@ def test_outline_editor_can_clear_standard_pacing_to_date_recommended(
     assert preview["route"]["pacing_posture"] == "accelerated"
 
 
+@pytest.mark.parametrize("action", ["change_outline", "confirm_outline", "skip"])
+def test_route_acceptance_conflict_is_projected_as_http_conflict(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+) -> None:
+    token = csrf(client, "/courses/new")
+    created = client.post(
+        "/api/courses",
+        headers={"x-csrf-token": token},
+        json={
+            "title": f"Conflicting {action}",
+            "goal": "Prepare for interviews.",
+            "experience": "",
+            "template_id": "technical-interview-prep",
+            "submission_id": str(uuid4()),
+        },
+    ).json()
+    slug = created["slug"]
+
+    def conflict(*_args: object, **_kwargs: object) -> object:
+        raise courses.RouteAcceptanceConflictError("course changed during acceptance")
+
+    monkeypatch.setattr(application, "accept_interview_curriculum", conflict)
+    response = client.post(
+        f"/api/courses/{slug}/placement",
+        headers={"x-csrf-token": token},
+        json={
+            "action": action,
+            "outline": "Saved outline",
+            "submission_id": str(uuid4()),
+            "expected_revision": tutor_service.course_revision(slug),
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "state": "conflict",
+        "error": "course changed during acceptance",
+    }
+
+
+def test_dashboard_reuses_lightweight_interview_card_without_parsing_sessions(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    token = csrf(client, "/courses/new")
+    created = client.post(
+        "/api/courses",
+        headers={"x-csrf-token": token},
+        json={
+            "title": "Dashboard Interview Card",
+            "goal": "Prepare for interviews.",
+            "experience": "",
+            "template_id": "technical-interview-prep",
+            "submission_id": str(uuid4()),
+        },
+    ).json()
+    slug = created["slug"]
+    application.accept_interview_curriculum(
+        slug, action="skip", submission_id=str(uuid4())
+    )
+    original = application.interview_learning_card
+    calls: list[str] = []
+
+    def card_projection(requested_slug: str) -> application.InterviewCardProjection | None:
+        calls.append(requested_slug)
+        return original(requested_slug)
+
+    monkeypatch.setattr(application, "interview_learning_card", card_projection)
+    monkeypatch.setattr(
+        application,
+        "interview_learning",
+        lambda _slug: pytest.fail("dashboard must not build a full lesson projection"),
+    )
+    monkeypatch.setattr(
+        cli,
+        "session_entries",
+        lambda _log: pytest.fail("dashboard cards must not parse session history"),
+    )
+
+    response = client.get("/dashboard")
+
+    assert response.status_code == 200
+    assert "Dashboard Interview Card" in response.text
+    assert calls == [slug]
+
+
 def test_later_outline_change_preserves_evidence_and_rehomes_ineligible_cursor(
     client: TestClient,
 ) -> None:
@@ -1372,6 +1459,99 @@ def test_non_interview_side_chat_does_not_require_curriculum_source_fields(
     assert captured["source_lesson_revision"] is None
 
 
+def test_interview_side_chat_accepts_legacy_absent_source_tuple(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    token = csrf(client, "/courses/new")
+    created = client.post(
+        "/api/courses",
+        headers={"x-csrf-token": token},
+        json={
+            "title": "Legacy Interview Chat",
+            "goal": "Prepare for interviews.",
+            "experience": "",
+            "template_id": "technical-interview-prep",
+            "submission_id": str(uuid4()),
+        },
+    ).json()
+    slug = created["slug"]
+    application.accept_interview_curriculum(
+        slug, action="skip", submission_id=str(uuid4())
+    )
+    captured: dict[str, object] = {}
+
+    def start_turn(*_args: object, **kwargs: object) -> tutor_service.TutorTurnResult:
+        captured.update(kwargs)
+        return tutor_service.TutorTurnResult(
+            submission_id=str(kwargs["submission_id"]),
+            status="saved",
+            input_status="saved",
+            message_kind="question",
+            move=None,
+        )
+
+    monkeypatch.setattr(tutor_service, "start_turn", start_turn)
+    response = client.post(
+        f"/api/courses/{slug}/turns",
+        headers={"x-csrf-token": token},
+        json={
+            "intent": "question",
+            "text": "Explain this lesson.",
+            "submission_id": str(uuid4()),
+            "expected_revision": tutor_service.course_revision(slug),
+        },
+    )
+
+    assert response.status_code == 202
+    assert captured["source_lesson_id"] is None
+    assert captured["source_lesson_title"] is None
+    assert captured["source_lesson_revision"] is None
+
+
+@pytest.mark.parametrize(
+    "source_fields",
+    [
+        {"source_lesson_id": "lesson_one"},
+        {"source_lesson_title": "Arrays"},
+        {"source_lesson_revision": 0},
+        {"source_lesson_id": "lesson_one", "source_lesson_title": "Arrays"},
+    ],
+)
+def test_interview_side_chat_rejects_partial_source_tuple(
+    client: TestClient, source_fields: dict[str, object]
+) -> None:
+    token = csrf(client, "/courses/new")
+    created = client.post(
+        "/api/courses",
+        headers={"x-csrf-token": token},
+        json={
+            "title": "Partial Interview Chat",
+            "goal": "Prepare for interviews.",
+            "experience": "",
+            "template_id": "technical-interview-prep",
+            "submission_id": str(uuid4()),
+        },
+    ).json()
+    slug = created["slug"]
+    application.accept_interview_curriculum(
+        slug, action="skip", submission_id=str(uuid4())
+    )
+    response = client.post(
+        f"/api/courses/{slug}/turns",
+        headers={"x-csrf-token": token},
+        json={
+            "intent": "question",
+            "text": "Explain this lesson.",
+            "submission_id": str(uuid4()),
+            "expected_revision": tutor_service.course_revision(slug),
+            **source_fields,
+        },
+    )
+
+    assert response.status_code == 409
+    assert "incomplete" in response.json()["error"].lower()
+
+
 def test_invalid_course_template_is_a_validation_error(client: TestClient) -> None:
     token = csrf(client, "/courses/new")
     response = client.post(
@@ -1925,6 +2105,32 @@ def test_outline_change_is_previewed_before_confirm_and_retries_one_submission()
     assert 'name.startsWith("rating_")' in javascript
     assert 'values.getAll("optional_skill_ids")' in javascript
     assert "updateOutlineConfidenceFields" in javascript
+    assert "renderOutlineItems(result.outline_items)" in preview_handler
+    assert 'querySelector("[data-outline-preview-heading], button")?.focus()' in (
+        preview_handler
+    )
+
+
+def test_side_chat_polling_has_no_lesson_preview_sink() -> None:
+    javascript = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "openlearn"
+        / "web"
+        / "static"
+        / "openlearn.js"
+    ).read_text(encoding="utf-8")
+    poll_start = javascript.index("async function pollOperation")
+    poll_end = javascript.index("function clearTurnComposer", poll_start)
+    chat_start = javascript.index('chatForm?.addEventListener("submit"')
+    chat_end = javascript.index(
+        'chatForm?.querySelector("textarea")?.addEventListener', chat_start
+    )
+
+    assert "renderTutorPreview(preview)" in javascript[poll_start:poll_end]
+    assert "await waitForOperation(result.operation_id" in javascript[chat_start:chat_end]
+    assert "renderTutorPreview" not in javascript[chat_start:chat_end]
+    assert '"[data-progression-action], [data-navigation-intent]"' in javascript
 
 
 def test_completed_tutor_stream_keeps_card_visible_and_resizes_only_if_needed() -> None:

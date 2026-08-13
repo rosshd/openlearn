@@ -121,7 +121,7 @@
         <div><h2 id="outline-heading">Your suggested course outline</h2><p>Lower-confidence patterns get more teaching time. High-confidence patterns stay in the plan for quick verification.</p></div>
         <span>{{ placement.outline_items|length }} units</span>
       </div>
-      <ol class="outline-list">
+      <ol class="outline-list" data-outline-list>
         {% for item in placement.outline_items %}
         <li class="{% if item.locked %}outline-locked{% endif %}">
           <div><strong>{{ item.title }}</strong><p>{{ item.outcome }}</p><p class="outline-habit"><span>Interview habit</span> {{ item.interview_habit }}</p></div>
@@ -133,7 +133,8 @@
         <button class="primary-action" type="button" data-confirm-outline>Confirm course outline</button>
         <button type="button" data-change-outline>Change course outline</button>
       </div>
-      <section data-outline-preview-confirm hidden>
+      <section data-outline-preview-confirm hidden aria-labelledby="outline-preview-heading">
+        <h3 id="outline-preview-heading" tabindex="-1" data-outline-preview-heading>Review changed course outline</h3>
         <p>Review the changed route above. Nothing is saved until you confirm.</p>
         <div class="placement-entry-actions">
           <button class="primary-action" type="button" data-accept-outline-preview>Confirm changes</button>

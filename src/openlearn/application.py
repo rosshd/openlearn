@@ -199,6 +199,15 @@ class InterviewLearningProjection:
     deferred_explanation: str | None = None
 
 
+@dataclass(frozen=True)
+class InterviewCardProjection:
+    """Lightweight canonical progress used by course-list cards."""
+
+    position: InterviewConceptProjection
+    coverage: InterviewCoverageProjection
+    readiness: InterviewReadinessProjection
+
+
 def _concept_projection(
     canonical: Mapping[str, object], cursor_or_target: Mapping[str, object]
 ) -> InterviewConceptProjection:
@@ -605,6 +614,29 @@ def interview_learning(slug: str) -> InterviewLearningProjection | None:
         ),
         deferred_skill=deferred_skill,
         deferred_explanation=deferred_explanation,
+    )
+
+
+def interview_learning_card(slug: str) -> InterviewCardProjection | None:
+    """Return canonical card metrics without parsing the lesson transcript."""
+    from openlearn.courses import interview_learning_source
+
+    source = interview_learning_source(slug)
+    if source is None:
+        return None
+    state = source["state"]
+    metadata = source["metadata"]
+    assert isinstance(state, dict) and isinstance(metadata, dict)
+    canonical = state["interview_curriculum"]
+    assert isinstance(canonical, dict)
+    position, _next_target, _active = _learning_positions(canonical)
+    coverage, readiness, _route_skills, _deferred_values = _learning_progress(
+        canonical, metadata
+    )
+    return InterviewCardProjection(
+        position=position,
+        coverage=coverage,
+        readiness=readiness,
     )
 
 
