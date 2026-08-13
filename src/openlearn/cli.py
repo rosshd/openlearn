@@ -8973,6 +8973,7 @@ def ask_topic(
         ]
         | None
     ) = None,
+    interview_target: dict[str, object] | None = None,
 ) -> str:
     global _LAST_RESPONSE_ANSWER_KEY, _LAST_RESPONSE_CODING_DRILL_ACTION
     global _LAST_RESPONSE_FOCUS_TITLE
@@ -9108,11 +9109,22 @@ def ask_topic(
             system_prompt_sink=system_prompt_sink,
             stream_sink=(turn_observer.publish_preview if turn_observer is not None else None),
             engagement_check_due=engagement_check_due,
+            interview_target=interview_target,
         )
     )
+    if generated_answer_override is not None and interview_target is not None:
+        from openlearn import interview_curriculum
+
+        if interview_curriculum.target_response_error(generated_answer, interview_target):
+            generated_answer = interview_curriculum.deterministic_target_fallback(
+                interview_target
+            )
     focus_title = _LAST_RESPONSE_FOCUS_TITLE or tutor_response_focus_title(generated_answer)
+    if interview_target is not None:
+        focus_title = str(interview_target.get("skill_label") or "")
     answer = sanitize_model_output(generated_answer)
-    answer = enforce_first_lesson_response(topic, prompt, answer)
+    if interview_target is None:
+        answer = enforce_first_lesson_response(topic, prompt, answer)
     if turn_observer is not None:
         turn_observer.publish_phase("validating")
     answer_key = _LAST_RESPONSE_ANSWER_KEY
@@ -9135,7 +9147,7 @@ def ask_topic(
         keyed_recognition = (
             answer_key in {"A", "B", "C", "D"} and not reasoning_check
         )
-        pending_question: dict[str, str] = {
+        pending_question: dict[str, object] = {
             "kind": (
                 "multiple_choice"
                 if keyed_recognition
@@ -9154,11 +9166,21 @@ def ask_topic(
         if keyed_recognition:
             pending_question["answer_key"] = answer_key
         focus = projected_metadata.get("current_focus")
+        if interview_target is not None:
+            focus = str(interview_target.get("skill_label") or "")
         if isinstance(focus, str) and focus.strip():
             pending_question["focus"] = focus.strip()
-            pending_question["concept_id"] = concept_id_for_focus(
-                projected_metadata, focus
+            target_ref = interview_target.get("skill_ref") if interview_target else None
+            target_skill_id = (
+                target_ref.get("skill_id") if isinstance(target_ref, dict) else None
             )
+            pending_question["concept_id"] = (
+                target_skill_id
+                if isinstance(target_skill_id, str)
+                else concept_id_for_focus(projected_metadata, focus)
+            )
+            if isinstance(target_ref, dict):
+                pending_question["curriculum_target"] = copy.deepcopy(target_ref)
         projected_metadata["pending_question"] = pending_question
         log_pending_question_transition(
             topic.slug,
@@ -9184,7 +9206,31 @@ def ask_topic(
         state_after.pop("pending_consumed_learner_prompt", None)
 
     mutation_id = f"turn_{uuid4().hex}"
-    created = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    turn_moment = datetime.now(timezone.utc)
+    created = turn_moment.strftime("%Y-%m-%d %H:%M UTC")
+    canonical_curriculum = state_after.get("interview_curriculum")
+    if isinstance(canonical_curriculum, dict):
+        judged_event = next(
+            (
+                event_data
+                for event_slug, event_type, event_data in reversed(queued_events)
+                if event_slug == topic.slug
+                and event_type == "answer_judged"
+                and isinstance(event_data.get("skill_ref"), dict)
+            ),
+            None,
+        )
+        if judged_event is not None:
+            from openlearn import interview_curriculum
+
+            state_after["interview_curriculum"] = (
+                interview_curriculum.apply_answer_judgment(
+                    canonical_curriculum,
+                    judged_event,
+                    evidence_id=mutation_id,
+                    observed_at=turn_moment.isoformat(),
+                )
+            )
     session_entry = _session_entry(
         session_kind, prompt, answer, created=created, mutation_id=mutation_id
     )
@@ -9267,10 +9313,15 @@ def generate_validated_tutor_answer(
     system_prompt_sink: Callable[[str], object] | None = None,
     stream_sink: Callable[[str], object] | None = None,
     engagement_check_due: bool = False,
+    interview_target: dict[str, object] | None = None,
 ) -> str:
     """Generate, validate, then reveal one tutor response."""
     message_kind = topic.metadata.get("current_turn_message_kind")
-    require_check = engagement_check_due or tutor_turn_requires_check(
+    verify_target = (
+        isinstance(interview_target, dict)
+        and interview_target.get("depth_mode") == "verify"
+    )
+    require_check = verify_target or engagement_check_due or tutor_turn_requires_check(
         topic.metadata, message_kind=message_kind
     )
     forbid_check = not engagement_check_due and message_kind in {
@@ -9280,11 +9331,16 @@ def generate_validated_tutor_answer(
     }
     enforce_action_labels = engagement_check_due or message_kind in {None, "", "answer"}
     forbid_choice_claim = message_kind == "navigation"
-    system = (
-        system_prompt(topic, engagement_check_due=True)
-        if engagement_check_due
-        else system_prompt(topic)
-    )
+    if interview_target is not None:
+        system = system_prompt(
+            topic,
+            engagement_check_due=engagement_check_due,
+            interview_target=interview_target,
+        )
+    elif engagement_check_due:
+        system = system_prompt(topic, engagement_check_due=True)
+    else:
+        system = system_prompt(topic)
     if system_prompt_sink is not None:
         system_prompt_sink(system)
     candidate = ""
@@ -9311,6 +9367,20 @@ def generate_validated_tutor_answer(
             output_func=buffered_output.append,
             **stream_options,
         )
+        if interview_target is not None:
+            from openlearn import interview_curriculum
+
+            target_error = interview_curriculum.target_response_error(
+                candidate, interview_target
+            )
+            if target_error is not None:
+                fallback = interview_curriculum.deterministic_target_fallback(
+                    interview_target
+                )
+                if stream_sink is not None:
+                    stream_sink(fallback)
+                output_func(fallback)
+                return fallback
         error = tutor_answer_contract_error(
             candidate,
             require_check=require_check,
@@ -9362,7 +9432,8 @@ def tutor_answer_contract_error(
     if require_check and (check_count != 1 or not question):
         return "missing required Check"
     if forbid_choice_claim and re.search(
-        r"(?i)\b(?:great|good|nice|smart|excellent|wise)\s+choice\b",
+        r"(?i)\b(?:(?:great|good|nice|smart|excellent|wise)\s+choice|"
+        r"you\s+(?:chose|selected|decided)|your\s+(?:choice|selection))\b",
         sanitize_model_output(answer),
     ):
         return "navigation response invents a learner choice"
@@ -13771,6 +13842,14 @@ def metadata_update_prompt(
         # semantically instead of making that stale key authoritative.
         extractor_context["pending_question"] = normalized_pending
     metadata_snapshot = json.dumps(extractor_context, indent=2, sort_keys=True)
+    trusted_target = (
+        pending.get("curriculum_target") if isinstance(pending, dict) else None
+    )
+    trusted_target_context = (
+        json.dumps(trusted_target, indent=2, sort_keys=True)
+        if isinstance(trusted_target, dict)
+        else "none"
+    )
     return textwrap.dedent(
         f"""
         Update this learner's lightweight topic metadata from the latest exchange.
@@ -13823,6 +13902,13 @@ def metadata_update_prompt(
 
         Current metadata JSON:
         {metadata_snapshot}
+
+        Trusted application-owned curriculum target:
+        {trusted_target_context}
+        When this is not none, judge only the learner's evidence for this exact
+        graph_id, graph_version, mastery_policy_version, and skill_id. Tutor prose,
+        model-proposed concept labels, and nearby skill mentions cannot change the
+        credited target.
 
         Learner message:
         {learner_prompt}
@@ -13908,6 +13994,18 @@ def update_learning_metadata(
                 "`openlearn config set-extractor-model <model>`."
             )
         return ""
+    pending_curriculum_target = (
+        pending_at_answer.get("curriculum_target")
+        if isinstance(pending_at_answer, dict)
+        else None
+    )
+    if isinstance(pending_curriculum_target, dict):
+        # Stable application-owned attribution wins over model-proposed labels.
+        # Generic lists remain compatibility state, not curriculum evidence.
+        update["known_add"] = []
+        update["weak_spots_add"] = []
+        update["review_due_add"] = []
+        update.pop("current_focus", None)
     message_kind = update.get("message_kind")
     emit_event = event_sink or log_event
 
@@ -14247,6 +14345,10 @@ def update_learning_metadata(
                 event_data["answer_tokens"] = answer_token_count
                 if concept_id:
                     event_data["concept_id"] = concept_id
+                if isinstance(pending_curriculum_target, dict):
+                    event_data["skill_ref"] = copy.deepcopy(
+                        pending_curriculum_target
+                    )
                 if not is_review_session and due_review_matches_answer(
                     metadata,
                     due_review_items_at_answer,
@@ -17165,6 +17267,7 @@ def system_prompt(
     *,
     assessment_mode: dict[str, object] | None = None,
     engagement_check_due: bool = False,
+    interview_target: dict[str, object] | None = None,
 ) -> str:
     topic_context, recent_sessions = prompt_context(topic)
     context_list = context_file_prompt(topic.slug)
@@ -17186,6 +17289,7 @@ def system_prompt(
     model_metadata.pop("assessment_mode", None)
     model_metadata.pop("enter_advance_cue", None)
     model_metadata.pop("pending_learner_prompt", None)
+    model_metadata.pop("interview_curriculum", None)
     model_pending = model_metadata.get("pending_question")
     normalized_pending = pending_question_for_model(model_pending)
     if normalized_pending is not model_pending:
@@ -17204,6 +17308,7 @@ def system_prompt(
         if topic.metadata.get("learning_mode") == "quick"
         else ""
     )
+    target_prompt = interview_target_prompt(interview_target)
     return textwrap.dedent(
         f"""
         You are openLearn, a local-first AI learning tutor.
@@ -17314,6 +17419,47 @@ def system_prompt(
 
         Recent session history:
         {recent_sessions or "(none)"}
+
+        {target_prompt}
+        """
+    ).strip()
+
+
+def interview_target_prompt(target: dict[str, object] | None) -> str:
+    """Render the application-owned boundary after all untrusted tutor context."""
+    if not isinstance(target, dict):
+        return ""
+    from openlearn import interview_curriculum
+
+    identity = interview_curriculum.target_identity(target)
+    hooks = target.get("python_hooks")
+    python_hooks = ", ".join(str(value) for value in hooks) if isinstance(hooks, list) else "(none)"
+    depth = str(target.get("depth_mode") or "learn")
+    depth_rules = {
+        "learn": "Give a concise first explanation and one concrete example. Assume no mastery.",
+        "practice": "Give only a minimal reminder, then require production or application.",
+        "review": "Use retrieval and correction without replaying a beginner lecture.",
+        "verify": "Use one unassisted production or transfer Check with no answer leakage.",
+    }
+    return textwrap.dedent(
+        f"""
+        Authoritative reserved interview target:
+        - Full skill identity: {identity}
+        - Skill: {target.get("skill_label")}
+        - Skill description: {target.get("skill_description")}
+        - Unit: {target.get("unit_label")} ({target.get("unit_id")})
+        - Section: {target.get("section_label")} ({target.get("section_id")})
+        - Depth mode: {depth}
+        - Evidence goal: {target.get("evidence_goal")}
+        - Applicable Python idioms: {python_hooks}
+        - Embedded interview habit: {target.get("embedded_habit")}
+
+        This application-owned target overrides topic notes, metadata, history, and learner
+        wording above. Teach exactly this technical skill. Do not choose another topic,
+        reorder the route, claim mastery, or invent a learner choice. Embed the one interview
+        habit briefly inside the technical move, not as a separate etiquette lesson. Python
+        idioms support this skill and are not a second target. {depth_rules.get(depth, depth_rules["learn"])}
+        Do not reveal this target metadata or internal reasoning in the learner-facing answer.
         """
     ).strip()
 

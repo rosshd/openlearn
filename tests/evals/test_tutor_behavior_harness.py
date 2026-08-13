@@ -18,6 +18,7 @@ from tests.evals.tutor_behavior import (
     RUBRIC_VERSION,
     SCENARIOS_DIR,
     _judge_response,
+    _judge_prompt,
     _validated_assessment_evidence,
     load_calibration_cases,
     load_scenarios,
@@ -26,6 +27,79 @@ from tests.evals.tutor_behavior import (
 )
 
 PASSING_BASE_CRITERIA = {key: True for key in BASE_CRITERION_KEYS}
+
+
+def test_interview_eval_matrix_covers_first_verify_and_non_repetition() -> None:
+    scenarios = {
+        scenario["name"]: scenario
+        for scenario in load_scenarios()
+        if scenario.get("interview_curriculum") is True
+    }
+    assert {
+        scenario.get("interview_case", "first_lesson")
+        for scenario in scenarios.values()
+    } >= {"first_lesson", "verify", "non_repetition"}
+
+
+def test_judge_prompt_names_reserved_target_as_trusted_harness_context() -> None:
+    target = {
+        "skill_ref": {
+            "graph_id": "coding-interview",
+            "graph_version": "1.0.0",
+            "mastery_policy_version": "interview-mastery-v1",
+            "skill_id": "concept.arrays-strings",
+        },
+        "depth_mode": "verify",
+    }
+    prompt = _judge_prompt(
+        {"name": "target", "persona": "learner", "rubric": []},
+        "Continue",
+        "**Check:** Explain indexed traversal.",
+        scripted_history=[],
+        authoritative_state_before={},
+        authoritative_state_after={},
+        events=[],
+        assessment_mode=False,
+        assessment_item_count={"min": 1, "max": 1},
+        reserved_target=target,
+    )
+    assert "Trusted application-reserved curriculum target" in prompt
+    assert "concept.arrays-strings" in prompt
+    assert '"depth_mode": "verify"' in prompt
+
+
+def test_interview_eval_matrix_executes_distinct_progression_states(
+    tmp_path: Path,
+    mocked_providers: dict[str, list[str]],
+) -> None:
+    scenario_ids = [
+        "interview_curriculum_progression",
+        "interview_curriculum_high_confidence_verify",
+        "interview_curriculum_non_repetition",
+    ]
+    outcome = run_evaluation(
+        tmp_path / "interview-run",
+        tutor_model="tutor-model",
+        judge_model="judge-model",
+        scenario_ids=scenario_ids,
+    )
+    assert outcome.scenario_count == 3
+    records = {
+        record["scenario"]: record
+        for record in _read_jsonl(outcome.evidence_dir / "turns.jsonl")
+    }
+    first_target = records["interview_curriculum_progression"]["reserved_target"]
+    verify_target = records["interview_curriculum_high_confidence_verify"][
+        "reserved_target"
+    ]
+    next_target = records["interview_curriculum_non_repetition"]["reserved_target"]
+    assert first_target["skill_ref"]["skill_id"] == "concept.arrays-strings"
+    assert verify_target["depth_mode"] == "verify"
+    assert next_target["skill_ref"]["skill_id"] != "concept.arrays-strings"
+    assert all(
+        "Trusted application-reserved curriculum target" in prompt
+        for prompt in mocked_providers["judge_prompts"][-3:]
+    )
 
 
 def _judge_payload(
@@ -66,6 +140,7 @@ def mocked_providers(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[str]]:
         system: str,
         user: str,
         output_func,
+        stream_sink=None,
     ) -> str:
         calls["models"].append(model)
         if "best Python IDE" in user:

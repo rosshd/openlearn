@@ -244,11 +244,20 @@ ProgressionIntent = Literal["continue", "skip", "revisit", "practice"]
 
 @dataclass(frozen=True)
 class ProgressionTarget:
+    bundle_id: str
+    bundle_version: str
     unit_id: str
+    unit_label: str
     section_id: str
+    section_label: str
     skill_ref: Mapping[str, str]
+    skill_label: str
+    skill_description: str
     requirement: str
     depth_mode: str
+    evidence_goal: str
+    embedded_habit: str
+    python_hooks: tuple[str, ...]
 
     @property
     def skill_id(self) -> str:
@@ -256,11 +265,20 @@ class ProgressionTarget:
 
     def to_dict(self) -> dict[str, object]:
         return {
+            "bundle_id": self.bundle_id,
+            "bundle_version": self.bundle_version,
             "unit_id": self.unit_id,
+            "unit_label": self.unit_label,
             "section_id": self.section_id,
+            "section_label": self.section_label,
             "skill_ref": dict(self.skill_ref),
+            "skill_label": self.skill_label,
+            "skill_description": self.skill_description,
             "requirement": self.requirement,
             "depth_mode": self.depth_mode,
+            "evidence_goal": self.evidence_goal,
+            "embedded_habit": self.embedded_habit,
+            "python_hooks": list(self.python_hooks),
         }
 
 
@@ -292,17 +310,329 @@ def _progression_route_items(
     return tuple(result)
 
 
-def _progression_target(item: Mapping[str, object]) -> ProgressionTarget:
+def _progression_target(
+    item: Mapping[str, object], bundle: "InterviewCurriculumBundle"
+) -> ProgressionTarget:
     ref = item.get("skill_ref")
     if not isinstance(ref, Mapping):
         raise CurriculumBundleError("canonical interview target is malformed")
-    return ProgressionTarget(
-        unit_id=str(item["unit_id"]),
-        section_id=str(item["section_id"]),
-        skill_ref=MappingProxyType({str(key): str(value) for key, value in ref.items()}),
-        requirement=str(item.get("requirement") or "required"),
-        depth_mode=str(item.get("depth_mode") or "learn"),
+    normalized_ref = {str(key): str(value) for key, value in ref.items()}
+    graph = bundle.graph_registry.graph(
+        normalized_ref["graph_id"],
+        normalized_ref["graph_version"],
+        normalized_ref["mastery_policy_version"],
     )
+    skill = graph.skill(normalized_ref["skill_id"])
+    depth_mode = str(item.get("depth_mode") or "learn")
+    evidence_goals = {
+        "learn": "Build an accurate mental model, then make one small application attempt.",
+        "practice": "Produce or apply the skill with only a minimal reminder.",
+        "review": "Retrieve the skill, correct any gap, and avoid replaying a beginner lesson.",
+        "verify": "Complete one unassisted production or transfer check without answer leakage.",
+    }
+    return ProgressionTarget(
+        bundle_id=bundle.bundle_id,
+        bundle_version=bundle.bundle_version,
+        unit_id=str(item["unit_id"]),
+        unit_label=str(item.get("unit_label") or item["unit_id"]),
+        section_id=str(item["section_id"]),
+        section_label=str(item.get("section_label") or item["section_id"]),
+        skill_ref=MappingProxyType(normalized_ref),
+        skill_label=skill.name,
+        skill_description=skill.description,
+        requirement=str(item.get("requirement") or "required"),
+        depth_mode=depth_mode,
+        evidence_goal=evidence_goals.get(depth_mode, evidence_goals["learn"]),
+        embedded_habit=str(item.get("embedded_habit") or "Explain the key decision aloud."),
+        python_hooks=tuple(
+            str(value)
+            for value in item.get("python_hooks", [])
+            if isinstance(value, str) and value.strip()
+        ),
+    )
+
+
+def target_identity(target: Mapping[str, object]) -> str:
+    ref = target.get("skill_ref")
+    if not isinstance(ref, Mapping):
+        raise CurriculumBundleError("interview target has no stable skill identity")
+    values = tuple(
+        ref.get(key)
+        for key in ("graph_id", "graph_version", "mastery_policy_version", "skill_id")
+    )
+    if not all(isinstance(value, str) and value for value in values):
+        raise CurriculumBundleError("interview target stable skill identity is malformed")
+    return "@".join(str(value) for value in values)
+
+
+def target_response_error(answer: str, target: Mapping[str, object]) -> str | None:
+    """Reject explicit target replacement, invented choices, or private reasoning."""
+    skill_ref = target.get("skill_ref")
+    skill_id = skill_ref.get("skill_id") if isinstance(skill_ref, Mapping) else None
+    if not isinstance(skill_id, str):
+        return "malformed reserved target"
+    if re.search(
+        r"(?is)<(?:think|analysis|reasoning)\b|(?:thinking process|analysis|reasoning)\s*:",
+        answer,
+    ):
+        return "internal reasoning exposed"
+    candidate_ids = set(
+        re.findall(
+            r"\b[a-z0-9]+(?:-[a-z0-9]+)*\.[a-z0-9]+(?:-[a-z0-9]+)*\b",
+            answer,
+        )
+    )
+    target_bundle_id = target.get("bundle_id")
+    target_bundle_version = target.get("bundle_version")
+    bundle = (
+        load_pinned_bundle(target_bundle_id, target_bundle_version)
+        if isinstance(target_bundle_id, str) and isinstance(target_bundle_version, str)
+        else load_default_bundle()
+    )
+    known_skill_ids: set[str] = set()
+    competing_skill_names: list[str] = []
+    for graph_ref in bundle.graphs:
+        graph = bundle.graph_registry.graph(
+            graph_ref.graph_id,
+            graph_ref.graph_version,
+            graph_ref.mastery_policy_version,
+        )
+        for skill in graph.skills:
+            known_skill_ids.add(skill.skill_id)
+            if skill.skill_id == skill_id:
+                continue
+            competing_skill_names.append(skill.name)
+    if (candidate_ids & known_skill_ids) - {skill_id}:
+        return "response names a conflicting stable target"
+    learner_sections = re.findall(
+        r"(?is)(?:^|\n)\s*(?:\*\*)?"
+        r"(Lesson|Check|Example|Feedback|Hint):(?:\*\*)?\s*"
+        r"(.*?)(?=(?:\n\s*(?:\*\*)?(?:Lesson|Check|Example|Feedback|Hint):)|\Z)",
+        answer,
+    )
+    target_label = str(target.get("skill_label") or "")
+    for section_kind, section_text in learner_sections:
+        for candidate_name in competing_skill_names:
+            candidate_match = re.search(
+                rf"(?i)\b{re.escape(candidate_name)}\b", section_text
+            )
+            if candidate_match is None:
+                continue
+            sentence_start = max(
+                section_text.rfind(".", 0, candidate_match.start()),
+                section_text.rfind("\n", 0, candidate_match.start()),
+            )
+            sentence_end = section_text.find(".", candidate_match.end())
+            if sentence_end < 0:
+                sentence_end = len(section_text)
+            sentence = section_text[sentence_start + 1 : sentence_end]
+            is_supporting_comparison = bool(
+                re.search(
+                    r"(?i)\b(?:unlike|compar(?:e|ed|ing)\s+(?:them\s+)?with|"
+                    r"in\s+contrast\s+to|versus)\b",
+                    sentence,
+                )
+                and target_label
+                and re.search(rf"(?i)\b{re.escape(target_label)}\b", sentence)
+            )
+            if is_supporting_comparison:
+                continue
+            before_candidate = section_text[
+                max(0, candidate_match.start() - 80) : candidate_match.start()
+            ]
+            directly_assigned = re.search(
+                r"(?i)\b(?:explain|implement|practice|learn|teach|study|verify|trace|"
+                r"apply|solve|derive|focus\s+on)\b[^.\n]{0,64}$",
+                before_candidate,
+            )
+            if directly_assigned or section_kind.casefold() in {
+                "lesson",
+                "check",
+                "example",
+            }:
+                return "response names a conflicting stable target"
+    focus_markers = re.findall(r"(?is)<!--\s*focus\s*:\s*(.*?)\s*-->", answer)
+    label = str(target.get("skill_label") or "")
+    if any(marker.strip().casefold() != label.casefold() for marker in focus_markers):
+        return "response declares a conflicting focus"
+    if re.search(
+        r"(?i)\b(?:you\s+(?:chose|selected|decided)|your\s+(?:choice|selection))\b",
+        answer,
+    ):
+        return "response invents a learner choice"
+    return None
+
+
+def apply_answer_judgment(
+    canonical_state: Mapping[str, object],
+    event_data: Mapping[str, object],
+    *,
+    evidence_id: str,
+    observed_at: str,
+) -> dict[str, object]:
+    """Project one trusted answer judgment into the pinned curriculum state."""
+    state = copy.deepcopy(dict(canonical_state))
+    bundle_id = state.get("bundle_id")
+    bundle_version = state.get("bundle_version")
+    if not isinstance(bundle_id, str) or not isinstance(bundle_version, str):
+        raise CurriculumBundleError("canonical interview curriculum binding is malformed")
+    bundle = load_pinned_bundle(bundle_id, bundle_version)
+    raw_ref = event_data.get("skill_ref")
+    if not isinstance(raw_ref, Mapping):
+        raise CurriculumBundleError("answer judgment has no stable skill identity")
+    identity_keys = (
+        "graph_id",
+        "graph_version",
+        "mastery_policy_version",
+        "skill_id",
+    )
+    if set(raw_ref) != set(identity_keys) or not all(
+        isinstance(raw_ref.get(key), str) and raw_ref.get(key) for key in identity_keys
+    ):
+        raise CurriculumBundleError("answer judgment stable skill identity is malformed")
+    skill_ref = {key: str(raw_ref[key]) for key in identity_keys}
+    route_items = _progression_route_items(state)
+    if not any(
+        isinstance(item.get("skill_ref"), Mapping)
+        and all(item["skill_ref"].get(key) == skill_ref[key] for key in identity_keys)
+        for item, _skill_id in route_items
+    ):
+        raise CurriculumBundleError("answer judgment target is absent from the pinned route")
+    cursor = state.get("cursor")
+    cursor_ref = cursor.get("skill_ref") if isinstance(cursor, Mapping) else None
+    if not isinstance(cursor_ref, Mapping) or not all(
+        cursor_ref.get(key) == skill_ref[key] for key in identity_keys
+    ):
+        raise CurriculumBundleError("answer judgment does not match the reserved target")
+    graph = bundle.graph_registry.graph(
+        skill_ref["graph_id"],
+        skill_ref["graph_version"],
+        skill_ref["mastery_policy_version"],
+    )
+    skill = graph.skill(skill_ref["skill_id"])
+    status = event_data.get("status")
+    if status not in {"correct", "partial", "needs_work"}:
+        raise CurriculumBundleError("answer judgment status is malformed")
+    if not isinstance(evidence_id, str) or not evidence_id:
+        raise CurriculumBundleError("answer judgment evidence id is malformed")
+    if not isinstance(observed_at, str) or not observed_at:
+        raise CurriculumBundleError("answer judgment timestamp is malformed")
+    answer_kind = event_data.get("answer_kind")
+    kinds: list[str] = []
+    if status == "correct":
+        if answer_kind in interview_skills.EVIDENCE_KINDS:
+            kinds.append(str(answer_kind))
+        if event_data.get("is_transfer") is True and "transfer" not in kinds:
+            kinds.append("transfer")
+        if event_data.get("is_retrieval") is True and "delayed_retrieval" not in kinds:
+            kinds.append("delayed_retrieval")
+        kinds.sort(key=interview_skills.EVIDENCE_KINDS.index)
+    evidence = state.get("evidence")
+    if not isinstance(evidence, dict):
+        raise CurriculumBundleError("canonical interview evidence is malformed")
+    records = evidence.get("answer_evidence")
+    records = (
+        [copy.deepcopy(dict(item)) for item in records if isinstance(item, Mapping)]
+        if isinstance(records, list)
+        else []
+    )
+    if not any(item.get("evidence_id") == evidence_id for item in records):
+        record: dict[str, object] = {
+            "evidence_id": evidence_id,
+            "observed_at": observed_at,
+            "skill_ref": skill_ref,
+            "status": status,
+            "kinds": kinds,
+        }
+        score = event_data.get("score")
+        if isinstance(score, (int, float)) and not isinstance(score, bool):
+            record["score"] = float(score)
+        records.append(record)
+    evidence["answer_evidence"] = records
+
+    skill_id_value = skill_ref["skill_id"]
+    weak = {
+        value for value in evidence.get("weak", []) if isinstance(value, str)
+    }
+    ready = {
+        value for value in evidence.get("ready", []) if isinstance(value, str)
+    }
+    due = {
+        value for value in evidence.get("due_review", []) if isinstance(value, str)
+    }
+    if status in {"partial", "needs_work"}:
+        weak.add(skill_id_value)
+        ready.discard(skill_id_value)
+        if isinstance(cursor, dict):
+            cursor["instruction_status"] = "needs_work"
+    elif "production" in kinds or "transfer" in kinds:
+        weak.discard(skill_id_value)
+        matching_records = [
+            item
+            for item in records
+            if item.get("status") == "correct"
+            and isinstance(item.get("skill_ref"), Mapping)
+            and all(item["skill_ref"].get(key) == skill_ref[key] for key in identity_keys)
+        ]
+        counts = {
+            kind: sum(kind in item.get("kinds", []) for item in matching_records)
+            for kind in interview_skills.EVIDENCE_KINDS
+        }
+        required = dict(skill.evidence_policy.minimum)
+        required["transfer"] = max(
+            required["transfer"], skill.evidence_policy.transfer.minimum_novel_contexts
+        )
+        is_ready = all(counts[kind] >= required[kind] for kind in interview_skills.EVIDENCE_KINDS)
+        readiness = evidence.get("readiness")
+        readiness = copy.deepcopy(dict(readiness)) if isinstance(readiness, Mapping) else {}
+        readiness[target_identity({"skill_ref": skill_ref})] = {
+            "skill_ref": skill_ref,
+            "status": "ready" if is_ready else "provisional",
+            "counts": counts,
+            "missing": [
+                f"{kind} {counts[kind]}/{required[kind]}"
+                for kind in interview_skills.EVIDENCE_KINDS
+                if counts[kind] < required[kind]
+            ],
+        }
+        evidence["readiness"] = readiness
+        if is_ready:
+            ready.add(skill_id_value)
+            due.discard(skill_id_value)
+        else:
+            ready.discard(skill_id_value)
+    evidence["weak"] = sorted(weak)
+    evidence["ready"] = sorted(ready)
+    evidence["due_review"] = sorted(due)
+    return state
+
+
+def deterministic_target_fallback(target: Mapping[str, object]) -> str:
+    """Return one learner-facing bundle-bound move when provider output is unsafe."""
+    label = str(target.get("skill_label") or "this skill")
+    description = str(target.get("skill_description") or "Build the core technical model.")
+    depth = str(target.get("depth_mode") or "learn")
+    habit = str(target.get("embedded_habit") or "Explain the key decision aloud.")
+    hooks = target.get("python_hooks")
+    python_text = ""
+    if isinstance(hooks, list) and hooks:
+        python_text = f" In Python, use {str(hooks[0]).rstrip('.')} where it supports the approach."
+    if depth == "verify":
+        return (
+            f"**Check:**\nVerify {label} without a refresher: explain the invariant or core "
+            f"representation, then apply it to one concrete input. {habit}"
+        )
+    if depth == "practice":
+        return (
+            f"**Check:**\nApply {label} to a small example and state the key implementation "
+            f"decision. {habit}{python_text}"
+        )
+    if depth == "review":
+        return (
+            f"**Check:**\nRetrieve {label}: summarize the core idea, then name one edge case "
+            f"that could break an implementation. {habit}"
+        )
+    return f"**Lesson:**\n{label}: {description} {habit}{python_text}".strip()
 
 
 def resolve_progression_target(
@@ -316,6 +646,11 @@ def resolve_progression_target(
     if intent not in {"continue", "skip", "revisit", "practice"}:
         raise ValueError("unsupported interview progression intent")
     state = copy.deepcopy(dict(canonical_state))
+    bundle_id = state.get("bundle_id")
+    bundle_version = state.get("bundle_version")
+    if not isinstance(bundle_id, str) or not isinstance(bundle_version, str):
+        raise CurriculumBundleError("canonical interview curriculum binding is malformed")
+    bundle = load_pinned_bundle(bundle_id, bundle_version)
     route_items = _progression_route_items(state)
     by_id = {skill_id: item for item, skill_id in route_items}
     evidence = state.get("evidence")
@@ -369,7 +704,9 @@ def resolve_progression_target(
         selected = next((item for item, skill_id in route_items if skill_id in exposed), None)
         if selected is None:
             return ProgressionResolution(state, None, "caught_up", caught_up=True)
-        return ProgressionResolution(state, _progression_target(selected), "practice_now")
+        return ProgressionResolution(
+            state, _progression_target(selected, bundle), "practice_now"
+        )
     else:
         excluded = {deferred_skill_id} if deferred_skill_id else set()
         selected = next(
@@ -437,7 +774,7 @@ def resolve_progression_target(
                 deferred_skill_id=deferred_skill_id,
             )
 
-    target = _progression_target(selected)
+    target = _progression_target(selected, bundle)
     state["cursor"] = {
         "unit_id": target.unit_id,
         "section_id": target.section_id,
@@ -840,6 +1177,25 @@ class InterviewCurriculumBundle:
 def bundle_resource() -> Traversable:
     return importlib.resources.files("openlearn").joinpath(
         "interview_curricula", "technical-interview-v1.json"
+    )
+
+
+def load_pinned_bundle(bundle_id: str, bundle_version: str) -> InterviewCurriculumBundle:
+    """Load the immutable package asset matching an existing course binding."""
+    resources = importlib.resources.files("openlearn").joinpath("interview_curricula")
+    for resource in resources.iterdir():
+        if not resource.name.endswith(".json"):
+            continue
+        try:
+            raw = json.loads(resource.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(raw, dict):
+            continue
+        if raw.get("bundle_id") == bundle_id and raw.get("bundle_version") == bundle_version:
+            return validate_bundle(raw)
+    raise CurriculumBundleError(
+        f"pinned interview curriculum is unavailable: {bundle_id}@{bundle_version}"
     )
 
 

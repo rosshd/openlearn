@@ -1,0 +1,19 @@
+{
+  "name": "interview_curriculum_non_repetition",
+  "persona": "An entry-level software engineer who has completed the first route skill and wants the next technical move without repetition.",
+  "description": "Checks that the application skips a completed first skill and binds teaching to the next exact route target.",
+  "topic": "technical interview non repetition eval",
+  "goal": "Prepare for LeetCode-style coding interviews with algorithms, data structures, and clear solution reasoning",
+  "interview_curriculum": true,
+  "interview_case": "non_repetition",
+  "turns": [
+    {"role": "user", "content": "Continue to the next technical concept."},
+    {"role": "assistant", "content": null}
+  ],
+  "rubric": [
+    "the response semantically teaches the exact application-reserved next skill",
+    "the response does not repeat the completed first route skill as its primary move",
+    "one communication habit is embedded briefly inside technical learning",
+    "relevant Python usage supports the exact skill without becoming a second topic"
+  ]
+}

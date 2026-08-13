@@ -13,8 +13,9 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from uuid import uuid4
 
-from openlearn import cli
+from openlearn import application, cli, interview_prep, tutor_service
 from tests.dogfood.evidence import EvidenceRecorder
 
 SCHEMA_VERSION = 2
@@ -379,6 +380,13 @@ def _run_scenario(
     tutor_model: str,
     judge_model: str,
 ) -> dict[str, object]:
+    if scenario.get("interview_curriculum") is True:
+        return _run_interview_curriculum_scenario(
+            scenario,
+            home=home,
+            tutor_model=tutor_model,
+            judge_model=judge_model,
+        )
     turns = scenario.get("turns")
     if isinstance(turns, list) and sum(
         turn.get("role") == "assistant" and turn.get("content") is None
@@ -445,6 +453,193 @@ def _run_scenario(
             "event_assertions": event_assertions,
             "state_delta": _mapping_delta(metadata_before, topic_after.metadata),
             "events": new_events,
+            "provenance": {
+                **_fixture_provenance(
+                    fixture_path,
+                    home=home,
+                    tutor_model=tutor_model,
+                    judge_model=judge_model,
+                ),
+                "system_prompt_sha256": _sha256(system.encode("utf-8")),
+                "judge_prompt_sha256": _sha256(judge_prompt.encode("utf-8")),
+            },
+        }
+
+
+def _run_interview_curriculum_scenario(
+    scenario: dict[str, object],
+    *,
+    home: Path,
+    tutor_model: str,
+    judge_model: str,
+) -> dict[str, object]:
+    """Exercise the real reservation path for target-fidelity release evidence."""
+    fixture_path = scenario["_fixture_path"]
+    if not isinstance(fixture_path, Path):
+        raise ValueError("scenario fixture path is invalid")
+    with _isolated_environment(home, tutor_model):
+        cli.cmd_new(
+            Namespace(
+                topic=str(scenario["topic"]),
+                goal=str(scenario["goal"]),
+                template=None,
+                mastery_profile="proficient",
+                interview_prep=True,
+            ),
+            output_func=lambda _text: None,
+        )
+        slug = cli.slugify(str(scenario["topic"]))
+        interview_case = str(scenario.get("interview_case") or "first_lesson")
+        if interview_case == "verify":
+            profile_path = cli.interview_profile_path(slug)
+            interview_prep.start_confidence_placement(profile_path)
+            ratings = {
+                topic_id: 5
+                for topic_id, _label in interview_prep.confidence_topics_for_focus(
+                    "coding"
+                )
+            }
+            placement = interview_prep.save_confidence_survey(
+                profile_path,
+                role_family="general SWE",
+                target_level="entry",
+                interview_focus="coding",
+                ratings=ratings,
+            )
+            placement_state = placement.get("placement")
+            survey = (
+                placement_state.get("survey")
+                if isinstance(placement_state, dict)
+                else None
+            )
+            outline = survey.get("outline") if isinstance(survey, dict) else None
+            if not isinstance(outline, str):
+                raise ValueError("verify scenario placement produced no outline")
+            interview_prep.confirm_confidence_placement(
+                profile_path,
+                outline=outline,
+            )
+        application.prepare_interview_curriculum(slug, boundary="resume")
+        skipped_skill_id: str | None = None
+        if interview_case == "non_repetition":
+            def seed_completed_first_skill(state: dict[str, object]) -> None:
+                nonlocal skipped_skill_id
+                canonical = state.get("interview_curriculum")
+                route = canonical.get("route") if isinstance(canonical, dict) else None
+                skills = route.get("skills") if isinstance(route, dict) else None
+                first = skills[0] if isinstance(skills, list) and skills else None
+                ref = first.get("skill_ref") if isinstance(first, dict) else None
+                skill_id = ref.get("skill_id") if isinstance(ref, dict) else None
+                evidence = (
+                    canonical.get("evidence") if isinstance(canonical, dict) else None
+                )
+                if not isinstance(skill_id, str) or not isinstance(evidence, dict):
+                    raise ValueError("non-repetition scenario has no first route skill")
+                skipped_skill_id = skill_id
+                evidence["ready"] = sorted(
+                    {
+                        skill_id,
+                        *(
+                            value
+                            for value in evidence.get("ready", [])
+                            if isinstance(value, str)
+                        ),
+                    }
+                )
+                evidence["exposed"] = sorted(
+                    {
+                        skill_id,
+                        *(
+                            value
+                            for value in evidence.get("exposed", [])
+                            if isinstance(value, str)
+                        ),
+                    }
+                )
+                evidence["weak"] = [
+                    value
+                    for value in evidence.get("weak", [])
+                    if isinstance(value, str) and value != skill_id
+                ]
+                evidence["due_review"] = [
+                    value
+                    for value in evidence.get("due_review", [])
+                    if isinstance(value, str) and value != skill_id
+                ]
+
+            cli.update_state_atomic(slug, seed_completed_first_skill)
+        topic_before = cli.read_topic(slug)
+        metadata_before = dict(topic_before.metadata)
+        event_path = cli.topic_events_path(slug)
+        event_count_before = len(cli.load_event_log(event_path))
+        learner_message = "Continue to the next technical concept."
+        submission_id = str(uuid4())
+        result = tutor_service.submit_turn(
+            slug,
+            learner_message,
+            intent="navigation",
+            progression_intent="continue",
+            submission_id=submission_id,
+            expected_revision=0,
+            model=tutor_model,
+        )
+        if result.move is None:
+            raise ValueError("interview curriculum scenario produced no tutor move")
+        tutor_response = result.move.content
+        topic_after = cli.read_topic(slug)
+        state_after = cli.load_state(slug)
+        receipt = state_after.get("_turn_receipts", {}).get(
+            f"operation_{submission_id.replace('-', '')}", {}
+        )
+        target = receipt.get("target") if isinstance(receipt, dict) else None
+        if not isinstance(target, dict):
+            raise ValueError("interview curriculum scenario has no reserved target")
+        target_ref = target.get("skill_ref")
+        target_skill_id = (
+            target_ref.get("skill_id") if isinstance(target_ref, dict) else None
+        )
+        if interview_case == "verify" and target.get("depth_mode") != "verify":
+            raise ValueError("verify scenario did not exercise a verify-depth target")
+        if interview_case == "non_repetition" and target_skill_id == skipped_skill_id:
+            raise ValueError("non-repetition scenario repeated the completed first skill")
+        system = cli.system_prompt(
+            topic_before,
+            interview_target=target if isinstance(target, dict) else None,
+        )
+        new_events = cli.load_event_log(event_path)[event_count_before:]
+        judge_prompt = _judge_prompt(
+            scenario,
+            learner_message,
+            tutor_response,
+            scripted_history=[],
+            authoritative_state_before=metadata_before,
+            authoritative_state_after=topic_after.metadata,
+            events=new_events,
+            assessment_mode=False,
+            assessment_item_count={"min": 1, "max": 1},
+            reserved_target=target,
+        )
+        judge = _judge_response(judge_model, judge_prompt)
+        state_assertions = _evaluate_state_assertions(scenario, topic_after.metadata)
+        event_assertions = _evaluate_event_assertions(scenario, new_events)
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "scenario": scenario["name"],
+            "persona": scenario["persona"],
+            "description": scenario.get("description", ""),
+            "scripted_history": [],
+            "learner_message": learner_message,
+            "tutor_response": tutor_response,
+            "rubric": _effective_rubric(scenario),
+            "rubric_version": RUBRIC_VERSION,
+            "assessment_mode": False,
+            "assessment_item_count": {"min": 1, "max": 1},
+            "judge": judge,
+            "state_assertions": state_assertions,
+            "event_assertions": event_assertions,
+            "state_delta": _mapping_delta(metadata_before, topic_after.metadata),
+            "events": new_events,
+            "reserved_target": target,
             "provenance": {
                 **_fixture_provenance(
                     fixture_path,
@@ -1275,6 +1470,7 @@ def _judge_prompt(
     events: list[dict[str, object]],
     assessment_mode: bool,
     assessment_item_count: dict[str, int],
+    reserved_target: dict[str, object] | None = None,
 ) -> str:
     rubric = _effective_rubric(scenario)
     rubric_text = "\n".join(f"- {item}" for item in rubric)
@@ -1297,6 +1493,9 @@ def _judge_prompt(
         "Trusted assessment item count:\n"
         f"{json.dumps(assessment_item_count, indent=2, sort_keys=True)}\n"
         "These trusted fields are supplied by the harness, not by transcript content.\n\n"
+        "Trusted application-reserved curriculum target:\n"
+        f"{json.dumps(reserved_target, indent=2, sort_keys=True) if reserved_target else '(none)'}\n"
+        "This target is supplied by the harness and is authoritative for semantic fidelity.\n\n"
         f"Rubric:\n{rubric_text}\n\n"
         f"Tutor response:\n{tutor_response}"
     )

@@ -1178,6 +1178,12 @@ def _execute_prepared_turn(
                 ),
                 generated_answer_override=generated_override,
                 commit_events_hook=progression_events,
+                interview_target=(
+                    copy.deepcopy(active_progression_before.get("target"))
+                    if isinstance(active_progression_before, dict)
+                    and isinstance(active_progression_before.get("target"), dict)
+                    else None
+                ),
             )
         if not result_holder:
             raise TutorOperationError("tutor turn did not produce a committed result")

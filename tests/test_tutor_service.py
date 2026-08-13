@@ -195,7 +195,6 @@ class TutorServiceTests(TestCase):
             progression_events[0]["data"]["skill_ref"]["skill_id"],
             "concept.arrays-strings",
         )
-
         internal = committed["_openlearn_internal"]
         internal["turn_results"] = {}
         cli.save_state(slug, committed)
@@ -203,6 +202,232 @@ class TutorServiceTests(TestCase):
         self.assertIsNotNone(old)
         self.assertEqual(old.status, "committed")
         self.assertEqual(old.move.content, result.move.content)
+
+    def test_interview_generation_is_bound_to_application_owned_target(self) -> None:
+        slug = self._create_interview_course()
+        captured: dict[str, str] = {}
+
+        def response(_model: str, system: str, _user: str) -> str:
+            captured["system"] = system
+            return (
+                "**Lesson:**\nUse indexed traversal to inspect each array position while "
+                "stating the expected output. In Python, enumerate keeps the index and value "
+                "together."
+            )
+
+        with mock.patch.object(cli, "call_openai", new=response):
+            result = submit_turn(
+                slug,
+                "Continue to the next concept.",
+                intent="navigation",
+                submission_id=str(uuid4()),
+                expected_revision=0,
+            )
+
+        system = captured["system"]
+        self.assertIn("coding-interview@1.0.0@interview-mastery-v1@concept.arrays-strings", system)
+        self.assertIn("Arrays and strings", system)
+        self.assertIn("Reason about indexed sequences", system)
+        self.assertIn("Depth mode: learn", system)
+        self.assertIn("Evidence goal:", system)
+        self.assertIn("enumerate", system)
+        self.assertIn("Clarify input and output", system)
+        self.assertNotIn("choose the next topic", system.casefold())
+        receipt = next(
+            value
+            for key, value in cli.load_state(slug)["_turn_receipts"].items()
+            if key.startswith("operation_")
+        )
+        self.assertEqual(receipt["target"]["skill_ref"]["skill_id"], "concept.arrays-strings")
+        self.assertEqual(receipt["target"]["skill_label"], "Arrays and strings")
+        self.assertIsNotNone(result.move)
+
+    def test_conflicting_interview_target_uses_fallback_without_cursor_drift(self) -> None:
+        slug = self._create_interview_course()
+        sid = str(uuid4())
+        adversarial = (
+            "**Lesson:**\nLet's move to Dynamic programming and learn a DP table."
+        )
+        def conflicting(_model: str, _system: str, _user: str) -> str:
+            return adversarial
+
+        with mock.patch.object(cli, "call_openai", new=conflicting):
+            result = submit_turn(
+                slug,
+                "Continue to the next concept.",
+                intent="navigation",
+                submission_id=sid,
+                expected_revision=0,
+            )
+
+        self.assertIsNotNone(result.move)
+        self.assertIn("Arrays and strings", result.move.content)
+        self.assertNotIn("Dynamic programming", result.move.content)
+        state = cli.load_state(slug)
+        self.assertIn("concept.arrays-strings", state["interview_curriculum"]["evidence"]["exposed"])
+        self.assertEqual(
+            state["_turn_receipts"][f"operation_{sid.replace('-', '')}"]["target"]["skill_ref"]["skill_id"],
+            "concept.arrays-strings",
+        )
+
+    def test_interview_check_and_judgment_keep_exact_stable_skill_identity(self) -> None:
+        slug = self._create_interview_course()
+
+        def check(_model: str, _system: str, _user: str) -> str:
+            return "**Check:**\nExplain how indexed traversal finds an array boundary."
+
+        with mock.patch.object(cli, "call_openai", new=check):
+            submit_turn(
+                slug,
+                "Continue to the next concept.",
+                intent="navigation",
+                submission_id=str(uuid4()),
+                expected_revision=0,
+            )
+
+        pending = cli.load_state(slug)["pending_question"]
+        expected_ref = {
+            "graph_id": "coding-interview",
+            "graph_version": "1.0.0",
+            "mastery_policy_version": "interview-mastery-v1",
+            "skill_id": "concept.arrays-strings",
+        }
+        self.assertEqual(pending["concept_id"], "concept.arrays-strings")
+        self.assertEqual(pending["curriculum_target"], expected_ref)
+
+        def judged(_model: str, system: str, _user: str) -> str:
+            if "calibrated JSON judge" in system:
+                return json.dumps(
+                    {
+                        "message_kind": "answer",
+                        "last_answer_status": "correct",
+                        "answer_score": 1.0,
+                        "answer_kind": "production",
+                        "is_transfer": True,
+                        "known_add": ["pattern.dynamic-programming"],
+                        "current_focus": "Dynamic programming",
+                    }
+                )
+            return "**Feedback:**\nYour boundary explanation is correct."
+
+        with mock.patch.object(cli, "call_openai", new=judged):
+            submit_turn(
+                slug,
+                "I compare each index with len(values) before accessing it.",
+                intent="answer",
+                submission_id=str(uuid4()),
+                expected_revision=2,
+            )
+
+        updated = cli.load_state(slug)
+        self.assertIn("concept.arrays-strings", updated["concept_attempts"])
+        self.assertNotIn("pattern.dynamic-programming", updated["concept_attempts"])
+        canonical_evidence = updated["interview_curriculum"]["evidence"]
+        self.assertEqual(
+            canonical_evidence["answer_evidence"][-1]["skill_ref"], expected_ref
+        )
+        self.assertEqual(
+            canonical_evidence["answer_evidence"][-1]["kinds"],
+            ["production", "transfer"],
+        )
+        self.assertNotIn("pattern.dynamic-programming", canonical_evidence["ready"])
+        judged_events = [
+            event
+            for event in cli.load_event_log(cli.topic_events_path(slug))
+            if event.get("event_type") == "answer_judged"
+        ]
+        self.assertEqual(judged_events[-1]["data"]["skill_ref"], expected_ref)
+
+    def test_wrong_interview_answer_then_continue_remains_on_exact_target(self) -> None:
+        slug = self._create_interview_course()
+
+        def provider(_model: str, system: str, _user: str) -> str:
+            if "calibrated JSON judge" in system:
+                return json.dumps(
+                    {
+                        "message_kind": "answer",
+                        "last_answer_status": "needs_work",
+                        "answer_score": 0.1,
+                        "answer_kind": "production",
+                        "is_transfer": False,
+                        "weak_spots_add": ["Dynamic programming"],
+                    }
+                )
+            if "Pending question to grade:" in system and "Stored question:" in system:
+                return (
+                    "**Feedback:**\nThe boundary reasoning needs another attempt.\n\n"
+                    "**Check:**\nExplain how indexed traversal avoids crossing an array boundary."
+                )
+            return "**Check:**\nExplain how indexed traversal avoids crossing an array boundary."
+
+        with mock.patch.object(cli, "call_openai", new=provider):
+            submit_turn(
+                slug,
+                "Continue to the next concept.",
+                intent="navigation",
+                submission_id=str(uuid4()),
+                expected_revision=0,
+            )
+            submit_turn(
+                slug,
+                "I would keep indexing until an exception occurs.",
+                intent="answer",
+                submission_id=str(uuid4()),
+                expected_revision=2,
+            )
+            follow_up_id = str(uuid4())
+            submit_turn(
+                slug,
+                "Continue.",
+                intent="navigation",
+                submission_id=follow_up_id,
+                expected_revision=3,
+            )
+
+        state = cli.load_state(slug)
+        canonical = state["interview_curriculum"]
+        self.assertIn("concept.arrays-strings", canonical["evidence"]["weak"])
+        self.assertNotIn("pattern.dynamic-programming", canonical["evidence"]["weak"])
+        receipt = state["_turn_receipts"][
+            f"operation_{follow_up_id.replace('-', '')}"
+        ]
+        self.assertEqual(
+            receipt["target"]["skill_ref"]["skill_id"],
+            "concept.arrays-strings",
+        )
+
+    def test_recovered_internal_reasoning_is_replaced_by_target_fallback(self) -> None:
+        slug = self._create_interview_course()
+        sid = str(uuid4())
+        tutor_service._reserve_interview_progression(
+            slug,
+            "Continue to the next concept.",
+            sid,
+            0,
+            "navigation",
+            "chat",
+            progression_intent="continue",
+        )
+
+        def save_generated(state: dict[str, object]) -> None:
+            canonical = state["interview_curriculum"]
+            canonical["active_operation"]["status"] = "generated"
+            canonical["active_operation"]["generated_response"] = (
+                "<think>I should switch topics.</think>\n**Lesson:**\nArrays store values."
+            )
+            state["_openlearn_internal"]["active_turn"]["status"] = "generated"
+
+        cli.update_state_atomic(slug, save_generated)
+        with mock.patch.object(
+            cli,
+            "call_openai",
+            side_effect=AssertionError("stored generated output must not call provider"),
+        ):
+            result = tutor_service.resume_interview_progression(slug)
+
+        self.assertIsNotNone(result.move)
+        self.assertIn("Arrays and strings", result.move.content)
+        self.assertNotIn("think", result.move.content.casefold())
 
     def test_interview_provider_failure_retries_the_same_reserved_target(self) -> None:
         slug = self._create_interview_course()

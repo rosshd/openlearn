@@ -3513,7 +3513,10 @@ class CliStorageTests(unittest.TestCase):
             if template.slug == "technical-interview-prep"
         )
         self.assertIn("LeetCode-style", interview_template.goal)
-        self.assertIn("Sliding Window Foundations", interview_template.units)
+        self.assertIn(
+            "Sequence Patterns: Pointer and Window Invariants",
+            interview_template.units,
+        )
         self.assertEqual(interview_template.entry_mode, "interview_prep")
         for template in templates:
             self.assertTrue(template.name)
@@ -15732,6 +15735,29 @@ class PromptInstructionTests(unittest.TestCase):
         self.assertNotIn('"course_units"', prompt)
         self.assertNotIn('"slide_contents"', prompt)
 
+    def test_metadata_update_prompt_marks_full_curriculum_target_as_trusted(self) -> None:
+        target_ref = {
+            "graph_id": "coding-interview",
+            "graph_version": "1.0.0",
+            "mastery_policy_version": "interview-mastery-v1",
+            "skill_id": "concept.arrays-strings",
+        }
+        prompt = cli.metadata_update_prompt(
+            {
+                "pending_question": {
+                    "question": "Explain indexed traversal.",
+                    "curriculum_target": target_ref,
+                }
+            },
+            "I check the boundary before indexing.",
+            "**Check:** Explain indexed traversal.",
+        )
+
+        self.assertIn("Trusted application-owned curriculum target", prompt)
+        for value in target_ref.values():
+            self.assertIn(value, prompt)
+        self.assertIn("Tutor prose", prompt)
+
     def test_learning_metadata_update_merges_known_and_weak_spots(self) -> None:
         home = tempfile.TemporaryDirectory()
         previous_home = os.environ.get("OPENLEARN_HOME")
@@ -17643,6 +17669,70 @@ class PromptInstructionTests(unittest.TestCase):
         )
 
         self.assertEqual(error, "navigation response invents a learner choice")
+
+    def test_navigation_response_rejects_broader_invented_choice_language(self) -> None:
+        for answer in (
+            "**Lesson:**\nYou chose hashing, so we will start there.",
+            "**Lesson:**\nYour selection is dynamic programming.",
+            "**Lesson:**\nYou decided to move on to graphs.",
+        ):
+            with self.subTest(answer=answer):
+                self.assertEqual(
+                    cli.tutor_answer_contract_error(
+                        answer,
+                        require_check=False,
+                        forbid_choice_claim=True,
+                    ),
+                    "navigation response invents a learner choice",
+                )
+
+    def test_verify_depth_repairs_beginner_lesson_into_unassisted_check(self) -> None:
+        topic = cli.Topic(
+            slug="demo",
+            path=Path("demo.md"),
+            metadata={"topic": "Demo", "current_turn_message_kind": "navigation"},
+            body="# Demo\n",
+        )
+        target = {
+            "unit_id": "coding.sequence-patterns",
+            "unit_label": "Sequence Patterns",
+            "section_id": "pointer-and-window-invariants",
+            "section_label": "Pointer and Window Invariants",
+            "skill_ref": {
+                "graph_id": "coding-interview",
+                "graph_version": "1.0.0",
+                "mastery_policy_version": "interview-mastery-v1",
+                "skill_id": "pattern.sliding-window",
+            },
+            "skill_label": "Sliding window",
+            "skill_description": "Maintain an invariant over a moving contiguous range.",
+            "requirement": "required",
+            "depth_mode": "verify",
+            "evidence_goal": "Complete one unassisted production or transfer check.",
+            "embedded_habit": "Name the invariant and justify pointer movement.",
+            "python_hooks": ["index loops", "dictionaries"],
+        }
+        responses = iter(
+            (
+                "**Lesson:**\nA sliding window uses two pointers.",
+                "**Check:**\nFor a new contiguous-range problem, state the invariant and explain when each pointer moves.",
+            )
+        )
+
+        def provider(_model: str, _system: str, _user: str) -> str:
+            return next(responses)
+
+        with mock.patch.object(cli, "call_openai", new=provider):
+            answer = cli.generate_validated_tutor_answer(
+                topic,
+                "Continue.",
+                "test-model",
+                output_func=lambda _text="": None,
+                interview_target=target,
+            )
+
+        self.assertTrue(answer.startswith("**Check:**"))
+        self.assertNotIn("uses two pointers", answer)
 
     def test_side_chat_prompt_anchors_the_exact_visible_lesson(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Interview", goal="practice interviews"))

@@ -343,6 +343,116 @@ def test_progression_resolver_selects_uncovered_and_due_targets_deterministicall
     assert due.reason == "due_review"
 
 
+def test_target_validator_allows_python_dotted_names_but_rejects_known_skill_ids() -> None:
+    state = _canonical_progression_state()
+    resolution = interview_curriculum.resolve_progression_target(state, intent="continue")
+    assert resolution.target is not None
+    target = resolution.target.to_dict()
+
+    assert (
+        interview_curriculum.target_response_error(
+            "**Lesson:** Use collections.deque and dict.get for the implementation.",
+            target,
+        )
+        is None
+    )
+    assert (
+        interview_curriculum.target_response_error(
+            "**Lesson:** Switch to concept.hashing next.",
+            target,
+        )
+        == "response names a conflicting stable target"
+    )
+    assert target["bundle_id"] == "technical-interview"
+    assert target["bundle_version"] == "1.0.0"
+
+    assert (
+        interview_curriculum.target_response_error(
+            "**Lesson:** Arrays and strings are useful. Dynamic programming builds "
+            "solutions from overlapping subproblems using a recurrence table.",
+            target,
+        )
+        == "response names a conflicting stable target"
+    )
+    assert (
+        interview_curriculum.target_response_error(
+            "**Lesson:** Learn Arrays and strings by comparing them with Dynamic "
+            "programming.",
+            target,
+        )
+        is None
+    )
+
+
+def test_target_validator_rejects_wrong_skill_in_labeled_move_without_blocking_comparison() -> None:
+    state = _canonical_progression_state()
+    resolution = interview_curriculum.resolve_progression_target(state, intent="continue")
+    assert resolution.target is not None
+    target = resolution.target.to_dict()
+
+    assert (
+        interview_curriculum.target_response_error(
+            "**Check:** Explain the recurrence for Dynamic programming.",
+            target,
+        )
+        == "response names a conflicting stable target"
+    )
+    assert (
+        interview_curriculum.target_response_error(
+            "**Example:** Unlike Dynamic programming, Arrays and strings can be traversed "
+            "directly by index for this problem.",
+            target,
+        )
+        is None
+    )
+
+
+def test_judged_evidence_uses_full_identity_and_preserves_due_until_policy_ready() -> None:
+    state = _canonical_progression_state()
+    resolution = interview_curriculum.resolve_progression_target(state, intent="continue")
+    assert resolution.target is not None
+    target_ref = dict(resolution.target.skill_ref)
+    state = resolution.state
+    state["evidence"]["due_review"] = [target_ref["skill_id"]]
+
+    weak = interview_curriculum.apply_answer_judgment(
+        state,
+        {
+            "skill_ref": target_ref,
+            "status": "needs_work",
+            "score": 0.2,
+            "answer_kind": "production",
+            "is_transfer": False,
+        },
+        evidence_id="turn_weak",
+        observed_at="2026-08-13T12:00:00+00:00",
+    )
+    assert target_ref["skill_id"] in weak["evidence"]["weak"]
+    assert target_ref["skill_id"] in weak["evidence"]["due_review"]
+    assert weak["evidence"]["answer_evidence"][-1]["skill_ref"] == target_ref
+
+    correct = interview_curriculum.apply_answer_judgment(
+        weak,
+        {
+            "skill_ref": target_ref,
+            "status": "correct",
+            "score": 1.0,
+            "answer_kind": "production",
+            "is_transfer": True,
+        },
+        evidence_id="turn_transfer",
+        observed_at="2026-08-13T12:05:00+00:00",
+    )
+    identity = interview_curriculum.target_identity({"skill_ref": target_ref})
+    assert correct["evidence"]["readiness"][identity]["status"] == "provisional"
+    assert target_ref["skill_id"] not in correct["evidence"]["ready"]
+    assert target_ref["skill_id"] in correct["evidence"]["due_review"]
+    assert correct["evidence"]["answer_evidence"][-1]["kinds"] == [
+        "production",
+        "transfer",
+    ]
+
+
 def test_skip_defers_without_mastery_and_returns_only_after_another_commit() -> None:
     state = _canonical_progression_state()
 
