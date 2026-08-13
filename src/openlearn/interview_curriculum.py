@@ -8,10 +8,12 @@ projections for application-layer progression code.
 from __future__ import annotations
 
 import importlib.resources
+import hashlib
 import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import date
 from importlib.resources.abc import Traversable
 from types import MappingProxyType
 
@@ -23,6 +25,49 @@ DEPTH_MODES = ("learn", "practice", "review", "verify")
 LEVELS = ("intern", "entry", "mid", "senior", "staff")
 STABLE_ID_PATTERN = re.compile(r"[a-z0-9]+(?:[.-][a-z0-9]+)*")
 RESOURCE_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\.json")
+PACING_POSTURES = ("accelerated", "standard")
+DATE_HORIZONS = ("long-term", "accelerated", "near-term", "open-ended")
+
+CONFIDENCE_AREA_SKILLS: Mapping[str, tuple[str, ...]] = MappingProxyType(
+    {
+        "arrays_hashing": ("concept.arrays-strings", "concept.hashing"),
+        "two_pointers": ("pattern.two-pointers",),
+        "sliding_window": ("pattern.sliding-window",),
+        "stack": ("concept.stacks-queues",),
+        "binary_search": ("pattern.binary-search",),
+        "linked_lists": ("concept.linked-structures",),
+        "trees": ("concept.trees",),
+        "graphs": ("concept.graphs", "pattern.bfs", "pattern.dfs"),
+        "heaps": ("concept.heaps",),
+        "backtracking": ("concept.recursion", "pattern.backtracking"),
+        "dynamic_programming": (
+            "concept.dynamic-programming-state",
+            "pattern.dynamic-programming",
+        ),
+        "intervals_greedy": ("pattern.intervals", "pattern.greedy"),
+        "requirements_scope": ("system.requirements-scope",),
+        "capacity_estimation": ("system.capacity-estimation",),
+        "api_design": ("system.api-contracts",),
+        "data_modeling": ("system.access-patterns-data-modeling",),
+        "databases_partitioning": (
+            "system.storage-indexing",
+            "system.replication-partitioning",
+        ),
+        "caching_delivery": (
+            "system.cache-invalidation",
+            "system.content-delivery",
+        ),
+        "messaging_async": (
+            "system.messaging-delivery",
+            "system.idempotency-retries",
+        ),
+        "reliability_observability": (
+            "system.reliability-backpressure",
+            "system.observability",
+        ),
+        "tradeoff_communication": ("communication.system-tradeoffs",),
+    }
+)
 
 
 class CurriculumBundleError(ValueError):
@@ -112,6 +157,85 @@ class CurriculumRoleExtension:
 
 
 @dataclass(frozen=True)
+class MaterializedInterviewSkill:
+    skill_ref: CurriculumSkillReference
+    unit_id: str
+    unit_label: str
+    section_id: str
+    section_label: str
+    requirement: str
+    depth_mode: str
+    weekly_minutes: int
+    embedded_habit: str
+    python_hooks: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "skill_ref": _ref_dict(self.skill_ref),
+            "unit_id": self.unit_id,
+            "unit_label": self.unit_label,
+            "section_id": self.section_id,
+            "section_label": self.section_label,
+            "requirement": self.requirement,
+            "depth_mode": self.depth_mode,
+            "weekly_minutes": self.weekly_minutes,
+            "embedded_habit": self.embedded_habit,
+            "python_hooks": list(self.python_hooks),
+        }
+
+
+@dataclass(frozen=True)
+class MaterializedInterviewRoute:
+    bundle_id: str
+    bundle_version: str
+    route_id: str
+    role_family: str
+    target_level: str
+    date_horizon: str
+    recommended_pacing_posture: str
+    pacing_posture: str
+    weekly_minutes: int
+    session_minutes: int
+    route_fingerprint: str
+    allocation_fingerprint: str
+    skills: tuple[MaterializedInterviewSkill, ...]
+    prerequisite_edges: tuple[tuple[str, str], ...]
+
+    @property
+    def skill_refs(self) -> tuple[CurriculumSkillReference, ...]:
+        return tuple(item.skill_ref for item in self.skills)
+
+    @property
+    def first_session(self) -> MaterializedInterviewSkill:
+        return self.skills[0]
+
+    def skill(self, skill_id: str) -> MaterializedInterviewSkill:
+        for item in self.skills:
+            if item.skill_ref.skill_id == skill_id:
+                return item
+        raise CurriculumBundleError(f"skill is absent from materialized route: {skill_id}")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "bundle_id": self.bundle_id,
+            "bundle_version": self.bundle_version,
+            "route_id": self.route_id,
+            "role_family": self.role_family,
+            "target_level": self.target_level,
+            "date_horizon": self.date_horizon,
+            "recommended_pacing_posture": self.recommended_pacing_posture,
+            "pacing_posture": self.pacing_posture,
+            "weekly_minutes": self.weekly_minutes,
+            "session_minutes": self.session_minutes,
+            "route_fingerprint": self.route_fingerprint,
+            "allocation_fingerprint": self.allocation_fingerprint,
+            "first_session": self.first_session.to_dict(),
+            "skills": [item.to_dict() for item in self.skills],
+            "prerequisite_edges": [list(edge) for edge in self.prerequisite_edges],
+        }
+
+
+@dataclass(frozen=True)
 class InterviewCurriculumBundle:
     schema_version: int
     bundle_id: str
@@ -121,6 +245,7 @@ class InterviewCurriculumBundle:
     routes: tuple[CurriculumRoute, ...]
     role_extensions: tuple[CurriculumRoleExtension, ...]
     confidence_mapping: Mapping[int, str]
+    confidence_skill_mapping: Mapping[str, tuple[str, ...]]
     legacy_aliases: Mapping[str, str]
     graph_registry: interview_skills.SkillGraphBundleRegistry
 
@@ -176,6 +301,20 @@ def load_default_bundle() -> InterviewCurriculumBundle:
     return validate_bundle(load_bundle_dict())
 
 
+def _ref_dict(ref: CurriculumSkillReference) -> dict[str, str]:
+    return {
+        "graph_id": ref.graph_id,
+        "graph_version": ref.graph_version,
+        "mastery_policy_version": ref.mastery_policy_version,
+        "skill_id": ref.skill_id,
+    }
+
+
+def _fingerprint(value: Mapping[str, object]) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _text(value: object, label: str) -> str:
     if not isinstance(value, str) or not value.strip() or value != value.strip():
         raise CurriculumBundleError(f"{label} must be trimmed non-empty text")
@@ -206,9 +345,7 @@ def _text_list(
 def _graph_resource(filename: str) -> Traversable:
     if not RESOURCE_PATTERN.fullmatch(filename):
         raise CurriculumBundleError("graph resource must be a bundled JSON filename")
-    return importlib.resources.files("openlearn").joinpath(
-        "interview_skill_graphs", filename
-    )
+    return importlib.resources.files("openlearn").joinpath("interview_skill_graphs", filename)
 
 
 def _load_graph(reference: CurriculumGraphReference) -> interview_skills.InterviewSkillGraph:
@@ -241,7 +378,9 @@ def _load_graph(reference: CurriculumGraphReference) -> interview_skills.Intervi
     return graph
 
 
-def _parse_graphs(value: object) -> tuple[
+def _parse_graphs(
+    value: object,
+) -> tuple[
     tuple[CurriculumGraphReference, ...],
     Mapping[str, CurriculumGraphReference],
     interview_skills.SkillGraphBundleRegistry,
@@ -275,11 +414,7 @@ def _parse_graphs(value: object) -> tuple[
             reference.graph_version,
             reference.mastery_policy_version,
         )
-        if (
-            reference.alias in aliases
-            or identity in identities
-            or reference.resource in resources
-        ):
+        if reference.alias in aliases or identity in identities or reference.resource in resources:
             raise CurriculumBundleError("duplicate graph reference")
         aliases[reference.alias] = reference
         identities.add(identity)
@@ -373,9 +508,7 @@ def _validate_prerequisites(
     positions = {ref.identity: index for index, ref in enumerate(route.skill_refs)}
     by_skill = {ref.skill_id: ref for ref in route.skill_refs}
     for ref in route.skill_refs:
-        graph = registry.graph(
-            ref.graph_id, ref.graph_version, ref.mastery_policy_version
-        )
+        graph = registry.graph(ref.graph_id, ref.graph_version, ref.mastery_policy_version)
         skill = graph.skill(ref.skill_id)
         for prerequisite in skill.prerequisites:
             if prerequisite.kind != "blocking" or prerequisite.skill_id not in by_skill:
@@ -383,8 +516,7 @@ def _validate_prerequisites(
             prerequisite_ref = by_skill[prerequisite.skill_id]
             if positions[prerequisite_ref.identity] >= positions[ref.identity]:
                 raise CurriculumBundleError(
-                    f"{route.route_id} route breaks blocking prerequisite order for "
-                    f"{ref.skill_id}"
+                    f"{route.route_id} route breaks blocking prerequisite order for {ref.skill_id}"
                 )
 
 
@@ -450,17 +582,13 @@ def validate_bundle(raw: Mapping[str, object]) -> InterviewCurriculumBundle:
             )
             for ref in refs:
                 if ref.identity in skill_locations:
-                    raise CurriculumBundleError(
-                        f"duplicate progression skill: {ref.skill_id}"
-                    )
+                    raise CurriculumBundleError(f"duplicate progression skill: {ref.skill_id}")
                 skill_locations[ref.identity] = section_id
             section = CurriculumSection(
                 section_id=section_id,
                 label=_text(section_value.get("label"), f"{section_id} label"),
                 skill_refs=refs,
-                applicability=_parse_applicability(
-                    section_value.get("applicability"), section_id
-                ),
+                applicability=_parse_applicability(section_value.get("applicability"), section_id),
                 embedded_habit=_text(
                     section_value.get("embedded_habit"),
                     f"{section_id} embedded_habit",
@@ -576,8 +704,7 @@ def validate_bundle(raw: Mapping[str, object]) -> InterviewCurriculumBundle:
     }:
         raise CurriculumBundleError("confidence mapping must define ratings 1 through 5")
     confidence_mapping = {
-        int(key): _text(value, f"confidence {key}")
-        for key, value in confidence_value.items()
+        int(key): _text(value, f"confidence {key}") for key, value in confidence_value.items()
     }
     if not set(confidence_mapping.values()) <= set(DEPTH_MODES):
         raise CurriculumBundleError("confidence mapping contains an invalid depth mode")
@@ -590,9 +717,7 @@ def validate_bundle(raw: Mapping[str, object]) -> InterviewCurriculumBundle:
         legacy_text = _text(legacy, "legacy alias")
         section_text = _stable_id(section_id, f"legacy alias {legacy_text}")
         if section_text not in sections:
-            raise CurriculumBundleError(
-                f"legacy alias references unknown section: {section_text}"
-            )
+            raise CurriculumBundleError(f"legacy alias references unknown section: {section_text}")
         legacy_aliases[legacy_text] = section_text
 
     return InterviewCurriculumBundle(
@@ -604,6 +729,287 @@ def validate_bundle(raw: Mapping[str, object]) -> InterviewCurriculumBundle:
         routes=tuple(routes),
         role_extensions=tuple(extensions),
         confidence_mapping=MappingProxyType(confidence_mapping),
+        confidence_skill_mapping=CONFIDENCE_AREA_SKILLS,
         legacy_aliases=MappingProxyType(legacy_aliases),
         graph_registry=registry,
+    )
+
+
+def _date_horizon(interview_date: str, current_date: date) -> str:
+    if not interview_date:
+        return "open-ended"
+    try:
+        remaining = (date.fromisoformat(interview_date) - current_date).days
+    except ValueError as exc:
+        raise ValueError("interview date must use YYYY-MM-DD") from exc
+    if remaining < 0:
+        return "long-term"
+    if remaining <= 28:
+        return "accelerated"
+    if remaining <= 84:
+        return "near-term"
+    return "open-ended"
+
+
+def _normalized_focus(value: str) -> str:
+    normalized = value.strip().casefold().replace("_", "-")
+    if normalized not in FOCUSES:
+        raise ValueError("interview focus is invalid")
+    return normalized
+
+
+def _normalized_level(value: str) -> str:
+    normalized = value.strip().casefold()
+    aliases = {"senior+": "senior", "unspecified": "entry", "": "entry"}
+    normalized = aliases.get(normalized, normalized)
+    if normalized not in LEVELS:
+        raise ValueError("target level is invalid")
+    return normalized
+
+
+def _normalized_role(value: str) -> str:
+    normalized = value.strip().casefold()
+    aliases = {
+        "data / ml": "data-ml",
+        "data/ml": "data-ml",
+        "data ml": "data-ml",
+        "general swe": "general-swe",
+        "": "general-swe",
+    }
+    return aliases.get(normalized, normalized.replace("_", "-"))
+
+
+def _section_locations(
+    bundle: InterviewCurriculumBundle,
+) -> dict[tuple[str, str, str, str], tuple[CurriculumUnit, CurriculumSection]]:
+    return {
+        ref.identity: (unit, section)
+        for unit in bundle.units
+        for section in unit.sections
+        for ref in section.skill_refs
+    }
+
+
+def _required_at_level(applicability: CurriculumApplicability, level: str) -> bool:
+    minimum = applicability.minimum_required_level
+    if minimum is None:
+        return True
+    return LEVELS.index(level) >= LEVELS.index(minimum)
+
+
+def _route_requirement(
+    section: CurriculumSection,
+    ref: CurriculumSkillReference,
+    *,
+    focus: str,
+    level: str,
+) -> str:
+    applicability = section.applicability
+    if focus in applicability.required_for and _required_at_level(applicability, level):
+        return "required"
+    if focus == "system-design" and ref.skill_id in {
+        "concept.constraint-reading",
+        "concept.complexity-analysis",
+        "concept.arrays-strings",
+        "concept.hashing",
+        "pattern.sliding-window",
+    }:
+        return "required"
+    return "optional"
+
+
+def _confidence_depths(
+    bundle: InterviewCurriculumBundle,
+    ratings: Mapping[str, int],
+) -> dict[str, str]:
+    unknown = set(ratings) - set(bundle.confidence_skill_mapping)
+    if unknown:
+        raise ValueError(f"confidence area is invalid: {sorted(unknown)[0]}")
+    depths: dict[str, str] = {}
+    for area, rating in ratings.items():
+        if isinstance(rating, bool) or not isinstance(rating, int) or rating not in range(1, 6):
+            raise ValueError(f"confidence rating is invalid: {area}")
+        for skill_id in bundle.confidence_skill_mapping[area]:
+            depths[skill_id] = bundle.confidence_mapping[rating]
+    return depths
+
+
+def _prerequisite_edges(
+    bundle: InterviewCurriculumBundle,
+    refs: tuple[CurriculumSkillReference, ...],
+) -> tuple[tuple[str, str], ...]:
+    included = {ref.skill_id for ref in refs}
+    edges: list[tuple[str, str]] = []
+    for ref in refs:
+        graph = bundle.graph_registry.graph(
+            ref.graph_id, ref.graph_version, ref.mastery_policy_version
+        )
+        skill = graph.skill(ref.skill_id)
+        edges.extend(
+            (prerequisite.skill_id, ref.skill_id)
+            for prerequisite in skill.prerequisites
+            if prerequisite.kind == "blocking" and prerequisite.skill_id in included
+        )
+    return tuple(edges)
+
+
+def _allocated_minutes(
+    requirements: tuple[str, ...],
+    depths: tuple[str, ...],
+    *,
+    weekly_minutes: int,
+    active_count: int,
+) -> tuple[int, ...]:
+    active_count = min(len(requirements), max(1, active_count))
+    weights = {
+        "learn": 4,
+        "practice": 3,
+        "review": 2,
+        "verify": 1,
+    }
+    active_weights = [
+        weights[depths[index]] + (2 if requirements[index] == "required" else 0)
+        for index in range(active_count)
+    ]
+    total_weight = sum(active_weights)
+    base = [weekly_minutes * weight // total_weight for weight in active_weights]
+    remainder = weekly_minutes - sum(base)
+    fractions = sorted(
+        range(active_count),
+        key=lambda index: (
+            -(weekly_minutes * active_weights[index] % total_weight),
+            index,
+        ),
+    )
+    for index in fractions[:remainder]:
+        base[index] += 1
+    return tuple((*base, *(0 for _ in range(len(requirements) - active_count))))
+
+
+def materialize_adaptive_route(
+    bundle: InterviewCurriculumBundle,
+    *,
+    role_family: str,
+    target_level: str,
+    interview_focus: str,
+    interview_date: str,
+    weekly_minutes: int,
+    session_minutes: int,
+    confidence_ratings: Mapping[str, int],
+    pacing_posture_override: str | None,
+    current_date: date,
+) -> MaterializedInterviewRoute:
+    """Project profile context into a deterministic, evidence-free route allocation."""
+    focus = _normalized_focus(interview_focus)
+    level = _normalized_level(target_level)
+    role = _normalized_role(role_family)
+    if (
+        isinstance(weekly_minutes, bool)
+        or isinstance(session_minutes, bool)
+        or not isinstance(weekly_minutes, int)
+        or not isinstance(session_minutes, int)
+        or weekly_minutes < 1
+        or session_minutes < 1
+        or session_minutes > weekly_minutes
+    ):
+        raise ValueError("weekly and session minutes are invalid")
+    if pacing_posture_override not in {None, "standard"}:
+        raise ValueError("pacing posture override is invalid")
+
+    horizon = _date_horizon(interview_date, current_date)
+    recommended = "accelerated" if horizon == "accelerated" else "standard"
+    pacing = pacing_posture_override or recommended
+    route = bundle.route(focus)
+    refs = list(route.skill_refs)
+    extension = next(
+        (item for item in bundle.role_extensions if item.role_family == role),
+        None,
+    )
+    if extension is not None:
+        refs.extend(extension.skill_refs)
+    ref_tuple = tuple(refs)
+    locations = _section_locations(bundle)
+    confidence_depths = _confidence_depths(bundle, confidence_ratings)
+    requirements = tuple(
+        (
+            "required"
+            if extension is not None
+            and ref in extension.skill_refs
+            and focus in {"balanced", "system-design"}
+            else "optional"
+            if extension is not None and ref in extension.skill_refs
+            else _route_requirement(locations[ref.identity][1], ref, focus=focus, level=level)
+        )
+        for ref in ref_tuple
+    )
+    depths = tuple(confidence_depths.get(ref.skill_id, "learn") for ref in ref_tuple)
+    session_count = max(1, (weekly_minutes + session_minutes - 1) // session_minutes)
+    active_count = (
+        session_count
+        if pacing == "accelerated"
+        else min(len(ref_tuple), session_count * 2)
+        if horizon == "near-term"
+        else len(ref_tuple)
+    )
+    minutes = _allocated_minutes(
+        requirements,
+        depths,
+        weekly_minutes=weekly_minutes,
+        active_count=active_count,
+    )
+    edges = _prerequisite_edges(bundle, ref_tuple)
+    route_payload: dict[str, object] = {
+        "bundle_id": bundle.bundle_id,
+        "bundle_version": bundle.bundle_version,
+        "route_id": focus,
+        "role_family": role,
+        "target_level": level,
+        "skill_refs": [_ref_dict(ref) for ref in ref_tuple],
+        "requirements": list(requirements),
+        "prerequisite_edges": [list(edge) for edge in edges],
+    }
+    route_fingerprint = _fingerprint(route_payload)
+    allocation_payload: dict[str, object] = {
+        "route_fingerprint": route_fingerprint,
+        "current_date": current_date.isoformat(),
+        "interview_date": interview_date,
+        "date_horizon": horizon,
+        "recommended_pacing_posture": recommended,
+        "pacing_posture": pacing,
+        "weekly_minutes": weekly_minutes,
+        "session_minutes": session_minutes,
+        "depths": list(depths),
+        "minutes": list(minutes),
+    }
+    allocation_fingerprint = _fingerprint(allocation_payload)
+    skills = tuple(
+        MaterializedInterviewSkill(
+            skill_ref=ref,
+            unit_id=locations[ref.identity][0].unit_id,
+            unit_label=locations[ref.identity][0].label,
+            section_id=locations[ref.identity][1].section_id,
+            section_label=locations[ref.identity][1].label,
+            requirement=requirements[index],
+            depth_mode=depths[index],
+            weekly_minutes=minutes[index],
+            embedded_habit=locations[ref.identity][1].embedded_habit,
+            python_hooks=locations[ref.identity][1].python_hooks,
+        )
+        for index, ref in enumerate(ref_tuple)
+    )
+    return MaterializedInterviewRoute(
+        bundle_id=bundle.bundle_id,
+        bundle_version=bundle.bundle_version,
+        route_id=focus,
+        role_family=role,
+        target_level=level,
+        date_horizon=horizon,
+        recommended_pacing_posture=recommended,
+        pacing_posture=pacing,
+        weekly_minutes=weekly_minutes,
+        session_minutes=session_minutes,
+        route_fingerprint=route_fingerprint,
+        allocation_fingerprint=allocation_fingerprint,
+        skills=skills,
+        prerequisite_edges=edges,
     )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import date
 
 import pytest
 
@@ -76,10 +77,7 @@ def test_default_bundle_validates_exact_reviewed_route_snapshots() -> None:
     )
     assert bundle.route("coding").first_session_skill_id == "concept.arrays-strings"
     assert bundle.route("balanced").first_session_skill_id == "concept.arrays-strings"
-    assert (
-        bundle.route("system-design").first_session_skill_id
-        == "system.requirements-scope"
-    )
+    assert bundle.route("system-design").first_session_skill_id == "system.requirements-scope"
 
 
 def test_bundle_has_unique_stable_structure_and_exact_embedded_contract() -> None:
@@ -125,9 +123,7 @@ def test_bundle_rejects_invalid_fields_missing_duplicate_and_unknown_ids() -> No
         interview_curriculum.validate_bundle(missing)
 
     applicability = interview_curriculum.load_bundle_dict()
-    applicability["units"][0]["sections"][0]["applicability"]["required_for"] = [
-        "invalid-focus"
-    ]
+    applicability["units"][0]["sections"][0]["applicability"]["required_for"] = ["invalid-focus"]
     with pytest.raises(interview_curriculum.CurriculumBundleError, match="applicability"):
         interview_curriculum.validate_bundle(applicability)
 
@@ -189,9 +185,128 @@ def test_multi_graph_registry_requires_full_identity_for_new_evidence() -> None:
 
 def test_historical_coding_graph_and_problem_catalog_remain_loadable() -> None:
     bundle = interview_curriculum.load_default_bundle()
-    historical = bundle.graph_registry.graph(
-        "coding-interview", "1.0.0", "interview-mastery-v1"
-    )
+    historical = bundle.graph_registry.graph("coding-interview", "1.0.0", "interview-mastery-v1")
 
     assert historical is not None
     assert historical.problem("problem.minimum-window-substring").title
+
+
+def _adaptive_route(
+    *,
+    focus: str = "coding",
+    role: str = "backend",
+    level: str = "entry",
+    interview_date: str = "2026-08-20",
+    weekly_minutes: int = 120,
+    session_minutes: int = 45,
+    pacing_override: str | None = None,
+    ratings: dict[str, int] | None = None,
+) -> interview_curriculum.MaterializedInterviewRoute:
+    return interview_curriculum.materialize_adaptive_route(
+        interview_curriculum.load_default_bundle(),
+        role_family=role,
+        target_level=level,
+        interview_focus=focus,
+        interview_date=interview_date,
+        weekly_minutes=weekly_minutes,
+        session_minutes=session_minutes,
+        confidence_ratings=ratings or {},
+        pacing_posture_override=pacing_override,
+        current_date=date(2026, 8, 12),
+    )
+
+
+def test_adaptive_route_maps_confidence_to_depth_without_mastery() -> None:
+    route = _adaptive_route(
+        ratings={
+            "arrays_hashing": 1,
+            "sliding_window": 5,
+        }
+    )
+
+    assert route.date_horizon == "accelerated"
+    assert route.recommended_pacing_posture == "accelerated"
+    assert route.pacing_posture == "accelerated"
+    assert route.first_session.skill_ref.skill_id == "concept.arrays-strings"
+    assert "Clarify input and output" in route.first_session.embedded_habit
+    assert route.skill("concept.arrays-strings").depth_mode == "learn"
+    assert route.skill("pattern.sliding-window").depth_mode == "verify"
+    assert route.skill("backend.api-boundaries").requirement == "optional"
+    serialized = route.to_dict()
+    assert "mastery" not in serialized
+    assert "mastered_skills" not in serialized
+    assert "evidence" not in serialized
+
+
+@pytest.mark.parametrize(
+    ("interview_date", "expected"),
+    [
+        ("2026-08-11", "long-term"),
+        ("2026-08-12", "accelerated"),
+        ("2026-09-09", "accelerated"),
+        ("2026-09-10", "near-term"),
+        ("2026-11-05", "open-ended"),
+        ("", "open-ended"),
+    ],
+)
+def test_adaptive_route_uses_four_date_horizons(
+    interview_date: str,
+    expected: str,
+) -> None:
+    assert _adaptive_route(interview_date=interview_date).date_horizon == expected
+
+
+def test_standard_override_changes_only_allocation_overlay() -> None:
+    accelerated = _adaptive_route()
+    standard = _adaptive_route(pacing_override="standard")
+
+    assert accelerated.route_fingerprint == standard.route_fingerprint
+    assert accelerated.skill_refs == standard.skill_refs
+    assert accelerated.prerequisite_edges == standard.prerequisite_edges
+    assert accelerated.allocation_fingerprint != standard.allocation_fingerprint
+    assert standard.pacing_posture == "standard"
+    assert sum(item.weekly_minutes > 0 for item in standard.skills) > sum(
+        item.weekly_minutes > 0 for item in accelerated.skills
+    )
+
+
+def test_time_allocation_changes_budget_without_reordering_route() -> None:
+    small = _adaptive_route(weekly_minutes=60, session_minutes=30)
+    large = _adaptive_route(weekly_minutes=240, session_minutes=60)
+
+    assert small.skill_refs == large.skill_refs
+    assert small.route_fingerprint == large.route_fingerprint
+    assert sum(item.weekly_minutes for item in small.skills) == 60
+    assert sum(item.weekly_minutes for item in large.skills) == 240
+    assert small.allocation_fingerprint != large.allocation_fingerprint
+
+
+def test_focus_role_and_level_select_only_applicable_versioned_skills() -> None:
+    coding = _adaptive_route(focus="coding", role="general SWE", level="entry")
+    system = _adaptive_route(
+        focus="system_design",
+        role="backend",
+        level="senior",
+    )
+    senior_coding = _adaptive_route(focus="coding", level="senior")
+
+    assert coding.first_session.skill_ref.skill_id == "concept.arrays-strings"
+    assert not any(ref.skill_id.startswith("system.") for ref in coding.skill_refs)
+    assert not any(ref.skill_id.startswith("backend.") for ref in coding.skill_refs)
+    assert system.first_session.skill_ref.skill_id == "system.requirements-scope"
+    assert any(ref.skill_id == "backend.api-boundaries" for ref in system.skill_refs)
+    assert not any(ref.skill_id.startswith("frontend.") for ref in system.skill_refs)
+    assert coding.skill("concept.tries").requirement == "optional"
+    assert senior_coding.skill("concept.tries").requirement == "required"
+
+
+def test_materialization_is_deterministic_and_rejects_invalid_inputs() -> None:
+    first = _adaptive_route(ratings={"graphs": 2})
+    second = _adaptive_route(ratings={"graphs": 2})
+
+    assert first.to_dict() == second.to_dict()
+    assert first.allocation_fingerprint == second.allocation_fingerprint
+    with pytest.raises(ValueError, match="pacing"):
+        _adaptive_route(pacing_override="fast")
+    with pytest.raises(ValueError, match="confidence"):
+        _adaptive_route(ratings={"graphs": 6})
