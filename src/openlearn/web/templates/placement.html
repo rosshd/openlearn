@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block content %}
-<section class="create-shell placement-shell" aria-labelledby="placement-title" data-placement-shell data-course-slug="{{ placement.slug }}">
+<section class="create-shell placement-shell" aria-labelledby="placement-title" data-placement-shell data-course-slug="{{ placement.slug }}" data-course-revision="{{ placement.course_revision or 0 }}">
   <div class="section-heading placement-heading">
     <div>
       <p class="eyebrow">Optional placement</p>
@@ -123,9 +123,9 @@
       </div>
       <ol class="outline-list">
         {% for item in placement.outline_items %}
-        <li>
+        <li class="{% if item.locked %}outline-locked{% endif %}">
           <div><strong>{{ item.title }}</strong><p>{{ item.outcome }}</p><p class="outline-habit"><span>Interview habit</span> {{ item.interview_habit }}</p></div>
-          <span class="outline-emphasis {{ item.emphasis|lower }}">{{ item.emphasis }}</span>
+          <span class="outline-emphasis {{ item.emphasis|lower }}">{{ item.emphasis }}{% if item.locked %} · locked{% endif %}</span>
         </li>
         {% endfor %}
       </ol>
@@ -133,14 +133,54 @@
         <button class="primary-action" type="button" data-confirm-outline>Confirm course outline</button>
         <button type="button" data-change-outline>Change course outline</button>
       </div>
+      <section data-outline-preview-confirm hidden>
+        <p>Review the changed route above. Nothing is saved until you confirm.</p>
+        <div class="placement-entry-actions">
+          <button class="primary-action" type="button" data-accept-outline-preview>Confirm changes</button>
+          <button type="button" data-cancel-outline-preview>Keep current outline</button>
+        </div>
+      </section>
       <section class="outline-editor" data-outline-editor hidden aria-labelledby="outline-editor-heading">
         <h3 id="outline-editor-heading">Change course outline</h3>
-        <p>Tell openlearn what to add, remove, reorder, or emphasize by editing the outline prompt below. Keep at least four numbered units.</p>
+        <p>Adjust your role, level, interview mix, time, confidence, or optional-unit preferences. Required prerequisites stay locked so the route remains valid.</p>
         <form class="form-stack" data-outline-form>
-          <label for="placement-outline">Course outline</label>
-          <textarea id="placement-outline" name="outline" rows="18" maxlength="12000">{{ placement.outline }}</textarea>
+          <div class="form-grid">
+            <label>Role<select name="role_family">{% for item in placement.roles %}<option value="{{ item.value }}" {% if placement.survey.role_family == item.value %}selected{% endif %}>{{ item.label }}</option>{% endfor %}</select></label>
+            <label>Level<select name="target_level">{% for item in placement.levels %}<option value="{{ item.value }}" {% if placement.survey.target_level == item.value %}selected{% endif %}>{{ item.label }}</option>{% endfor %}</select></label>
+            <label>Interview mix<select name="interview_focus">{% for item in placement.focuses %}<option value="{{ item.value }}" {% if placement.survey.interview_focus == item.value %}selected{% endif %}>{{ item.label }}</option>{% endfor %}</select></label>
+            <label>Interview date<input type="date" name="interview_date" value="{{ placement.profile.interview_date or '' }}"></label>
+            <label>Weekly practice minutes<input type="number" name="weekly_minutes" min="1" max="10080" value="{{ placement.profile.weekly_minutes }}"></label>
+            <label>Session minutes<input type="number" name="session_minutes" min="1" max="10080" value="{{ placement.profile.session_minutes }}"></label>
+            <label>Pacing<select name="pacing_posture_override"><option value="" {% if not placement.pacing_posture_override %}selected{% endif %}>Recommended for my date</option><option value="standard" {% if placement.pacing_posture_override == 'standard' %}selected{% endif %}>Standard pacing</option></select></label>
+          </div>
+          <fieldset class="choice-fieldset" data-outline-confidence>
+            <legend>Confidence by current interview focus</legend>
+            <p class="field-note">These ratings change teaching depth only. They never grant mastery.</p>
+            <div class="form-grid">
+              {% for topic in placement.topics %}
+              <label data-outline-confidence-topic data-topic-track="{{ topic.track }}">{{ topic.label }}
+                <select name="rating_{{ topic.id }}">
+                  {% for item in placement.scale %}<option value="{{ item.value }}" {% if topic.rating == item.value %}selected{% endif %}>{{ item.value }} - {{ item.label }}</option>{% endfor %}
+                </select>
+              </label>
+              {% endfor %}
+            </div>
+          </fieldset>
+          <fieldset class="choice-fieldset">
+            <legend>Optional course skills</legend>
+            <p class="field-note">Leave every option unchecked to keep the course focused on required skills.</p>
+            <div class="choice-chips">
+              {% for item in placement.optional_choices %}
+              <label><input type="checkbox" name="optional_skill_ids" value="{{ item.skill_id }}" {% if item.selected %}checked{% endif %}><span>{{ item.label }}</span></label>
+              {% else %}
+              <p class="quiet-copy">This route has no optional skills.</p>
+              {% endfor %}
+            </div>
+          </fieldset>
+          <label for="placement-outline">Route preview</label>
+          <textarea id="placement-outline" name="outline" rows="18" maxlength="12000" readonly>{{ placement.outline }}</textarea>
           <div class="placement-entry-actions">
-            <button class="primary-action" type="submit">Save changes and continue</button>
+            <button class="primary-action" type="submit">Preview changes</button>
             <button type="button" data-cancel-outline>Cancel</button>
           </div>
         </form>

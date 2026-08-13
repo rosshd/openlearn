@@ -684,7 +684,7 @@ def build_parser() -> argparse.ArgumentParser:
     interview_placement.add_argument("topic", help="Topic slug")
     interview_placement.add_argument(
         "action",
-        choices=("start", "resume", "status", "defer", "discard"),
+        choices=("start", "resume", "status", "defer", "discard", "skip", "change"),
         nargs="?",
         default="status",
     )
@@ -1250,13 +1250,11 @@ def create_interview_course_from_template(
     output_func(template.name)
     output_func(template.goal)
     output_func(
-        "Placement is a short offline reasoning conversation. No coding setup is needed."
+        "Placement is a quick confidence survey. No coding setup is needed."
     )
     while True:
         try:
-            choice = input_func(
-                "Start placement, defer it, or go back? [Y/d/b]: "
-            ).strip().lower()
+            choice = input_func("Start placement, skip it, or go back? [Y/s/b]: ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             output_func("\nNo course created.")
             return 0
@@ -1264,9 +1262,9 @@ def create_interview_course_from_template(
         if choice in {"b", "back", "q", "quit"}:
             output_func("No course created.")
             return 0
-        if choice in {"", "y", "yes", "d", "defer"}:
+        if choice in {"", "y", "yes", "s", "skip"}:
             break
-        output_func("Choose start, defer, or back.")
+        output_func("Choose start, skip, or back.")
 
     course_name = _available_course_name(template.name)
     result = cmd_new(
@@ -1282,9 +1280,9 @@ def create_interview_course_from_template(
     if result:
         return result
     slug = slugify(course_name)
-    if choice in {"d", "defer"}:
+    if choice in {"s", "skip"}:
         return cmd_interview_placement(
-            argparse.Namespace(topic=slug, action="defer"),
+            argparse.Namespace(topic=slug, action="skip"),
             output_func=output_func,
         )
     return cmd_interview_placement(
@@ -4451,6 +4449,195 @@ def _choose_legacy_placement_route(
     return "new"
 
 
+def _confidence_choice(
+    prompt: str,
+    values: tuple[tuple[str, str], ...],
+    *,
+    input_func,
+    output_func,
+    default: str,
+) -> str:
+    output_func(prompt)
+    for index, (_value, label) in enumerate(values, start=1):
+        output_func(f"{index}. {label}")
+    while True:
+        answer = input_func(f"Choose [{default}]: ").strip()
+        if not answer:
+            return values[int(default) - 1][0]
+        if answer.isdigit() and 1 <= int(answer) <= len(values):
+            return values[int(answer) - 1][0]
+        output_func(f"Choose 1-{len(values)}.")
+
+
+def _run_confidence_interview_placement(
+    slug: str,
+    path: Path,
+    *,
+    input_func=input,
+    output_func=print,
+) -> int:
+    """Run the same bounded V4 route setup used by the Maker Bench."""
+    from openlearn import application
+
+    value = interview_prep.load_profile(path)
+    placement = value["placement"]
+    assert isinstance(placement, dict)
+    survey = placement.get("survey")
+    if placement.get("next_stage") == "confidence":
+        role = _confidence_choice(
+            "Target role family",
+            interview_prep.CONFIDENCE_ROLES,
+            input_func=input_func,
+            output_func=output_func,
+            default="1",
+        )
+        level = _confidence_choice(
+            "Target level",
+            interview_prep.CONFIDENCE_LEVELS,
+            input_func=input_func,
+            output_func=output_func,
+            default="2",
+        )
+        focus = _confidence_choice(
+            "Interview mix",
+            interview_prep.CONFIDENCE_FOCUSES,
+            input_func=input_func,
+            output_func=output_func,
+            default="1",
+        )
+        ratings: dict[str, int] = {}
+        output_func("Rapid confidence survey: 1 is new; 5 means you could explain it.")
+        for topic_id, label in interview_prep.confidence_topics_for_focus(focus):
+            while True:
+                answer = input_func(f"{label} [1-5]: ").strip()
+                if answer in {"1", "2", "3", "4", "5"}:
+                    ratings[topic_id] = int(answer)
+                    break
+                output_func("Choose a confidence rating from 1 to 5.")
+        with interview_profile_write_lock(slug):
+            value = interview_prep.save_confidence_survey(
+                path,
+                role_family=role,
+                target_level=level,
+                interview_focus=focus,
+                ratings=ratings,
+            )
+        placement = value["placement"]
+        assert isinstance(placement, dict)
+        survey = placement.get("survey")
+    if placement.get("next_stage") != "outline" or not isinstance(survey, dict):
+        output_func("Placement is already complete.")
+        return 0
+    preview = application.preview_interview_curriculum_change(slug)
+    output_func("\nSuggested course outline")
+    output_func(str(preview["outline"]))
+    answer = input_func(
+        "Confirm, change, or leave this course outline for later? [Y/c/n]: "
+    ).strip().casefold()
+    if answer in {"c", "change"}:
+        return _run_interview_curriculum_change(
+            slug,
+            acceptance_action="confirm",
+            input_func=input_func,
+            output_func=output_func,
+        )
+    if answer not in {"", "y", "yes"}:
+        output_func(
+            f"Outline unchanged. Run 'openlearn interview placement {slug} resume' to continue."
+        )
+        return 0
+    accepted = application.accept_interview_curriculum(
+        slug,
+        action="confirm",
+        outline=str(preview["outline"]),
+        submission_id=str(uuid4()),
+    )
+    cursor = accepted["canonical"]["cursor"]
+    output_func("Course outline confirmed. Confidence granted no mastery.")
+    output_func(f"First technical target: {cursor['skill_ref']['skill_id']}")
+    return 0
+
+
+def _run_interview_curriculum_change(
+    slug: str,
+    *,
+    acceptance_action: Literal["confirm", "change"] = "change",
+    input_func=input,
+    output_func=print,
+) -> int:
+    """Preview and explicitly confirm the same bounded route changes as the web UI."""
+    from openlearn import application, tutor_service
+
+    current = application.preview_interview_curriculum_change(slug)
+    route = current["route"]
+    assert isinstance(route, dict)
+    changes: dict[str, object] = {}
+    prompts = (
+        ("role_family", "Role family", route.get("role_family")),
+        ("target_level", "Target level", route.get("target_level")),
+        ("interview_focus", "Interview focus", str(route.get("route_id") or "").replace("-", "_")),
+        ("interview_date", "Interview date YYYY-MM-DD", "unchanged"),
+        ("weekly_minutes", "Weekly practice minutes", route.get("weekly_minutes")),
+        ("session_minutes", "Session minutes", route.get("session_minutes")),
+    )
+    for field, label, current_value in prompts:
+        answer = input_func(f"{label} [{current_value}]: ").strip()
+        if answer:
+            changes[field] = int(answer) if field in {"weekly_minutes", "session_minutes"} else answer
+    pacing = input_func(
+        f"Pacing [recommended/standard, current {route.get('pacing_posture')}]: "
+    ).strip().casefold()
+    if pacing == "standard":
+        changes["pacing_posture_override"] = "standard"
+    elif pacing in {"r", "recommended"}:
+        changes["pacing_posture_override"] = None
+    focus = str(changes.get("interview_focus") or str(route.get("route_id")).replace("-", "_"))
+    confidence = input_func("Change confidence ratings? [y/N]: ").strip().casefold()
+    if confidence in {"y", "yes"}:
+        ratings: dict[str, int] = {}
+        for topic_id, label in interview_prep.confidence_topics_for_focus(focus):
+            while True:
+                value = input_func(f"{label} [1-5]: ").strip()
+                if value in {"1", "2", "3", "4", "5"}:
+                    ratings[topic_id] = int(value)
+                    break
+                output_func("Choose 1-5.")
+        changes["confidence_ratings"] = ratings
+    optional = input_func(
+        "Optional stable skill IDs to include (comma-separated, blank keeps current, "
+        "'none' removes all): "
+    ).strip()
+    if optional.casefold() in {"none", "clear"}:
+        changes["optional_skill_ids"] = []
+    elif optional:
+        changes["optional_skill_ids"] = [
+            item.strip() for item in optional.split(",") if item.strip()
+        ]
+    preview = application.preview_interview_curriculum_change(slug, changes=changes)
+    output_func("\nChanged course outline preview")
+    output_func(str(preview["outline"]))
+    if input_func("Confirm these changes? [y/N]: ").strip().casefold() not in {"y", "yes"}:
+        output_func("No course changes were saved.")
+        return 0
+    result = application.accept_interview_curriculum(
+        slug,
+        action=acceptance_action,
+        changes=changes,
+        outline=str(preview["outline"]),
+        submission_id=str(uuid4()),
+        expected_revision=tutor_service.course_revision(slug),
+    )
+    confirmation = (
+        "Course outline confirmed. First technical target: "
+        if acceptance_action == "confirm"
+        else "Course outline updated. Current technical target: "
+    )
+    output_func(
+        confirmation + f"{result['canonical']['cursor']['skill_ref']['skill_id']}"
+    )
+    return 0
+
+
 def cmd_interview_placement(
     args: argparse.Namespace, input_func=input, output_func=print
 ) -> int:
@@ -4477,6 +4664,26 @@ def cmd_interview_placement(
             output_func("Placement discarded. Append-only attempt evidence was preserved.")
             _print_placement_status(value, output_func)
             return 0
+        if action == "skip":
+            from openlearn import application
+
+            accepted = application.accept_interview_curriculum(
+                slug,
+                action="skip",
+                submission_id=str(uuid4()),
+            )
+            canonical = accepted["canonical"]
+            cursor = canonical["cursor"]
+            output_func("Placement skipped. A broad unmastered route is ready.")
+            output_func(
+                "First technical target: "
+                f"{cursor['skill_ref']['skill_id']}"
+            )
+            return 0
+        if action == "change":
+            return _run_interview_curriculum_change(
+                slug, input_func=input_func, output_func=output_func
+            )
         value = sync_interview_placement(slug)
         placement = value["placement"]
         assert isinstance(placement, dict)
@@ -4509,17 +4716,17 @@ def cmd_interview_placement(
                 placement = value["placement"]
                 assert isinstance(placement, dict)
         if placement.get("status") != "in_progress":
-            activity = _begin_interview_activity(
-                slug, lifecycle_version=interview_prep.PLACEMENT_V3
-            )
             with interview_profile_write_lock(slug):
-                value = interview_prep.start_placement(
-                    path,
-                    activity_id=str(activity["activity_id"]),
-                    lifecycle_version=interview_prep.PLACEMENT_V3,
-                )
+                value = interview_prep.start_confidence_placement(path)
             placement = value["placement"]
             assert isinstance(placement, dict)
+        if placement.get("lifecycle_version") == interview_prep.PLACEMENT_V4:
+            return _run_confidence_interview_placement(
+                slug,
+                path,
+                input_func=input_func,
+                output_func=output_func,
+            )
         if placement.get("lifecycle_version") == interview_prep.PLACEMENT_V3:
             return _run_reasoning_interview_placement(
                 slug,
@@ -8182,6 +8389,7 @@ def delete_topic_files(slug: str) -> None:
         durable_unlink(topic_turn_journal_path(slug))
         durable_unlink(interview_reconciliation_journal_path(slug))
         durable_unlink(interview_reconciliation_receipt_path(slug))
+        durable_unlink(interview_route_journal_path(slug))
         _topic_delete_checkpoint("after_journals")
         data_dir = topic_data_dir(slug)
         if data_dir.exists():
@@ -15037,6 +15245,10 @@ def interview_reconciliation_receipt_path(slug: str) -> Path:
     return topics_dir() / f".{slug}.interview-reconciliation-receipt.json"
 
 
+def interview_route_journal_path(slug: str) -> Path:
+    return topics_dir() / f".{slug}.interview-route.json"
+
+
 def topic_deletion_tombstone_path(slug: str) -> Path:
     return topics_dir() / f".{slug}.deleted.json"
 
@@ -16156,6 +16368,10 @@ def recover_activity_update(slug: str) -> None:
 
 
 def load_state(slug: str) -> dict[str, object]:
+    if interview_route_journal_path(slug).exists():
+        from openlearn import courses
+
+        courses.recover_interview_route_acceptance(slug)
     recover_turn_commit(slug)
     with file_lock(topic_path(slug)), file_lock(topic_state_path(slug)):
         if (
@@ -16182,6 +16398,7 @@ def save_state(slug: str, state: dict[str, object]) -> None:
             "_turn_receipts_schema",
             "_legacy_turn_receipts",
             "_legacy_turn_receipts_schema",
+            "_interview_route_receipts",
             "interview_curriculum",
         ):
             if internal_key in existing:
@@ -16840,9 +17057,11 @@ def repair_topic_metadata(slug: str) -> bool:
     if not path.exists():
         raise OpenLearnError(f"topic not found: {slug}")
     reconciliation_journal = interview_reconciliation_journal_path(slug)
-    with file_lock(reconciliation_journal), file_lock(path):
+    route_journal = interview_route_journal_path(slug)
+    with file_lock(reconciliation_journal), file_lock(route_journal), file_lock(path):
         durable_unlink(reconciliation_journal)
         durable_unlink(interview_reconciliation_receipt_path(slug))
+        durable_unlink(route_journal)
         current_text = path.read_text(encoding="utf-8")
         try:
             metadata, body = parse_topic(current_text)

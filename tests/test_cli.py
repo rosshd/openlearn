@@ -213,8 +213,118 @@ class CliStorageTests(unittest.TestCase):
 
     def test_slugify_rejects_empty_slugs(self) -> None:
         self.assertEqual(cli.slugify("Python Basics!"), "python-basics")
+
+    def test_interview_outline_change_uses_same_coordinator_as_application_api(self) -> None:
+        from openlearn import application, tutor_service
+
+        cli_slug = self.create_interview_topic("CLI Route Change")
+        api_slug = self.create_interview_topic("API Route Change")
+        application.accept_interview_curriculum(
+            cli_slug, action="skip", submission_id="00000000-0000-4000-8000-000000000001"
+        )
+        application.accept_interview_curriculum(
+            api_slug, action="skip", submission_id="00000000-0000-4000-8000-000000000002"
+        )
+        answers = iter(
+            [
+                "",
+                "",
+                "system_design",
+                "",
+                "",
+                "",
+                "recommended",
+                "n",
+                "none",
+                "y",
+            ]
+        )
+
+        result = cli.cmd_interview_placement(
+            Namespace(topic=cli_slug, action="change"),
+            input_func=lambda _prompt: next(answers),
+            output_func=lambda _line: None,
+        )
+        changes = {
+            "interview_focus": "system_design",
+            "pacing_posture_override": None,
+            "optional_skill_ids": [],
+        }
+        api_preview = application.preview_interview_curriculum_change(
+            api_slug, changes=changes
+        )
+        api_result = application.accept_interview_curriculum(
+            api_slug,
+            action="change",
+            changes=changes,
+            submission_id="00000000-0000-4000-8000-000000000003",
+            expected_revision=tutor_service.course_revision(api_slug),
+        )
+
+        self.assertEqual(result, 0)
+        cli_route = cli.load_state(cli_slug)["interview_curriculum"]["route"]
+        self.assertEqual(cli_route["route_fingerprint"], api_preview["route_fingerprint"])
+        self.assertEqual(
+            cli_route["route_fingerprint"],
+            api_result["canonical"]["route_fingerprint"],
+        )
+        self.assertEqual(cli_route["route_id"], "system-design")
+        self.assertNotIn("optional", {item["requirement"] for item in cli_route["skills"]})
         with self.assertRaises(cli.OpenLearnError):
             cli.slugify("!!!")
+
+    def test_initial_cli_outline_can_be_changed_before_confirmation(self) -> None:
+        from openlearn import application
+
+        slug = self.create_interview_topic("CLI Initial Route")
+        path = cli.interview_profile_path(slug)
+        with cli.interview_profile_write_lock(slug):
+            cli.interview_prep.start_confidence_placement(path)
+        ratings = {
+            topic_id: 2
+            for topic_id, _label in cli.interview_prep.confidence_topics_for_focus(
+                "coding"
+            )
+        }
+        with cli.interview_profile_write_lock(slug):
+            cli.interview_prep.save_confidence_survey(
+                path,
+                role_family="general SWE",
+                target_level="entry",
+                interview_focus="coding",
+                ratings=ratings,
+            )
+        answers = iter(
+            [
+                "c",
+                "",
+                "",
+                "system_design",
+                "",
+                "",
+                "",
+                "recommended",
+                "n",
+                "none",
+                "y",
+            ]
+        )
+
+        result = cli._run_confidence_interview_placement(
+            slug,
+            path,
+            input_func=lambda _prompt: next(answers),
+            output_func=lambda _line: None,
+        )
+
+        self.assertEqual(result, 0)
+        profile = cli.interview_prep.load_profile(path)
+        self.assertEqual(profile["placement"]["status"], "provisional")
+        route = cli.load_state(slug)["interview_curriculum"]["route"]
+        self.assertEqual(route["route_id"], "system-design")
+        self.assertNotIn("optional", {item["requirement"] for item in route["skills"]})
+        preview = application.preview_interview_curriculum_change(slug)
+        self.assertEqual(preview["selected_optional_skill_ids"], [])
 
     def test_version_flag_reports_package_version(self) -> None:
         from openlearn import __version__

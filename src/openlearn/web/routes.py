@@ -361,7 +361,7 @@ async def update_placement(request: Request, slug: str) -> JSONResponse:
             next_path=request.url_for("placement", slug=slug).path,
         )
     if payload.action == "skip":
-        result = public_mapping(await _call(request, "skip_placement", slug))
+        result = public_mapping(await _call(request, "skip_placement", slug, payload))
     else:
         result = public_mapping(await _call(request, "update_placement", slug, payload))
     if result.get("state") == "conflict":
@@ -370,6 +370,8 @@ async def update_placement(request: Request, slug: str) -> JSONResponse:
         raise HTTPException(status_code=404, detail="Placement not found")
     if result.get("invalid"):
         return _json_error(str(result.get("error")), 422)
+    if payload.action in {"preview_outline", "change_outline"}:
+        return JSONResponse(result)
     if result.get("status") == "provisional":
         if payload.action == "submit":
             return JSONResponse(result)

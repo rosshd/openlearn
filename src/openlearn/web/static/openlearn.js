@@ -1366,7 +1366,20 @@ function lockPlacement(locked) {
   placementShell?.setAttribute("aria-busy", String(locked));
 }
 
-function finishPlacementAction(result) {
+function placementSubmissionStorageKey(action) {
+  return placementShell
+    ? `openlearn-placement:${placementShell.dataset.courseSlug}:${action}`
+    : "";
+}
+
+function clearStablePlacementSubmission(action) {
+  placementSubmissionIds.delete(action);
+  const key = placementSubmissionStorageKey(action);
+  if (key) window.sessionStorage.removeItem(key);
+}
+
+function finishPlacementAction(result, action) {
+  if (action) clearStablePlacementSubmission(action);
   const destination = result.initialization_url || result.setup_url;
   if (destination) window.location.assign(appUrl(destination));
   else window.location.reload();
@@ -1381,7 +1394,7 @@ async function runPlacementAction(action, values = {}) {
       method: "POST",
       body: JSON.stringify({action, ...values}),
     });
-    finishPlacementAction(result);
+    finishPlacementAction(result, action);
   } catch (error) {
     if (error.payload?.setup_url) {
       window.location.assign(appUrl(error.payload.setup_url));
@@ -1563,12 +1576,87 @@ if (confidenceForm) {
 
 async function confirmPlacementOutline() {
   const outline = placementShell?.querySelector("#placement-outline")?.value || "";
-  await runPlacementAction("confirm_outline", {outline});
+  const form = placementShell?.querySelector("[data-outline-form]");
+  await runPlacementAction("confirm_outline", {
+    outline,
+    submission_id: stablePlacementSubmission("confirm"),
+    expected_revision: Number(placementShell.dataset.courseRevision || 0),
+    ...outlineChangeValues(form),
+  });
+}
+
+const placementSubmissionIds = new Map();
+function stablePlacementSubmission(action) {
+  if (placementSubmissionIds.has(action)) return placementSubmissionIds.get(action);
+  const key = placementSubmissionStorageKey(action);
+  const saved = key ? window.sessionStorage.getItem(key) : null;
+  placementSubmissionIds.set(action, saved || crypto.randomUUID());
+  if (key && !saved) window.sessionStorage.setItem(key, placementSubmissionIds.get(action));
+  return placementSubmissionIds.get(action);
+}
+
+function outlineChangeValues(form) {
+  const values = form ? new FormData(form) : new FormData();
+  const ratings = {};
+  for (const [name, value] of values.entries()) {
+    if (name.startsWith("rating_")) ratings[name.slice(7)] = Number(value);
+  }
+  return {
+    role_family: values.get("role_family") || "",
+    target_level: values.get("target_level") || "",
+    interview_focus: values.get("interview_focus") || "",
+    interview_date: values.get("interview_date") ?? "",
+    weekly_minutes: Number(values.get("weekly_minutes")),
+    session_minutes: Number(values.get("session_minutes")),
+    ratings,
+    pacing_posture_override: values.get("pacing_posture_override") || null,
+    optional_skill_ids: values.getAll("optional_skill_ids"),
+  };
 }
 
 placementShell?.querySelector("[data-outline-form]")?.addEventListener("submit", (event) => {
   event.preventDefault();
-  confirmPlacementOutline();
+  previewPlacementOutline(event.currentTarget);
+});
+
+let pendingOutlineChange = null;
+async function previewPlacementOutline(form) {
+  const values = outlineChangeValues(form);
+  lockPlacement(true);
+  if (placementStatus) placementStatus.textContent = "Previewing route…";
+  try {
+    const result = await requestJson(`/api/courses/${encodeURIComponent(placementShell.dataset.courseSlug)}/placement`, {
+      method: "POST",
+      body: JSON.stringify({action: "preview_outline", ...values}),
+    });
+    pendingOutlineChange = values;
+    const previewText = placementShell.querySelector("#placement-outline");
+    if (previewText) previewText.value = result.outline || "";
+    outlineEditor.hidden = true;
+    outlineActions.hidden = true;
+    placementShell.querySelector("[data-outline-preview-confirm]").hidden = false;
+    if (placementStatus) placementStatus.textContent = "Preview ready. Confirm to save it.";
+  } catch (error) {
+    if (placementStatus) placementStatus.textContent = error.message;
+  } finally {
+    lockPlacement(false);
+  }
+}
+
+placementShell?.querySelector("[data-accept-outline-preview]")?.addEventListener("click", () => {
+  if (!pendingOutlineChange) return;
+  runPlacementAction("change_outline", {
+    ...pendingOutlineChange,
+    submission_id: stablePlacementSubmission("change"),
+    expected_revision: Number(placementShell.dataset.courseRevision || 0),
+  });
+});
+
+placementShell?.querySelector("[data-cancel-outline-preview]")?.addEventListener("click", () => {
+  pendingOutlineChange = null;
+  placementShell.querySelector("[data-outline-preview-confirm]").hidden = true;
+  outlineActions.hidden = false;
+  window.location.reload();
 });
 
 placementShell?.querySelector("[data-confirm-outline]")?.addEventListener("click", () => {
@@ -1577,6 +1665,22 @@ placementShell?.querySelector("[data-confirm-outline]")?.addEventListener("click
 
 const outlineActions = placementShell?.querySelector("[data-outline-actions]");
 const outlineEditor = placementShell?.querySelector("[data-outline-editor]");
+
+function updateOutlineConfidenceFields() {
+  const focus = outlineEditor?.querySelector('[name="interview_focus"]')?.value || "coding";
+  for (const field of outlineEditor?.querySelectorAll("[data-outline-confidence-topic]") || []) {
+    const visible = focus === "balanced"
+      || field.dataset.topicTrack === (focus === "system_design" ? "system_design" : "coding");
+    field.hidden = !visible;
+    const select = field.querySelector("select");
+    if (select) select.disabled = !visible;
+  }
+}
+
+outlineEditor?.querySelector('[name="interview_focus"]')?.addEventListener(
+  "change", updateOutlineConfidenceFields,
+);
+updateOutlineConfidenceFields();
 
 placementShell?.querySelector("[data-change-outline]")?.addEventListener("click", () => {
   outlineActions.hidden = true;
@@ -1593,7 +1697,12 @@ placementShell?.querySelector("[data-cancel-outline]")?.addEventListener("click"
 for (const button of document.querySelectorAll("[data-placement-action]")) {
   button.addEventListener("click", () => runPlacementAction(button.dataset.placementAction, {
     stage: button.dataset.stage || null,
-    submission_id: button.dataset.placementAction === "submit" ? crypto.randomUUID() : null,
+    submission_id: ["submit", "skip"].includes(button.dataset.placementAction)
+      ? stablePlacementSubmission(button.dataset.placementAction)
+      : null,
+    expected_revision: button.dataset.placementAction === "skip"
+      ? Number(placementShell?.dataset.courseRevision || 0)
+      : null,
   }));
 }
 

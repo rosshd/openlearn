@@ -80,6 +80,8 @@ class PlacementRequest(BaseModel):
         "start",
         "save_confidence",
         "confirm_outline",
+        "preview_outline",
+        "change_outline",
         "save_draft",
         "submit",
         "skip_stage",
@@ -95,6 +97,12 @@ class PlacementRequest(BaseModel):
     interview_focus: str = Field(default="", max_length=64)
     ratings: dict[str, int] = Field(default_factory=dict)
     outline: str = Field(default="", max_length=12_000)
+    expected_revision: int | None = Field(default=None, ge=0)
+    interview_date: str | None = Field(default=None, max_length=64)
+    weekly_minutes: int | None = Field(default=None, ge=1, le=10_080)
+    session_minutes: int | None = Field(default=None, ge=1, le=10_080)
+    pacing_posture_override: Literal["standard"] | None = None
+    optional_skill_ids: list[str] | None = Field(default=None, max_length=128)
 
     @field_validator("submission_id")
     @classmethod

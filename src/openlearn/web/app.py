@@ -65,7 +65,7 @@ class WebServices(Protocol):
 
     def update_placement(self, slug: str, request: Any) -> Any: ...
 
-    def skip_placement(self, slug: str) -> Any: ...
+    def skip_placement(self, slug: str, request: Any | None = None) -> Any: ...
 
     def start_course_initialization(self, slug: str) -> Any: ...
 
@@ -155,7 +155,9 @@ class PlaceholderServices:
     def update_placement(self, slug: str, request: Any) -> dict[str, Any]:
         return {"ok": False, "error": "Placement services are unavailable."}
 
-    def skip_placement(self, slug: str) -> dict[str, Any]:
+    def skip_placement(
+        self, slug: str, request: Any | None = None
+    ) -> dict[str, Any]:
         return {"ok": False, "error": "Placement services are unavailable."}
 
     def start_course_initialization(self, slug: str) -> dict[str, Any]:

@@ -303,6 +303,53 @@ def prepare_interview_curriculum(
     )
 
 
+def preview_interview_curriculum_change(
+    slug: str, *, changes: Mapping[str, object] | None = None
+) -> dict[str, object]:
+    """Return a side-effect-free bounded course-outline preview."""
+    from datetime import date
+
+    from openlearn import cli, interview_curriculum, interview_prep
+
+    profile = interview_prep.load_profile(cli.interview_profile_path(slug))
+    canonical = cli.load_state(slug).get("interview_curriculum")
+    bundle = (
+        interview_curriculum.load_pinned_bundle(
+            str(canonical["bundle_id"]), str(canonical["bundle_version"])
+        )
+        if isinstance(canonical, dict)
+        else interview_curriculum.load_default_bundle()
+    )
+    return interview_prep.preview_curriculum_change(
+        profile,
+        changes=changes,
+        current_date=date.today(),
+        bundle=bundle,
+    )
+
+
+def accept_interview_curriculum(
+    slug: str,
+    *,
+    action: Literal["confirm", "skip", "change"],
+    changes: Mapping[str, object] | None = None,
+    outline: str = "",
+    submission_id: str | None = None,
+    expected_revision: int | None = None,
+) -> dict[str, object]:
+    """Persist an accepted route through the shared recoverable coordinator."""
+    from openlearn.courses import accept_interview_curriculum as accept
+
+    return accept(
+        slug,
+        action=action,
+        changes=dict(changes or {}),
+        outline=outline,
+        submission_id=submission_id,
+        expected_revision=expected_revision,
+    )
+
+
 def sync_interview_placement(slug: str) -> dict[str, object]:
     """Project durable placement evidence into the learner's local profile."""
     from openlearn import cli

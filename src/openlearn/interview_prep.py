@@ -169,6 +169,7 @@ CONFIDENCE_LEVELS = (
     ("entry", "Entry"),
     ("mid", "Mid-level"),
     ("senior", "Senior+"),
+    ("staff", "Staff"),
 )
 CONFIDENCE_FOCUSES = (
     ("coding", "Coding interviews"),
@@ -179,7 +180,17 @@ CONFIDENCE_SURVEY_ID = "leetcode_pattern_confidence_v1"
 CURRICULUM_ALLOCATION_SCHEMA_VERSION = 1
 CURRICULUM_ALLOCATION_BOUNDARIES = frozenset({"preparation", "resume", "confirmed-outline"})
 OUTLINE_CHANGE_FIELDS = frozenset(
-    {"interview_focus", "role_family", "target_level", "pacing_posture_override"}
+    {
+        "interview_focus",
+        "role_family",
+        "target_level",
+        "interview_date",
+        "weekly_minutes",
+        "session_minutes",
+        "confidence_ratings",
+        "pacing_posture_override",
+        "optional_skill_ids",
+    }
 )
 
 
@@ -947,7 +958,8 @@ def _validate_curriculum_allocation(allocation: object) -> None:
         or isinstance(allocation.get("profile_revision"), bool)
         or allocation.get("pacing_posture_override") not in {None, "standard"}
         or not isinstance(route, dict)
-        or set(route) != route_fields
+        or frozenset(route)
+        not in {frozenset(route_fields), frozenset((*route_fields, "optional_skill_ids"))}
         or allocation_id != f"allocation_{route.get('allocation_fingerprint')}"
         or route.get("route_id") not in interview_curriculum.FOCUSES
         or route.get("date_horizon") not in interview_curriculum.DATE_HORIZONS
@@ -957,6 +969,11 @@ def _validate_curriculum_allocation(allocation: object) -> None:
         or not route["skills"]
     ):
         raise ValueError("interview-prep curriculum allocation is invalid")
+    optional_skill_ids = route.get("optional_skill_ids", [])
+    if not isinstance(optional_skill_ids, list) or not all(
+        isinstance(value, str) and value for value in optional_skill_ids
+    ) or len(optional_skill_ids) != len(set(optional_skill_ids)):
+        raise ValueError("interview-prep curriculum optional preferences are invalid")
     _validated_timestamp(allocation.get("created_at"), "curriculum allocation created_at")
     try:
         date.fromisoformat(str(allocation.get("allocation_date")))
@@ -1403,6 +1420,491 @@ def confidence_outline(survey: Mapping[str, object] | None) -> str:
         lines.append("Concepts: " + "; ".join(str(value) for value in item["concepts"]))
         lines.append(f"Interview habit: {item['interview_habit']}")
     return "\n".join(lines)
+
+
+def _outline_focus(value: object) -> str:
+    focus = str(value or "coding").strip().casefold().replace("-", "_")
+    if focus not in {item for item, _label in CONFIDENCE_FOCUSES}:
+        raise ValueError("interview curriculum focus change is invalid")
+    return focus
+
+
+def _route_outline_items(route: Mapping[str, object]) -> list[dict[str, object]]:
+    skills = route.get("skills")
+    if not isinstance(skills, list):
+        raise ValueError("interview curriculum route is malformed")
+    items: list[dict[str, object]] = []
+    by_unit: dict[str, dict[str, object]] = {}
+    for raw in skills:
+        if not isinstance(raw, Mapping):
+            continue
+        unit_id = str(raw.get("unit_id") or "")
+        section_id = str(raw.get("section_id") or "")
+        ref = raw.get("skill_ref")
+        skill_id = ref.get("skill_id") if isinstance(ref, Mapping) else None
+        if not unit_id or not section_id or not isinstance(skill_id, str):
+            continue
+        unit = by_unit.get(unit_id)
+        if unit is None:
+            unit = {
+                "unit_id": unit_id,
+                "title": str(raw.get("unit_label") or unit_id),
+                "sections": [],
+                "skill_ids": [],
+                "locked": False,
+                "emphasis": str(raw.get("depth_mode") or "learn").title(),
+                "outcome": "",
+                "interview_habit": str(raw.get("embedded_habit") or ""),
+            }
+            by_unit[unit_id] = unit
+            items.append(unit)
+        sections = unit["sections"]
+        skill_ids = unit["skill_ids"]
+        assert isinstance(sections, list) and isinstance(skill_ids, list)
+        label = str(raw.get("section_label") or section_id)
+        if label not in sections:
+            sections.append(label)
+        skill_ids.append(skill_id)
+        if raw.get("requirement") == "required":
+            unit["locked"] = True
+        if not unit["outcome"]:
+            unit["outcome"] = f"Build and verify {label.lower()}."
+    for item in items:
+        sections = item["sections"]
+        assert isinstance(sections, list)
+        item["outcome"] = "Practice " + ", then ".join(
+            str(label).lower() for label in sections
+        ) + "."
+    return items
+
+
+def _route_outline(route: Mapping[str, object]) -> str:
+    role = str(route.get("role_family") or "general-swe").replace("-", " ")
+    level = str(route.get("target_level") or "entry")
+    focus = str(route.get("route_id") or "coding").replace("-", " ")
+    lines = [
+        f"Scope: Technical interview preparation for a {level} {role} target.",
+        "Confidence changes depth and practice allocation, never mastery.",
+        f"Interview focus: {focus}.",
+        "Units:",
+    ]
+    for index, item in enumerate(_route_outline_items(route), start=1):
+        locked = " Locked prerequisite." if item["locked"] else ""
+        lines.append(
+            f"{index}. {item['title']} - {item['outcome']} "
+            f"Emphasis: {item['emphasis']}.{locked}"
+        )
+    return "\n".join(lines)
+
+
+def curriculum_change_projection(
+    profile_value: Mapping[str, object],
+    *,
+    changes: Mapping[str, object] | None = None,
+    current_date: date,
+    bundle: interview_curriculum.InterviewCurriculumBundle | None = None,
+) -> tuple[dict[str, object], dict[str, object]]:
+    """Return a validated profile candidate and pinned route without writing storage."""
+    requested = dict(changes or {})
+    unknown = set(requested) - OUTLINE_CHANGE_FIELDS
+    if unknown:
+        raise ValueError(f"interview curriculum outline change is invalid: {sorted(unknown)[0]}")
+    profile_raw = profile_value.get("profile")
+    placement_raw = profile_value.get("placement")
+    if not isinstance(profile_raw, Mapping) or not isinstance(placement_raw, Mapping):
+        raise ValueError("interview-prep profile is malformed")
+    candidate = copy.deepcopy(dict(profile_value))
+    profile = candidate["profile"]
+    placement = candidate["placement"]
+    assert isinstance(profile, dict) and isinstance(placement, dict)
+    survey_raw = placement.get("survey")
+    survey = copy.deepcopy(dict(survey_raw)) if isinstance(survey_raw, Mapping) else {}
+    existing_allocation = candidate.get("curriculum_allocation")
+    existing_route = (
+        existing_allocation.get("route")
+        if isinstance(existing_allocation, Mapping)
+        and isinstance(existing_allocation.get("route"), Mapping)
+        else {}
+    )
+
+    for key in (
+        "role_family",
+        "target_level",
+        "interview_date",
+        "weekly_minutes",
+        "session_minutes",
+    ):
+        if key in requested:
+            profile[key] = requested[key]
+    normalized_profile = _normalized_profile(profile)
+    candidate["profile"] = normalized_profile
+    role = str(
+        requested.get("role_family")
+        or survey.get("role_family")
+        or existing_route.get("role_family")
+        or normalized_profile.get("role_family")
+        or "general SWE"
+    )
+    level = str(
+        requested.get("target_level")
+        or survey.get("target_level")
+        or existing_route.get("target_level")
+        or normalized_profile.get("target_level")
+        or "entry"
+    )
+    focus = _outline_focus(
+        requested.get("interview_focus")
+        or survey.get("interview_focus")
+        or existing_route.get("route_id")
+        or "coding"
+    )
+    ratings_raw = requested.get("confidence_ratings", survey.get("ratings", {}))
+    if not isinstance(ratings_raw, Mapping):
+        raise ValueError("interview curriculum confidence change is invalid")
+    ratings = {str(key): int(value) for key, value in ratings_raw.items()}
+    expected_rating_ids = {
+        topic_id for topic_id, _label in confidence_topics_for_focus(focus)
+    }
+    if "confidence_ratings" in requested and set(ratings) != expected_rating_ids:
+        raise ValueError("interview curriculum confidence change is invalid")
+    if "confidence_ratings" not in requested:
+        ratings = {
+            topic_id: ratings.get(topic_id, 1) for topic_id in expected_rating_ids
+        }
+
+    existing_override = (
+        existing_allocation.get("pacing_posture_override")
+        if isinstance(existing_allocation, Mapping)
+        else None
+    )
+    override_value = (
+        requested["pacing_posture_override"]
+        if "pacing_posture_override" in requested
+        else existing_override
+    )
+    pinned_bundle = bundle or interview_curriculum.load_default_bundle()
+    route = interview_curriculum.materialize_adaptive_route(
+        pinned_bundle,
+        role_family=role,
+        target_level=level,
+        interview_focus=focus,
+        interview_date=str(normalized_profile.get("interview_date") or ""),
+        weekly_minutes=int(normalized_profile["weekly_minutes"]),
+        session_minutes=int(normalized_profile["session_minutes"]),
+        confidence_ratings=ratings,
+        pacing_posture_override=(
+            str(override_value)
+            if override_value is not None
+            else None
+        ),
+        current_date=current_date,
+    ).to_dict()
+    skills = route["skills"]
+    assert isinstance(skills, list)
+    optional_ids = {
+        str(item["skill_ref"]["skill_id"])
+        for item in skills
+        if isinstance(item, dict)
+        and item.get("requirement") == "optional"
+        and isinstance(item.get("skill_ref"), dict)
+    }
+    has_optional_preference = (
+        "optional_skill_ids" in requested or "optional_skill_ids" in existing_route
+    )
+    existing_optional = existing_route.get("optional_skill_ids", ())
+    preferred_raw = requested.get("optional_skill_ids", existing_optional)
+    if not isinstance(preferred_raw, (list, tuple)) or not all(
+        isinstance(value, str) for value in preferred_raw
+    ):
+        raise ValueError("interview curriculum optional preferences are invalid")
+    preferred = tuple(dict.fromkeys(str(value) for value in preferred_raw))
+    if not set(preferred) <= optional_ids:
+        raise ValueError("interview curriculum optional preferences are invalid")
+    if has_optional_preference:
+        preferred_set = set(preferred)
+        route["skills"] = [
+            item
+            for item in skills
+            if isinstance(item, dict) and (
+                item.get("requirement") == "required"
+                or (
+                    item.get("requirement") == "optional"
+                    and isinstance(item.get("skill_ref"), dict)
+                    and item["skill_ref"].get("skill_id") in preferred_set
+                )
+            )
+        ]
+        route["first_session"] = route["skills"][0]
+        route["prerequisite_edges"] = [
+            edge
+            for edge in route["prerequisite_edges"]
+            if edge[0] in {
+                str(item["skill_ref"]["skill_id"])
+                for item in route["skills"]
+                if isinstance(item, dict) and isinstance(item.get("skill_ref"), dict)
+            }
+            and edge[1] in {
+                str(item["skill_ref"]["skill_id"])
+                for item in route["skills"]
+                if isinstance(item, dict) and isinstance(item.get("skill_ref"), dict)
+            }
+        ]
+        route["optional_skill_ids"] = list(preferred)
+        route["route_fingerprint"] = interview_curriculum.canonical_fingerprint(
+            {
+                "base": route["route_fingerprint"],
+                "optional_skill_ids": preferred,
+            }
+        )
+        route["allocation_fingerprint"] = interview_curriculum.canonical_fingerprint(
+            {
+                "base": route["allocation_fingerprint"],
+                "route_fingerprint": route["route_fingerprint"],
+                "optional_skill_ids": preferred,
+            }
+        )
+
+    survey.update(
+        {
+            "role_family": role,
+            "target_level": "entry" if level in {"", "unspecified"} else level,
+            "interview_focus": focus,
+            "ratings": ratings,
+            "outline": _route_outline(route),
+        }
+    )
+    placement["survey"] = survey
+    candidate["curriculum_allocation"] = None
+    return candidate, route
+
+
+def preview_curriculum_change(
+    profile_value: Mapping[str, object],
+    *,
+    changes: Mapping[str, object] | None = None,
+    current_date: date,
+    bundle: interview_curriculum.InterviewCurriculumBundle | None = None,
+) -> dict[str, object]:
+    """Build the learner-visible route preview without mutating local files."""
+    candidate, route = curriculum_change_projection(
+        profile_value, changes=changes, current_date=current_date, bundle=bundle
+    )
+    available_profile = copy.deepcopy(dict(profile_value))
+    available_allocation = available_profile.get("curriculum_allocation")
+    if isinstance(available_allocation, dict):
+        available_route = available_allocation.get("route")
+        if isinstance(available_route, dict):
+            available_route.pop("optional_skill_ids", None)
+    available_changes = dict(changes or {})
+    available_changes.pop("optional_skill_ids", None)
+    _available_candidate, available_route = curriculum_change_projection(
+        available_profile,
+        changes=available_changes,
+        current_date=current_date,
+        bundle=bundle,
+    )
+    skills = route["skills"]
+    assert isinstance(skills, list) and skills
+    first = skills[0]
+    assert isinstance(first, Mapping) and isinstance(first.get("skill_ref"), Mapping)
+    locked = [
+        {
+            "skill_id": str(item["skill_ref"]["skill_id"]),
+            "unit_id": str(item["unit_id"]),
+            "section_id": str(item["section_id"]),
+            "explanation": "Required by the pinned curriculum or a blocking prerequisite.",
+        }
+        for item in skills
+        if isinstance(item, Mapping)
+        and item.get("requirement") == "required"
+        and isinstance(item.get("skill_ref"), Mapping)
+    ]
+    selected_optional = route.get("optional_skill_ids")
+    selected_optional_ids = (
+        set(selected_optional)
+        if isinstance(selected_optional, list)
+        else {
+            str(item["skill_ref"]["skill_id"])
+            for item in route["skills"]
+            if isinstance(item, Mapping)
+            and item.get("requirement") == "optional"
+            and isinstance(item.get("skill_ref"), Mapping)
+        }
+    )
+    optional_choices = [
+        {
+            "skill_id": str(item["skill_ref"]["skill_id"]),
+            "label": str(item.get("section_label") or item["skill_ref"]["skill_id"]),
+            "selected": str(item["skill_ref"]["skill_id"]) in selected_optional_ids,
+        }
+        for item in available_route["skills"]
+        if isinstance(item, Mapping)
+        and item.get("requirement") == "optional"
+        and isinstance(item.get("skill_ref"), Mapping)
+    ]
+    candidate_placement = candidate.get("placement")
+    candidate_survey = (
+        candidate_placement.get("survey")
+        if isinstance(candidate_placement, Mapping)
+        and isinstance(candidate_placement.get("survey"), Mapping)
+        else {}
+    )
+    focus = str(candidate_survey.get("interview_focus") or route["route_id"]).replace(
+        "-", "_"
+    )
+    ratings = candidate_survey.get("ratings")
+    return {
+        "bundle_id": route["bundle_id"],
+        "bundle_version": route["bundle_version"],
+        "route_id": route["route_id"],
+        "route_fingerprint": route["route_fingerprint"],
+        "allocation_fingerprint": route["allocation_fingerprint"],
+        "outline": _route_outline(route),
+        "outline_items": _route_outline_items(route),
+        "locked_prerequisites": locked,
+        "confidence_topics": [
+            {
+                "id": topic_id,
+                "label": label,
+                "track": (
+                    "coding" if topic_id in CONFIDENCE_PATTERN_IDS else "system_design"
+                ),
+                "rating": int(ratings.get(topic_id, 1))
+                if isinstance(ratings, Mapping)
+                else 1,
+            }
+            for topic_id, label in confidence_topics_for_focus(focus)
+        ],
+        "optional_choices": optional_choices,
+        "selected_optional_skill_ids": sorted(selected_optional_ids),
+        "first_cursor": {
+            "unit_id": first["unit_id"],
+            "section_id": first["section_id"],
+            "skill_id": first["skill_ref"]["skill_id"],
+        },
+        "route": route,
+    }
+
+
+def accepted_curriculum_profile(
+    profile_value: Mapping[str, object],
+    *,
+    action: str,
+    changes: Mapping[str, object] | None,
+    outline: str = "",
+    now: datetime,
+    bundle: interview_curriculum.InterviewCurriculumBundle | None = None,
+) -> tuple[dict[str, object], dict[str, object]]:
+    """Build the complete profile payload for an explicit route acceptance."""
+    if action not in {"confirm", "skip", "change"}:
+        raise ValueError("interview curriculum acceptance action is invalid")
+    original_placement = profile_value.get("placement")
+    original_survey = (
+        original_placement.get("survey")
+        if isinstance(original_placement, Mapping)
+        and isinstance(original_placement.get("survey"), Mapping)
+        else {}
+    )
+    original_outline = str(original_survey.get("outline") or "").strip()
+    candidate, route = curriculum_change_projection(
+        profile_value,
+        changes=changes,
+        current_date=now.date(),
+        bundle=bundle,
+    )
+    original_profile = profile_value.get("profile")
+    profile = candidate.get("profile")
+    placement = candidate.get("placement")
+    if not isinstance(profile, dict) or not isinstance(placement, dict):
+        raise ValueError("interview-prep profile is malformed")
+    timestamp = now.astimezone(timezone.utc).isoformat()
+    changed_profile = profile != original_profile
+    revision = int(candidate["profile_revision"]) + (1 if changed_profile else 0)
+    candidate["profile_revision"] = revision
+    candidate["updated_at"] = timestamp
+
+    if action == "confirm":
+        survey = placement.get("survey")
+        if (
+            placement.get("lifecycle_version") != PLACEMENT_V4
+            or placement.get("status") not in {"in_progress", "provisional"}
+            or not isinstance(survey, dict)
+        ):
+            raise ValueError("confidence placement outline is not ready")
+        expected_outline = _route_outline(route)
+        if outline.strip() not in {original_outline, expected_outline}:
+            raise ValueError(
+                "free-form outline replacement is unsupported; use bounded outline changes"
+            )
+        survey["outline"] = expected_outline
+        placement.update(
+            {
+                "status": "provisional",
+                "next_stage": None,
+                "updated_at": timestamp,
+                "completed_at": placement.get("completed_at") or timestamp,
+                "profile_revision": revision,
+                "result": _confidence_result(survey, skipped=False),
+            }
+        )
+    elif action == "skip":
+        skipped_survey = placement.get("survey")
+        skipped_survey = (
+            copy.deepcopy(dict(skipped_survey))
+            if isinstance(skipped_survey, Mapping)
+            else {
+                "role_family": route["role_family"],
+                "target_level": route["target_level"],
+                "interview_focus": str(route["route_id"]).replace("-", "_"),
+                "ratings": {
+                    topic_id: 1
+                    for topic_id, _label in confidence_topics_for_focus(
+                        str(route["route_id"]).replace("-", "_")
+                    )
+                },
+                "outline": _route_outline(route),
+            }
+        )
+        placement = {
+            **_empty_placement(PLACEMENT_V4),
+            "status": "provisional",
+            "attempt_id": f"interview_attempt_{uuid4().hex}",
+            "started_at": timestamp,
+            "updated_at": timestamp,
+            "completed_at": timestamp,
+            "profile_revision": revision,
+            "problem_id": CONFIDENCE_SURVEY_ID,
+            "result": _confidence_result(None, skipped=True),
+            "survey": skipped_survey,
+        }
+        candidate["placement"] = placement
+    else:
+        if placement.get("status") != "provisional":
+            raise ValueError("confirm or skip placement before changing the course outline")
+        survey = placement.get("survey")
+        if isinstance(survey, dict):
+            survey["outline"] = _route_outline(route)
+        placement["profile_revision"] = revision
+        placement["updated_at"] = timestamp
+
+    boundary = "confirmed-outline"
+    candidate["curriculum_allocation"] = {
+        "schema_version": CURRICULUM_ALLOCATION_SCHEMA_VERSION,
+        "allocation_id": f"allocation_{route['allocation_fingerprint']}",
+        "allocation_date": now.date().isoformat(),
+        "boundary": boundary,
+        "created_at": timestamp,
+        "profile_revision": revision,
+        "pacing_posture_override": (
+            "standard" if route.get("pacing_posture") == "standard"
+            and route.get("recommended_pacing_posture") == "accelerated" else None
+        ),
+        "route": route,
+    }
+    candidate["recommendations"] = _recommendations(candidate, current_date=now.date())
+    _validate_placement(placement)
+    _validate_curriculum_allocation(candidate["curriculum_allocation"])
+    return candidate, route
 
 
 def start_confidence_placement(

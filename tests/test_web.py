@@ -4,7 +4,7 @@ import argparse
 import json
 from pathlib import Path
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
@@ -12,7 +12,7 @@ import pytest
 pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient
 
-from openlearn import cli, code_runner, data_management
+from openlearn import application, cli, code_runner, courses, data_management
 from openlearn import config
 from openlearn import interview_prep
 from openlearn import providers
@@ -226,11 +226,13 @@ def test_interview_course_confidence_placement_resumes_and_builds_first_lesson(
     resumed = restarted_client.get(body["placement_url"])
     restarted_token = resumed.cookies["openlearn_csrf"]
     assert "Your suggested course outline" in resumed.text
-    assert "Requirements, Scale, and Interfaces" in resumed.text
-    assert "Reliability, Observability, and Tradeoffs" in resumed.text
-    assert "Two Pointers and Sliding Window" in resumed.text
+    assert "Requirements and Interfaces" in resumed.text
+    assert "Reliability" in resumed.text
+    assert "Sequence Patterns" in resumed.text
+    assert "Linear Foundations" in resumed.text
+    assert "locked" in resumed.text
     assert "Interview habit" in resumed.text
-    assert "Integrated Mock Interview Rounds" in resumed.text
+    assert "Interview Communication and Problem Framing" not in resumed.text
     assert "Timed and Behavioral Interview Practice" not in resumed.text
     assert "Workshop this outline" not in resumed.text
     assert "Confirm course outline" in resumed.text
@@ -302,31 +304,483 @@ def test_confirmed_confidence_outline_retries_course_plan_save(
             "ratings": confidence_ratings(),
         },
     ).json()
-    real_save = cli.save_course_started
+    from openlearn import courses
 
-    def fail_course_save(*_args: object, **_kwargs: object) -> None:
-        raise cli.OpenLearnError("simulated course save interruption")
+    real_checkpoint = courses._route_acceptance_checkpoint
 
-    monkeypatch.setattr(cli, "save_course_started", fail_course_save)
+    def fail_after_profile(stage: str) -> None:
+        if stage == "after_profile":
+            raise cli.OpenLearnError("simulated route acceptance interruption")
+
+    monkeypatch.setattr(courses, "_route_acceptance_checkpoint", fail_after_profile)
+    submission_id = str(uuid4())
     first = client.post(
         f"/api/courses/{slug}/placement",
         headers={"x-csrf-token": token},
-        json={"action": "confirm_outline", "outline": saved["outline"]},
+        json={
+            "action": "confirm_outline",
+            "outline": saved["outline"],
+            "submission_id": submission_id,
+        },
     )
     assert first.status_code == 422
     assert interview_prep.load_profile(cli.interview_profile_path(slug))["placement"][
         "status"
     ] == "provisional"
 
-    monkeypatch.setattr(cli, "save_course_started", real_save)
+    monkeypatch.setattr(courses, "_route_acceptance_checkpoint", real_checkpoint)
     retried = client.post(
         f"/api/courses/{slug}/placement",
         headers={"x-csrf-token": token},
-        json={"action": "confirm_outline", "outline": saved["outline"]},
+        json={
+            "action": "confirm_outline",
+            "outline": saved["outline"],
+            "submission_id": submission_id,
+        },
     )
 
     assert retried.status_code == 202
     assert cli.read_topic(slug).metadata["course_started"] is True
+
+
+def test_skipped_confidence_placement_persists_canonical_route_before_initialization(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    token = csrf(client, "/courses/new")
+    created = client.post(
+        "/api/courses",
+        headers={"x-csrf-token": token},
+        json={
+            "title": "Skipped Interview Placement",
+            "goal": "Prepare for interviews.",
+            "experience": "",
+            "template_id": "technical-interview-prep",
+            "submission_id": str(uuid4()),
+        },
+    ).json()
+    observed: dict[str, object] = {}
+
+    def observe_initialization(slug: str) -> dict[str, object]:
+        observed["canonical"] = cli.load_state(slug).get("interview_curriculum")
+        observed["allocation"] = interview_prep.load_profile(
+            cli.interview_profile_path(slug)
+        ).get("curriculum_allocation")
+        return {
+            "ok": True,
+            "slug": slug,
+            "operation_id": str(uuid4()),
+            "state": "saved",
+        }
+
+    monkeypatch.setattr(
+        OpenLearnWebServices,
+        "start_course_initialization",
+        staticmethod(observe_initialization),
+    )
+    response = client.post(
+        f"/api/courses/{created['slug']}/placement",
+        headers={"x-csrf-token": token},
+        json={"action": "skip", "submission_id": str(uuid4())},
+    )
+
+    assert response.status_code == 202
+    canonical = observed["canonical"]
+    allocation = observed["allocation"]
+    assert isinstance(canonical, dict)
+    assert isinstance(allocation, dict)
+    assert canonical["route_fingerprint"] == allocation["route"]["route_fingerprint"]
+    assert canonical["cursor"]["skill_ref"]["skill_id"] == "concept.arrays-strings"
+    saved_profile = interview_prep.load_profile(cli.interview_profile_path(created["slug"]))
+    survey = saved_profile["placement"]["survey"]
+    assert isinstance(survey, dict)
+    assert set(survey["ratings"]) == {
+        topic_id
+        for topic_id, _label in interview_prep.confidence_topics_for_focus("coding")
+    }
+    assert set(survey["ratings"].values()) == {1}
+
+
+def test_outline_editor_exposes_every_bounded_change_and_previews_empty_optionals(
+    client: TestClient,
+) -> None:
+    token = csrf(client, "/courses/new")
+    created = client.post(
+        "/api/courses",
+        headers={"x-csrf-token": token},
+        json={
+            "title": "Bounded Maker Bench",
+            "goal": "Prepare for interviews.",
+            "experience": "",
+            "template_id": "technical-interview-prep",
+            "submission_id": str(uuid4()),
+        },
+    ).json()
+    slug = created["slug"]
+    started = client.post(
+        f"/api/courses/{slug}/placement",
+        headers={"x-csrf-token": token},
+        json={"action": "start"},
+    )
+    assert started.status_code == 200
+    saved = client.post(
+        f"/api/courses/{slug}/placement",
+        headers={"x-csrf-token": token},
+        json={
+            "action": "save_confidence",
+            "role_family": "backend",
+            "target_level": "entry",
+            "interview_focus": "coding",
+            "ratings": confidence_ratings(),
+        },
+    )
+    assert saved.status_code == 200
+
+    page = client.get(f"/courses/{slug}/placement")
+    for field in (
+        'name="interview_date"',
+        'name="weekly_minutes"',
+        'name="session_minutes"',
+        'name="pacing_posture_override"',
+        'name="rating_arrays_hashing"',
+        'name="optional_skill_ids"',
+    ):
+        assert field in page.text
+    assert ">Preview changes<" in page.text
+    assert "Confirm changes and continue" not in page.text
+
+    default_preview = client.post(
+        f"/api/courses/{slug}/placement",
+        headers={"x-csrf-token": token},
+        json={"action": "preview_outline"},
+    ).json()
+    empty_preview = client.post(
+        f"/api/courses/{slug}/placement",
+        headers={"x-csrf-token": token},
+        json={"action": "preview_outline", "optional_skill_ids": []},
+    ).json()
+    assert default_preview["optional_choices"]
+    assert any(item["selected"] for item in default_preview["optional_choices"])
+    assert empty_preview["selected_optional_skill_ids"] == []
+    assert all(not item["selected"] for item in empty_preview["optional_choices"])
+    assert all(
+        item["requirement"] == "required" for item in empty_preview["route"]["skills"]
+    )
+    assert empty_preview["route_fingerprint"] != default_preview["route_fingerprint"]
+
+
+def test_outline_editor_can_clear_standard_pacing_to_date_recommended(
+    client: TestClient,
+) -> None:
+    token = csrf(client, "/courses/new")
+    created = client.post(
+        "/api/courses",
+        headers={"x-csrf-token": token},
+        json={
+            "title": "Pacing Override Interview Prep",
+            "goal": "Prepare for interviews.",
+            "experience": "",
+            "template_id": "technical-interview-prep",
+            "submission_id": str(uuid4()),
+        },
+    ).json()
+    slug = created["slug"]
+    client.post(
+        f"/api/courses/{slug}/placement",
+        headers={"x-csrf-token": token},
+        json={"action": "start"},
+    )
+    saved = client.post(
+        f"/api/courses/{slug}/placement",
+        headers={"x-csrf-token": token},
+        json={
+            "action": "save_confidence",
+            "role_family": "backend",
+            "target_level": "entry",
+            "interview_focus": "coding",
+            "ratings": confidence_ratings(),
+        },
+    ).json()
+    interview_date = (date.today() + timedelta(days=5)).isoformat()
+    confirmed = client.post(
+        f"/api/courses/{slug}/placement",
+        headers={"x-csrf-token": token},
+        json={
+            "action": "confirm_outline",
+            "outline": saved["outline"],
+            "interview_date": interview_date,
+            "pacing_posture_override": "standard",
+            "submission_id": str(uuid4()),
+        },
+    )
+    assert confirmed.status_code == 202
+    profile = interview_prep.load_profile(cli.interview_profile_path(slug))
+    assert profile["curriculum_allocation"]["pacing_posture_override"] == "standard"
+
+    recommended = client.post(
+        f"/api/courses/{slug}/placement",
+        headers={"x-csrf-token": token},
+        json={"action": "preview_outline", "pacing_posture_override": None},
+    )
+
+    assert recommended.status_code == 200
+    preview = recommended.json()
+    assert preview["route"]["recommended_pacing_posture"] == "accelerated"
+    assert preview["route"]["pacing_posture"] == "accelerated"
+
+
+def test_later_outline_change_preserves_evidence_and_rehomes_ineligible_cursor(
+    client: TestClient,
+) -> None:
+    token = csrf(client, "/courses/new")
+    created = client.post(
+        "/api/courses",
+        headers={"x-csrf-token": token},
+        json={
+            "title": "Route Change Interview Prep",
+            "goal": "Prepare for interviews.",
+            "experience": "",
+            "template_id": "technical-interview-prep",
+            "submission_id": str(uuid4()),
+        },
+    ).json()
+    slug = created["slug"]
+    skipped = client.post(
+        f"/api/courses/{slug}/placement",
+        headers={"x-csrf-token": token},
+        json={"action": "skip", "submission_id": str(uuid4())},
+    )
+    wait_for_operation(client, slug, skipped.json()["operation_id"])
+    state = cli.load_state(slug)
+    canonical = state["interview_curriculum"]
+    dp = next(
+        item
+        for item in canonical["route"]["skills"]
+        if item["skill_ref"]["skill_id"] == "pattern.dynamic-programming"
+    )
+    canonical["cursor"] = {
+        "unit_id": dp["unit_id"],
+        "section_id": dp["section_id"],
+        "skill_ref": dp["skill_ref"],
+        "instruction_status": "covered",
+    }
+    canonical["evidence"]["answer_evidence"] = [
+        {"evidence_id": "kept", "skill_ref": dp["skill_ref"], "status": "correct"}
+    ]
+    state["interview_curriculum"] = canonical
+    cli.write_text_atomic(
+        cli.topic_state_path(slug), json.dumps(state, indent=2, sort_keys=True) + "\n"
+    )
+    revision = tutor_service.course_revision(slug)
+    changed = client.post(
+        f"/api/courses/{slug}/placement",
+        headers={"x-csrf-token": token},
+        json={
+            "action": "change_outline",
+            "interview_focus": "system_design",
+            "submission_id": str(uuid4()),
+            "expected_revision": revision,
+        },
+    )
+
+    assert changed.status_code == 200
+    updated = cli.load_state(slug)["interview_curriculum"]
+    assert updated["route_id"] == "system-design"
+    assert updated["cursor"]["skill_ref"]["skill_id"] == "system.requirements-scope"
+    assert updated["evidence"]["answer_evidence"][0]["evidence_id"] == "kept"
+    assert "pattern.dynamic-programming" in updated["route_history"][-1][
+        "out_of_route_skill_ids"
+    ]
+    assert changed.json()["receipt"]["cursor_decision"] == (
+        "earliest-eligible-unmet-prerequisite"
+    )
+
+
+@pytest.mark.parametrize(
+    "checkpoint", ["after_profile", "after_state", "after_topic", "after_event"]
+)
+def test_route_acceptance_recovers_every_publication_checkpoint_on_read(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, checkpoint: str
+) -> None:
+    token = csrf(client, "/courses/new")
+    created = client.post(
+        "/api/courses",
+        headers={"x-csrf-token": token},
+        json={
+            "title": f"Checkpoint {checkpoint}",
+            "goal": "Prepare for interviews.",
+            "experience": "",
+            "template_id": "technical-interview-prep",
+            "submission_id": str(uuid4()),
+        },
+    ).json()
+    slug = created["slug"]
+    submission_id = str(uuid4())
+
+    def interrupt(stage: str) -> None:
+        if stage == checkpoint:
+            raise cli.OpenLearnError(f"interrupt {checkpoint}")
+
+    monkeypatch.setattr(courses, "_route_acceptance_checkpoint", interrupt)
+    failed = client.post(
+        f"/api/courses/{slug}/placement",
+        headers={"x-csrf-token": token},
+        json={"action": "skip", "submission_id": submission_id},
+    )
+    assert failed.status_code == 422
+    monkeypatch.setattr(courses, "_route_acceptance_checkpoint", lambda _stage: None)
+
+    restarted = TestClient(create_app(testing=True))
+    assert restarted.get(f"/courses/{slug}/placement").status_code == 200
+    state = cli.load_state(slug)
+    receipt_id = f"route_{submission_id.replace('-', '')}"
+    assert list(state["_interview_route_receipts"]) == [receipt_id]
+    events = cli.load_event_log(cli.topic_events_path(slug))
+    assert sum(event.get("event_id") == f"{receipt_id}:0" for event in events) == 1
+    assert not cli.interview_route_journal_path(slug).exists()
+
+
+def test_route_acceptance_rejects_submission_payload_collision(client: TestClient) -> None:
+    token = csrf(client, "/courses/new")
+    created = client.post(
+        "/api/courses",
+        headers={"x-csrf-token": token},
+        json={
+            "title": "Route Collision",
+            "goal": "Prepare for interviews.",
+            "experience": "",
+            "template_id": "technical-interview-prep",
+            "submission_id": str(uuid4()),
+        },
+    ).json()
+    submission_id = str(uuid4())
+    first = application.accept_interview_curriculum(
+        created["slug"], action="skip", submission_id=submission_id
+    )
+
+    with pytest.raises(cli.OpenLearnError, match="already used"):
+        application.accept_interview_curriculum(
+            created["slug"],
+            action="change",
+            changes={"interview_focus": "system_design"},
+            submission_id=submission_id,
+            expected_revision=int(first["receipt"]["final_revision"]),
+        )
+
+
+def test_lost_skip_response_retry_keeps_one_revision_receipt_and_attempt(
+    client: TestClient,
+) -> None:
+    token = csrf(client, "/courses/new")
+    created = client.post(
+        "/api/courses",
+        headers={"x-csrf-token": token},
+        json={
+            "title": "Lost Skip Response",
+            "goal": "Prepare for interviews.",
+            "experience": "",
+            "template_id": "technical-interview-prep",
+            "submission_id": str(uuid4()),
+        },
+    ).json()
+    submission_id = str(uuid4())
+    first = application.accept_interview_curriculum(
+        created["slug"], action="skip", submission_id=submission_id
+    )
+    attempt_id = first["profile"]["placement"]["attempt_id"]
+    retried = application.accept_interview_curriculum(
+        created["slug"], action="skip", submission_id=submission_id
+    )
+
+    assert retried["replayed"] is True
+    assert retried["receipt"] == first["receipt"]
+    assert retried["profile"]["placement"]["attempt_id"] == attempt_id
+    assert tutor_service.course_revision(created["slug"]) == 1
+    assert len(cli.load_state(created["slug"])["_interview_route_receipts"]) == 1
+
+
+def test_route_acceptance_race_checks_revision_before_profile_write(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    token = csrf(client, "/courses/new")
+    created = client.post(
+        "/api/courses",
+        headers={"x-csrf-token": token},
+        json={
+            "title": "Route Race",
+            "goal": "Prepare for interviews.",
+            "experience": "",
+            "template_id": "technical-interview-prep",
+            "submission_id": str(uuid4()),
+        },
+    ).json()
+    slug = created["slug"]
+    profile_path = cli.interview_profile_path(slug)
+    topic_path = cli.topic_path(slug)
+    before_profile = profile_path.read_bytes()
+    before_topic = topic_path.read_bytes()
+
+    def publish_competing_progress(stage: str) -> None:
+        if stage != "after_journal":
+            return
+        state = cli._load_state_unlocked(slug)
+        internal = state.setdefault("_openlearn_internal", {})
+        assert isinstance(internal, dict)
+        internal["course_revision"] = 1
+        internal["schema_version"] = 1
+        internal.setdefault("turn_results", {})
+        cli.write_text_atomic(
+            cli.topic_state_path(slug), json.dumps(state, indent=2, sort_keys=True) + "\n"
+        )
+
+    monkeypatch.setattr(courses, "_route_acceptance_checkpoint", publish_competing_progress)
+    with pytest.raises(courses.RouteAcceptanceConflictError, match="course changed"):
+        application.accept_interview_curriculum(
+            slug, action="skip", submission_id=str(uuid4()), expected_revision=0
+        )
+
+    assert profile_path.read_bytes() == before_profile
+    assert topic_path.read_bytes() == before_topic
+    state = cli._load_state_unlocked(slug)
+    assert state["_openlearn_internal"]["course_revision"] == 1
+    assert "interview_curriculum" not in state
+    assert not cli.interview_route_journal_path(slug).exists()
+
+
+def test_route_acceptance_rejects_tampered_journal_before_recovery(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    token = csrf(client, "/courses/new")
+    created = client.post(
+        "/api/courses",
+        headers={"x-csrf-token": token},
+        json={
+            "title": "Tampered Route Journal",
+            "goal": "Prepare for interviews.",
+            "experience": "",
+            "template_id": "technical-interview-prep",
+            "submission_id": str(uuid4()),
+        },
+    ).json()
+    slug = created["slug"]
+
+    def interrupt(stage: str) -> None:
+        if stage == "after_journal":
+            raise cli.OpenLearnError("leave journal for validation")
+
+    monkeypatch.setattr(courses, "_route_acceptance_checkpoint", interrupt)
+    with pytest.raises(cli.OpenLearnError, match="leave journal"):
+        application.accept_interview_curriculum(
+            slug, action="skip", submission_id=str(uuid4()), expected_revision=0
+        )
+    journal_path = cli.interview_route_journal_path(slug)
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    journal["receipt"]["payload_hash"] = "0" * 64
+    cli.write_text_atomic(journal_path, json.dumps(journal, indent=2, sort_keys=True) + "\n")
+
+    with pytest.raises(cli.OpenLearnError, match="invalid identity"):
+        courses.recover_interview_route_acceptance(slug)
+
+    assert journal_path.exists()
 
 
 def test_dashboard_groups_discoverable_learning_practice_and_settings_paths(
@@ -1295,6 +1749,36 @@ def test_video_preparation_ignores_out_of_order_responses() -> None:
         'querySelector("#video-url")?.addEventListener("input", invalidatePreparedVideo)'
         in handler
     )
+
+
+def test_outline_change_is_previewed_before_confirm_and_retries_one_submission() -> None:
+    javascript = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "openlearn"
+        / "web"
+        / "static"
+        / "openlearn.js"
+    ).read_text(encoding="utf-8")
+
+    preview_start = javascript.index("async function previewPlacementOutline")
+    confirm_start = javascript.index(
+        'querySelector("[data-accept-outline-preview]")', preview_start
+    )
+    preview_handler = javascript[preview_start:confirm_start]
+    assert 'action: "preview_outline"' in preview_handler
+    assert 'action: "change_outline"' not in preview_handler
+    assert "pendingOutlineChange = values" in preview_handler
+    assert 'stablePlacementSubmission("change")' in javascript[confirm_start:]
+    assert "window.sessionStorage.getItem(key)" in javascript
+    assert "window.sessionStorage.setItem(key" in javascript
+    assert "clearStablePlacementSubmission(action)" in javascript
+    assert 'values.get("interview_date")' in javascript
+    assert 'values.get("weekly_minutes")' in javascript
+    assert 'values.get("session_minutes")' in javascript
+    assert 'name.startsWith("rating_")' in javascript
+    assert 'values.getAll("optional_skill_ids")' in javascript
+    assert "updateOutlineConfidenceFields" in javascript
 
 
 def test_completed_tutor_stream_keeps_card_visible_and_resizes_only_if_needed() -> None:

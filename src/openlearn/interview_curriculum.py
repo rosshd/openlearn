@@ -1063,6 +1063,174 @@ def build_canonical_curriculum_state(
     }
 
 
+def canonical_state_from_route(
+    route: Mapping[str, object], *, acceptance_id: str
+) -> dict[str, object]:
+    """Create a fresh canonical state from an accepted materialized route."""
+    skills = route.get("skills")
+    if not isinstance(skills, list) or not skills or not isinstance(skills[0], Mapping):
+        raise CurriculumBundleError("accepted interview route has no skills")
+    first = skills[0]
+    ref = first.get("skill_ref")
+    if not isinstance(ref, Mapping):
+        raise CurriculumBundleError("accepted interview route has no first skill identity")
+    return {
+        "schema_version": CANONICAL_STATE_SCHEMA_VERSION,
+        "bundle_id": route["bundle_id"],
+        "bundle_version": route["bundle_version"],
+        "route_id": route["route_id"],
+        "route_fingerprint": route["route_fingerprint"],
+        "allocation_fingerprint": route["allocation_fingerprint"],
+        "route": copy.deepcopy(dict(route)),
+        "cursor": {
+            "unit_id": first["unit_id"],
+            "section_id": first["section_id"],
+            "skill_ref": copy.deepcopy(dict(ref)),
+            "instruction_status": "uncovered",
+        },
+        "evidence": {
+            "ready": [],
+            "exposed": [],
+            "weak": [],
+            "due_review": [],
+        },
+        "legacy_context": {"aliases_applied": {}, "unassessed": []},
+        "reconciliation": {
+            "reconciliation_id": acceptance_id,
+            "source_fingerprint": canonical_fingerprint(route),
+            "from_version": "new-course",
+            "to_version": route["bundle_version"],
+        },
+        "route_history": [],
+        "active_operation": None,
+    }
+
+
+def rematerialize_canonical_state(
+    canonical_state: Mapping[str, object],
+    route: Mapping[str, object],
+    *,
+    change_id: str,
+) -> tuple[dict[str, object], str]:
+    """Move a canonical state to another pinned route without discarding evidence."""
+    state = copy.deepcopy(dict(canonical_state))
+    if isinstance(state.get("active_operation"), Mapping):
+        raise CurriculumBundleError(
+            "finish or cancel the active tutor operation before changing the course outline"
+        )
+    if (
+        state.get("bundle_id") != route.get("bundle_id")
+        or state.get("bundle_version") != route.get("bundle_version")
+    ):
+        raise CurriculumBundleError("route changes must stay on the pinned curriculum version")
+    skills_raw = route.get("skills")
+    skills = (
+        [dict(item) for item in skills_raw if isinstance(item, Mapping)]
+        if isinstance(skills_raw, list)
+        else []
+    )
+    if not skills:
+        raise CurriculumBundleError("changed interview route has no skills")
+    route_identities: dict[tuple[str, str, str, str], dict[str, object]] = {}
+    for item in skills:
+        ref = item.get("skill_ref")
+        if not isinstance(ref, Mapping):
+            raise CurriculumBundleError("changed interview route has a malformed skill")
+        identity = tuple(
+            str(ref.get(key) or "")
+            for key in ("graph_id", "graph_version", "mastery_policy_version", "skill_id")
+        )
+        if not all(identity):
+            raise CurriculumBundleError("changed interview route has a malformed skill identity")
+        route_identities[identity] = item
+
+    old_cursor = state.get("cursor")
+    old_ref = old_cursor.get("skill_ref") if isinstance(old_cursor, Mapping) else None
+    old_identity = (
+        tuple(
+            str(old_ref.get(key) or "")
+            for key in ("graph_id", "graph_version", "mastery_policy_version", "skill_id")
+        )
+        if isinstance(old_ref, Mapping)
+        else ()
+    )
+    evidence = state.get("evidence")
+    evidence = copy.deepcopy(dict(evidence)) if isinstance(evidence, Mapping) else {}
+    ready = {
+        value for value in evidence.get("ready", []) if isinstance(value, str)
+    }
+    exposed = {
+        value for value in evidence.get("exposed", []) if isinstance(value, str)
+    }
+    current = route_identities.get(old_identity) if old_identity else None
+    cursor_decision = "retained-eligible-cursor"
+    if current is None:
+        current = next(
+            (
+                item
+                for item in skills
+                if isinstance(item.get("skill_ref"), Mapping)
+                and item["skill_ref"].get("skill_id") not in ready | exposed
+                and item.get("requirement") == "required"
+            ),
+            skills[0],
+        )
+        cursor_decision = "earliest-eligible-unmet-prerequisite"
+    current_ref = current.get("skill_ref")
+    assert isinstance(current_ref, Mapping)
+
+    old_route = state.get("route")
+    history = state.get("route_history")
+    history_values = (
+        [copy.deepcopy(dict(item)) for item in history if isinstance(item, Mapping)]
+        if isinstance(history, list)
+        else []
+    )
+    old_route_skills = old_route.get("skills", []) if isinstance(old_route, Mapping) else []
+    old_skill_ids = {
+        str(item["skill_ref"]["skill_id"])
+        for item in old_route_skills
+        if isinstance(item, Mapping)
+        and isinstance(item.get("skill_ref"), Mapping)
+    }
+    new_skill_ids = {
+        str(item["skill_ref"]["skill_id"])
+        for item in skills
+        if isinstance(item.get("skill_ref"), Mapping)
+    }
+    history_values.append(
+        {
+            "change_id": change_id,
+            "route_id": state.get("route_id"),
+            "route_fingerprint": state.get("route_fingerprint"),
+            "cursor": copy.deepcopy(old_cursor),
+            "out_of_route_skill_ids": sorted(old_skill_ids - new_skill_ids),
+        }
+    )
+    state.update(
+        {
+            "route_id": route["route_id"],
+            "route_fingerprint": route["route_fingerprint"],
+            "allocation_fingerprint": route["allocation_fingerprint"],
+            "route": copy.deepcopy(dict(route)),
+            "cursor": {
+                "unit_id": current["unit_id"],
+                "section_id": current["section_id"],
+                "skill_ref": copy.deepcopy(dict(current_ref)),
+                "instruction_status": (
+                    str(old_cursor.get("instruction_status") or "uncovered")
+                    if current is route_identities.get(old_identity)
+                    and isinstance(old_cursor, Mapping)
+                    else "uncovered"
+                ),
+            },
+            "route_history": history_values,
+            "evidence": evidence,
+        }
+    )
+    return state, cursor_decision
+
+
 def compatibility_projection(state: Mapping[str, object]) -> dict[str, object]:
     route = state.get("route")
     cursor = state.get("cursor")

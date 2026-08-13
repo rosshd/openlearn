@@ -31,6 +31,11 @@ CREATION_SUBMISSION_STATE_KEY = "course_creation_submission_id"
 CREATION_SUBMISSION_METADATA_KEY = "course_creation_submission_id"
 CALIBRATION_TEXT_LIMIT = 4_000
 RECONCILIATION_SCHEMA_VERSION = 1
+ROUTE_ACCEPTANCE_SCHEMA_VERSION = 1
+
+
+class RouteAcceptanceConflictError(RuntimeError):
+    """A pending route transaction lost its optimistic concurrency fence."""
 
 
 def _cli():
@@ -192,6 +197,362 @@ def _reconciliation_checkpoint(_stage: str) -> None:
     """Fault-injection seam for the curriculum reconciliation publication stages."""
 
 
+def _route_acceptance_checkpoint(_stage: str) -> None:
+    """Fault-injection seam for route acceptance publication stages."""
+
+
+def _event_has_id(path: Path, event_id: str) -> bool:
+    if not path.exists():
+        return False
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict) and event.get("event_id") == event_id:
+            return True
+    return False
+
+
+def _route_journal_identity(value: dict[str, object]) -> dict[str, object]:
+    return {key: value[key] for key in value if key != "journal_sha256"}
+
+
+def _validated_route_acceptance_journal(
+    slug: str, value: object
+) -> dict[str, object]:
+    required = {
+        "schema_version",
+        "slug",
+        "topic_generation",
+        "profile_before_fingerprint",
+        "profile_after",
+        "canonical_after",
+        "metadata_projection",
+        "receipt",
+        "event",
+        "journal_sha256",
+    }
+    if not isinstance(value, dict) or set(value) != required:
+        raise _cli().OpenLearnError("saved interview curriculum acceptance is malformed")
+    receipt = value.get("receipt")
+    event = value.get("event")
+    if (
+        value.get("schema_version") != ROUTE_ACCEPTANCE_SCHEMA_VERSION
+        or value.get("slug") != slug
+        or not isinstance(value.get("topic_generation"), str)
+        or not isinstance(value.get("profile_before_fingerprint"), str)
+        or not isinstance(value.get("profile_after"), dict)
+        or not isinstance(value.get("canonical_after"), dict)
+        or not isinstance(value.get("metadata_projection"), dict)
+        or not isinstance(receipt, dict)
+        or not isinstance(event, dict)
+    ):
+        raise _cli().OpenLearnError("saved interview curriculum acceptance is malformed")
+    action_id = receipt.get("action_id")
+    if (
+        receipt.get("schema_version") != ROUTE_ACCEPTANCE_SCHEMA_VERSION
+        or not isinstance(action_id, str)
+        or not action_id.startswith("route_")
+        or receipt.get("topic_generation") != value["topic_generation"]
+        or event.get("event_id") != f"{action_id}:0"
+        or event.get("slug") != slug
+        or event.get("data") != receipt
+        or value.get("journal_sha256")
+        != interview_curriculum.canonical_fingerprint(_route_journal_identity(value))
+    ):
+        raise _cli().OpenLearnError("saved interview curriculum acceptance has invalid identity")
+    return copy.deepcopy(value)
+
+
+def _apply_route_acceptance_journal(slug: str, journal: dict[str, object]) -> None:
+    cli = _cli()
+    journal = _validated_route_acceptance_journal(slug, journal)
+    generation = journal["topic_generation"]
+    profile_after = journal.get("profile_after")
+    canonical_after = journal.get("canonical_after")
+    projection = journal.get("metadata_projection")
+    receipt = journal.get("receipt")
+    event = journal.get("event")
+    if not all(isinstance(value, dict) for value in (profile_after, canonical_after, projection, receipt, event)):
+        raise cli.OpenLearnError("saved interview curriculum acceptance is malformed")
+    profile_path = cli.interview_profile_path(slug)
+    with cli.topic_store_locks(slug), cli.file_lock(profile_path):
+        if generation != cli.current_topic_generation(slug):
+            raise RouteAcceptanceConflictError(
+                "topic changed during interview curriculum acceptance"
+            )
+        current_profile = interview_prep.load_profile(profile_path)
+        current_profile_fingerprint = interview_curriculum.canonical_fingerprint(current_profile)
+        before_fingerprint = journal.get("profile_before_fingerprint")
+        after_fingerprint = interview_curriculum.canonical_fingerprint(profile_after)
+        if current_profile_fingerprint not in {before_fingerprint, after_fingerprint}:
+            raise RouteAcceptanceConflictError(
+                "interview profile changed while course outline confirmation was pending"
+            )
+        state = cli._load_state_unlocked(slug)
+        internal_raw = state.get("_openlearn_internal")
+        internal = copy.deepcopy(internal_raw) if isinstance(internal_raw, dict) else {}
+        revision = internal.get("course_revision", 0)
+        base_revision = receipt.get("base_revision")
+        final_revision = receipt.get("final_revision")
+        if revision not in {base_revision, final_revision}:
+            raise RouteAcceptanceConflictError(
+                "course changed while course outline confirmation was pending"
+            )
+        active = internal.get("active_turn")
+        if isinstance(active, dict) and revision != final_revision:
+            raise RouteAcceptanceConflictError(
+                "finish or cancel the active tutor operation before changing the course outline"
+            )
+        receipts_raw = state.get("_interview_route_receipts")
+        receipts = copy.deepcopy(receipts_raw) if isinstance(receipts_raw, dict) else {}
+        action_id = str(receipt["action_id"])
+        existing = receipts.get(action_id)
+        if revision == final_revision and (
+            existing != receipt or state.get("interview_curriculum") != canonical_after
+        ):
+            raise RouteAcceptanceConflictError(
+                "course changed while course outline confirmation was pending"
+            )
+        topic_text = cli.topic_path(slug).read_text(encoding="utf-8")
+        metadata, body = cli.parse_topic(topic_text)
+
+        # All optimistic-concurrency fences are checked before the first write.
+        if current_profile_fingerprint != after_fingerprint:
+            interview_prep._write(profile_path, profile_after)
+        _route_acceptance_checkpoint("after_profile")
+        if existing is not None and existing != receipt:
+            raise cli.OpenLearnError("interview curriculum acceptance receipt conflicts")
+        receipts[action_id] = copy.deepcopy(receipt)
+        state["_interview_route_receipts"] = receipts
+        state["interview_curriculum"] = copy.deepcopy(canonical_after)
+        internal["schema_version"] = 1
+        internal["course_revision"] = final_revision
+        internal.setdefault("turn_results", {})
+        state["_openlearn_internal"] = internal
+        cli.write_text_atomic(
+            cli.topic_state_path(slug),
+            json.dumps(state, indent=2, sort_keys=True) + "\n",
+        )
+        _route_acceptance_checkpoint("after_state")
+
+        metadata = dict(metadata)
+        metadata.update(copy.deepcopy(projection))
+        metadata["course_started"] = True
+        metadata["course_completed"] = False
+        cli.write_text_atomic(cli.topic_path(slug), cli.format_topic(metadata, body))
+        _route_acceptance_checkpoint("after_topic")
+
+        events_path = cli.topic_events_path(slug)
+        event_id = str(event["event_id"])
+        if not _event_has_id(events_path, event_id):
+            existing_events = events_path.read_text(encoding="utf-8") if events_path.exists() else ""
+            if existing_events and not existing_events.endswith("\n"):
+                existing_events += "\n"
+            cli.write_text_atomic(
+                events_path,
+                existing_events + json.dumps(event, sort_keys=True) + "\n",
+            )
+        _route_acceptance_checkpoint("after_event")
+
+
+def recover_interview_route_acceptance(slug: str) -> bool:
+    """Finish one validated pending route transaction before interview state is used."""
+    cli = _cli()
+    journal_path = cli.interview_route_journal_path(slug)
+    with cli.file_lock(journal_path):
+        if not journal_path.exists():
+            return False
+        try:
+            raw = json.loads(journal_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise cli.OpenLearnError(
+                "saved interview curriculum acceptance is unreadable"
+            ) from exc
+        journal = _validated_route_acceptance_journal(slug, raw)
+        try:
+            _apply_route_acceptance_journal(slug, journal)
+        except RouteAcceptanceConflictError:
+            cli.durable_unlink(journal_path)
+            raise
+        cli.durable_unlink(journal_path)
+        return True
+
+
+def accept_interview_curriculum(
+    slug: str,
+    *,
+    action: str,
+    changes: dict[str, object] | None = None,
+    outline: str = "",
+    submission_id: str | None = None,
+    expected_revision: int | None = None,
+    now: datetime | None = None,
+) -> dict[str, object]:
+    """Confirm, skip, or change one route through a recoverable shared transaction."""
+    cli = _cli()
+    if action not in {"confirm", "skip", "change"}:
+        raise ValueError("interview curriculum acceptance action is invalid")
+    moment = now or datetime.now(timezone.utc)
+    canonical_slug = cli.slugify(slug)
+    if canonical_slug != slug or not cli.interview_profile_path(slug).exists():
+        raise cli.OpenLearnError(f"interview course not found: {slug}")
+    payload_hash = interview_curriculum.canonical_fingerprint(
+        {"action": action, "changes": changes or {}, "outline": outline.strip()}
+    )
+    if submission_id is not None:
+        try:
+            parsed = UUID(submission_id)
+        except (ValueError, AttributeError) as exc:
+            raise ValueError("submission ID must be a canonical UUID") from exc
+        if str(parsed) != submission_id:
+            raise ValueError("submission ID must be a canonical UUID")
+        action_id = f"route_{parsed.hex}"
+    else:
+        action_id = f"route_{uuid4().hex}"
+    journal_path = cli.interview_route_journal_path(slug)
+    with cli.file_lock(journal_path):
+        if journal_path.exists():
+            try:
+                pending = json.loads(journal_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as exc:
+                raise cli.OpenLearnError(
+                    "saved interview curriculum acceptance is unreadable"
+                ) from exc
+            if not isinstance(pending, dict):
+                raise cli.OpenLearnError("saved interview curriculum acceptance is malformed")
+            _apply_route_acceptance_journal(
+                slug, _validated_route_acceptance_journal(slug, pending)
+            )
+            cli.durable_unlink(journal_path)
+
+        with cli.topic_store_locks(slug), cli.file_lock(cli.interview_profile_path(slug)):
+            cli.raise_if_topic_tombstoned(slug)
+            state = cli._load_state_unlocked(slug)
+            receipts_raw = state.get("_interview_route_receipts")
+            receipts = receipts_raw if isinstance(receipts_raw, dict) else {}
+            prior = receipts.get(action_id)
+            if isinstance(prior, dict):
+                if prior.get("payload_hash") != payload_hash:
+                    raise cli.OpenLearnError(
+                        "submission ID was already used for another course outline change"
+                    )
+                canonical = state.get("interview_curriculum")
+                if not isinstance(canonical, dict):
+                    raise cli.OpenLearnError("saved curriculum acceptance lost its route")
+                return {
+                    "profile": interview_prep.load_profile(cli.interview_profile_path(slug)),
+                    "canonical": canonical,
+                    "receipt": prior,
+                    "replayed": True,
+                }
+            internal_raw = state.get("_openlearn_internal")
+            internal = internal_raw if isinstance(internal_raw, dict) else {}
+            revision = internal.get("course_revision", 0)
+            if not isinstance(revision, int) or revision < 0:
+                revision = 0
+            if expected_revision is not None and expected_revision != revision:
+                raise cli.OpenLearnError("course changed elsewhere; reload before confirming")
+            if isinstance(internal.get("active_turn"), dict):
+                raise cli.OpenLearnError(
+                    "finish or cancel the active tutor operation before changing the course outline"
+                )
+            profile_before = interview_prep.load_profile(cli.interview_profile_path(slug))
+            existing_canonical = state.get("interview_curriculum")
+            bundle = (
+                interview_curriculum.load_pinned_bundle(
+                    str(existing_canonical["bundle_id"]),
+                    str(existing_canonical["bundle_version"]),
+                )
+                if isinstance(existing_canonical, dict)
+                else interview_curriculum.load_default_bundle()
+            )
+            profile_after, route = interview_prep.accepted_curriculum_profile(
+                profile_before,
+                action=action,
+                changes=changes,
+                outline=outline,
+                now=moment,
+                bundle=bundle,
+            )
+            if isinstance(existing_canonical, dict):
+                canonical_after, cursor_decision = (
+                    interview_curriculum.rematerialize_canonical_state(
+                        existing_canonical, route, change_id=action_id
+                    )
+                )
+                old_route_fingerprint = existing_canonical.get("route_fingerprint")
+                old_cursor = copy.deepcopy(existing_canonical.get("cursor"))
+            else:
+                canonical_after = interview_curriculum.canonical_state_from_route(
+                    route, acceptance_id=action_id
+                )
+                cursor_decision = "first-technical-target"
+                old_route_fingerprint = None
+                old_cursor = None
+            projection = interview_curriculum.compatibility_projection(canonical_after)
+            final_revision = revision + 1
+            receipt = {
+                "schema_version": ROUTE_ACCEPTANCE_SCHEMA_VERSION,
+                "action_id": action_id,
+                "action": action,
+                "payload_hash": payload_hash,
+                "topic_generation": cli.current_topic_generation(slug),
+                "base_revision": revision,
+                "final_revision": final_revision,
+                "old_route_fingerprint": old_route_fingerprint,
+                "new_route_fingerprint": route["route_fingerprint"],
+                "old_cursor": old_cursor,
+                "new_cursor": copy.deepcopy(canonical_after["cursor"]),
+                "cursor_decision": cursor_decision,
+                "profile_fingerprint": interview_curriculum.canonical_fingerprint(
+                    profile_after
+                ),
+                "created_at": moment.astimezone(timezone.utc).isoformat(),
+            }
+            event = {
+                "schema_version": cli.EVENT_SCHEMA_VERSION,
+                "event_id": f"{action_id}:0",
+                "ts": moment.astimezone(timezone.utc).isoformat(),
+                "event_type": "interview_curriculum_route_accepted",
+                "slug": slug,
+                "data": copy.deepcopy(receipt),
+            }
+            journal = {
+                "schema_version": ROUTE_ACCEPTANCE_SCHEMA_VERSION,
+                "slug": slug,
+                "topic_generation": cli.current_topic_generation(slug),
+                "profile_before_fingerprint": interview_curriculum.canonical_fingerprint(
+                    profile_before
+                ),
+                "profile_after": profile_after,
+                "canonical_after": canonical_after,
+                "metadata_projection": projection,
+                "receipt": receipt,
+                "event": event,
+            }
+            journal["journal_sha256"] = interview_curriculum.canonical_fingerprint(
+                _route_journal_identity(journal)
+            )
+            _validated_route_acceptance_journal(slug, journal)
+            cli.write_text_atomic(journal_path, json.dumps(journal, indent=2, sort_keys=True) + "\n")
+            journal_path.chmod(0o600)
+            _route_acceptance_checkpoint("after_journal")
+        try:
+            _apply_route_acceptance_journal(slug, journal)
+        except RouteAcceptanceConflictError:
+            cli.durable_unlink(journal_path)
+            raise
+        cli.durable_unlink(journal_path)
+        return {
+            "profile": profile_after,
+            "canonical": canonical_after,
+            "receipt": receipt,
+            "replayed": False,
+        }
+
+
 def _route_for_profile(profile_value: dict[str, object]) -> dict[str, object]:
     allocation = profile_value.get("curriculum_allocation")
     if isinstance(allocation, dict) and isinstance(allocation.get("route"), dict):
@@ -332,6 +693,7 @@ def prepare_interview_curriculum(slug: str, *, boundary: str = "resume") -> dict
     if boundary not in {"preparation", "resume"}:
         raise ValueError("interview curriculum preparation boundary is invalid")
     cli = _cli()
+    recover_interview_route_acceptance(slug)
     canonical_slug = cli.slugify(slug)
     if canonical_slug != slug or not cli.interview_profile_path(slug).exists():
         raise cli.OpenLearnError(f"interview course not found: {slug}")

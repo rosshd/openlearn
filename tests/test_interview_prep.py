@@ -337,6 +337,146 @@ class InterviewPrepTests(unittest.TestCase):
         self.assertIn("Emphasis: Learn", outline)
         self.assertNotIn("Two Pointers and Sliding Window", outline)
 
+    def test_curriculum_preview_is_a_pure_projection_of_the_versioned_route(self) -> None:
+        value = self.create()
+        before = self.path.read_bytes()
+
+        coding = interview_prep.preview_curriculum_change(
+            value,
+            changes={"interview_focus": "coding"},
+            current_date=NOW.date(),
+        )
+        system = interview_prep.preview_curriculum_change(
+            value,
+            changes={"interview_focus": "system_design"},
+            current_date=NOW.date(),
+        )
+
+        self.assertEqual(before, self.path.read_bytes())
+        self.assertEqual(coding["first_cursor"]["skill_id"], "concept.arrays-strings")
+        self.assertEqual(system["first_cursor"]["skill_id"], "system.requirements-scope")
+        self.assertNotEqual(coding["route_fingerprint"], system["route_fingerprint"])
+        self.assertTrue(coding["locked_prerequisites"])
+        self.assertNotIn("Interview Communication and Problem Framing", coding["outline"])
+
+    def test_curriculum_preview_rejects_unversioned_optional_preferences(self) -> None:
+        value = self.create()
+
+        with self.assertRaisesRegex(ValueError, "optional"):
+            interview_prep.preview_curriculum_change(
+                value,
+                changes={"optional_skill_ids": ["let-the-model-decide"]},
+                current_date=NOW.date(),
+            )
+
+    def test_unrelated_route_change_retains_pacing_and_selected_optional_skills(self) -> None:
+        value = self.create()
+        optional_id = "backend.api-boundaries"
+        selected, route = interview_prep.curriculum_change_projection(
+            value,
+            changes={
+                "interview_focus": "coding",
+                "pacing_posture_override": "standard",
+                "optional_skill_ids": [optional_id],
+            },
+            current_date=NOW.date(),
+        )
+        selected["curriculum_allocation"] = {
+            "schema_version": 1,
+            "allocation_id": f"allocation_{route['allocation_fingerprint']}",
+            "allocation_date": NOW.date().isoformat(),
+            "boundary": "confirmed-outline",
+            "created_at": NOW.isoformat(),
+            "profile_revision": 1,
+            "pacing_posture_override": "standard",
+            "route": route,
+        }
+
+        _candidate, changed = interview_prep.curriculum_change_projection(
+            selected,
+            changes={"target_level": "mid"},
+            current_date=NOW.date(),
+        )
+
+        self.assertEqual(changed["pacing_posture"], "standard")
+        self.assertEqual(changed["optional_skill_ids"], [optional_id])
+        self.assertNotEqual(
+            changed["route_fingerprint"], route["route_fingerprint"]
+        )
+        route_ids = {item["skill_ref"]["skill_id"] for item in changed["skills"]}
+        self.assertIn(optional_id, route_ids)
+        self.assertNotIn("backend.concurrency", route_ids)
+
+    def test_optional_selection_preserves_route_order_and_explicit_empty(self) -> None:
+        value = self.create()
+        full = interview_prep.preview_curriculum_change(
+            value,
+            changes={"interview_focus": "coding"},
+            current_date=NOW.date(),
+        )
+        optional_ids = [
+            item["skill_id"] for item in full["optional_choices"]
+        ]
+        self.assertGreaterEqual(len(optional_ids), 2)
+        selected_id = optional_ids[-1]
+
+        selected = interview_prep.preview_curriculum_change(
+            value,
+            changes={
+                "interview_focus": "coding",
+                "optional_skill_ids": [selected_id],
+            },
+            current_date=NOW.date(),
+        )
+        empty = interview_prep.preview_curriculum_change(
+            value,
+            changes={"interview_focus": "coding", "optional_skill_ids": []},
+            current_date=NOW.date(),
+        )
+
+        full_skills = full["route"]["skills"]
+        expected_selected = [
+            item["skill_ref"]["skill_id"]
+            for item in full_skills
+            if item["requirement"] == "required"
+            or item["skill_ref"]["skill_id"] == selected_id
+        ]
+        self.assertEqual(
+            [item["skill_ref"]["skill_id"] for item in selected["route"]["skills"]],
+            expected_selected,
+        )
+        self.assertEqual(empty["route"]["optional_skill_ids"], [])
+        self.assertTrue(all(not item["selected"] for item in empty["optional_choices"]))
+        self.assertTrue(
+            all(item["requirement"] == "required" for item in empty["route"]["skills"])
+        )
+        self.assertNotEqual(empty["route_fingerprint"], full["route_fingerprint"])
+
+        empty_candidate, empty_route = interview_prep.curriculum_change_projection(
+            value,
+            changes={"interview_focus": "coding", "optional_skill_ids": []},
+            current_date=NOW.date(),
+        )
+        empty_candidate["curriculum_allocation"] = {
+            "schema_version": 1,
+            "allocation_id": f"allocation_{empty_route['allocation_fingerprint']}",
+            "allocation_date": NOW.date().isoformat(),
+            "boundary": "confirmed-outline",
+            "created_at": NOW.isoformat(),
+            "profile_revision": 1,
+            "pacing_posture_override": None,
+            "route": empty_route,
+        }
+        _retained_candidate, retained = interview_prep.curriculum_change_projection(
+            empty_candidate,
+            changes={"weekly_minutes": 240},
+            current_date=NOW.date(),
+        )
+        self.assertEqual(retained["optional_skill_ids"], [])
+        self.assertTrue(
+            all(item["requirement"] == "required" for item in retained["skills"])
+        )
+
     def test_starting_active_confidence_placement_preserves_saved_survey(self) -> None:
         self.create()
         interview_prep.start_confidence_placement(self.path, now=lambda: NOW)
