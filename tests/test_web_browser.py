@@ -2,16 +2,19 @@ from __future__ import annotations
 
 import json
 import os
+import argparse
 from pathlib import Path
 import socket
 import subprocess
 import sys
 import time
 from urllib.request import Request, urlopen
+from uuid import uuid4
 
 import pytest
 
-from openlearn import cli, interview_prep
+from openlearn import application, cli, interview_prep, tutor_service
+from openlearn.web.services import OpenLearnWebServices
 
 
 pytestmark = pytest.mark.skipif(
@@ -52,7 +55,8 @@ def _revision(page) -> int:
     return int(page.locator("[data-focus-shell]").get_attribute("data-revision"))
 
 
-def _wait_for_new_revision(page, previous: int) -> None:
+def _show_new_revision(page, previous: int) -> None:
+    page.get_by_role("button", name="Show next lesson").click()
     page.wait_for_function(
         "previous => Number(document.querySelector('[data-focus-shell]').dataset.revision) > previous",
         arg=previous,
@@ -156,8 +160,8 @@ def test_real_browser_course_polling_theme_conflict_and_keyboard_submit(
                 ).to_be_visible()
                 assert first.get_by_text("first_unique_window", exact=False).count() == 0
                 _assert_no_page_overflow(first)
-                first.locator('input[name="target_level"][value="senior"]').check()
-                first.locator('input[name="interview_focus"][value="balanced"]').check()
+                first.get_by_label("Senior+", exact=True).check(force=True)
+                first.get_by_label("Coding + system design", exact=True).check(force=True)
                 first.emulate_media(reduced_motion="reduce")
                 first.get_by_role("button", name="Start rapid questions").click()
                 seen_topics: set[str] = set()
@@ -218,19 +222,36 @@ def test_real_browser_course_polling_theme_conflict_and_keyboard_submit(
                         "dot => getComputedStyle(dot).animationName === 'none'"
                     )
                 first.locator("[data-focus-shell]").wait_for(state="visible")
-                playwright.expect(first.get_by_text("Before writing code", exact=False)).to_be_visible()
+                playwright.expect(
+                    first.get_by_role("heading", name="Arrays and strings")
+                ).to_be_visible()
                 playwright.expect(first.get_by_text("Press Enter to continue", exact=True)).to_have_count(0)
-                assert first.locator("#learner-response").count() == 0
                 passive_revision = _revision(first)
-                first.locator("body").press("Enter")
-                _wait_for_new_revision(first, passive_revision)
+                if first.locator("#learner-response").count():
+                    first.locator("#learner-response").fill(
+                        "I would clarify the input and output, then state the invariant."
+                    )
+                    with first.expect_response(
+                        lambda response: response.url.endswith("/turns")
+                    ) as first_saved:
+                        first.locator("#learner-response").press("Control+Enter")
+                    assert first_saved.value.status == 202
+                else:
+                    first.locator("body").press("Enter")
+                _show_new_revision(first, passive_revision)
 
                 lesson_title = first.locator("#move-title").inner_text()
                 first.get_by_role("button", name="Chat", exact=True).click()
                 playwright.expect(first.locator('[data-tool-panel="chat"]')).to_be_visible()
                 playwright.expect(first.locator(".focus-column")).to_be_visible()
                 first.locator("#chat-question").fill("Can you explain that another way?")
-                first.locator("#chat-question").press("Control+Enter")
+                with first.expect_response(
+                    lambda response: response.url.endswith("/turns")
+                ) as chat_saved:
+                    first.locator("[data-chat-form]").get_by_role(
+                        "button", name="Ask tutor"
+                    ).click()
+                assert chat_saved.value.status == 202
                 playwright.expect(first.locator(".chat-exchange")).to_have_count(1)
                 playwright.expect(first.locator("#chat-question")).to_have_value("")
                 assert first.locator("#move-title").inner_text() == lesson_title
@@ -242,14 +263,39 @@ def test_real_browser_course_polling_theme_conflict_and_keyboard_submit(
                 monkeypatch.setenv("OPENLEARN_HOME", str(home))
                 cli.clear_config_cache()
                 topic = cli.read_topic(slug)
-                check = "**Check:**\nWhich Vim mode runs commands like dd?"
+                check = "**Check:**\nWhat invariant would you maintain for this hash-map step?"
                 cli.append_session(topic, "lesson", "Browser response check", check)
                 cli.save_pending_question(
                     cli.read_topic(slug),
                     check,
                     "",
-                    question_text="Which Vim mode runs commands like dd?",
+                    question_text="What invariant would you maintain for this hash-map step?",
                 )
+                pending_state = cli.load_state(slug)
+                canonical = pending_state["interview_curriculum"]
+                check_target = canonical["committed_check_target"]
+                pending_state["pending_question"]["curriculum_target"] = check_target[
+                    "skill_ref"
+                ]
+                pending_state["pending_question"]["curriculum_evidence_kind"] = (
+                    check_target["evidence_kind"]
+                )
+                pending_question = pending_state["pending_question"]
+                cli.update_state_atomic(
+                    slug,
+                    lambda state: state.__setitem__(
+                        "pending_question", pending_question
+                    ),
+                )
+                topic_path = cli.topic_path(slug)
+                with cli.file_lock(topic_path):
+                    raw_metadata, body = cli.parse_topic(
+                        topic_path.read_text(encoding="utf-8")
+                    )
+                    raw_metadata["pending_question"] = pending_question
+                    cli.write_text_atomic(
+                        topic_path, cli.format_topic(raw_metadata, body)
+                    )
                 first.reload()
                 composer_submit = first.locator("[data-composer-submit]")
                 playwright.expect(composer_submit).to_contain_text("Send answer")
@@ -426,9 +472,9 @@ def test_real_browser_course_polling_theme_conflict_and_keyboard_submit(
                 assert progress_button.get_attribute("aria-expanded") == "true"
                 playwright.expect(first.locator("#progress-drawer")).to_be_visible()
                 playwright.expect(first.locator("#progress-drawer")).to_contain_text(
-                    "Progress will appear after your first learning check."
+                    "accepted route skills covered once"
                 )
-                assert first.locator("#progress-drawer progress").count() == 0
+                assert first.locator("#progress-drawer progress").count() == 1
                 first.emulate_media(reduced_motion="reduce")
                 first.get_by_role("button", name="Close progress").press("Enter")
                 assert progress_button.get_attribute("aria-expanded") == "false"
@@ -454,7 +500,7 @@ def test_real_browser_course_polling_theme_conflict_and_keyboard_submit(
                 saved_body = saved_response.json()
                 assert saved_body["state"] == "saved"
                 assert saved_body["operation_id"]
-                _wait_for_new_revision(first, initial_revision)
+                _show_new_revision(first, initial_revision)
                 playwright.expect(first.locator("[data-current-move]")).to_be_visible()
 
                 stale.locator("#learner-response").fill("This tab still has an old revision.")
@@ -486,7 +532,144 @@ def test_real_browser_course_polling_theme_conflict_and_keyboard_submit(
                 ) as retried:
                     stale.locator("#learner-response").press("Control+Enter")
                 assert retried.value.status == 202
-                _wait_for_new_revision(stale, refreshed_revision)
+                _show_new_revision(stale, refreshed_revision)
+                browser.close()
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+            cli.clear_config_cache()
+
+
+def test_real_browser_restored_historical_chat_draft_submits_without_advancing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    playwright = pytest.importorskip("playwright.sync_api")
+    home = tmp_path / "openlearn-home"
+    monkeypatch.setenv("OPENLEARN_HOME", str(home))
+    monkeypatch.setenv("OPENLEARN_MOCK", "1")
+    for name in (
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "OPENLEARN_API_KEY",
+        "OPENLEARN_BASE_URL",
+        "OPENLEARN_MODEL",
+        "OPENLEARN_PROVIDER",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    cli.clear_config_cache()
+    cli.cmd_new(
+        argparse.Namespace(
+            topic="Historical Draft Browser",
+            goal="Prepare for technical interviews",
+            mastery_profile="efficient",
+            template=None,
+            interview_prep=True,
+        ),
+        output_func=lambda _text="": None,
+    )
+    slug = "historical-draft-browser"
+    application.prepare_interview_curriculum(slug, boundary="resume")
+    application.accept_interview_curriculum(
+        slug, action="skip", submission_id=str(uuid4())
+    )
+    initialized = OpenLearnWebServices()._start_course_initialization(
+        slug, str(uuid4())
+    )
+    assert "operation_id" in initialized, initialized
+    operation_id = str(initialized["operation_id"])
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        operation = tutor_service.operation_status(slug, operation_id)
+        if operation is not None and operation.status == "committed":
+            break
+        if operation is not None and operation.status in {"conflict", "retryable_error"}:
+            raise AssertionError(operation.error_message or operation.status)
+        time.sleep(0.02)
+    else:
+        raise AssertionError("first lesson did not finish")
+
+    port = _free_loopback_port()
+    base_url = f"http://127.0.0.1:{port}"
+    environment = {**os.environ, "OPENLEARN_HOME": str(home), "OPENLEARN_MOCK": "1"}
+    command = f"from openlearn.web.launcher import run; run(port={port}, open_browser=False)"
+    log_path = tmp_path / "openlearn-web.log"
+    with log_path.open("wb") as log:
+        process = subprocess.Popen(
+            [sys.executable, "-c", command],
+            cwd=tmp_path,
+            env=environment,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+        )
+        try:
+            bootstrap_url, app_url = _wait_until_ready(base_url, process, home)
+            with playwright.sync_playwright() as runtime:
+                browser = runtime.chromium.launch()
+                page = browser.new_page()
+                page.goto(bootstrap_url)
+                page.goto(f"{app_url}/courses/{slug}")
+                page.locator("[data-focus-shell]").wait_for(state="visible")
+                historical_title = page.locator("#move-title").inner_text()
+                historical_id = page.locator(
+                    'input[name="source_lesson_id"]'
+                ).input_value()
+                historical_revision = _revision(page)
+
+                page.get_by_role("button", name="Chat", exact=True).click()
+                draft = "Explain the exact lesson I had open before continuing."
+                page.locator("#chat-question").fill(draft)
+                assert page.locator(
+                    'input[name="source_lesson_revision"]'
+                ).input_value() == str(historical_revision)
+
+                if page.locator("#learner-response").count():
+                    page.locator("#learner-response").fill(
+                        "I would state the invariant and trace one example."
+                    )
+                    page.locator("#learner-response").press("Control+Enter")
+                else:
+                    page.get_by_role("button", name="Close learning tool").click()
+                    page.get_by_role("button", name="Continue", exact=True).click()
+                playwright.expect(
+                    page.get_by_role("button", name="Show next lesson")
+                ).to_be_visible()
+                page.get_by_role("button", name="Show next lesson").click()
+                page.wait_for_function(
+                    "previous => Number(document.querySelector('[data-focus-shell]').dataset.revision) > previous",
+                    arg=historical_revision,
+                )
+                current_revision = _revision(page)
+                assert page.locator("#move-title").inner_text() != historical_title
+
+                page.reload()
+                page.locator("[data-focus-shell]").wait_for(state="visible")
+                page.get_by_role("button", name="Chat", exact=True).click()
+                playwright.expect(page.locator("#chat-question")).to_have_value(draft)
+                assert page.locator(
+                    'input[name="source_lesson_id"]'
+                ).input_value() == historical_id
+                assert page.locator(
+                    'input[name="source_lesson_revision"]'
+                ).input_value() == str(historical_revision)
+
+                with page.expect_response(
+                    lambda response: response.url.endswith("/turns")
+                ) as submitted:
+                    page.locator("[data-chat-form]").get_by_role(
+                        "button", name="Ask tutor"
+                    ).click()
+                assert submitted.value.status == 202
+                playwright.expect(page.locator(".chat-exchange")).to_have_count(1)
+                playwright.expect(page.locator(".chat-source-label")).to_have_text(
+                    f"About: {historical_title}"
+                )
+                assert _revision(page) == current_revision
+                assert tutor_service.course_revision(slug) == current_revision
                 browser.close()
         finally:
             process.terminate()
@@ -534,11 +717,21 @@ def test_progression_action_locks_every_competing_control_until_handled() -> Non
               window.progressionFetches += 1;
               return new Promise((resolve) => { window.resolveProgression = resolve; });
             };
+            void 0;
             """
         )
         page.add_script_tag(path=str(javascript))
 
-        page.get_by_role("button", name="Resume").click()
+        page.evaluate(
+            """
+            setTimeout(
+              () => document.querySelector('[data-progression-action="resume"]').click(),
+              0,
+            );
+            void 0;
+            """
+        )
+        page.wait_for_function("() => window.progressionFetches === 1")
         controls = page.locator(
             "[data-progression-action], [data-navigation-intent]"
         )
@@ -568,10 +761,10 @@ def test_progression_action_locks_every_competing_control_until_handled() -> Non
                   data-operation-id="main-operation" data-operation-state="generating"
                   data-revision="2">
               <article data-current-move>
+                <div data-move-content>Main lesson</div>
                 <div data-tutor-stream-preview hidden>
                   <p data-tutor-stream-text></p>
                 </div>
-                <div data-move-content>Main lesson</div>
               </article>
               <p data-operation-state hidden tabindex="-1">
                 <span data-operation-message></span>
@@ -590,6 +783,11 @@ def test_progression_action_locks_every_competing_control_until_handled() -> Non
         )
         concurrent.evaluate(
             """
+            window.mainPolls = 0;
+            Object.defineProperty(window.crypto, "randomUUID", {
+              configurable: true,
+              value: () => "00000000-0000-4000-8000-000000000099",
+            });
             window.fetch = async (url, options = {}) => {
               if (url.includes("/turns") && options.method === "POST") {
                 return new Response(JSON.stringify({
@@ -597,19 +795,28 @@ def test_progression_action_locks_every_competing_control_until_handled() -> Non
                 }), {status: 200, headers: {"Content-Type": "application/json"}});
               }
               if (url.includes("/operations/side-operation")) {
-                return new Response(JSON.stringify({
-                  state: "committed", preview_text: "SIDE ANSWER",
-                }), {status: 200, headers: {"Content-Type": "application/json"}});
+                return new Promise((resolve) => { window.resolveSideOperation = resolve; });
               }
               if (url.endsWith("/chat")) {
-                return new Response(JSON.stringify({conversation: [], revision: 2}), {
+                return new Response(JSON.stringify({
+                  conversation: [{
+                    source_lesson_title: "Main lesson",
+                    question: "Explain this",
+                    blocks: [],
+                  }],
+                  revision: 4,
+                }), {
                   status: 200, headers: {"Content-Type": "application/json"},
                 });
               }
-              return new Response(JSON.stringify({
-                state: "generating", preview_text: "MAIN PREVIEW",
-              }), {status: 200, headers: {"Content-Type": "application/json"}});
+              window.mainPolls += 1;
+              return new Response(JSON.stringify(window.mainPolls === 1
+                ? {state: "generating", preview_text: "MAIN PREVIEW"}
+                : {state: "committed", preview_text: "MAIN PREVIEW"}), {
+                status: 200, headers: {"Content-Type": "application/json"},
+              });
             };
+            void 0;
             """
         )
         concurrent.add_script_tag(path=str(javascript))
@@ -617,15 +824,340 @@ def test_progression_action_locks_every_competing_control_until_handled() -> Non
             concurrent.locator("[data-tutor-stream-text]")
         ).to_contain_text("MAIN PREVIEW")
         concurrent.get_by_role("button", name="Ask tutor").click()
+        playwright.expect(
+            concurrent.get_by_role("button", name="Show next lesson")
+        ).to_be_disabled()
+        assert concurrent.locator('textarea[name="text"]').input_value() == "Explain this"
+        assert concurrent.locator("[data-move-content]").inner_text() == "Main lesson"
+        concurrent.wait_for_function(
+            "() => typeof window.resolveSideOperation === 'function'"
+        )
+        concurrent.evaluate(
+            """
+            window.resolveSideOperation(new Response(JSON.stringify({
+              state: "committed", preview_text: "SIDE ANSWER",
+            }), {status: 200, headers: {"Content-Type": "application/json"}}));
+            """
+        )
         playwright.expect(concurrent.locator("[data-chat-status]")).to_have_text(
             "Answered. Your lesson is still open."
         )
+        playwright.expect(
+            concurrent.get_by_role("button", name="Show next lesson")
+        ).to_be_enabled()
+        assert concurrent.locator('textarea[name="text"]').input_value() == ""
         assert "SIDE ANSWER" not in concurrent.locator(
             "[data-tutor-stream-text]"
         ).inner_text()
         assert "MAIN PREVIEW" in concurrent.locator(
             "[data-tutor-stream-text]"
         ).inner_text()
+        browser.close()
+
+
+def test_stream_preview_is_separate_smooth_and_bounded() -> None:
+    playwright = pytest.importorskip("playwright.sync_api")
+    static_dir = (
+        Path(__file__).resolve().parents[1] / "src" / "openlearn" / "web" / "static"
+    )
+    javascript = static_dir / "openlearn.js"
+    stylesheet = static_dir / "openlearn.css"
+    long_preview = " ".join(f"token-{index}" for index in range(900))
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch()
+        page = browser.new_page(viewport={"width": 1100, "height": 800})
+        page.set_content(
+            """
+            <meta name="csrf-token" content="test-token">
+            <main data-focus-shell data-course-slug="technical-interview-prep"
+                  data-operation-id="main-operation" data-operation-state="generating"
+                  data-revision="2">
+              <article class="move-surface" data-current-move>
+                <h1>Current lesson remains readable</h1>
+                <div class="move-content" data-move-content>
+                  <p>Keep this lesson visible while the next response is generated.</p>
+                </div>
+                <div class="tutor-stream-preview" data-tutor-stream-preview hidden>
+                  <p class="stream-label">Tutor response</p>
+                  <div data-tutor-stream-text></div>
+                </div>
+              </article>
+              <p data-operation-state hidden tabindex="-1">
+                <span data-operation-message></span>
+              </p>
+            </main>
+            """
+        )
+        page.add_style_tag(path=str(stylesheet))
+        page.evaluate(
+            """preview => {
+              window.previewMutations = 0;
+              new MutationObserver((records) => {
+                window.previewMutations += records.length;
+              }).observe(document.querySelector('[data-tutor-stream-text]'), {
+                childList: true,
+                characterData: true,
+                subtree: true,
+              });
+              window.previewPoll = 0;
+              window.fetch = async () => {
+                window.previewPoll += 1;
+                return new Response(JSON.stringify({
+                  state: window.previewPoll === 1 ? 'generating' : 'committed',
+                  preview_text: preview,
+                }), {status: 200, headers: {'Content-Type': 'application/json'}});
+              };
+            }""",
+            long_preview,
+        )
+        page.add_script_tag(path=str(javascript))
+
+        playwright.expect(page.get_by_text("Current lesson remains readable")).to_be_visible()
+        playwright.expect(page.locator("[data-tutor-stream-preview]")).to_be_visible()
+        playwright.expect(
+            page.get_by_role("button", name="Show next lesson")
+        ).to_be_visible(timeout=6_000)
+        preview_box = page.locator("[data-tutor-stream-preview]").bounding_box()
+        assert preview_box and 140 <= preview_box["height"] <= 370
+        assert page.locator("[data-current-move]").evaluate(
+            "surface => surface.style.height === ''"
+        )
+        assert page.evaluate("window.previewMutations") < 180
+
+        reduced = browser.new_page(viewport={"width": 1100, "height": 800})
+        reduced.emulate_media(reduced_motion="reduce")
+        reduced.set_content(
+            """
+            <meta name="csrf-token" content="test-token">
+            <main data-focus-shell data-course-slug="technical-interview-prep"
+                  data-operation-id="reduced-operation" data-operation-state="generating"
+                  data-revision="2">
+              <article class="move-surface" data-current-move>
+                <h1>Long current lesson</h1>
+                <div class="move-content" data-move-content>
+                  <p>Existing explanation.</p><p>Existing example.</p>
+                  <p>Existing tradeoffs.</p><p>Existing constraints.</p>
+                  <p>Existing walkthrough.</p><p>Existing summary.</p>
+                </div>
+                <div class="tutor-stream-preview" data-tutor-stream-preview hidden>
+                  <p class="stream-label">Tutor response</p>
+                  <div data-tutor-stream-text></div>
+                </div>
+              </article>
+              <p data-operation-state hidden tabindex="-1">
+                <span data-operation-message></span>
+              </p>
+            </main>
+            """
+        )
+        reduced.add_style_tag(path=str(stylesheet))
+        reduced.evaluate(
+            """
+            window.fetch = async () => new Response(JSON.stringify({
+              state: 'committed', preview_text: 'A short next lesson.',
+            }), {status: 200, headers: {'Content-Type': 'application/json'}});
+            """
+        )
+        reduced.add_script_tag(path=str(javascript))
+        playwright.expect(
+            reduced.get_by_role("button", name="Show next lesson")
+        ).to_be_visible()
+        region = reduced.locator("[data-tutor-stream-preview]")
+        assert region.evaluate("node => getComputedStyle(node).transitionDuration") == "0s"
+        first_height = reduced.locator("[data-current-move]").bounding_box()["height"]
+        reduced.wait_for_timeout(300)
+        second_height = reduced.locator("[data-current-move]").bounding_box()["height"]
+        assert abs(first_height - second_height) < 2
+        assert region.bounding_box()["height"] <= 180
+        browser.close()
+
+
+def test_next_lesson_handoff_restores_unsent_chat_draft() -> None:
+    playwright = pytest.importorskip("playwright.sync_api")
+    javascript = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "openlearn"
+        / "web"
+        / "static"
+        / "openlearn.js"
+    )
+    document = """
+      <meta name="csrf-token" content="test-token">
+      <main data-focus-shell data-course-slug="technical-interview-prep"
+            data-operation-id="main-operation" data-operation-state="generating"
+            data-revision="2">
+        <article data-current-move>
+          <div data-move-content>Current lesson</div>
+          <div data-tutor-stream-preview hidden><div data-tutor-stream-text></div></div>
+        </article>
+        <p data-operation-state hidden tabindex="-1"><span data-operation-message></span></p>
+        <div data-chat-conversation></div>
+        <form data-chat-form>
+          <input name="submission_id" value="side-submission">
+          <input name="expected_revision" value="2">
+          <input name="intent" value="question">
+          <input name="source_lesson_id" value="old-lesson">
+          <input name="source_lesson_title" value="Old lesson title">
+          <input name="source_lesson_revision" value="2">
+          <textarea name="text" required></textarea>
+          <button type="submit">Ask tutor</button>
+          <p data-chat-status></p>
+        </form>
+      </main>
+      <script>
+        window.fetch = async () => new Response(JSON.stringify({
+          state: 'committed', preview_text: 'Next lesson preview',
+        }), {status: 200, headers: {'Content-Type': 'application/json'}});
+      </script>
+      <script src="/openlearn.js"></script>
+    """
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch()
+        page = browser.new_page()
+        page.route(
+            "http://openlearn.test/openlearn.js",
+            lambda route: route.fulfill(path=str(javascript)),
+        )
+        page.route(
+            "http://openlearn.test/focus",
+            lambda route: route.fulfill(body=document, content_type="text/html"),
+        )
+        page.goto("http://openlearn.test/focus")
+        draft = "Keep this question about the old lesson."
+        page.locator('textarea[name="text"]').fill(draft)
+        playwright.expect(
+            page.get_by_role("button", name="Show next lesson")
+        ).to_be_visible()
+        page.get_by_role("button", name="Show next lesson").click()
+        playwright.expect(page.locator('textarea[name="text"]')).to_have_value(draft)
+        assert page.locator('input[name="source_lesson_id"]').input_value() == "old-lesson"
+        assert page.locator('input[name="source_lesson_title"]').input_value() == (
+            "Old lesson title"
+        )
+        browser.close()
+
+
+def test_late_chat_refresh_cannot_replace_newer_conversation() -> None:
+    playwright = pytest.importorskip("playwright.sync_api")
+    javascript = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "openlearn"
+        / "web"
+        / "static"
+        / "openlearn.js"
+    )
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch()
+        page = browser.new_page()
+        document = """
+            <meta name="csrf-token" content="test-token">
+            <button data-tool-open="chat">Chat</button>
+            <main data-focus-shell data-course-slug="technical-interview-prep" data-revision="2">
+              <aside data-tool-surface hidden>
+                <h2 data-tool-title></h2><button data-tool-close>Close</button>
+                <section data-tool-panel="chat" hidden>
+                  <div data-chat-conversation></div>
+                  <form data-chat-form>
+                    <input name="submission_id" value="side-submission">
+                    <input name="expected_revision" value="2">
+                    <input name="intent" value="question">
+                    <textarea name="text" required>Newest question</textarea>
+                    <button type="submit">Ask tutor</button>
+                    <p data-chat-status></p>
+                  </form>
+                </section>
+              </aside>
+            </main>
+            """
+        page.route(
+            "http://openlearn.test/focus",
+            lambda route: route.fulfill(body=document, content_type="text/html"),
+        )
+        page.goto("http://openlearn.test/focus")
+        page.evaluate(
+            """
+            window.chatGets = 0;
+            Object.defineProperty(window.crypto, 'randomUUID', {
+              configurable: true,
+              value: () => '00000000-0000-4000-8000-000000000099',
+            });
+            window.fetch = async (url, options = {}) => {
+              const requestUrl = typeof url === 'string' ? url : (url?.url || '');
+              if (requestUrl.includes('/turns') && options.method === 'POST') {
+                return new Response(JSON.stringify({
+                  state: 'saved', operation_id: 'side-operation',
+                }), {status: 200, headers: {'Content-Type': 'application/json'}});
+              }
+              if (requestUrl.includes('/operations/side-operation')) {
+                return new Response(JSON.stringify({state: 'committed'}), {
+                  status: 200, headers: {'Content-Type': 'application/json'},
+                });
+              }
+              window.chatGets += 1;
+              if (window.chatGets === 1) {
+                return new Promise((resolve) => { window.resolveOldChat = resolve; });
+              }
+              return new Response(JSON.stringify({
+                revision: 2,
+                course_revision: 2,
+                chat_revision: 2,
+                conversation: [{
+                  source_lesson_title: 'New lesson',
+                  question: 'Newest question',
+                  blocks: [{kind: 'paragraph', text: 'Newest answer'}],
+                }],
+              }), {status: 200, headers: {'Content-Type': 'application/json'}});
+            };
+            void 0;
+            """
+        )
+        page.add_script_tag(path=str(javascript))
+        page.evaluate(
+            """
+            setTimeout(
+              () => document.querySelector('[data-tool-open="chat"]').click(),
+              0,
+            );
+            void 0;
+            """
+        )
+        page.wait_for_function("() => typeof window.resolveOldChat === 'function'")
+        page.evaluate(
+            """
+            setTimeout(
+              () => document.querySelector('[data-chat-form]').requestSubmit(),
+              0,
+            );
+            void 0;
+            """
+        )
+        playwright.expect(page.locator("[data-chat-conversation]")).to_contain_text(
+            "Newest answer"
+        )
+        assert page.locator('input[name="expected_revision"]').input_value() == "2"
+        page.evaluate(
+            """
+            window.resolveOldChat(new Response(JSON.stringify({
+              revision: 3,
+              course_revision: 3,
+              chat_revision: 1,
+              conversation: [{
+                source_lesson_title: 'Old lesson',
+                question: 'Old question',
+                blocks: [{kind: 'paragraph', text: 'Stale answer'}],
+              }],
+            }), {status: 200, headers: {'Content-Type': 'application/json'}}));
+            """
+        )
+        page.wait_for_timeout(100)
+        assert "Newest answer" in page.locator("[data-chat-conversation]").inner_text()
+        assert "Stale answer" not in page.locator("[data-chat-conversation]").inner_text()
+        assert page.locator("[data-focus-shell]").get_attribute("data-revision") == "3"
+        assert page.locator("[data-focus-shell]").get_attribute(
+            "data-chat-revision"
+        ) == "2"
         browser.close()
 
 

@@ -212,6 +212,35 @@ class ApplicationQueryTests(unittest.TestCase):
         self.assertEqual(projection.coverage.covered, 1)
         self.assertNotIn("Step", projection.position.label)
 
+    def test_interview_learning_reads_dynamic_pending_question_from_state(self) -> None:
+        created = application.create_course(
+            application.CourseCreationRequest(
+                name="Pending Interview Check",
+                template_id="technical-interview-prep",
+            )
+        )
+        slug = created.course.slug
+        application.accept_interview_curriculum(
+            slug, action="skip", submission_id=str(uuid4())
+        )
+        state = cli.load_state(slug)
+        state["pending_question"] = {
+            "kind": "free_response",
+            "question": "Explain the current invariant.",
+        }
+        cli.update_state_atomic(
+            slug,
+            lambda current: current.__setitem__(
+                "pending_question", state["pending_question"]
+            ),
+        )
+
+        projection = application.interview_learning(slug)
+
+        self.assertIsNotNone(projection)
+        assert projection is not None
+        self.assertEqual(projection.pending_prompt, "Explain the current invariant.")
+
     def test_interview_progress_separates_historical_coverage_from_readiness_work(
         self,
     ) -> None:
@@ -269,6 +298,57 @@ class ApplicationQueryTests(unittest.TestCase):
         self.assertGreaterEqual(projection.readiness.deferred, 1)
         self.assertGreaterEqual(projection.readiness.total, 2)
         self.assertEqual(projection.readiness.next_retrieval, "2026-02-01")
+
+    def test_practice_lesson_projects_committed_target_instead_of_forward_cursor(
+        self,
+    ) -> None:
+        created = application.create_course(
+            application.CourseCreationRequest(
+                name="Practice Lesson Identity",
+                template_id="technical-interview-prep",
+            )
+        )
+        slug = created.course.slug
+        application.accept_interview_curriculum(
+            slug, action="skip", submission_id=str(uuid4())
+        )
+        state = cli.load_state(slug)
+        canonical = state["interview_curriculum"]
+        first, second = canonical["route"]["skills"][:2]
+        canonical["cursor"] = {
+            "unit_id": first["unit_id"],
+            "section_id": first["section_id"],
+            "skill_ref": first["skill_ref"],
+            "instruction_status": "covered",
+        }
+        canonical["committed_target"] = {
+            **second,
+            "depth_mode": "practice",
+        }
+        canonical["evidence"]["exposed"] = [
+            first["skill_ref"]["skill_id"],
+            second["skill_ref"]["skill_id"],
+        ]
+        state["interview_curriculum"] = canonical
+        cli.write_text_atomic(
+            cli.topic_state_path(slug),
+            json.dumps(state, indent=2, sort_keys=True) + "\n",
+        )
+        cli.append_session(
+            cli.read_topic(slug),
+            "next",
+            "Practice a covered skill.",
+            "**Check:** Explain the hashing invariant.",
+        )
+
+        projection = application.interview_learning(slug)
+
+        assert projection is not None
+        self.assertEqual(
+            projection.position.skill_id, second["skill_ref"]["skill_id"]
+        )
+        self.assertEqual(projection.position.emphasis, "Practice")
+        self.assertEqual(projection.committed_lesson.title, projection.position.skill_label)
 
     def test_identical_committed_lesson_text_keeps_distinct_source_ids(self) -> None:
         created = application.create_course(

@@ -47,7 +47,7 @@
         {% if course.move.content %}<p>{{ course.move.content }}</p>{% endif %}
       </div>
       {% if course.move.prompt %}<div class="prompt-block" data-move-prompt><p>{{ course.move.prompt }}</p></div>{% endif %}
-      <div class="tutor-stream-preview" data-tutor-stream-preview hidden>
+      <div class="tutor-stream-preview" data-tutor-stream-preview role="status" aria-live="polite" aria-atomic="false" hidden>
         <p class="stream-label"><span class="stream-pulse" aria-hidden="true"></span>Tutor response</p>
         <div data-tutor-stream-text></div><span class="stream-caret" aria-hidden="true"></span>
       </div>

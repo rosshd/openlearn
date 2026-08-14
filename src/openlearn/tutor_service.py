@@ -70,6 +70,15 @@ class _LiveTurnState:
     preview: str | None = None
 
 
+@dataclass(frozen=True)
+class _LessonSource:
+    content: str
+    lesson_id: str
+    title: str
+    revision: int
+    skill_ref: dict[str, str] | None
+
+
 _GENERATION_LOCK = threading.RLock()
 _COURSE_LOCKS: dict[str, threading.RLock] = {}
 _COURSE_LOCKS_GUARD = threading.Lock()
@@ -118,6 +127,158 @@ def _visible_curriculum_skill_ref(
     if not isinstance(ref, Mapping) or not all(isinstance(ref.get(key), str) for key in keys):
         return None
     return {key: str(ref[key]) for key in keys}
+
+
+def _historical_lesson_receipts(
+    slug: str, state: dict[str, object]
+) -> list[dict[str, object]]:
+    """Read the bounded durable navigation receipts that authorize old lessons."""
+    from openlearn import cli
+
+    submission_ids: set[str] = set()
+    raw_receipts = state.get("_turn_receipts")
+    if isinstance(raw_receipts, dict):
+        for key in raw_receipts:
+            match = re.fullmatch(r"operation_([a-f0-9]{32})", str(key))
+            if match is not None:
+                submission_ids.add(str(UUID(hex=match.group(1))))
+    receipt_directory = cli.topic_operation_receipts_dir(slug)
+    if receipt_directory.exists():
+        for path in receipt_directory.iterdir():
+            match = re.fullmatch(r"operation_([a-f0-9]{32})\.json", path.name)
+            if match is not None:
+                submission_ids.add(str(UUID(hex=match.group(1))))
+
+    receipts: list[dict[str, object]] = []
+    for submission_id in sorted(submission_ids):
+        receipt = cli.load_operation_receipt(slug, submission_id, state=state)
+        if isinstance(receipt, dict) and receipt.get("receipt_kind") != "caught_up":
+            receipts.append(receipt)
+    return receipts
+
+
+def _resolved_side_chat_source(
+    slug: str,
+    state: dict[str, object],
+    lesson_id: str | None,
+    title: str | None,
+    revision: int | None,
+) -> _LessonSource:
+    """Resolve a current or historical visible lesson from durable identities."""
+    from openlearn import application, cli
+
+    projection = application.interview_learning(slug)
+    if projection is None:
+        topic = cli.read_topic(slug)
+        source_entry = cli.last_tutor_lesson_entry(topic)
+        content = source_entry[1]["response"].strip() if source_entry else ""
+        expected_id = cli.tutor_lesson_entry_id(source_entry[1]) if source_entry else ""
+        expected_title = cli.tutor_response_focus_title(content) or "Saved lesson"
+        current_revision = course_revision(slug)
+        if any(value is not None for value in (lesson_id, title, revision)) and (
+            lesson_id != expected_id
+            or title != expected_title
+            or revision != current_revision
+        ):
+            raise TutorConflictError(
+                "The visible lesson changed. Your question was not submitted; refresh and retry."
+            )
+        return _LessonSource(
+            content=content,
+            lesson_id=expected_id,
+            title=expected_title,
+            revision=current_revision,
+            skill_ref=None,
+        )
+    if lesson_id is None and title is None and revision is None:
+        return _LessonSource(
+            content=projection.committed_lesson.content,
+            lesson_id=projection.committed_lesson.lesson_id,
+            title=projection.committed_lesson.title,
+            revision=projection.revision,
+            skill_ref=_visible_curriculum_skill_ref(state),
+        )
+    if lesson_id is None or title is None or revision is None:
+        raise TutorConflictError(
+            "The visible lesson changed. Your question was not submitted; refresh and retry."
+        )
+    if (
+        lesson_id == projection.committed_lesson.lesson_id
+        and title == projection.committed_lesson.title
+        and revision == projection.revision
+    ):
+        return _LessonSource(
+            content=projection.committed_lesson.content,
+            lesson_id=lesson_id,
+            title=title,
+            revision=revision,
+            skill_ref=_visible_curriculum_skill_ref(state),
+        )
+    if revision >= projection.revision:
+        raise TutorConflictError(
+            "The visible lesson changed. Your question was not submitted; refresh and retry."
+        )
+
+    topic = cli.read_topic(slug)
+    _context, session_log = cli.split_session_log(topic.body)
+    entries = cli.session_entries(session_log)
+    matching_entries = [
+        entry
+        for entry in entries
+        if entry.get("kind") != cli.SIDE_CHAT_SESSION_KIND
+        and entry.get("response", "").strip()
+        and cli.tutor_lesson_entry_id(entry) == lesson_id
+    ]
+    if len(matching_entries) != 1:
+        raise TutorConflictError(
+            "The visible lesson changed. Your question was not submitted; refresh and retry."
+        )
+    entry = matching_entries[0]
+    mutation_id = entry.get("mutation_id")
+    receipts = [
+        receipt
+        for receipt in _historical_lesson_receipts(slug, state)
+        if receipt.get("mutation_id") == mutation_id
+    ]
+    if len(receipts) != 1:
+        raise TutorConflictError(
+            "The visible lesson changed. Your question was not submitted; refresh and retry."
+        )
+    receipt = receipts[0]
+    target = receipt.get("target")
+    skill_ref = target.get("skill_ref") if isinstance(target, dict) else None
+    identity_keys = (
+        "graph_id",
+        "graph_version",
+        "mastery_policy_version",
+        "skill_id",
+    )
+    normalized_ref = (
+        {key: str(skill_ref[key]) for key in identity_keys}
+        if isinstance(skill_ref, dict)
+        and all(isinstance(skill_ref.get(key), str) and skill_ref.get(key) for key in identity_keys)
+        else None
+    )
+    content = entry["response"].strip()
+    response_hash = receipt.get("response_sha256")
+    if (
+        receipt.get("final_revision") != revision
+        or not isinstance(target, dict)
+        or target.get("skill_label") != title
+        or normalized_ref is None
+        or not isinstance(response_hash, str)
+        or hashlib.sha256(content.encode("utf-8")).hexdigest() != response_hash
+    ):
+        raise TutorConflictError(
+            "The visible lesson changed. Your question was not submitted; refresh and retry."
+        )
+    return _LessonSource(
+        content=content,
+        lesson_id=lesson_id,
+        title=title,
+        revision=revision,
+        skill_ref=normalized_ref,
+    )
 
 
 def _now() -> str:
@@ -188,8 +349,7 @@ def operation_result(slug: str, submission_id: str) -> TutorTurnResult | None:
     raw = results.get(submission_id)
     if isinstance(raw, dict):
         return _result_from_dict(raw)
-    receipts = cli._validated_turn_receipts(state)
-    permanent = receipts.get(f"operation_{submission_id.replace('-', '')}")
+    permanent = cli.load_operation_receipt(slug, submission_id, state=state)
     if not isinstance(permanent, dict):
         return None
     return _result_from_permanent_receipt(slug, permanent)
@@ -222,8 +382,7 @@ def operation_status(slug: str, submission_id: str) -> TutorTurnResult | None:
             raw_result = results.get(submission_id)
             if isinstance(raw_result, dict):
                 return _result_from_dict(raw_result)
-        receipts = cli._validated_turn_receipts(state)
-        permanent = receipts.get(f"operation_{submission_id.replace('-', '')}")
+        permanent = cli.load_operation_receipt(slug, submission_id, state=state)
         if isinstance(permanent, dict):
             return _result_from_permanent_receipt(slug, permanent)
         active = next(
@@ -415,10 +574,17 @@ def _save_operation(
         active_key = _active_operation_key(session_kind)
         previous_active = internal.get(active_key)
         previous_active = previous_active if isinstance(previous_active, dict) else {}
-        internal[active_key] = (
-            None
-            if status in {"committed", "retryable_error", "conflict"}
-            else {
+        previous_submission_id = previous_active.get("submission_id")
+        terminal = status in {"committed", "retryable_error", "conflict"}
+        if not terminal and previous_active and previous_submission_id != submission_id:
+            raise TutorConflictError("another tutor turn is already active for this course")
+        if terminal:
+            # A late worker may report failure after another process reserved a
+            # newer turn. Only the owner of the current slot may clear it.
+            if previous_submission_id == submission_id:
+                internal[active_key] = None
+        else:
+            internal[active_key] = {
                 "submission_id": submission_id,
                 "status": status,
                 "expected_revision": expected_revision,
@@ -457,7 +623,6 @@ def _save_operation(
                 ),
                 "updated_at": _now(),
             }
-        )
         if result is None and status in {"saved", "judging", "generating", "validating"}:
             results = internal.get("turn_results")
             if isinstance(results, dict) and submission_id in results:
@@ -571,7 +736,7 @@ def _recover_active_turn(
     # normal restart-recovery window. Only orphaned durable records expire.
     if _future_active(slug, submission_id):
         return None
-    if isinstance(owner_pid, int) and owner_pid > 0:
+    if isinstance(owner_pid, int) and owner_pid > 0 and owner_pid != os.getpid():
         try:
             os.kill(owner_pid, 0)
         except (OSError, ProcessLookupError):
@@ -618,6 +783,53 @@ def _interview_progression_state(slug: str) -> dict[str, object] | None:
     return value if isinstance(value, dict) else None
 
 
+def _pending_interview_target(
+    canonical: object, pending_question: object
+) -> dict[str, object] | None:
+    """Return the pinned target only when it owns the stored learner check."""
+    if not isinstance(canonical, dict) or not isinstance(pending_question, dict):
+        return None
+    committed = canonical.get("committed_check_target")
+    if not isinstance(committed, dict):
+        return None
+    target = committed.get("target")
+    committed_ref = committed.get("skill_ref")
+    target_ref = target.get("skill_ref") if isinstance(target, dict) else None
+    pending_ref = pending_question.get("curriculum_target")
+    identity_keys = (
+        "graph_id",
+        "graph_version",
+        "mastery_policy_version",
+        "skill_id",
+    )
+    if (
+        not isinstance(target, dict)
+        or not isinstance(committed_ref, dict)
+        or not isinstance(target_ref, dict)
+        or not isinstance(pending_ref, dict)
+        or any(
+            not isinstance(committed_ref.get(key), str)
+            or committed_ref.get(key) != target_ref.get(key)
+            or committed_ref.get(key) != pending_ref.get(key)
+            for key in identity_keys
+        )
+        or target.get("evidence_kind") != committed.get("evidence_kind")
+        or pending_question.get("curriculum_evidence_kind")
+        != committed.get("evidence_kind")
+    ):
+        return None
+    for pending_key, committed_key in (
+        ("curriculum_problem_id", "problem_id"),
+        ("curriculum_transfer_family", "transfer_family"),
+    ):
+        if target.get(committed_key) != committed.get(committed_key):
+            return None
+        pending_value = pending_question.get(pending_key)
+        if pending_value is not None and pending_value != committed.get(committed_key):
+            return None
+    return copy.deepcopy(target)
+
+
 def _reserve_interview_progression(
     slug: str,
     normalized: str,
@@ -645,7 +857,7 @@ def _reserve_interview_progression(
         results = internal.get("turn_results")
         raw_replay = results.get(sid) if isinstance(results, dict) else None
         receipts = cli._validated_turn_receipts(state)
-        permanent = receipts.get(f"operation_{sid.replace('-', '')}")
+        permanent = cli.load_operation_receipt(slug, sid, state=state)
         replay = (
             _result_from_dict(raw_replay)
             if isinstance(raw_replay, dict)
@@ -800,6 +1012,13 @@ def _reserve_interview_progression(
                 cli.topic_state_path(slug),
                 json.dumps(state, indent=2, sort_keys=True) + "\n",
             )
+            # Caught-up commits do not use the normal turn journal. Publish the
+            # authoritative hot receipt first, then externalize and compact it.
+            cli._externalize_operation_receipts_unlocked(slug, state)
+            cli.write_text_atomic(
+                cli.topic_state_path(slug),
+                json.dumps(state, indent=2, sort_keys=True) + "\n",
+            )
             return revision, result
         reservation_revision = revision + 1
         reserved = resolution.state
@@ -900,12 +1119,9 @@ def _prepare_turn(
         )
     if replay is not None and replay.status == "committed":
         return course_revision(slug), replay
-    course_revision_value = course_revision(slug)
-    if expected_revision is not None and expected_revision != course_revision_value:
-        raise TutorConflictError("course changed; refresh before submitting again")
+    active_key = _active_operation_key(session_kind)
     state = cli.load_state(slug)
     internal = _internal_state(state)
-    active_key = _active_operation_key(session_kind)
     active = internal.get(active_key)
     if isinstance(active, dict):
         active_sid = active.get("submission_id")
@@ -916,72 +1132,122 @@ def _prepare_turn(
             )
         recovered = _recover_active_turn(slug, active, session_kind=session_kind)
         if recovered is not None and active_sid == sid:
-            return course_revision_value, recovered
+            return course_revision(slug), recovered
         if recovered is None and active_sid != sid:
             raise TutorConflictError("another tutor turn is already active for this course")
         if recovered is None and _future_active(slug, sid):
-            return course_revision_value, operation_status(slug, sid)
+            current = operation_status(slug, sid)
+            if current is not None:
+                return course_revision(slug), current
     if (
         replay is not None
         and replay.status == "retryable_error"
         and _future_active(slug, sid)
     ):
-        return course_revision_value, replay
-    revision = course_revision_value
+        return course_revision(slug), replay
     source_lesson: str | None = None
     source_lesson_skill_ref: dict[str, str] | None = None
+    source_course_revision: int | None = None
     if session_kind == cli.SIDE_CHAT_SESSION_KIND:
-        source_values = (
+        course_revision_value = internal.get("course_revision", 0)
+        course_revision_value = (
+            course_revision_value
+            if isinstance(course_revision_value, int) and course_revision_value >= 0
+            else 0
+        )
+        source_course_revision = course_revision_value
+        resolved = _resolved_side_chat_source(
+            slug,
+            state,
             source_lesson_id,
             source_lesson_title,
             source_lesson_revision,
         )
-        if any(value is not None for value in source_values) and any(
-            value is None for value in source_values
-        ):
-            raise TutorConflictError(
-                "The visible lesson changed. Your question was not submitted; refresh and retry."
-            )
-        side_revision = internal.get("side_chat_revision")
-        revision = side_revision if isinstance(side_revision, int) and side_revision >= 0 else 0
-        source_topic = cli.read_topic(slug)
-        source_entry = cli.last_tutor_lesson_entry(source_topic)
-        source_lesson = source_entry[1]["response"].strip() if source_entry else ""
-        expected_source_id = (
-            cli.tutor_lesson_entry_id(source_entry[1]) if source_entry else ""
+        source_lesson = resolved.content
+        source_lesson_id = resolved.lesson_id
+        source_lesson_title = resolved.title
+        source_lesson_revision = resolved.revision
+        source_lesson_skill_ref = resolved.skill_ref
+    reservation: dict[str, object] = {}
+
+    def reserve(state_after: dict[str, object]) -> None:
+        current_internal = _internal_state(state_after)
+        course_value = current_internal.get("course_revision", 0)
+        current_course_revision = (
+            course_value if isinstance(course_value, int) and course_value >= 0 else 0
         )
-        if all(value is None for value in source_values):
-            source_lesson_id = expected_source_id
-            source_lesson_title = (
-                cli.tutor_response_focus_title(source_lesson) or "Saved lesson"
-            )
-            source_lesson_revision = course_revision_value
-        elif (
-            source_lesson_revision != course_revision_value
-            or source_lesson_id != expected_source_id
+        namespace_value = (
+            current_internal.get("side_chat_revision", 0)
+            if session_kind == cli.SIDE_CHAT_SESSION_KIND
+            else current_course_revision
+        )
+        namespace_revision = (
+            namespace_value
+            if isinstance(namespace_value, int) and namespace_value >= 0
+            else 0
+        )
+        expected_value = (
+            current_course_revision
+            if session_kind == cli.SIDE_CHAT_SESSION_KIND
+            else namespace_revision
+        )
+        if expected_revision is not None and expected_revision != expected_value:
+            raise TutorConflictError("course changed; refresh before submitting again")
+        if (
+            session_kind == cli.SIDE_CHAT_SESSION_KIND
+            and source_course_revision != current_course_revision
         ):
             raise TutorConflictError(
                 "The visible lesson changed. Your question was not submitted; refresh and retry."
             )
-        source_lesson_skill_ref = _visible_curriculum_skill_ref(state)
-    if session_kind != cli.SIDE_CHAT_SESSION_KIND:
-        cli.save_pending_learner_prompt(slug, normalized)
-    _save_operation(
-        slug,
-        submission_id=sid,
-        status="saved",
-        expected_revision=revision,
-        prompt=normalized,
-        payload_hash=payload_hash,
-        owner_pid=os.getpid(),
-        session_kind=session_kind,
-        source_course_revision=course_revision_value,
-        source_lesson=source_lesson,
-        source_lesson_id=source_lesson_id,
-        source_lesson_title=source_lesson_title,
-        source_lesson_revision=source_lesson_revision,
-        source_lesson_skill_ref=source_lesson_skill_ref,
-    )
+        current = current_internal.get(active_key)
+        if isinstance(current, dict):
+            if current.get("submission_id") != sid:
+                raise TutorConflictError(
+                    "another tutor turn is already active for this course"
+                )
+            if current.get("payload_hash") != payload_hash:
+                raise TutorConflictError(
+                    "submission ID was already used with different learner input"
+                )
+            reservation["existing"] = True
+            reservation["revision"] = namespace_revision
+            return
+        if session_kind != cli.SIDE_CHAT_SESSION_KIND:
+            state_after["pending_learner_prompt"] = normalized
+        current_internal[active_key] = {
+            "submission_id": sid,
+            "status": "saved",
+            "expected_revision": namespace_revision,
+            "prompt": normalized,
+            "payload_hash": payload_hash,
+            "owner_pid": os.getpid(),
+            "source_course_revision": current_course_revision,
+            "source_lesson": source_lesson,
+            "source_lesson_id": source_lesson_id,
+            "source_lesson_title": source_lesson_title,
+            "source_lesson_revision": source_lesson_revision,
+            "source_lesson_skill_ref": (
+                dict(source_lesson_skill_ref)
+                if source_lesson_skill_ref is not None
+                else None
+            ),
+            "updated_at": _now(),
+        }
+        state_after["_openlearn_internal"] = current_internal
+        reservation["revision"] = namespace_revision
+
+    cli.update_state_atomic(slug, reserve)
+    revision = int(reservation["revision"])
+    if reservation.get("existing") is True:
+        return revision, TutorTurnResult(
+            submission_id=sid,
+            status="saved",
+            input_status="saved",
+            message_kind=_message_kind(intent),
+            move=None,
+            payload_hash=payload_hash,
+        )
     return revision, None
 
 
@@ -999,11 +1265,19 @@ def _execute_prepared_turn_inner(
 
     active_key = _active_operation_key(session_kind)
     canonical_before = _interview_progression_state(slug)
+    state_snapshot = cli.load_state(slug)
     active_progression_before = (
         canonical_before.get("active_operation")
         if intent == "navigation"
         and session_kind != cli.SIDE_CHAT_SESSION_KIND
         and isinstance(canonical_before, dict)
+        else None
+    )
+    pending_interview_target = (
+        _pending_interview_target(
+            canonical_before, state_snapshot.get("pending_question")
+        )
+        if intent == "answer" and session_kind != cli.SIDE_CHAT_SESSION_KIND
         else None
     )
     generated_override = (
@@ -1330,7 +1604,7 @@ def _execute_prepared_turn_inner(
                     copy.deepcopy(active_progression_before.get("target"))
                     if isinstance(active_progression_before, dict)
                     and isinstance(active_progression_before.get("target"), dict)
-                    else None
+                    else pending_interview_target
                 ),
             )
         if not result_holder:

@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from enum import Enum, auto
 from pathlib import Path, PureWindowsPath
-from uuid import uuid4
+from uuid import UUID, uuid4
 from urllib.parse import urlencode, urlparse
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -426,6 +426,15 @@ def main(argv: list[str] | None = None) -> int:
     except OpenLearnError as exc:
         print_error(str(exc), output_func=lambda text: print(text, file=sys.stderr))
         return 1
+    except Exception as exc:
+        # Extracted application conflicts intentionally stay independent from
+        # this legacy module's exception hierarchy.
+        from openlearn.courses import RouteAcceptanceConflictError
+
+        if isinstance(exc, RouteAcceptanceConflictError):
+            print_error(str(exc), output_func=lambda text: print(text, file=sys.stderr))
+            return 1
+        raise
     except KeyboardInterrupt:
         print("", file=sys.stderr)
         return 130
@@ -2238,6 +2247,18 @@ def run_repl(
                         continue
                     failure_prompt = prompt
                     active_slug = resolve_topic_slug(None)
+                    active_state = load_state(active_slug)
+                    if should_use_interview_side_chat(active_state, prompt):
+                        print_active_status_bar()
+                        status_printed = True
+                        last_tutor_answer = ask_interview_side_chat(
+                            active_slug,
+                            prompt,
+                            model=model,
+                            output_func=output_func,
+                        )
+                        preserved_prompt = None
+                        continue
                     try:
                         save_pending_learner_prompt(active_slug, prompt)
                     except Exception as exc:
@@ -2331,6 +2352,59 @@ def learner_preference_from_advance(prompt: str) -> str:
     ):
         return ""
     return value
+
+
+def should_use_interview_side_chat(
+    state: Mapping[str, object], prompt: str
+) -> bool:
+    """Keep canonical lessons visible while answering an ungraded side question."""
+    if not isinstance(state.get("interview_curriculum"), dict):
+        return False
+    return classify_ungraded_learner_message(prompt) in {
+        "question",
+        "request",
+        "confusion",
+    }
+
+
+def ask_interview_side_chat(
+    slug: str,
+    prompt: str,
+    *,
+    model: str | None = None,
+    output_func=print,
+) -> str:
+    """Answer against the exact visible canonical lesson without advancing it."""
+    from openlearn import application, tutor_service
+
+    projection = application.interview_learning(slug)
+    if projection is None:
+        raise OpenLearnError("interview curriculum is not prepared")
+    lesson_id = projection.committed_lesson.lesson_id
+    lesson_title = projection.committed_lesson.title
+    message_kind = classify_ungraded_learner_message(prompt)
+    revision = projection.revision
+    intent: Literal["question", "confusion"] = (
+        "confusion" if message_kind == "confusion" else "question"
+    )
+    try:
+        result = tutor_service.submit_turn(
+            slug,
+            prompt,
+            intent=intent,
+            expected_revision=revision,
+            model=model,
+            session_kind=SIDE_CHAT_SESSION_KIND,
+            source_lesson_id=lesson_id,
+            source_lesson_title=lesson_title,
+            source_lesson_revision=revision,
+        )
+    except (tutor_service.TutorConflictError, tutor_service.TutorOperationError) as exc:
+        raise OpenLearnError(str(exc)) from exc
+    if result.move is None:
+        raise OpenLearnError("the tutor did not return an answer")
+    emit_tutor_output(result.move.content, output_func)
+    return result.move.content
 
 
 def clear_learning_gate(metadata: dict[str, object]) -> None:
@@ -2429,10 +2503,16 @@ def restore_learner_preferences_from_history(topic: Topic) -> Topic:
     return read_topic(topic.slug)
 
 
-def handle_natural_advance(prompt: str, model: str | None = None, output_func=print) -> bool:
+def handle_natural_advance(
+    prompt: str,
+    model: str | None = None,
+    output_func=print,
+    *,
+    topic_value: str | None = None,
+) -> bool:
     if not learner_requests_advance(prompt):
         return False
-    slug = resolve_topic_slug(None)
+    slug = resolve_topic_slug(topic_value)
     topic = read_topic(slug)
     state = load_state(slug)
     if isinstance(state.get("interview_curriculum"), dict):
@@ -2499,7 +2579,12 @@ def handle_repl_command(
     elif name in {"next", "n"}:
         slug = resolve_topic_slug(args[0] if args else None)
         if isinstance(load_state(slug).get("interview_curriculum"), dict):
-            handle_natural_advance("Continue to the next concept.", model, output_func)
+            handle_natural_advance(
+                "Continue to the next concept.",
+                model,
+                output_func,
+                topic_value=slug,
+            )
             return None
         cmd_next(
             argparse.Namespace(topic=args[0] if args else None, model=model),
@@ -2510,7 +2595,12 @@ def handle_repl_command(
         topic_value = topic_args[0] if topic_args else None
         slug = resolve_topic_slug(topic_value)
         if isinstance(load_state(slug).get("interview_curriculum"), dict):
-            handle_natural_advance("Continue to the next concept.", model, output_func)
+            handle_natural_advance(
+                "Continue to the next concept.",
+                model,
+                output_func,
+                topic_value=slug,
+            )
             return None
         if finish_pending_chapter_quiz(slug):
             output_func("")
@@ -2533,7 +2623,9 @@ def handle_repl_command(
         slug = resolve_topic_slug(args[0] if args else None)
         if not isinstance(load_state(slug).get("interview_curriculum"), dict):
             raise OpenLearnError("/practice is available for interview curriculum courses")
-        handle_natural_advance("Practice now", model, output_func)
+        handle_natural_advance(
+            "Practice now", model, output_func, topic_value=slug
+        )
     elif name == "review":
         due_only = "--due" in args
         topic_args = [arg for arg in args if arg != "--due"]
@@ -9538,6 +9630,12 @@ def ask_topic(
                 evidence_kind = interview_target.get("evidence_kind")
                 if evidence_kind in interview_skills.EVIDENCE_KINDS:
                     pending_question["curriculum_evidence_kind"] = evidence_kind
+                problem_id = interview_target.get("problem_id")
+                if isinstance(problem_id, str) and problem_id:
+                    pending_question["curriculum_problem_id"] = problem_id
+                transfer_family = interview_target.get("transfer_family")
+                if isinstance(transfer_family, str) and transfer_family:
+                    pending_question["curriculum_transfer_family"] = transfer_family
         projected_metadata["pending_question"] = pending_question
         log_pending_question_transition(
             topic.slug,
@@ -10740,6 +10838,112 @@ def _validated_turn_receipts(state: dict[str, object]) -> dict[str, object]:
     return receipts
 
 
+TURN_RECEIPT_HOT_CACHE_LIMIT = 32
+# Keep a large replay window without allowing one long-lived course to grow
+# this side store forever. The newest 256 completed navigation operations are
+# substantially more than the in-state hot cache while remaining inexpensive.
+TURN_RECEIPT_DURABLE_RETENTION_LIMIT = 256
+
+
+def topic_operation_receipts_dir(slug: str) -> Path:
+    return topic_data_dir(slug) / "operation-receipts"
+
+
+def topic_operation_receipt_path(slug: str, submission_id: str) -> Path:
+    try:
+        canonical = str(UUID(submission_id))
+    except (ValueError, AttributeError) as exc:
+        raise OpenLearnError("saved tutor operation receipt has an invalid submission ID") from exc
+    if canonical != submission_id:
+        raise OpenLearnError("saved tutor operation receipt has an invalid submission ID")
+    return topic_operation_receipts_dir(slug) / f"operation_{canonical.replace('-', '')}.json"
+
+
+def _write_operation_receipt_unlocked(
+    slug: str, submission_id: str, receipt: dict[str, object]
+) -> None:
+    key = f"operation_{submission_id.replace('-', '')}"
+    validated = _validated_receipt_mapping({key: receipt})[key]
+    path = topic_operation_receipt_path(slug, submission_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    encoded = json.dumps(validated, indent=2, sort_keys=True) + "\n"
+    if not path.exists() or path.read_text(encoding="utf-8") != encoded:
+        write_text_atomic(path, encoded)
+    os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
+
+
+def load_operation_receipt(
+    slug: str, submission_id: str, *, state: dict[str, object] | None = None
+) -> dict[str, object] | None:
+    key = f"operation_{submission_id.replace('-', '')}"
+    snapshot = load_state(slug) if state is None else state
+    hot = _validated_turn_receipts(snapshot).get(key)
+    if isinstance(hot, dict):
+        return copy.deepcopy(hot)
+    path = topic_operation_receipt_path(slug, submission_id)
+    if not path.exists():
+        return None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise OpenLearnError("saved tutor operation receipt is unreadable") from exc
+    return copy.deepcopy(_validated_receipt_mapping({key: raw})[key])
+
+
+def _externalize_operation_receipts_unlocked(
+    slug: str, state: dict[str, object]
+) -> None:
+    """Publish and prune receipts while the caller holds the topic store locks."""
+    receipts = _validated_turn_receipts(state)
+    operation_items = [
+        (key, value)
+        for key, value in receipts.items()
+        if key.startswith("operation_") and isinstance(value, dict)
+    ]
+    for _key, receipt in operation_items:
+        submission_id = receipt.get("submission_id")
+        if isinstance(submission_id, str):
+            _write_operation_receipt_unlocked(slug, submission_id, receipt)
+    overflow = max(0, len(operation_items) - TURN_RECEIPT_HOT_CACHE_LIMIT)
+    if overflow:
+        compact = dict(receipts)
+        for key, _value in operation_items[:overflow]:
+            compact.pop(key, None)
+        state["_turn_receipts"] = compact
+    directory = topic_operation_receipts_dir(slug)
+    if not directory.exists():
+        return
+    candidate_files: list[tuple[str, Path]] = []
+    for path in directory.iterdir():
+        match = re.fullmatch(r"operation_([a-f0-9]{32})\.json", path.name)
+        try:
+            if match is None or not path.is_file():
+                continue
+        except OSError:
+            continue
+        candidate_files.append((match.group(1), path))
+    if len(candidate_files) <= TURN_RECEIPT_DURABLE_RETENTION_LIMIT:
+        return
+    validated_files: list[tuple[int, str, Path]] = []
+    for identifier, path in candidate_files:
+        submission_id = str(UUID(hex=identifier))
+        key = f"operation_{identifier}"
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            validated = _validated_receipt_mapping({key: raw})[key]
+            if validated.get("submission_id") != submission_id:
+                continue
+            modified = path.stat().st_mtime_ns
+        except (OSError, json.JSONDecodeError, OpenLearnError):
+            continue
+        validated_files.append((modified, path.name, path))
+    durable_overflow = max(
+        0, len(validated_files) - TURN_RECEIPT_DURABLE_RETENTION_LIMIT
+    )
+    for _modified, _name, path in sorted(validated_files)[:durable_overflow]:
+        durable_unlink(path)
+
+
 def _migrate_legacy_turn_receipts(slug: str) -> tuple[str | None, set[str]]:
     with file_lock(topic_path(slug)), file_lock(topic_state_path(slug)):
         if (
@@ -10867,6 +11071,10 @@ def _apply_turn_journal(slug: str, journal: dict[str, object]) -> bool:
             receipts[mutation_id] = commit_hash
             state["_turn_receipts"] = receipts
             state["_turn_receipts_schema"] = 2
+            # Publish replay receipts to their bounded side store before the
+            # hot state snapshot. The pending turn journal remains recovery
+            # authority if the process stops between these writes.
+            _externalize_operation_receipts_unlocked(slug, state)
             write_text_atomic(state_file, json.dumps(state, indent=2, sort_keys=True) + "\n")
         _turn_commit_checkpoint("after_state")
 
@@ -14846,6 +15054,14 @@ def update_learning_metadata(
                     )
                     if evidence_kind in interview_skills.EVIDENCE_KINDS:
                         event_data["evidence_kind"] = evidence_kind
+                    problem_id = pending_at_answer.get("curriculum_problem_id")
+                    if isinstance(problem_id, str) and problem_id:
+                        event_data["problem_id"] = problem_id
+                    transfer_family = pending_at_answer.get(
+                        "curriculum_transfer_family"
+                    )
+                    if isinstance(transfer_family, str) and transfer_family:
+                        event_data["transfer_family"] = transfer_family
                 if not is_review_session and due_review_matches_answer(
                     metadata,
                     due_review_items_at_answer,
@@ -18703,6 +18919,23 @@ def _mock_openai_response(model: str, system: str, user: str) -> str:
         )
     # Metadata extraction
     if "update this learner's lightweight topic metadata" in prompt:
+        if '"pending_question": {' in prompt:
+            return json.dumps(
+                {
+                    "message_kind": "answer",
+                    "known_add": [],
+                    "weak_spots_add": [],
+                    "review_due_add": [],
+                    "last_answer_status": "correct",
+                    "answer_score": 1.0,
+                    "answer_kind": "production",
+                    "is_transfer": False,
+                    "gameable": False,
+                    "misconception": None,
+                    "answer_gap": None,
+                    "answer_hint": None,
+                }
+            )
         return json.dumps({"current_focus": "Vim modes"})
     # Placement question JSON response
     if "create one placement question" in prompt or "placement question" in prompt:

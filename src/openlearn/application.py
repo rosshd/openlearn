@@ -257,7 +257,9 @@ def _concept_projection(
         mastery_policy_version=str(ref["mastery_policy_version"]),
         skill_id=skill_id,
         skill_label=skill.name,
-        emphasis=str(item.get("depth_mode") or "learn").title(),
+        emphasis=str(
+            cursor_or_target.get("depth_mode") or item.get("depth_mode") or "learn"
+        ).title(),
         instruction_status=str(
             cursor_or_target.get("instruction_status")
             or item.get("instruction_status")
@@ -279,8 +281,11 @@ def _learning_positions(
     cursor = canonical.get("cursor")
     if not isinstance(cursor, Mapping):
         raise ValueError("interview curriculum cursor is malformed")
-    committed_cursor = cursor
-    if active is not None:
+    committed_target = canonical.get("committed_target")
+    committed_cursor = (
+        committed_target if isinstance(committed_target, Mapping) else cursor
+    )
+    if active is not None and not isinstance(committed_target, Mapping):
         rollback = active.get("rollback")
         rollback_cursor = rollback.get("cursor") if isinstance(rollback, Mapping) else None
         rollback_value = (
@@ -573,6 +578,7 @@ def _deferred_projection(
 
 def interview_learning(slug: str) -> InterviewLearningProjection | None:
     """Return the one typed curriculum/lesson projection shared by CLI and web."""
+    from openlearn import cli
     from openlearn.courses import interview_learning_source
 
     source = interview_learning_source(slug)
@@ -582,6 +588,9 @@ def interview_learning(slug: str) -> InterviewLearningProjection | None:
     metadata = source["metadata"]
     body = source["body"]
     assert isinstance(state, dict) and isinstance(metadata, dict) and isinstance(body, str)
+    metadata = cli.merge_topic_state(
+        cli.normalize_topic_metadata(metadata, slug), state
+    )
     canonical = state["interview_curriculum"]
     assert isinstance(canonical, dict)
     position, next_target, active = _learning_positions(canonical)
@@ -622,7 +631,7 @@ def interview_learning_card(slug: str) -> InterviewCardProjection | None:
     """Return canonical card metrics without parsing the lesson transcript."""
     from openlearn.courses import interview_learning_source
 
-    source = interview_learning_source(slug)
+    source = interview_learning_source(slug, include_body=False)
     if source is None:
         return None
     return interview_learning_card_projection(source["state"], source["metadata"])

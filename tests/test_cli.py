@@ -459,6 +459,135 @@ class CliStorageTests(unittest.TestCase):
         self.assertEqual(canonical_after["cursor"], cursor_before)
         self.assertTrue(output)
 
+    def test_repl_interview_question_uses_side_chat_without_replacing_lesson(
+        self,
+    ) -> None:
+        from openlearn import application, tutor_service
+
+        slug = self.create_interview_topic("CLI Side Chat")
+        application.accept_interview_curriculum(
+            slug,
+            action="skip",
+            submission_id="00000000-0000-4000-8000-000000000041",
+        )
+        cli.set_active_topic(slug)
+        with mock.patch.object(
+            cli,
+            "call_openai_streaming",
+            return_value="**Lesson:** Use one invariant while scanning the array.",
+        ):
+            cli.handle_natural_advance("Continue", output_func=lambda _line: None)
+
+        def add_pending_check(state: dict[str, object]) -> None:
+            state["pending_question"] = {
+                "kind": "free_response",
+                "question": "State the invariant.",
+                "created": "2026-08-13",
+            }
+
+        cli.update_state_atomic(slug, add_pending_check)
+
+        topic_before = cli.read_topic(slug)
+        lesson_before = cli.last_tutor_lesson_entry(topic_before)
+        lesson_title_before = application.interview_learning(
+            slug
+        ).committed_lesson.title
+        revision_before = tutor_service.course_revision(slug)
+        output: list[str] = []
+        with mock.patch.object(
+            cli,
+            "call_openai_streaming",
+            return_value="**Answer:** The invariant states what remains true after each step.",
+        ):
+            cli.run_repl(
+                input_func=iter_input(["Why does the invariant matter?", "/q"]),
+                output_func=output.append,
+                show_intro=False,
+            )
+
+        topic_after = cli.read_topic(slug)
+        self.assertEqual(tutor_service.course_revision(slug), revision_before)
+        self.assertEqual(cli.last_tutor_lesson_entry(topic_after), lesson_before)
+        self.assertEqual(
+            topic_after.metadata["pending_question"]["question"],
+            "State the invariant.",
+        )
+        _body, log = cli.split_session_log(topic_after.body)
+        side_chat = cli.session_entries(log)[-1]
+        self.assertEqual(side_chat["kind"], cli.SIDE_CHAT_SESSION_KIND)
+        self.assertEqual(
+            side_chat["source_lesson_id"],
+            cli.tutor_lesson_entry_id(lesson_before[1]),
+        )
+        self.assertEqual(side_chat["source_lesson_title"], lesson_title_before)
+        self.assertTrue(any("invariant states" in line for line in output))
+
+    def test_repl_interview_pending_check_answer_uses_progression_turn(self) -> None:
+        from openlearn import application
+
+        slug = self.create_interview_topic("CLI Pending Check")
+        application.accept_interview_curriculum(
+            slug,
+            action="skip",
+            submission_id="00000000-0000-4000-8000-000000000044",
+        )
+
+        def add_pending_check(state: dict[str, object]) -> None:
+            state["pending_question"] = {
+                "kind": "free_response",
+                "question": "State the invariant.",
+                "created": "2026-08-13",
+            }
+
+        cli.update_state_atomic(slug, add_pending_check)
+        cli.set_active_topic(slug)
+        with (
+            mock.patch.object(cli, "ask_topic", return_value="**Feedback:** Correct.") as ask,
+            mock.patch.object(cli, "ask_interview_side_chat") as side_chat,
+        ):
+            cli.run_repl(
+                input_func=iter_input(["The window contains no duplicates.", "/q"]),
+                output_func=lambda _line: None,
+                show_intro=False,
+            )
+
+        ask.assert_called_once()
+        side_chat.assert_not_called()
+
+    def test_repl_practice_with_explicit_slug_advances_that_course(self) -> None:
+        from openlearn import application, tutor_service
+
+        requested_slug = self.create_interview_topic("Requested Practice")
+        active_slug = self.create_interview_topic("Active Practice")
+        for index, slug in enumerate((requested_slug, active_slug), start=42):
+            application.accept_interview_curriculum(
+                slug,
+                action="skip",
+                submission_id=f"00000000-0000-4000-8000-{index:012d}",
+            )
+
+        def expose_first_skill(state: dict[str, object]) -> None:
+            canonical = state["interview_curriculum"]
+            first = canonical["route"]["skills"][0]["skill_ref"]["skill_id"]
+            canonical["evidence"]["exposed"] = [first]
+
+        cli.update_state_atomic(requested_slug, expose_first_skill)
+        cli.set_active_topic(active_slug)
+        requested_before = tutor_service.course_revision(requested_slug)
+        active_before = tutor_service.course_revision(active_slug)
+
+        with mock.patch.object(
+            cli,
+            "call_openai_streaming",
+            return_value="**Check:** Explain the array invariant you would maintain.",
+        ):
+            cli.handle_repl_command(
+                f"practice {requested_slug}", output_func=lambda _line: None
+            )
+
+        self.assertGreater(tutor_service.course_revision(requested_slug), requested_before)
+        self.assertEqual(tutor_service.course_revision(active_slug), active_before)
+
     def test_version_flag_reports_package_version(self) -> None:
         from openlearn import __version__
 
@@ -468,6 +597,28 @@ class CliStorageTests(unittest.TestCase):
                 cli.main(["--version"])
         self.assertEqual(ctx.exception.code, 0)
         self.assertIn("0.7.0", out.getvalue())
+
+    def test_main_formats_route_acceptance_conflict_without_traceback(self) -> None:
+        from openlearn.courses import RouteAcceptanceConflictError
+
+        parser = mock.Mock()
+        parser.parse_args.return_value = Namespace(
+            dry_run=False,
+            terminal_onboarding=False,
+            func=lambda _args: (_ for _ in ()).throw(
+                RouteAcceptanceConflictError("course changed elsewhere")
+            ),
+        )
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(cli, "build_parser", return_value=parser),
+            contextlib.redirect_stderr(stderr),
+        ):
+            result = cli.main(["interview"])
+
+        self.assertEqual(result, 1)
+        self.assertIn("course changed elsewhere", stderr.getvalue())
+        self.assertNotIn("Traceback", stderr.getvalue())
 
     def test_topic_round_trip_and_summary_metadata(self) -> None:
         call_silent(cli.cmd_init, Namespace())

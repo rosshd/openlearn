@@ -32,6 +32,7 @@ from openlearn.courses import (
     CREATION_SUBMISSION_METADATA_KEY,
     CREATION_SUBMISSION_STATE_KEY,
     RouteAcceptanceConflictError,
+    course_conversation_source,
 )
 
 from .schemas import (
@@ -1600,19 +1601,6 @@ class OpenLearnWebServices:
                         "The visible lesson reference is incomplete. Refresh before asking."
                     ),
                 }
-            if projection is not None and all(supplied_source_fields) and (
-                request.source_lesson_id
-                != projection.committed_lesson.lesson_id
-                or request.source_lesson_title != projection.committed_lesson.title
-                or request.source_lesson_revision != projection.revision
-            ):
-                return {
-                    "state": "conflict",
-                    "error": (
-                        "The visible lesson changed. Your question was not submitted; "
-                        "refresh and retry."
-                    ),
-                }
             if projection is None:
                 source_fields = (None, None, None)
         else:
@@ -1653,13 +1641,19 @@ class OpenLearnWebServices:
 
     def chat(self, slug: str) -> dict[str, object]:
         try:
-            topic = cli.read_topic(slug)
+            source = course_conversation_source(slug)
         except (cli.OpenLearnError, OSError):
             return {"slug": slug, "missing": True}
-        _context, log = cli.split_session_log(topic.body)
+        body = source["body"]
+        assert isinstance(body, str)
+        _context, log = cli.split_session_log(body)
+        course_revision = int(source["course_revision"])
         return {
             "conversation": _side_conversation(cli.session_entries(log)),
-            "revision": tutor_service.course_revision(slug),
+            # ``revision`` remains the course namespace for older clients.
+            "revision": course_revision,
+            "course_revision": course_revision,
+            "chat_revision": int(source["side_chat_revision"]),
         }
 
     def operation_status(self, slug: str, operation_id: str) -> dict[str, object]:

@@ -4,6 +4,8 @@ import argparse
 import copy
 import hashlib
 import json
+import multiprocessing
+import os
 import threading
 import time
 from concurrent.futures import wait
@@ -21,6 +23,36 @@ from openlearn.tutor_service import (
     start_turn,
     submit_turn,
 )
+
+
+def _reserve_generic_turn_process(
+    home: str,
+    submission_id: str,
+    ready: multiprocessing.synchronize.Event,
+    release: multiprocessing.synchronize.Event,
+    results: multiprocessing.queues.Queue,
+) -> None:
+    os.environ["OPENLEARN_HOME"] = home
+    os.environ["OPENLEARN_MOCK"] = "1"
+    cli._CONFIG_CACHE = None
+    ready.wait(timeout=5)
+    try:
+        _revision, replay = tutor_service._prepare_turn(
+            "web-tutor",
+            f"answer {submission_id}",
+            submission_id,
+            0,
+            "answer",
+            "chat",
+            None,
+            None,
+            None,
+            None,
+        )
+        results.put(("reserved", replay is None))
+    except TutorConflictError:
+        results.put(("conflict", True))
+    release.wait(timeout=5)
 
 
 class TutorServiceTests(TestCase):
@@ -397,6 +429,82 @@ class TutorServiceTests(TestCase):
             "concept.arrays-strings",
         )
 
+    def test_remediation_check_keeps_pinned_target_until_correct_answer(self) -> None:
+        slug = self._create_interview_course()
+        judgments = iter(("needs_work", "correct"))
+
+        def provider(_model: str, system: str, _user: str) -> str:
+            if "calibrated JSON judge" in system:
+                status = next(judgments)
+                return json.dumps(
+                    {
+                        "message_kind": "answer",
+                        "last_answer_status": status,
+                        "answer_score": 0.1 if status == "needs_work" else 1.0,
+                        "answer_kind": "production",
+                        "is_transfer": False,
+                    }
+                )
+            if "Pending question to grade:" in system:
+                return (
+                    "**Feedback:**\nUse the length as the exclusive upper bound.\n\n"
+                    "**Check:**\nExplain how indexed traversal avoids crossing an array boundary."
+                )
+            return "**Check:**\nExplain how indexed traversal finds an array boundary."
+
+        with mock.patch.object(cli, "call_openai", new=provider):
+            submit_turn(
+                slug,
+                "Continue to the next concept.",
+                intent="navigation",
+                submission_id=str(uuid4()),
+                expected_revision=0,
+            )
+            initial = copy.deepcopy(cli.load_state(slug)["pending_question"])
+            submit_turn(
+                slug,
+                "I would keep indexing until Python raises an exception.",
+                intent="answer",
+                submission_id=str(uuid4()),
+                expected_revision=2,
+            )
+            remediated = copy.deepcopy(cli.load_state(slug)["pending_question"])
+            submit_turn(
+                slug,
+                "I stop before len(values), so the largest valid index is len(values) - 1.",
+                intent="answer",
+                submission_id=str(uuid4()),
+                expected_revision=3,
+            )
+
+        attribution_keys = (
+            "curriculum_target",
+            "curriculum_evidence_kind",
+            "curriculum_problem_id",
+            "curriculum_transfer_family",
+        )
+        self.assertEqual(
+            {key: remediated[key] for key in attribution_keys},
+            {key: initial[key] for key in attribution_keys},
+        )
+        evidence = cli.load_state(slug)["interview_curriculum"]["evidence"][
+            "answer_evidence"
+        ]
+        self.assertEqual(len(evidence), 2)
+        self.assertEqual(evidence[0]["skill_ref"], initial["curriculum_target"])
+        self.assertEqual(evidence[1]["skill_ref"], initial["curriculum_target"])
+        self.assertEqual(evidence[0]["policy_record"]["outcome"], "fail")
+        self.assertEqual(evidence[1]["policy_record"]["outcome"], "pass")
+        for record in evidence:
+            self.assertEqual(
+                record["policy_record"]["problem_id"],
+                initial["curriculum_problem_id"],
+            )
+            self.assertEqual(
+                record["policy_record"]["transfer_family"],
+                initial["curriculum_transfer_family"],
+            )
+
     def test_recovered_internal_reasoning_is_replaced_by_target_fallback(self) -> None:
         slug = self._create_interview_course()
         sid = str(uuid4())
@@ -654,7 +762,10 @@ class TutorServiceTests(TestCase):
                 self.assertEqual(canonical["cursor"], before["cursor"])
                 self.assertEqual(canonical.get("deferred"), before.get("deferred"))
                 self.assertEqual(course_revision(slug), 1)
-                self.assertEqual(canonical["evidence"], before["evidence"])
+                for key in ("due_review", "exposed", "ready", "weak"):
+                    self.assertEqual(
+                        canonical["evidence"].get(key), before["evidence"].get(key)
+                    )
                 projection = interview_curriculum.compatibility_projection(canonical)
                 metadata = cli.read_topic(slug).metadata
                 self.assertEqual(metadata["current_unit"], projection["current_unit"])
@@ -1362,6 +1473,82 @@ class TutorServiceTests(TestCase):
             )
         finish.assert_not_called()
 
+    def test_side_chat_resolves_a_committed_historical_lesson_without_advancing(self) -> None:
+        slug = self._create_interview_course("Historical Side Chat")
+        first = submit_turn(
+            slug,
+            "Begin the course.",
+            intent="navigation",
+            progression_intent="continue",
+            submission_id=str(uuid4()),
+            expected_revision=0,
+        )
+        self.assertEqual(first.status, "committed")
+        historical = application.interview_learning(slug)
+        self.assertIsNotNone(historical)
+        assert historical is not None
+
+        second = submit_turn(
+            slug,
+            "Continue.",
+            intent="navigation",
+            progression_intent="continue",
+            submission_id=str(uuid4()),
+            expected_revision=historical.revision,
+        )
+        self.assertEqual(second.status, "committed")
+        current_revision = course_revision(slug)
+        captured: dict[str, str] = {}
+
+        def answer(*_args: object, **kwargs: object) -> str:
+            captured["user"] = str(kwargs["user"])
+            return "**Lesson:**\nThe old lesson answer stays in side chat."
+
+        with mock.patch.object(cli, "call_openai_streaming", side_effect=answer):
+            side = submit_turn(
+                slug,
+                "Explain the lesson I still had open.",
+                intent="question",
+                submission_id=str(uuid4()),
+                expected_revision=current_revision,
+                session_kind=cli.SIDE_CHAT_SESSION_KIND,
+                source_lesson_id=historical.committed_lesson.lesson_id,
+                source_lesson_title=historical.committed_lesson.title,
+                source_lesson_revision=historical.revision,
+            )
+
+        self.assertEqual(side.status, "committed")
+        self.assertEqual(course_revision(slug), current_revision)
+        self.assertIn(historical.committed_lesson.content, captured["user"])
+        topic = cli.read_topic(slug)
+        _body, log = cli.split_session_log(topic.body)
+        entry = cli.session_entries(log)[-1]
+        self.assertEqual(entry["kind"], cli.SIDE_CHAT_SESSION_KIND)
+        self.assertEqual(
+            entry["source_lesson_id"], historical.committed_lesson.lesson_id
+        )
+        self.assertEqual(
+            entry["source_lesson_title"], historical.committed_lesson.title
+        )
+        self.assertEqual(entry["source_lesson_revision"], str(historical.revision))
+        self.assertEqual(
+            json.loads(entry["source_lesson_skill_ref"])["skill_id"],
+            historical.position.skill_id,
+        )
+
+        with self.assertRaises(TutorConflictError):
+            submit_turn(
+                slug,
+                "Explain a fabricated source.",
+                intent="question",
+                submission_id=str(uuid4()),
+                expected_revision=current_revision,
+                session_kind=cli.SIDE_CHAT_SESSION_KIND,
+                source_lesson_id=historical.committed_lesson.lesson_id,
+                source_lesson_title="Fabricated title",
+                source_lesson_revision=historical.revision,
+            )
+
     def test_navigation_after_two_passive_lessons_generates_a_check(self) -> None:
         for index in range(2):
             cli.append_session(
@@ -1553,6 +1740,121 @@ class TutorServiceTests(TestCase):
         self.assertEqual(
             internal["turn_results"][submission_id]["status"], "retryable_error"
         )
+
+    def test_status_converts_same_pid_operation_without_local_worker_to_retryable(self) -> None:
+        submission_id = str(uuid4())
+        self._persist_active_turn(submission_id)
+        state = cli.load_state("web-tutor")
+        state["_openlearn_internal"]["active_turn"]["owner_pid"] = os.getpid()
+        cli.save_state("web-tutor", state)
+
+        recovered = operation_status("web-tutor", submission_id)
+
+        self.assertIsNotNone(recovered)
+        self.assertEqual(recovered.status, "retryable_error")
+        self.assertIsNone(
+            cli.load_state("web-tutor")["_openlearn_internal"]["active_turn"]
+        )
+
+    def test_generic_turn_reservation_is_atomic_across_processes(self) -> None:
+        context = multiprocessing.get_context("spawn")
+        ready = context.Event()
+        release = context.Event()
+        results = context.Queue()
+        processes = [
+            context.Process(
+                target=_reserve_generic_turn_process,
+                args=(str(self.home), str(uuid4()), ready, release, results),
+            )
+            for _index in range(2)
+        ]
+        for process in processes:
+            process.start()
+        ready.set()
+        outcomes = sorted(results.get(timeout=5)[0] for _index in processes)
+        release.set()
+        for process in processes:
+            process.join(timeout=5)
+            self.assertEqual(process.exitcode, 0)
+
+        self.assertEqual(outcomes, ["conflict", "reserved"])
+        active = cli.load_state("web-tutor")["_openlearn_internal"]["active_turn"]
+        self.assertIsInstance(active, dict)
+
+    def test_operation_receipts_have_bounded_durable_retention_and_replay_window(
+        self,
+    ) -> None:
+        state = cli.load_state("web-tutor")
+        receipts = state.setdefault("_turn_receipts", {})
+        state["_turn_receipts_schema"] = 2
+        caught_up = (
+            "You are caught up on the current curriculum. Choose Practice now "
+            "or return when the next review is due."
+        )
+        submission_ids = [
+            str(uuid4())
+            for _index in range(cli.TURN_RECEIPT_DURABLE_RETENTION_LIMIT + 12)
+        ]
+        for submission_id in submission_ids:
+            payload_hash = hashlib.sha256(submission_id.encode()).hexdigest()
+            result = tutor_service.TutorTurnResult(
+                submission_id=submission_id,
+                status="committed",
+                input_status="committed",
+                message_kind="navigation",
+                move=tutor_service.TutorMove(
+                    move_id="caught-up-0",
+                    revision=0,
+                    kind="caught_up",
+                    content=caught_up,
+                    action_kind="practice",
+                    prompt="",
+                    history_summary="Caught up; practice is available.",
+                ),
+                payload_hash=payload_hash,
+            )
+            receipt = {
+                "schema_version": 2,
+                "receipt_kind": "caught_up",
+                "submission_id": submission_id,
+                "payload_hash": payload_hash,
+                "base_revision": 0,
+                "reservation_revision": 0,
+                "final_revision": 0,
+                "status": "committed",
+                "mutation_id": f"turn_{uuid4().hex}",
+                "target": None,
+                "reason": "caught_up",
+                "response_sha256": hashlib.sha256(caught_up.encode()).hexdigest(),
+                "result": tutor_service._compact_result_dict(result),
+            }
+            receipt["receipt_sha256"] = cli._payload_sha256(receipt)
+            receipts[f"operation_{submission_id.replace('-', '')}"] = receipt
+        invalid_receipt = cli.topic_operation_receipts_dir("web-tutor") / (
+            "operation_ffffffffffffffffffffffffffffffff.json"
+        )
+        invalid_receipt.parent.mkdir(parents=True, exist_ok=True)
+        invalid_receipt.write_text("not json\n", encoding="utf-8")
+        cli._externalize_operation_receipts_unlocked("web-tutor", state)
+        cli.save_state("web-tutor", state)
+
+        persisted = cli.load_state("web-tutor")
+        hot_operations = [
+            key for key in persisted["_turn_receipts"] if key.startswith("operation_")
+        ]
+        self.assertLessEqual(len(hot_operations), cli.TURN_RECEIPT_HOT_CACHE_LIMIT)
+        receipt_files = list(cli.topic_operation_receipts_dir("web-tutor").glob("*.json"))
+        valid_receipt_files = [path for path in receipt_files if path != invalid_receipt]
+        self.assertEqual(
+            len(valid_receipt_files), cli.TURN_RECEIPT_DURABLE_RETENTION_LIMIT
+        )
+        self.assertTrue(invalid_receipt.exists())
+        self.assertIsNone(tutor_service.operation_result("web-tutor", submission_ids[0]))
+        oldest_retained = submission_ids[-cli.TURN_RECEIPT_DURABLE_RETENTION_LIMIT]
+        replay = tutor_service.operation_result("web-tutor", oldest_retained)
+        self.assertIsNotNone(replay)
+        self.assertEqual(replay.status, "committed")
+        self.assertEqual(replay.move.content, caught_up)
 
     def test_start_recovers_orphan_before_same_submission_can_retry(self) -> None:
         submission_id = str(uuid4())

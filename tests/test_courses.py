@@ -9,9 +9,9 @@ import unittest
 from unittest import mock
 from uuid import uuid4
 
-from openlearn import application, cli
+from openlearn import application, cli, courses, interview_curriculum
 from openlearn.application import CalibrationContext, CourseCreationRequest
-from openlearn.courses import create_course
+from openlearn.courses import course_conversation_source, create_course
 
 
 class CourseServiceTests(unittest.TestCase):
@@ -348,6 +348,101 @@ class CourseServiceTests(unittest.TestCase):
         )
         self.assertNotIn("interview_curriculum", cli.load_state(slug))
 
+    def test_dashboard_metadata_snapshot_recovers_pending_route_acceptance(self) -> None:
+        result = create_course(
+            CourseCreationRequest(
+                name="Dashboard Route Recovery",
+                template_id="technical-interview-prep",
+            )
+        )
+        slug = result.course.slug
+        with mock.patch(
+            "openlearn.courses._route_acceptance_checkpoint",
+            side_effect=lambda stage: (
+                (_ for _ in ()).throw(RuntimeError(stage))
+                if stage == "after_state"
+                else None
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "after_state"):
+                application.accept_interview_curriculum(
+                    slug,
+                    action="skip",
+                    submission_id=str(uuid4()),
+                    expected_revision=0,
+                )
+
+        self.assertTrue(cli.interview_route_journal_path(slug).exists())
+        dashboard = application.dashboard()
+
+        self.assertFalse(cli.interview_route_journal_path(slug).exists())
+        card = next(item for item in dashboard.courses if item.slug == slug)
+        self.assertIsNotNone(card.interview)
+        self.assertEqual(cli.load_state(slug)["_openlearn_internal"]["course_revision"], 1)
+
+    def test_conversation_snapshot_cannot_pair_new_transcript_with_old_revision(
+        self,
+    ) -> None:
+        result = create_course(
+            CourseCreationRequest(name="Atomic Chat Snapshot", goal="Learn safely")
+        )
+        slug = result.course.slug
+        topic = cli.read_topic(slug)
+        entry = cli._session_entry(
+            cli.SIDE_CHAT_SESSION_KIND,
+            "Why?",
+            "Because the snapshot is atomic.",
+            created="2026-08-13T12:00:00+00:00",
+            mutation_id=str(uuid4()),
+        )
+        updated_body = topic.body.rstrip() + "\n\n" + entry + "\n"
+        topic_written = threading.Event()
+        release_writer = threading.Event()
+        reader_started = threading.Event()
+        snapshot: list[dict[str, object]] = []
+
+        def write_both_stores() -> None:
+            with cli.topic_store_locks(slug):
+                cli.write_text_atomic(
+                    cli.topic_path(slug),
+                    cli.format_topic(topic.metadata, updated_body),
+                )
+                topic_written.set()
+                release_writer.wait(timeout=2)
+                state = cli._load_state_unlocked(slug)
+                internal = state.get("_openlearn_internal")
+                internal = dict(internal) if isinstance(internal, dict) else {}
+                internal["course_revision"] = 0
+                internal["side_chat_revision"] = 1
+                state["_openlearn_internal"] = internal
+                cli.write_text_atomic(
+                    cli.topic_state_path(slug),
+                    json.dumps(state, indent=2, sort_keys=True) + "\n",
+                )
+
+        def read_snapshot() -> None:
+            reader_started.set()
+            snapshot.append(course_conversation_source(slug))
+
+        writer = threading.Thread(target=write_both_stores)
+        writer.start()
+        self.assertTrue(topic_written.wait(timeout=1))
+        reader = threading.Thread(target=read_snapshot)
+        reader.start()
+        self.assertTrue(reader_started.wait(timeout=1))
+        reader.join(timeout=0.05)
+        self.assertTrue(reader.is_alive())
+
+        release_writer.set()
+        writer.join(timeout=2)
+        reader.join(timeout=2)
+
+        self.assertFalse(writer.is_alive())
+        self.assertFalse(reader.is_alive())
+        self.assertEqual(snapshot[0]["course_revision"], 0)
+        self.assertEqual(snapshot[0]["side_chat_revision"], 1)
+        self.assertIn("Because the snapshot is atomic.", str(snapshot[0]["body"]))
+
     def test_reconciliation_recovers_each_publication_boundary_exactly_once(self) -> None:
         for boundary in ("after_journal", "after_state", "after_event", "after_receipt"):
             with self.subTest(boundary=boundary):
@@ -379,6 +474,83 @@ class CourseServiceTests(unittest.TestCase):
                 cli.delete_topic_files(slug)
                 self.assertFalse(cli.interview_reconciliation_journal_path(slug).exists())
                 self.assertFalse(cli.interview_reconciliation_receipt_path(slug).exists())
+
+    def test_schema_one_reconciliation_journal_migrates_before_recovery(self) -> None:
+        slug = self._legacy_interview_course()
+        with mock.patch(
+            "openlearn.courses._reconciliation_checkpoint",
+            side_effect=lambda stage: (
+                (_ for _ in ()).throw(RuntimeError(stage))
+                if stage == "after_journal"
+                else None
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "after_journal"):
+                application.prepare_interview_curriculum(slug, boundary="resume")
+        journal_path = cli.interview_reconciliation_journal_path(slug)
+        legacy = json.loads(journal_path.read_text(encoding="utf-8"))
+        legacy["schema_version"] = courses.LEGACY_RECONCILIATION_SCHEMA_VERSION
+        legacy.pop("journal_sha256")
+        legacy["receipt"]["schema_version"] = (
+            courses.LEGACY_RECONCILIATION_SCHEMA_VERSION
+        )
+        legacy["receipt"].pop("receipt_sha256")
+        cli.write_text_atomic(
+            journal_path, json.dumps(legacy, indent=2, sort_keys=True) + "\n"
+        )
+
+        application.prepare_interview_curriculum(slug, boundary="resume")
+
+        self.assertFalse(journal_path.exists())
+        receipt = json.loads(
+            cli.interview_reconciliation_receipt_path(slug).read_text(encoding="utf-8")
+        )
+        self.assertEqual(receipt["schema_version"], courses.RECONCILIATION_SCHEMA_VERSION)
+        self.assertIsInstance(receipt["receipt_sha256"], str)
+        self.assertIn("interview_curriculum", cli.load_state(slug))
+
+    def test_schema_one_reconciliation_receipt_migrates_before_replay(self) -> None:
+        slug = self._legacy_interview_course()
+        expected = application.prepare_interview_curriculum(slug, boundary="resume")
+        receipt_path = cli.interview_reconciliation_receipt_path(slug)
+        legacy = json.loads(receipt_path.read_text(encoding="utf-8"))
+        legacy["schema_version"] = courses.LEGACY_RECONCILIATION_SCHEMA_VERSION
+        legacy.pop("receipt_sha256")
+        cli.write_text_atomic(
+            receipt_path, json.dumps(legacy, indent=2, sort_keys=True) + "\n"
+        )
+        cli.update_state_atomic(slug, lambda state: state.pop("interview_curriculum"))
+
+        recovered = application.prepare_interview_curriculum(slug, boundary="resume")
+
+        self.assertEqual(recovered, expected)
+        migrated = json.loads(receipt_path.read_text(encoding="utf-8"))
+        self.assertEqual(migrated["schema_version"], courses.RECONCILIATION_SCHEMA_VERSION)
+        self.assertIsInstance(migrated["receipt_sha256"], str)
+
+    def test_schema_one_reconciliation_artifact_with_conflicting_identity_fails_closed(
+        self,
+    ) -> None:
+        slug = self._legacy_interview_course()
+        application.prepare_interview_curriculum(slug, boundary="resume")
+        receipt_path = cli.interview_reconciliation_receipt_path(slug)
+        legacy = json.loads(receipt_path.read_text(encoding="utf-8"))
+        legacy["schema_version"] = courses.LEGACY_RECONCILIATION_SCHEMA_VERSION
+        legacy.pop("receipt_sha256")
+        legacy["reconciliation_id"] = "reconcile_conflicting"
+        cli.write_text_atomic(
+            receipt_path, json.dumps(legacy, indent=2, sort_keys=True) + "\n"
+        )
+        cli.update_state_atomic(slug, lambda state: state.pop("interview_curriculum"))
+        before_state = cli.topic_state_path(slug).read_bytes()
+
+        with self.assertRaisesRegex(cli.OpenLearnError, "invalid identity"):
+            application.prepare_interview_curriculum(slug, boundary="resume")
+
+        self.assertEqual(cli.topic_state_path(slug).read_bytes(), before_state)
+        self.assertEqual(
+            json.loads(receipt_path.read_text(encoding="utf-8")), legacy
+        )
 
     def test_profile_edit_recovers_route_acceptance_interrupted_after_profile_write(self) -> None:
         result = create_course(
@@ -543,6 +715,156 @@ class CourseServiceTests(unittest.TestCase):
 
         self.assertEqual(recovered, first)
         self.assertIn("interview_curriculum", cli.load_state(slug))
+
+    def test_reconciliation_recovery_repairs_projection_after_state_publication(self) -> None:
+        slug = self._legacy_interview_course()
+        first = application.prepare_interview_curriculum(slug, boundary="resume")
+        canonical = cli.load_state(slug)["interview_curriculum"]
+        expected = interview_curriculum.compatibility_projection(canonical)
+        cli.update_state_atomic(slug, lambda state: state.pop("interview_curriculum"))
+        metadata, body = cli.parse_topic(cli.topic_path(slug).read_text(encoding="utf-8"))
+        metadata["current_focus"] = "stale compatibility projection"
+        cli.write_text_atomic(cli.topic_path(slug), cli.format_topic(metadata, body))
+        with mock.patch(
+            "openlearn.courses._reconciliation_checkpoint",
+            side_effect=lambda stage: (
+                (_ for _ in ()).throw(RuntimeError(stage))
+                if stage == "after_state"
+                else None
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "after_state"):
+                application.prepare_interview_curriculum(slug, boundary="resume")
+        self.assertIn("interview_curriculum", cli._load_state_unlocked(slug))
+        interrupted_metadata, _body = cli.parse_topic(
+            cli.topic_path(slug).read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            interrupted_metadata["current_focus"], "stale compatibility projection"
+        )
+        self.assertTrue(cli.interview_reconciliation_journal_path(slug).exists())
+
+        recovered = application.prepare_interview_curriculum(slug, boundary="resume")
+
+        metadata, _body = cli.parse_topic(cli.topic_path(slug).read_text(encoding="utf-8"))
+        for key in ("course_units", "current_unit", "current_slide", "current_focus"):
+            self.assertEqual(metadata[key], expected[key])
+        self.assertEqual(recovered, first)
+        self.assertFalse(cli.interview_reconciliation_journal_path(slug).exists())
+
+    def test_reconciliation_rejects_valid_json_with_poisoned_identity(self) -> None:
+        slug = self._legacy_interview_course()
+        with mock.patch(
+            "openlearn.courses._reconciliation_checkpoint",
+            side_effect=lambda stage: (
+                (_ for _ in ()).throw(RuntimeError(stage))
+                if stage == "after_journal"
+                else None
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "after_journal"):
+                application.prepare_interview_curriculum(slug, boundary="resume")
+        journal_path = cli.interview_reconciliation_journal_path(slug)
+        journal = json.loads(journal_path.read_text(encoding="utf-8"))
+        journal["canonical_state"]["cursor"]["unit_id"] = "poisoned"
+        cli.write_text_atomic(journal_path, json.dumps(journal, indent=2, sort_keys=True) + "\n")
+        before_state = cli.topic_state_path(slug).read_bytes()
+
+        with self.assertRaisesRegex(cli.OpenLearnError, "invalid identity"):
+            application.prepare_interview_curriculum(slug, boundary="resume")
+
+        self.assertEqual(cli.topic_state_path(slug).read_bytes(), before_state)
+        self.assertTrue(journal_path.exists())
+
+    def test_legacy_route_replay_requires_unchanged_profile(self) -> None:
+        result = create_course(
+            CourseCreationRequest(
+                name="Legacy Replay Profile Fence",
+                template_id="technical-interview-prep",
+            )
+        )
+        slug = result.course.slug
+        first = application.accept_interview_curriculum(slug, action="skip")
+        cli.cmd_interview_edit(
+            argparse.Namespace(topic=slug, field="target_level", value="mid"),
+            output_func=lambda _text="": None,
+        )
+
+        second = application.accept_interview_curriculum(slug, action="skip")
+
+        self.assertFalse(second["replayed"])
+        self.assertNotEqual(first["receipt"]["action_id"], second["receipt"]["action_id"])
+        self.assertEqual(second["receipt"]["final_revision"], 2)
+
+    def test_route_change_retires_removed_check_and_projection_across_recovery(self) -> None:
+        result = create_course(
+            CourseCreationRequest(
+                name="Retire Removed Check",
+                template_id="technical-interview-prep",
+            )
+        )
+        slug = result.course.slug
+        accepted = application.accept_interview_curriculum(
+            slug, action="skip", submission_id=str(uuid4())
+        )
+        optional = next(
+            item
+            for item in accepted["canonical"]["route"]["skills"]
+            if item["requirement"] == "optional"
+        )
+        pending = {
+            "question": "Explain the optional technique.",
+            "kind": "free_response",
+            "skill_ref": optional["skill_ref"],
+        }
+        state = cli.load_state(slug)
+        state["interview_curriculum"]["committed_check_target"] = {
+            "skill_ref": optional["skill_ref"],
+            "evidence_kind": "production",
+            "problem_id": "problem.optional",
+            "transfer_family": "optional",
+        }
+        state["pending_question"] = pending
+        cli.write_text_atomic(
+            cli.topic_state_path(slug), json.dumps(state, indent=2, sort_keys=True) + "\n"
+        )
+        metadata, body = cli.parse_topic(cli.topic_path(slug).read_text(encoding="utf-8"))
+        metadata["pending_question"] = pending
+        cli.write_text_atomic(cli.topic_path(slug), cli.format_topic(metadata, body))
+        submission_id = str(uuid4())
+        with mock.patch(
+            "openlearn.courses._route_acceptance_checkpoint",
+            side_effect=lambda stage: (
+                (_ for _ in ()).throw(RuntimeError(stage))
+                if stage == "after_state"
+                else None
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "after_state"):
+                application.accept_interview_curriculum(
+                    slug,
+                    action="change",
+                    changes={"optional_skill_ids": []},
+                    submission_id=submission_id,
+                    expected_revision=1,
+                )
+
+        application.accept_interview_curriculum(
+            slug,
+            action="change",
+            changes={"optional_skill_ids": []},
+            submission_id=submission_id,
+            expected_revision=1,
+        )
+
+        repaired = cli.load_state(slug)
+        self.assertNotIn("pending_question", repaired)
+        self.assertNotIn("pending_question", cli.read_topic(slug).metadata)
+        self.assertEqual(len(repaired["_interview_retired_checks"]), 1)
+        self.assertEqual(
+            repaired["_interview_retired_checks"][0]["skill_ref"],
+            optional["skill_ref"],
+        )
 
     def test_manual_repair_removes_stale_reconciliation_artifacts(self) -> None:
         slug = self._legacy_interview_course()

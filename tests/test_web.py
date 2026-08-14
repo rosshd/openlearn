@@ -160,6 +160,8 @@ def test_default_web_app_runs_setup_dashboard_course_and_tutor_flow(
     assert chat["conversation"][0]["blocks"]
     assert chat["conversation"][0]["source_lesson_id"].startswith("lesson_")
     assert chat["conversation"][0]["source_lesson_title"]
+    assert chat["revision"] == chat["course_revision"] == revision
+    assert chat["chat_revision"] == 1
     history = client.get(f"/courses/{slug}/history", headers={"accept": "application/json"})
     assert history.status_code == 200
     assert len(history.json()["items"]) == 1
@@ -574,6 +576,34 @@ def test_route_acceptance_conflict_is_projected_as_http_conflict(
     }
 
 
+def test_stale_route_revision_is_a_real_http_conflict(client: TestClient) -> None:
+    token = csrf(client, "/courses/new")
+    created = client.post(
+        "/api/courses",
+        headers={"x-csrf-token": token},
+        json={
+            "title": "Stale Route HTTP Conflict",
+            "goal": "Prepare for interviews.",
+            "experience": "",
+            "template_id": "technical-interview-prep",
+            "submission_id": str(uuid4()),
+        },
+    ).json()
+
+    response = client.post(
+        f"/api/courses/{created['slug']}/placement",
+        headers={"x-csrf-token": token},
+        json={
+            "action": "skip",
+            "submission_id": str(uuid4()),
+            "expected_revision": 99,
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["state"] == "conflict"
+
+
 def test_dashboard_reuses_lightweight_interview_card_without_parsing_sessions(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -608,11 +638,62 @@ def test_dashboard_reuses_lightweight_interview_card_without_parsing_sessions(
         "session_entries",
         lambda _log: pytest.fail("dashboard cards must not parse session history"),
     )
+    original_read_text = Path.read_text
+
+    def reject_transcript_read(path: Path, *args: object, **kwargs: object) -> str:
+        if path == cli.topic_path(slug):
+            pytest.fail("dashboard cards must not read the Markdown transcript")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", reject_transcript_read)
+    monkeypatch.setattr(
+        cli,
+        "parse_topic",
+        lambda _text: pytest.fail("dashboard cards must not parse the Markdown transcript"),
+    )
 
     response = client.get("/dashboard")
 
     assert response.status_code == 200
     assert "Dashboard Interview Card" in response.text
+
+
+def test_chat_returns_both_revisions_from_one_recovery_fenced_snapshot(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    created = application.create_course(
+        application.CourseCreationRequest(name="Chat Snapshot", goal="Learn safely")
+    )
+    slug = created.course.slug
+
+    def set_revisions(state: dict[str, object]) -> None:
+        internal = state.get("_openlearn_internal")
+        internal = dict(internal) if isinstance(internal, dict) else {}
+        internal["course_revision"] = 2
+        internal["side_chat_revision"] = 4
+        state["_openlearn_internal"] = internal
+
+    cli.update_state_atomic(slug, set_revisions)
+    monkeypatch.setattr(
+        cli,
+        "read_topic",
+        lambda _slug: pytest.fail("chat must use the recovery-fenced snapshot"),
+    )
+    monkeypatch.setattr(
+        tutor_service,
+        "course_revision",
+        lambda _slug: pytest.fail("chat must not read course revision separately"),
+    )
+
+    response = client.get(f"/api/courses/{slug}/chat")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "conversation": [],
+        "revision": 2,
+        "course_revision": 2,
+        "chat_revision": 4,
+    }
 
 
 def test_later_outline_change_preserves_evidence_and_rehomes_ineligible_cursor(
@@ -785,7 +866,7 @@ def test_route_acceptance_rejects_submission_payload_collision(client: TestClien
         created["slug"], action="skip", submission_id=submission_id
     )
 
-    with pytest.raises(cli.OpenLearnError, match="already used"):
+    with pytest.raises(courses.RouteAcceptanceConflictError, match="already used"):
         application.accept_interview_curriculum(
             created["slug"],
             action="change",
@@ -2129,7 +2210,7 @@ def test_side_chat_polling_has_no_lesson_preview_sink() -> None:
     assert '"[data-progression-action], [data-navigation-intent]"' in javascript
 
 
-def test_completed_tutor_stream_keeps_card_visible_and_resizes_only_if_needed() -> None:
+def test_completed_tutor_stream_keeps_card_visible_and_resizes_preview_only() -> None:
     repository = Path(__file__).resolve().parents[1]
     javascript = (repository / "src/openlearn/web/static/openlearn.js").read_text(
         encoding="utf-8"
@@ -2141,9 +2222,10 @@ def test_completed_tutor_stream_keeps_card_visible_and_resizes_only_if_needed() 
     assert "data-stream-complete" not in javascript
     assert "data-stream-complete" not in css
     assert "move-arrive" not in css
-    assert "resizeTutorSurfaceIfNeeded" in javascript
-    assert "Math.abs(targetHeight - currentHeight)" in javascript
-    assert "data-stream-resizing" in css
+    assert "measureTutorPreviewHeight" in javascript
+    assert "clone = region.cloneNode(true)" in javascript
+    assert "tutorPreviewHeightCache.size > 8" in javascript
+    assert "data-stream-open" in css
 
 
 def test_initialization_failure_preserves_course_and_retries_same_operation(
@@ -2388,7 +2470,7 @@ def test_interview_focus_uses_curriculum_labels_not_turn_steps(
     assert "Step " not in page.text
 
 
-def test_stale_visible_lesson_question_is_rejected_after_another_lesson_commits(
+def test_historical_visible_lesson_question_is_answered_after_another_lesson_commits(
     client: TestClient,
 ) -> None:
     token = csrf(client, "/courses/new")
@@ -2436,7 +2518,7 @@ def test_stale_visible_lesson_question_is_rejected_after_another_lesson_commits(
     wait_for_operation(client, slug, advanced.json()["operation_id"])
     current_revision = tutor_service.course_revision(slug)
 
-    stale_question = client.post(
+    historical_question = client.post(
         f"/api/courses/{slug}/turns",
         headers={"x-csrf-token": token},
         json={
@@ -2450,12 +2532,34 @@ def test_stale_visible_lesson_question_is_rejected_after_another_lesson_commits(
         },
     )
 
-    assert stale_question.status_code == 409
-    assert stale_question.json()["state"] == "conflict"
-    assert "visible lesson changed" in stale_question.json()["error"].lower()
+    assert historical_question.status_code == 202
+    historical_result = wait_for_operation(
+        client, slug, historical_question.json()["operation_id"]
+    )
+    assert historical_result["state"] == "committed"
+    assert tutor_service.course_revision(slug) == current_revision
+    conversation = client.get(f"/api/courses/{slug}/chat").json()["conversation"]
+    assert conversation[-1]["source_lesson_id"] == source_id
+    assert conversation[-1]["source_lesson_title"] == source_title
     assert cli.load_state(slug).get("pending_learner_prompt") != (
         "Explain the lesson I still have open."
     )
+
+    fabricated = client.post(
+        f"/api/courses/{slug}/turns",
+        headers={"x-csrf-token": token},
+        json={
+            "intent": "question",
+            "text": "Explain a fabricated old lesson.",
+            "submission_id": str(uuid4()),
+            "expected_revision": current_revision,
+            "source_lesson_id": source_id,
+            "source_lesson_title": "Fabricated title",
+            "source_lesson_revision": source_revision,
+        },
+    )
+    assert fabricated.status_code == 409
+    assert "visible lesson changed" in fabricated.json()["error"].lower()
 
 
 def test_passive_interview_lesson_offers_skip_without_awarding_readiness(

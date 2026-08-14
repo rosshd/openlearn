@@ -1512,9 +1512,45 @@ def accepted_curriculum_profile(
         else {}
     )
     original_outline = str(original_survey.get("outline") or "").strip()
+    projection_source = profile_value
+    projection_changes = dict(changes or {})
+    if action == "skip":
+        focus = _outline_focus(
+            projection_changes.get("interview_focus")
+            or original_survey.get("interview_focus")
+            or "coding"
+        )
+        baseline = copy.deepcopy(dict(profile_value))
+        baseline_placement = baseline.get("placement")
+        baseline_placement = (
+            copy.deepcopy(dict(baseline_placement))
+            if isinstance(baseline_placement, Mapping)
+            else _empty_placement(PLACEMENT_V4)
+        )
+        baseline_placement["survey"] = {
+            "role_family": str(
+                projection_changes.get("role_family")
+                or original_survey.get("role_family")
+                or "general SWE"
+            ),
+            "target_level": str(
+                projection_changes.get("target_level")
+                or original_survey.get("target_level")
+                or "entry"
+            ),
+            "interview_focus": focus,
+            "ratings": {
+                topic_id: 1
+                for topic_id, _label in confidence_topics_for_focus(focus)
+            },
+            "outline": None,
+        }
+        baseline["placement"] = baseline_placement
+        projection_source = baseline
+        projection_changes.pop("confidence_ratings", None)
     candidate, route = curriculum_change_projection(
-        profile_value,
-        changes=changes,
+        projection_source,
+        changes=projection_changes,
         current_date=now.date(),
         bundle=bundle,
     )
@@ -1554,23 +1590,24 @@ def accepted_curriculum_profile(
             }
         )
     elif action == "skip":
-        skipped_survey = placement.get("survey")
-        skipped_survey = (
-            copy.deepcopy(dict(skipped_survey))
-            if isinstance(skipped_survey, Mapping)
-            else {
-                "role_family": route["role_family"],
-                "target_level": route["target_level"],
-                "interview_focus": str(route["route_id"]).replace("-", "_"),
-                "ratings": {
-                    topic_id: 1
-                    for topic_id, _label in confidence_topics_for_focus(
-                        str(route["route_id"]).replace("-", "_")
-                    )
-                },
-                "outline": _route_outline(route),
-            }
+        baseline_survey = placement.get("survey")
+        baseline_survey = (
+            baseline_survey if isinstance(baseline_survey, Mapping) else {}
         )
+        baseline_focus = str(
+            baseline_survey.get("interview_focus")
+            or str(route["route_id"]).replace("-", "_")
+        )
+        skipped_survey = {
+            "role_family": str(baseline_survey.get("role_family") or "general SWE"),
+            "target_level": str(baseline_survey.get("target_level") or "entry"),
+            "interview_focus": baseline_focus,
+            "ratings": {
+                topic_id: 1
+                for topic_id, _label in confidence_topics_for_focus(baseline_focus)
+            },
+            "outline": _route_outline(route),
+        }
         placement = {
             **_empty_placement(PLACEMENT_V4),
             "status": "provisional",

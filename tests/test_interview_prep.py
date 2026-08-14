@@ -199,6 +199,36 @@ class InterviewPrepTests(unittest.TestCase):
         self.assertNotIn("evidence", allocation)
         self.assertEqual(interview_prep.load_profile(self.path), completed)
 
+    def test_skip_placement_replaces_prior_confidence_with_fresh_broad_baseline(
+        self,
+    ) -> None:
+        self.create()
+        interview_prep.start_confidence_placement(self.path, now=lambda: NOW)
+        ratings = {
+            topic_id: 5
+            for topic_id, _label in interview_prep.confidence_topics_for_focus("coding")
+        }
+        saved = interview_prep.save_confidence_survey(
+            self.path,
+            role_family="backend",
+            target_level="senior",
+            interview_focus="coding",
+            ratings=ratings,
+            now=lambda: NOW,
+        )
+
+        skipped, route = interview_prep.accepted_curriculum_profile(
+            saved,
+            action="skip",
+            changes=None,
+            now=NOW,
+        )
+
+        survey = skipped["placement"]["survey"]
+        self.assertEqual(set(survey["ratings"].values()), {1})
+        self.assertTrue(all(item["depth_mode"] == "learn" for item in route["skills"][:25]))
+
+
     def test_resume_allocation_is_idempotent_and_preserves_standard_override(
         self,
     ) -> None:
