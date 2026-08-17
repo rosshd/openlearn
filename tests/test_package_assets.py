@@ -340,6 +340,9 @@ def test_web_assets_keep_accessibility_release_guards() -> None:
     assert '@media (prefers-reduced-motion: reduce)' in css
     assert ".site-nav" in css
     assert ".theme-toggle" in css
+    assert "::-webkit-progress-bar" in css
+    assert "::-webkit-progress-value" in css
+    assert "::-moz-progress-bar" in css
     assert "min-height: 2.75rem" in css
     assert 'aria-label="Openlearn navigation"' in base
     assert 'data-theme-toggle' in base

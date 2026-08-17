@@ -1213,10 +1213,15 @@ def test_real_browser_course_library_preview_history_responsive_and_no_js(
                 page = context.new_page()
                 page.goto(bootstrap_url)
                 page.goto(f"{app_url}/dashboard?course={active.slug}")
+                page.evaluate("localStorage.setItem('openlearn-theme', 'dark')")
+                page.reload()
                 _assert_no_page_overflow(page)
                 workspace = page.locator("[data-course-workspace]")
                 playwright.expect(workspace).to_be_visible()
                 assert workspace.bounding_box()["width"] >= 1100
+                assert workspace.evaluate(
+                    "element => getComputedStyle(element).borderTopWidth"
+                ) == "1px"
                 playwright.expect(page.locator(".course-controls-panel")).to_be_visible()
                 playwright.expect(
                     page.get_by_role("link", name="Change course outline")
@@ -1442,6 +1447,9 @@ def test_real_browser_unverified_provider_stays_in_setup(
                 starter_tiles = empty_library.locator(".starter-tile")
                 assert starter_tiles.count() >= 3
                 assert starter_tiles.first.bounding_box()["width"] >= 220
+                assert starter_tiles.first.evaluate(
+                    "element => getComputedStyle(element).textDecorationLine"
+                ) == "none"
                 playwright.expect(page.locator("[data-theme-toggle]")).to_be_visible()
                 assert page.locator(".local-status").count() == 0
                 _assert_no_page_overflow(page)
