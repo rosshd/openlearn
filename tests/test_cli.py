@@ -6717,8 +6717,17 @@ class InteractiveTests(unittest.TestCase):
         args = parser.parse_args([])
 
         self.assertIs(args.func, cli.cmd_web)
-        self.assertEqual(args.port, 8765)
+        self.assertIsNone(args.port)
         self.assertFalse(args.no_browser)
+
+    def test_web_port_is_exact_only_when_explicitly_requested(self) -> None:
+        parser = cli.build_parser()
+
+        automatic = parser.parse_args(["web"])
+        explicit = parser.parse_args(["web", "--port", "8765"])
+
+        self.assertIsNone(automatic.port)
+        self.assertEqual(explicit.port, 8765)
 
     def test_cli_command_opens_terminal_menu(self) -> None:
         parser = cli.build_parser()

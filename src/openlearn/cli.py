@@ -485,7 +485,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.set_defaults(
         func=cmd_web,
-        port=8765,
+        port=None,
         no_browser=False,
         terminal_onboarding=False,
     )
@@ -559,7 +559,12 @@ def build_parser() -> argparse.ArgumentParser:
     tui_parser.set_defaults(func=cmd_tui)
 
     web_parser = sub.add_parser("web", help="Open the local web learning workspace")
-    web_parser.add_argument("--port", type=int, default=8765, help="Loopback port (default: 8765)")
+    web_parser.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="Exact loopback port (default: automatic, preferring 8765)",
+    )
     web_parser.add_argument(
         "--no-browser",
         action="store_true",
