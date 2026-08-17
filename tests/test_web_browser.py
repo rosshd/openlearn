@@ -1456,6 +1456,12 @@ def test_real_browser_unverified_provider_stays_in_setup(
                 starter_tiles = empty_library.locator(".starter-tile")
                 assert starter_tiles.count() >= 3
                 assert starter_tiles.first.bounding_box()["width"] >= 220
+                assert (
+                    page.locator(".course-list .new-course-menu > summary").bounding_box()[
+                        "width"
+                    ]
+                    < 260
+                )
                 assert starter_tiles.first.evaluate(
                     "element => getComputedStyle(element).textDecorationLine"
                 ) == "none"

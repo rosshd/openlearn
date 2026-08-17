@@ -250,9 +250,10 @@ h2 { font-size: clamp(1.35rem, 3vw, 2rem); line-height: 1.1; letter-spacing: -0.
   background: transparent;
 }
 .course-list { border-right: 1px solid var(--line); }
-.course-list .panel-heading { align-items: stretch; flex-direction: column; }
-.course-list .panel-heading h2 { font-size: 1.35rem; }
-.course-list .new-course-menu, .course-list .new-course-menu > summary { width: 100%; }
+.course-library-grid:not(.is-empty) .course-list .panel-heading { align-items: stretch; flex-direction: column; }
+.course-library-grid:not(.is-empty) .course-list .panel-heading h2 { font-size: 1.35rem; }
+.course-library-grid:not(.is-empty) .course-list .new-course-menu,
+.course-library-grid:not(.is-empty) .course-list .new-course-menu > summary { width: 100%; }
 .course-preview { border-right: 1px solid var(--line); display: grid; align-content: start; gap: clamp(1rem, 2vw, 1.4rem); }
 .course-preview > p { max-width: 58ch; color: var(--graphite-soft); }
 .course-preview:focus { outline: none; }
