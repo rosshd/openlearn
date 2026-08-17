@@ -308,12 +308,12 @@ def test_real_browser_course_polling_theme_conflict_and_keyboard_submit(
                 initial_revision = _revision(first)
                 focus_url = first.url
 
-                first.get_by_text("Utilities", exact=True).click()
                 theme = first.locator("[data-theme-toggle]")
+                playwright.expect(theme).to_be_visible()
                 theme.click()
-                assert first.locator("html").get_attribute("data-theme") == "light"
+                assert first.locator("html").get_attribute("data-theme") == "dark"
                 first.reload()
-                assert first.locator("html").get_attribute("data-theme") == "light"
+                assert first.locator("html").get_attribute("data-theme") == "dark"
 
                 first.locator("#learner-response").fill("Keep this unsent draft while tools open.")
                 closed_lesson_x = first.locator(".focus-column").bounding_box()["x"]
@@ -463,11 +463,10 @@ def test_real_browser_course_polling_theme_conflict_and_keyboard_submit(
                 )
                 first.set_viewport_size({"width": 320, "height": 720})
                 _assert_no_page_overflow(first)
-                first.get_by_text("Utilities", exact=True).click()
-                utilities = first.get_by_role("navigation", name="Openlearn utilities")
-                playwright.expect(utilities).to_be_visible()
-                playwright.expect(utilities.get_by_text("Tutor connection", exact=True)).to_be_visible()
-                playwright.expect(utilities.get_by_text("Data and backup", exact=True)).to_be_visible()
+                navigation = first.get_by_role("navigation", name="Openlearn navigation")
+                playwright.expect(navigation).to_be_visible()
+                playwright.expect(navigation.get_by_text("Tutor", exact=True)).to_be_visible()
+                playwright.expect(navigation.get_by_text("Data", exact=True)).to_be_visible()
                 assert not first.locator(".focus-column").is_visible()
                 first.get_by_role("button", name="Close learning tool").click()
                 _assert_no_page_overflow(first)
@@ -1425,10 +1424,23 @@ def test_real_browser_unverified_provider_stays_in_setup(
                 browser = runtime.chromium.launch()
                 page = browser.new_page()
                 page.goto(bootstrap_url)
+                page.goto(f"{app_url}/dashboard")
+                page.set_viewport_size({"width": 1280, "height": 800})
+                empty_library = page.locator("[data-empty-course-library]")
+                playwright.expect(empty_library).to_be_visible()
+                assert page.locator(".empty-preview").count() == 0
+                starter_tiles = empty_library.locator(".starter-tile")
+                assert starter_tiles.count() >= 3
+                assert starter_tiles.first.bounding_box()["width"] >= 220
+                playwright.expect(page.locator("[data-theme-toggle]")).to_be_visible()
+                assert page.locator(".local-status").count() == 0
+                _assert_no_page_overflow(page)
                 page.goto(f"{app_url}/setup")
                 page.set_viewport_size({"width": 320, "height": 720})
                 _assert_no_page_overflow(page)
-                assert page.get_by_text("Utilities", exact=True).is_visible()
+                playwright.expect(
+                    page.get_by_role("navigation", name="Openlearn navigation")
+                ).to_be_visible()
                 page.locator("#provider").select_option("custom")
                 page.locator("#api-key").fill("browser-secret-must-clear")
                 page.locator("#model").fill("offline-model")
@@ -1466,7 +1478,9 @@ def test_real_browser_unverified_provider_stays_in_setup(
                 for path in ("/dashboard", "/progress", "/data"):
                     page.goto(f"{app_url}{path}")
                     _assert_no_page_overflow(page)
-                    assert page.get_by_text("Utilities", exact=True).is_visible()
+                    playwright.expect(
+                        page.get_by_role("navigation", name="Openlearn navigation")
+                    ).to_be_visible()
                 browser.close()
         finally:
             process.terminate()

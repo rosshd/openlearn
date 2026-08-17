@@ -88,7 +88,7 @@ def test_default_web_app_runs_setup_dashboard_course_and_tutor_flow(
     client: TestClient,
 ) -> None:
     empty_dashboard = client.get("/").text
-    assert "What do you want to learn?" in empty_dashboard
+    assert "Choose your first course" in empty_dashboard
     assert "Technical Interview Prep" in empty_dashboard
     assert "New course" in empty_dashboard
 
@@ -1138,6 +1138,12 @@ def test_empty_dashboard_embeds_varied_starters_and_creation_choices(
     assert "Custom course" in response.text
     assert "Quick Learn" in response.text
     assert "Choose a starting point" not in response.text
+    assert 'data-empty-course-library' in response.text
+    assert "Your next course starts here." not in response.text
+    assert 'aria-label="Openlearn navigation"' in response.text
+    assert 'data-theme-toggle' in response.text
+    assert 'class="local-status"' not in response.text
+    assert 'class="utilities-menu"' not in response.text
 
 
 def test_course_settings_preview_confirm_and_permanent_deletion(

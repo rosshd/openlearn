@@ -338,10 +338,13 @@ def test_web_assets_keep_accessibility_release_guards() -> None:
 
     assert '@media (max-width: 390px)' in css
     assert '@media (prefers-reduced-motion: reduce)' in css
-    assert ".utilities-menu" in css
+    assert ".site-nav" in css
+    assert ".theme-toggle" in css
     assert "min-height: 2.75rem" in css
-    assert 'aria-label="Openlearn utilities"' in base
-    assert 'class="utilities-menu"' in base
+    assert 'aria-label="Openlearn navigation"' in base
+    assert 'data-theme-toggle' in base
+    assert 'class="local-status"' not in base
+    assert 'class="utilities-menu"' not in base
     assert "restoreFocus" in javascript
     assert 'setAttribute("aria-expanded"' in javascript
     assert 'setAttribute("inert"' in javascript

@@ -17,18 +17,17 @@
         <span class="wordmark-mark" aria-hidden="true">ol</span>
         <span>openlearn</span>
       </a>
-      <div class="header-tools">
-        <span class="local-status"><span aria-hidden="true"></span> Local</span>
-        <details class="utilities-menu">
-          <summary>Utilities</summary>
-          <nav aria-label="Openlearn utilities">
-            <a href="{{ url_for('setup') }}">Tutor connection</a>
-            <a href="{{ url_for('progress') }}">App settings and progress</a>
-            <a href="{{ url_for('data') }}">Data and backup</a>
-            <button class="tool-button" type="button" data-theme-toggle aria-label="Change color theme">Theme: <span data-theme-label>System</span></button>
-          </nav>
-        </details>
-      </div>
+      <nav class="site-nav" aria-label="Openlearn navigation">
+        <a href="{{ url_for('dashboard') }}">Courses</a>
+        <a href="{{ url_for('setup') }}">Tutor</a>
+        <a href="{{ url_for('progress') }}">Progress</a>
+        <a href="{{ url_for('data') }}">Data</a>
+      </nav>
+      <button class="theme-toggle" type="button" data-theme-toggle
+        aria-label="Theme: System. Activate to use dark theme">
+        <span class="theme-icon" aria-hidden="true"></span>
+        <span><span data-theme-label>System</span> theme</span>
+      </button>
     </header>
     {% block status %}{% endblock %}
     <main id="main-content" tabindex="-1" class="{% block main_class %}{% endblock %}">

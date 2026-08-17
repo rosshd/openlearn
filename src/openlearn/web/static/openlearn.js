@@ -1,7 +1,7 @@
 "use strict";
 
 const root = document.documentElement;
-const themeOrder = ["system", "light", "dark"];
+const themeOrder = ["system", "dark", "light"];
 const appRoot = document.querySelector('meta[name="openlearn-root"]')?.content.replace(/\/$/, "") || "";
 
 function appUrl(url) {
@@ -21,6 +21,14 @@ function setTheme(theme) {
   root.dataset.theme = selected;
   const label = document.querySelector("[data-theme-label]");
   if (label) label.textContent = selected[0].toUpperCase() + selected.slice(1);
+  const toggle = document.querySelector("[data-theme-toggle]");
+  if (toggle) {
+    const next = themeOrder[(themeOrder.indexOf(selected) + 1) % themeOrder.length];
+    toggle.setAttribute(
+      "aria-label",
+      `Theme: ${selected[0].toUpperCase() + selected.slice(1)}. Activate to use ${next} theme`,
+    );
+  }
 }
 
 try {
