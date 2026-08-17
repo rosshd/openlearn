@@ -12,20 +12,19 @@
   </header>
 
   <section class="course-library-frame" data-course-workspace>
-    <div class="library-toolbar">
-      <h2 id="courses-title">Your courses</h2>
-      <details class="new-course-menu">
-        <summary class="primary-action compact">New course <span aria-hidden="true">+</span></summary>
-        <div aria-label="New course choices">
-          <a href="{{ url_for('new_course') }}#starter-courses"><strong>Starter course</strong><small>Begin with a proven course path.</small></a>
-          <a href="{{ url_for('new_course') }}#custom-course"><strong>Custom course</strong><small>Describe anything you want to learn.</small></a>
-          <a href="{{ url_for('quick_learn') }}"><strong>Quick Learn</strong><small>Learn from one bounded source.</small></a>
-        </div>
-      </details>
-    </div>
-
     <div class="dashboard-grid course-library-grid{% if not dashboard.courses %} is-empty{% endif %}">
     <section class="course-list" aria-labelledby="courses-title">
+      <div class="panel-heading">
+        <h2 id="courses-title">Your courses</h2>
+        <details class="new-course-menu">
+          <summary class="primary-action compact course-add-action">New course <span aria-hidden="true">+</span></summary>
+          <div aria-label="New course choices">
+            <a href="{{ url_for('new_course') }}#starter-courses"><strong>Starter course</strong><small>Begin with a proven course path.</small></a>
+            <a href="{{ url_for('new_course') }}#custom-course"><strong>Custom course</strong><small>Describe anything you want to learn.</small></a>
+            <a href="{{ url_for('quick_learn') }}"><strong>Quick Learn</strong><small>Learn from one bounded source.</small></a>
+          </div>
+        </details>
+      </div>
       {% if dashboard.courses %}
         <div class="course-rows" aria-label="Saved courses">
         {% for course in dashboard.courses %}

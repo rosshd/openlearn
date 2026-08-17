@@ -1219,6 +1219,15 @@ def test_real_browser_course_library_preview_history_responsive_and_no_js(
                 workspace = page.locator("[data-course-workspace]")
                 playwright.expect(workspace).to_be_visible()
                 assert workspace.bounding_box()["width"] >= 1100
+                assert workspace.locator(".library-toolbar").count() == 0
+                playwright.expect(
+                    workspace.locator(".course-list").get_by_role(
+                        "heading", name="Your courses"
+                    )
+                ).to_be_visible()
+                playwright.expect(
+                    workspace.locator(".course-list .new-course-menu")
+                ).to_be_visible()
                 assert workspace.evaluate(
                     "element => getComputedStyle(element).borderTopWidth"
                 ) == "1px"

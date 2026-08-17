@@ -131,6 +131,10 @@ def test_default_web_app_runs_setup_dashboard_course_and_tutor_flow(
     assert "New course" not in dashboard_intro
     assert "New course" in courses_panel
     assert "new-course-menu" in courses_panel
+    assert 'class="library-toolbar"' not in courses_panel
+    assert courses_panel.index('class="course-list"') < courses_panel.index(
+        'class="new-course-menu"'
+    )
     course_heading = courses_panel.split("</div>", 2)[0]
     assert "<span>1</span>" not in course_heading
     assert 'class="course-tool"' not in courses_panel

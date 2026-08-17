@@ -241,9 +241,7 @@ h2 { font-size: clamp(1.35rem, 3vw, 2rem); line-height: 1.1; letter-spacing: -0.
 .course-library-intro h1 { max-width: 24ch; margin-bottom: 0; font-size: clamp(2rem, 3.2vw, 2.4rem); line-height: 1; }
 .course-library-intro > p { max-width: 48ch; margin: 0; color: var(--graphite-soft); }
 .course-library-frame { min-width: 0; border: 1px solid var(--line-strong); border-radius: var(--radius); background: color-mix(in srgb, var(--surface) 96%, transparent); box-shadow: var(--shadow); }
-.library-toolbar { min-height: 4.6rem; padding: 0.8rem clamp(1rem, 2vw, 1.35rem); display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
-.library-toolbar h2 { margin: 0; }
-.course-library-grid { grid-template-columns: minmax(15.5rem, 0.72fr) minmax(28rem, 1.65fr) minmax(13.5rem, 0.63fr); align-items: stretch; gap: 0; border-top: 1px solid var(--line); }
+.course-library-grid { grid-template-columns: minmax(15.5rem, 0.72fr) minmax(28rem, 1.65fr) minmax(13.5rem, 0.63fr); align-items: stretch; gap: 0; }
 .course-library-grid.is-empty { grid-template-columns: minmax(0, 1fr); }
 .course-library-grid.is-empty .course-list { padding: clamp(1rem, 2vw, 1.35rem); border-right: 0; }
 .course-list, .course-preview, .starter-strip {
@@ -252,6 +250,9 @@ h2 { font-size: clamp(1.35rem, 3vw, 2rem); line-height: 1.1; letter-spacing: -0.
   background: transparent;
 }
 .course-list { border-right: 1px solid var(--line); }
+.course-list .panel-heading { align-items: stretch; flex-direction: column; }
+.course-list .panel-heading h2 { font-size: 1.35rem; }
+.course-list .new-course-menu, .course-list .new-course-menu > summary { width: 100%; }
 .course-preview { border-right: 1px solid var(--line); display: grid; align-content: start; gap: clamp(1rem, 2vw, 1.4rem); }
 .course-preview > p { max-width: 58ch; color: var(--graphite-soft); }
 .course-preview:focus { outline: none; }
@@ -700,9 +701,6 @@ h2 { font-size: clamp(1.35rem, 3vw, 2rem); line-height: 1.1; letter-spacing: -0.
   .focus-identity { flex-direction: column; gap: 0; }
   .tool-rail { grid-template-columns: 1fr 1fr; }
   .move-surface { padding: 1.2rem; }
-  .course-list .panel-heading { align-items: stretch; flex-direction: column; }
-  .library-toolbar { align-items: stretch; flex-direction: column; }
-  .library-toolbar .new-course-menu { width: 100%; }
   .new-course-menu > summary { width: 100%; }
   .new-course-menu > div { right: auto; left: 0; }
   .course-controls-panel nav { grid-template-columns: 1fr; }
