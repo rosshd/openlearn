@@ -70,6 +70,282 @@ class ApplicationQueryTests(unittest.TestCase):
         dashboard = application.dashboard()
         self.assertEqual(dashboard.resume.slug, second.slug)
 
+    def test_dashboard_selection_previews_without_changing_active_course(self) -> None:
+        active = application.create_course(
+            application.CourseCreationRequest(
+                name="Active Python",
+                template_id="python-basics",
+            )
+        ).course
+        selected = application.create_course(
+            application.CourseCreationRequest(
+                name="Selected Git",
+                template_id="git",
+            )
+        ).course
+        cli.set_active_topic(active.slug)
+        before = cli.state_path().read_bytes()
+
+        dashboard = application.dashboard(selected_slug=selected.slug)
+
+        self.assertEqual(dashboard.active_slug, active.slug)
+        self.assertEqual(dashboard.resume.slug, active.slug)
+        self.assertEqual(dashboard.selected.slug, selected.slug)
+        self.assertEqual(dashboard.selected_slug, selected.slug)
+        self.assertEqual(cli.state_path().read_bytes(), before)
+
+    def test_course_activation_preserves_non_study_global_state(self) -> None:
+        first = application.create_course(
+            application.CourseCreationRequest(name="First", goal="First goal")
+        ).course
+        second = application.create_course(
+            application.CourseCreationRequest(name="Second", goal="Second goal")
+        ).course
+        cli.write_text_atomic(
+            cli.state_path(),
+            json.dumps(
+                {
+                    "active_topic": first.slug,
+                    "study_streak": 8,
+                    "longest_streak": 13,
+                    "last_study_date": "2026-08-16",
+                    "learner_preference": "keep-me",
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+        )
+
+        result = application.activate_course(second.slug)
+
+        saved = json.loads(cli.state_path().read_text(encoding="utf-8"))
+        self.assertEqual(result.slug, second.slug)
+        self.assertEqual(saved["active_topic"], second.slug)
+        self.assertEqual(saved["study_streak"], 8)
+        self.assertEqual(saved["longest_streak"], 13)
+        self.assertEqual(saved["last_study_date"], "2026-08-16")
+        self.assertEqual(saved["learner_preference"], "keep-me")
+
+    def test_course_deletion_requires_exact_confirmation_and_preserves_other_state(
+        self,
+    ) -> None:
+        first = application.create_course(
+            application.CourseCreationRequest(name="First Course", goal="First goal")
+        ).course
+        second = application.create_course(
+            application.CourseCreationRequest(name="Second Course", goal="Second goal")
+        ).course
+        cli.activate_topic_without_study(first.slug)
+        cli.update_state_atomic(
+            second.slug,
+            lambda state: state.__setitem__("known", ["keep-this-evidence"]),
+        )
+        cli.write_text_atomic(
+            cli.state_path(),
+            json.dumps(
+                {
+                    "active_topic": first.slug,
+                    "study_streak": 8,
+                    "longest_streak": 13,
+                    "last_study_date": "2026-08-16",
+                    "learner_preference": "keep-me",
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+        )
+        cli.write_text_atomic(
+            cli.config_path(),
+            json.dumps({"openai_api_key": "do-not-touch"}, sort_keys=True) + "\n",
+        )
+        config_before = cli.config_path().read_bytes()
+        second_before = cli.topic_state_path(second.slug).read_bytes()
+        preview = application.preview_course_deletion(first.slug)
+
+        self.assertEqual(preview.slug, first.slug)
+        self.assertEqual(preview.title, "First Course")
+        self.assertEqual(preview.backup_scope, "whole-home")
+        with self.assertRaisesRegex(application.CourseDeletionConfirmationError, "exact"):
+            application.confirm_course_deletion(
+                preview,
+                confirmation_slug="wrong-course",
+                confirmation_title="First Course",
+            )
+        with self.assertRaisesRegex(application.CourseDeletionConfirmationError, "exact"):
+            application.confirm_course_deletion(
+                preview,
+                confirmation_slug=first.slug,
+                confirmation_title="first course",
+            )
+        self.assertTrue(cli.topic_path(first.slug).exists())
+
+        with mock.patch(
+            "openlearn.data_management.create_backup",
+            side_effect=AssertionError("deletion must not create a backup implicitly"),
+        ):
+            result = application.confirm_course_deletion(
+                preview,
+                confirmation_slug=first.slug,
+                confirmation_title="First Course",
+            )
+
+        saved = json.loads(cli.state_path().read_text(encoding="utf-8"))
+        self.assertTrue(result.deleted)
+        self.assertFalse(result.replayed)
+        self.assertEqual(result.next_selected_slug, second.slug)
+        self.assertNotIn("active_topic", saved)
+        self.assertEqual(saved["study_streak"], 8)
+        self.assertEqual(saved["longest_streak"], 13)
+        self.assertEqual(saved["last_study_date"], "2026-08-16")
+        self.assertEqual(saved["learner_preference"], "keep-me")
+        self.assertEqual(cli.config_path().read_bytes(), config_before)
+        self.assertEqual(cli.topic_state_path(second.slug).read_bytes(), second_before)
+
+        replay = application.confirm_course_deletion(
+            preview,
+            confirmation_slug=first.slug,
+            confirmation_title="First Course",
+        )
+        self.assertFalse(replay.deleted)
+        self.assertTrue(replay.replayed)
+        self.assertEqual(replay.next_selected_slug, second.slug)
+
+    def test_generic_course_settings_preview_is_read_only_and_confirm_is_idempotent(
+        self,
+    ) -> None:
+        created = application.create_course(
+            application.CourseCreationRequest(
+                name="Python Notes",
+                template_id="python-basics",
+            )
+        ).course
+        slug = created.slug
+        topic = cli.read_topic(slug)
+        learner_body = topic.body + "\nA learner-authored note.\n"
+        cli.write_text_atomic(
+            topic.path,
+            cli.format_topic(cli.stable_metadata_for_topic(topic.metadata), learner_body),
+        )
+        before = topic.path.read_bytes()
+        preview = application.preview_course_settings(
+            slug,
+            application.CourseSettingsChange(
+                title="Python Interview Practice",
+                goal="Solve Python interview problems",
+                difficulty="deep",
+                weekly_minutes=180,
+                session_minutes=60,
+            ),
+        )
+        self.assertEqual(topic.path.read_bytes(), before)
+
+        submission_id = str(uuid4())
+        first = application.confirm_course_settings(preview, submission_id=submission_id)
+        replay = application.confirm_course_settings(preview, submission_id=submission_id)
+
+        updated = cli.read_topic(slug)
+        self.assertEqual(updated.slug, slug)
+        self.assertEqual(updated.metadata["topic"], "Python Interview Practice")
+        self.assertEqual(updated.metadata["goal"], "Solve Python interview problems")
+        self.assertEqual(updated.metadata["mastery_profile"], "deep")
+        self.assertEqual(updated.metadata["weekly_minutes"], 180)
+        self.assertEqual(updated.metadata["session_minutes"], 60)
+        self.assertIn("A learner-authored note.", updated.body)
+        self.assertEqual(first.receipt_id, replay.receipt_id)
+        self.assertTrue(replay.replayed)
+
+    def test_course_library_projection_exposes_ordered_path_and_first_pass_coverage(
+        self,
+    ) -> None:
+        course = application.create_course(
+            application.CourseCreationRequest(
+                name="Python Path",
+                template_id="python-basics",
+            )
+        ).course
+
+        projected = application.course(course.slug).card.library
+
+        self.assertIsNotNone(projected.current)
+        assert projected.current is not None
+        self.assertEqual(projected.current.identity, "unit:1")
+        self.assertEqual(projected.current.title, "Variables and Data Types")
+        self.assertEqual(len(projected.upcoming), 5)
+        self.assertEqual(projected.upcoming[0].identity, "unit:2")
+        self.assertEqual(projected.coverage.covered, 0)
+        self.assertEqual(projected.coverage.total, len(projected.path))
+        self.assertFalse(projected.first_pass_complete)
+
+    def test_interview_library_projection_uses_accepted_route_and_separates_readiness(
+        self,
+    ) -> None:
+        created = application.create_course(
+            application.CourseCreationRequest(
+                name="Interview Library Path",
+                template_id="technical-interview-prep",
+            )
+        )
+        slug = created.course.slug
+        accepted = application.accept_interview_curriculum(
+            slug, action="skip", submission_id=str(uuid4())
+        )
+        canonical = accepted["canonical"]
+        first = canonical["route"]["skills"][0]
+        first_id = first["skill_ref"]["skill_id"]
+        state = cli.load_state(slug)
+        state["interview_curriculum"]["evidence"]["exposed"] = [first_id]
+        state["interview_curriculum"]["evidence"]["weak"] = [first_id]
+        state["interview_curriculum"]["evidence"]["due_review"] = [first_id]
+        cli.write_text_atomic(
+            cli.topic_state_path(slug),
+            json.dumps(state, indent=2, sort_keys=True) + "\n",
+        )
+
+        projected = application.course(slug).card.library
+
+        self.assertEqual(projected.coverage.covered, 1)
+        self.assertEqual(projected.coverage.total, len(projected.path))
+        self.assertEqual(projected.current.identity, first_id)
+        self.assertEqual(projected.weak_areas, (projected.current.title,))
+        self.assertTrue(projected.review.actionable)
+        self.assertEqual(projected.review.due, 1)
+        self.assertEqual(projected.review.kind, "canonical")
+        self.assertFalse(projected.first_pass_complete)
+
+    def test_interview_deepening_opens_weak_practice_without_awarding_mastery(self) -> None:
+        created = application.create_course(
+            application.CourseCreationRequest(
+                name="Interview Deepening",
+                template_id="technical-interview-prep",
+            )
+        )
+        slug = created.course.slug
+        accepted = application.accept_interview_curriculum(
+            slug, action="skip", submission_id=str(uuid4())
+        )
+        first_id = accepted["canonical"]["route"]["skills"][0]["skill_ref"]["skill_id"]
+        state = cli.load_state(slug)
+        canonical = state["interview_curriculum"]
+        canonical["evidence"]["exposed"] = [first_id]
+        canonical["evidence"]["weak"] = [first_id]
+        state["interview_curriculum"] = canonical
+        cli.write_text_atomic(
+            cli.topic_state_path(slug),
+            json.dumps(state, indent=2, sort_keys=True) + "\n",
+        )
+
+        with mock.patch.dict(os.environ, {"OPENLEARN_MOCK": "1"}, clear=False):
+            application.advance_course_growth(
+                slug,
+                action="deepen",
+                submission_id=str(uuid4()),
+            )
+
+        after = cli.load_state(slug)["interview_curriculum"]["evidence"]
+        self.assertNotIn(first_id, after["ready"])
+
     def test_provider_lifecycle_projection_never_exposes_the_key(self) -> None:
         application.set_provider_api_key("application-secret")
 
@@ -115,9 +391,7 @@ class ApplicationQueryTests(unittest.TestCase):
             )
         )
         slug = created.course.slug
-        application.accept_interview_curriculum(
-            slug, action="skip", submission_id=str(uuid4())
-        )
+        application.accept_interview_curriculum(slug, action="skip", submission_id=str(uuid4()))
         state = cli.load_state(slug)
         canonical = state["interview_curriculum"]
         first, second = canonical["route"]["skills"][:2]
@@ -220,9 +494,7 @@ class ApplicationQueryTests(unittest.TestCase):
             )
         )
         slug = created.course.slug
-        application.accept_interview_curriculum(
-            slug, action="skip", submission_id=str(uuid4())
-        )
+        application.accept_interview_curriculum(slug, action="skip", submission_id=str(uuid4()))
         state = cli.load_state(slug)
         state["pending_question"] = {
             "kind": "free_response",
@@ -230,9 +502,7 @@ class ApplicationQueryTests(unittest.TestCase):
         }
         cli.update_state_atomic(
             slug,
-            lambda current: current.__setitem__(
-                "pending_question", state["pending_question"]
-            ),
+            lambda current: current.__setitem__("pending_question", state["pending_question"]),
         )
 
         projection = application.interview_learning(slug)
@@ -251,9 +521,7 @@ class ApplicationQueryTests(unittest.TestCase):
             )
         )
         slug = created.course.slug
-        application.accept_interview_curriculum(
-            slug, action="skip", submission_id=str(uuid4())
-        )
+        application.accept_interview_curriculum(slug, action="skip", submission_id=str(uuid4()))
         state = cli.load_state(slug)
         canonical = state["interview_curriculum"]
         first, second = canonical["route"]["skills"][:2]
@@ -309,9 +577,7 @@ class ApplicationQueryTests(unittest.TestCase):
             )
         )
         slug = created.course.slug
-        application.accept_interview_curriculum(
-            slug, action="skip", submission_id=str(uuid4())
-        )
+        application.accept_interview_curriculum(slug, action="skip", submission_id=str(uuid4()))
         state = cli.load_state(slug)
         canonical = state["interview_curriculum"]
         first, second = canonical["route"]["skills"][:2]
@@ -344,9 +610,7 @@ class ApplicationQueryTests(unittest.TestCase):
         projection = application.interview_learning(slug)
 
         assert projection is not None
-        self.assertEqual(
-            projection.position.skill_id, second["skill_ref"]["skill_id"]
-        )
+        self.assertEqual(projection.position.skill_id, second["skill_ref"]["skill_id"])
         self.assertEqual(projection.position.emphasis, "Practice")
         self.assertEqual(projection.committed_lesson.title, projection.position.skill_label)
 
@@ -358,9 +622,7 @@ class ApplicationQueryTests(unittest.TestCase):
             )
         )
         slug = created.course.slug
-        application.accept_interview_curriculum(
-            slug, action="skip", submission_id=str(uuid4())
-        )
+        application.accept_interview_curriculum(slug, action="skip", submission_id=str(uuid4()))
         response = "**Lesson:** The same words can support separate turns."
         topic = cli.read_topic(slug)
         first_entry = cli._session_entry(
@@ -370,7 +632,9 @@ class ApplicationQueryTests(unittest.TestCase):
             created="2026-08-13 12:00 UTC",
             mutation_id="turn_first_occurrence",
         )
-        cli.write_topic(topic.path, topic.metadata, topic.body.rstrip() + "\n\n" + first_entry + "\n")
+        cli.write_topic(
+            topic.path, topic.metadata, topic.body.rstrip() + "\n\n" + first_entry + "\n"
+        )
         first = application.interview_learning(slug)
         assert first is not None
 
@@ -404,9 +668,7 @@ class ApplicationQueryTests(unittest.TestCase):
             )
         )
         slug = created.course.slug
-        application.accept_interview_curriculum(
-            slug, action="skip", submission_id=str(uuid4())
-        )
+        application.accept_interview_curriculum(slug, action="skip", submission_id=str(uuid4()))
         state = cli.load_state(slug)
         canonical = state["interview_curriculum"]
         route = canonical["route"]
@@ -415,9 +677,7 @@ class ApplicationQueryTests(unittest.TestCase):
             for item in route["skills"]
             if item["requirement"] == "optional"
         ]
-        required_count = sum(
-            item["requirement"] == "required" for item in route["skills"]
-        )
+        required_count = sum(item["requirement"] == "required" for item in route["skills"])
         self.assertTrue(optional_ids)
 
         route.pop("optional_skill_ids", None)
@@ -458,9 +718,7 @@ class ApplicationQueryTests(unittest.TestCase):
             )
         )
         slug = created.course.slug
-        application.accept_interview_curriculum(
-            slug, action="skip", submission_id=str(uuid4())
-        )
+        application.accept_interview_curriculum(slug, action="skip", submission_id=str(uuid4()))
         journal_saved = threading.Event()
         release_writer = threading.Event()
         errors: list[BaseException] = []

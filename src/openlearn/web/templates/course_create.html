@@ -6,7 +6,7 @@
     <a class="quiet-link" href="{{ url_for('dashboard') }}">Back to dashboard</a>
   </div>
 
-  <div class="starter-strip" aria-labelledby="starters-title" data-starter-strip>
+  <div class="starter-strip" id="starter-courses" aria-labelledby="starters-title" data-starter-strip>
     <div class="panel-heading">
       <h2 id="starters-title">Starter courses</h2>
       <div class="starter-controls" aria-label="Browse starter courses">
@@ -28,14 +28,15 @@
     </div>
   </div>
 
-  <form class="work-panel form-stack create-form" data-json-form data-enter-flow data-endpoint="/api/courses" novalidate>
-    <input type="hidden" name="submission_id" data-uuid>
-    <input type="hidden" name="template_id">
+  {% if create_error %}<div class="error-summary" role="alert" tabindex="-1">{{ create_error }}</div>{% endif %}
+  <form class="work-panel form-stack create-form" id="custom-course" method="post" action="{{ url_for('create_course_form') }}" data-json-form data-enter-flow data-endpoint="/api/courses" novalidate>
+    <input type="hidden" name="submission_id" data-uuid value="{{ submission_id }}">
+    <input type="hidden" name="template_id" value="{{ selected_template.id if selected_template else '' }}">
     <div class="error-summary" role="alert" tabindex="-1" data-form-error hidden></div>
     <label for="course-title">Course name</label>
-    <input id="course-title" name="title" maxlength="160" required placeholder="Technical Interview Prep">
+    <input id="course-title" name="title" maxlength="160" required placeholder="Technical Interview Prep" value="{{ selected_template.title if selected_template else '' }}">
     <label for="goal">Your goal</label>
-    <textarea id="goal" name="goal" rows="4" maxlength="4000" required placeholder="What should you be able to do when this course is working?"></textarea>
+    <textarea id="goal" name="goal" rows="4" maxlength="4000" required placeholder="What should you be able to do when this course is working?">{{ selected_template.description if selected_template else '' }}</textarea>
     <label for="experience">What have you tried already? <span class="optional">Optional</span></label>
     <textarea id="experience" name="experience" rows="3" maxlength="4000" placeholder="A few words is enough. This guides the first example, but does not count as mastery."></textarea>
     <div class="form-footer">

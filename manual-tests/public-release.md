@@ -72,13 +72,29 @@ Documentation links are allowed because documentation discoverability is part of
 7. Find Technical Interview Prep in starter courses and complete the assigned skip or rapid confidence-placement route.
 8. Reach one useful teaching interaction and respond once.
 9. Leave the course, reopen Openlearn, and resume without losing the active objective.
-10. Find progress, identify the recommended next action, and locate provider settings.
-11. Locate the active learner-data home from the application and confirm it with `openlearn data inventory`.
-12. Create a credential-redacted verified backup outside the test home.
-13. Complete the assigned supplemental journey.
+10. Return to the course library, identify the active course, preview another course without activating it, and use Continue learning to switch deliberately.
+11. Open the selected course path, settings, and Utilities menu without encountering a duplicate Quick Learn, settings, data, or empty-review panel.
+12. Change one reversible course setting through preview and confirmation, then verify the course address and prior progress remain intact.
+13. Open permanent deletion, verify the exact course name and ID are required, follow the backup link, and leave without deleting the course.
+14. Locate the active learner-data home from the application and confirm it with `openlearn data inventory`.
+15. Create a credential-redacted verified backup outside the test home.
+16. Complete the assigned supplemental journey.
 
 Measure time from first Openlearn launch to the first teaching interaction.
 The target is under five minutes excluding external provider-account creation and local-model download time.
+
+## Course-library presentation probes
+
+Run these checks on the course-library dashboard after at least two courses exist.
+
+- At a normal desktop width, select the non-active course and verify its preview updates while the active marker stays on the original course.
+- Use browser Back, Forward, and Reload and verify the URL-selected preview is restored without changing the active course.
+- At approximately 760 pixels and 320 pixels wide, verify the library stacks before the preview and the View selected course preview link moves focus deliberately.
+- Increase browser text size to at least 150 percent and verify course names, status chips, path items, menus, and actions remain readable without horizontal page scrolling.
+- Enable reduced motion and verify selection and disclosure change immediately without sliding, resizing, or flashing movement.
+- Navigate the course rows, full-path disclosure, Utilities menu, Continue learning, settings, backup link, and deletion fields using only the keyboard.
+- Disable JavaScript for one pass and verify course selection, settings forms, backup navigation, and deletion confirmation still use ordinary links and forms.
+- If a generated follow-up is available, verify one click shows a pending state, duplicate submission is disabled, provider failure leaves retry available, and completion keeps the source-course preview visible until confirmation.
 
 ## Recovery probes
 

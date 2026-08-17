@@ -6,6 +6,7 @@ import hashlib
 import json
 import multiprocessing
 import os
+import queue
 import threading
 import time
 from concurrent.futures import wait
@@ -14,7 +15,7 @@ from pathlib import Path
 from unittest import TestCase, mock
 from uuid import uuid4
 
-from openlearn import application, cli, interview_curriculum, tutor_service
+from openlearn import application, cli, config, interview_curriculum, providers, tutor_service
 from openlearn.tutor_service import (
     TutorConflictError,
     TutorOperationError,
@@ -53,6 +54,51 @@ def _reserve_generic_turn_process(
     except TutorConflictError:
         results.put(("conflict", True))
     release.wait(timeout=5)
+
+
+def _retry_follow_up_process(
+    home: str,
+    submission_id: str,
+    ready: multiprocessing.queues.Queue,
+    start: multiprocessing.synchronize.Event,
+    release: multiprocessing.synchronize.Event,
+    provider_calls: multiprocessing.queues.Queue,
+    results: multiprocessing.queues.Queue,
+) -> None:
+    os.environ["OPENLEARN_HOME"] = home
+    os.environ["OPENLEARN_MOCK"] = "1"
+    cli._CONFIG_CACHE = None
+    credentials = config.ProviderCredentials(
+        base_url="https://openrouter.ai/api/v1",
+        model="test/model",
+        api_key="test-key",
+        verified=True,
+    )
+    config.provider_is_configured = lambda **_kwargs: True
+    config.effective_provider_credentials = lambda: credentials
+
+    def delayed_completion(*_args: object, **_kwargs: object) -> str:
+        provider_calls.put(os.getpid())
+        if not release.wait(timeout=5):
+            raise providers.ProviderError("test_release_timeout")
+        return json.dumps(
+            {
+                "title": "Vim Plugin Engineering",
+                "goal": "Build maintainable Vim plugins around deliberate workflows.",
+            }
+        )
+
+    providers.chat_completion = delayed_completion
+    ready.put(os.getpid())
+    if not start.wait(timeout=5):
+        results.put(("error", "start_timeout"))
+        return
+    try:
+        proposal = tutor_service.retry_follow_up_proposal("web-tutor", submission_id)
+    except Exception as exc:  # pragma: no cover - returned for parent-process assertion
+        results.put(("error", repr(exc)))
+    else:
+        results.put((proposal.state, proposal.replayed))
 
 
 class TutorServiceTests(TestCase):
@@ -102,6 +148,383 @@ class TutorServiceTests(TestCase):
             "updated_at": (updated_at or datetime.now(timezone.utc)).isoformat(),
         }
         cli.save_state("web-tutor", state)
+
+    def _ready_provider(self):
+        credentials = config.ProviderCredentials(
+            base_url="https://openrouter.ai/api/v1",
+            model="test/model",
+            api_key="test-key",
+            verified=True,
+        )
+        return mock.patch.multiple(
+            config,
+            provider_is_configured=mock.DEFAULT,
+            effective_provider_credentials=mock.DEFAULT,
+        ), credentials
+
+    def _complete_follow_up_source(self) -> None:
+        topic = cli.read_topic("web-tutor")
+        metadata = dict(topic.metadata)
+        metadata["course_completed"] = True
+        cli.write_topic(topic.path, metadata, topic.body)
+
+    def _persist_pending_follow_up(
+        self, submission_id: str, *, abandoned_claim: bool = False
+    ) -> None:
+        snapshot = application.course("web-tutor")
+        generation = cli.current_topic_generation("web-tutor")
+        self.assertIsNotNone(generation)
+        record = {
+            "schema_version": tutor_service._FOLLOW_UP_SCHEMA_VERSION,
+            "source_slug": "web-tutor",
+            "source_generation": generation,
+            "source_title": snapshot.card.title,
+            "source_goal": snapshot.card.goal,
+            "submission_id": submission_id,
+            "payload_hash": tutor_service._follow_up_payload_hash(
+                "web-tutor", str(generation), "Build editor tools", ()
+            ),
+            "state": "pending",
+            "interests": "Build editor tools",
+            "weak_areas": [],
+            "title": "",
+            "goal": "",
+            "error_code": None,
+            "error_message": None,
+            "created_slug": None,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if abandoned_claim:
+            record["claim"] = {
+                "token": str(uuid4()),
+                "owner_id": str(uuid4()),
+                "owner_pid": os.getpid(),
+                "expires_at": (
+                    datetime.now(timezone.utc) + tutor_service._FOLLOW_UP_CLAIM_TIMEOUT
+                ).isoformat(),
+            }
+        self.assertIsNone(tutor_service._reserve_follow_up_record(record))
+
+    def test_follow_up_proposal_is_durable_idempotent_and_confirmation_creates_once(
+        self,
+    ) -> None:
+        self._complete_follow_up_source()
+        submission_id = str(uuid4())
+        config_patch, credentials = self._ready_provider()
+        with config_patch as configured, mock.patch.object(
+            providers,
+            "chat_completion",
+            return_value=json.dumps(
+                {
+                    "title": "Advanced Vim Automation",
+                    "goal": "Build reliable editor automation with reusable commands.",
+                }
+            ),
+        ) as completion:
+            configured["provider_is_configured"].return_value = True
+            configured["effective_provider_credentials"].return_value = credentials
+            first = tutor_service.request_follow_up_proposal(
+                "web-tutor",
+                interests="Automate repeated editing work",
+                submission_id=submission_id,
+            )
+            replay = tutor_service.request_follow_up_proposal(
+                "web-tutor",
+                interests="Automate repeated editing work",
+                submission_id=submission_id,
+            )
+
+        self.assertEqual(first.state, "ready")
+        self.assertTrue(replay.replayed)
+        completion.assert_called_once()
+        self.assertEqual(len(application.dashboard().courses), 1)
+
+        created = tutor_service.confirm_follow_up_proposal("web-tutor", submission_id)
+        confirmed_replay = tutor_service.confirm_follow_up_proposal(
+            "web-tutor", submission_id
+        )
+
+        self.assertTrue(created.created)
+        self.assertFalse(confirmed_replay.created)
+        self.assertEqual(created.course_slug, confirmed_replay.course_slug)
+        self.assertEqual(len(application.dashboard().courses), 2)
+
+    def test_follow_up_proposal_requires_ready_provider_before_reserving(self) -> None:
+        self._complete_follow_up_source()
+        submission_id = str(uuid4())
+        with mock.patch.object(config, "provider_is_configured", return_value=False):
+            with self.assertRaises(tutor_service.FollowUpProviderNotReadyError):
+                tutor_service.request_follow_up_proposal(
+                    "web-tutor",
+                    interests="Advanced motions",
+                    submission_id=submission_id,
+                )
+
+        self.assertIsNone(tutor_service.follow_up_proposal_status("web-tutor", submission_id))
+
+    def test_follow_up_proposal_failure_is_retryable_without_duplicate_operation(self) -> None:
+        self._complete_follow_up_source()
+        submission_id = str(uuid4())
+        config_patch, credentials = self._ready_provider()
+        with config_patch as configured, mock.patch.object(
+            providers,
+            "chat_completion",
+            side_effect=[
+                providers.ProviderError("provider_unreachable"),
+                json.dumps(
+                    {
+                        "title": "Vim Internals",
+                        "goal": "Understand and extend Vim's editing model.",
+                    }
+                ),
+            ],
+        ) as completion:
+            configured["provider_is_configured"].return_value = True
+            configured["effective_provider_credentials"].return_value = credentials
+            failed = tutor_service.request_follow_up_proposal(
+                "web-tutor",
+                interests="Understand the editor deeply",
+                submission_id=submission_id,
+            )
+            retried = tutor_service.retry_follow_up_proposal("web-tutor", submission_id)
+
+        self.assertEqual(failed.state, "error")
+        self.assertEqual(failed.error_code, "provider_unavailable")
+        self.assertEqual(retried.state, "ready")
+        self.assertEqual(completion.call_count, 2)
+
+    def test_follow_up_proposal_exposes_pending_and_coalesces_duplicate_clicks(
+        self,
+    ) -> None:
+        self._complete_follow_up_source()
+        submission_id = str(uuid4())
+        entered = threading.Event()
+        release = threading.Event()
+        results: list[application.FollowUpProposal] = []
+
+        def delayed_completion(*_args, **_kwargs) -> str:
+            entered.set()
+            self.assertTrue(release.wait(timeout=2))
+            return json.dumps(
+                {
+                    "title": "Vim Plugin Engineering",
+                    "goal": "Build maintainable Vim plugins around deliberate workflows.",
+                }
+            )
+
+        config_patch, credentials = self._ready_provider()
+        with config_patch as configured, mock.patch.object(
+            providers, "chat_completion", side_effect=delayed_completion
+        ) as completion:
+            configured["provider_is_configured"].return_value = True
+            configured["effective_provider_credentials"].return_value = credentials
+            worker = threading.Thread(
+                target=lambda: results.append(
+                    tutor_service.request_follow_up_proposal(
+                        "web-tutor",
+                        interests="Build editor tools",
+                        submission_id=submission_id,
+                    )
+                )
+            )
+            worker.start()
+            self.assertTrue(entered.wait(timeout=2))
+
+            pending = tutor_service.follow_up_proposal_status(
+                "web-tutor", submission_id
+            )
+            duplicate = tutor_service.request_follow_up_proposal(
+                "web-tutor",
+                interests="Build editor tools",
+                submission_id=submission_id,
+            )
+            release.set()
+            worker.join(timeout=2)
+
+        self.assertFalse(worker.is_alive())
+        self.assertIsNotNone(pending)
+        assert pending is not None
+        self.assertEqual(pending.state, "pending")
+        self.assertEqual(duplicate.state, "pending")
+        self.assertTrue(duplicate.replayed)
+        self.assertEqual(results[0].state, "ready")
+        completion.assert_called_once()
+
+    def test_follow_up_retry_atomically_coalesces_concurrent_provider_calls(self) -> None:
+        self._complete_follow_up_source()
+        submission_id = str(uuid4())
+        entered = threading.Event()
+        release = threading.Event()
+        retries: list[application.FollowUpProposal] = []
+        provider_calls = 0
+
+        def delayed_retry(*_args, **_kwargs) -> str:
+            nonlocal provider_calls
+            provider_calls += 1
+            if provider_calls == 1:
+                raise providers.ProviderError("provider_unreachable")
+            entered.set()
+            self.assertTrue(release.wait(timeout=2))
+            return json.dumps(
+                {
+                    "title": "Vim Plugin Engineering",
+                    "goal": "Build maintainable Vim plugins around deliberate workflows.",
+                }
+            )
+
+        config_patch, credentials = self._ready_provider()
+        with config_patch as configured, mock.patch.object(
+            providers,
+            "chat_completion",
+            side_effect=delayed_retry,
+        ) as completion:
+            configured["provider_is_configured"].return_value = True
+            configured["effective_provider_credentials"].return_value = credentials
+            failed = tutor_service.request_follow_up_proposal(
+                "web-tutor",
+                interests="Build editor tools",
+                submission_id=submission_id,
+            )
+            self.assertEqual(failed.state, "error")
+
+            worker = threading.Thread(
+                target=lambda: retries.append(
+                    tutor_service.retry_follow_up_proposal(
+                        "web-tutor", submission_id
+                    )
+                )
+            )
+            worker.start()
+            self.assertTrue(entered.wait(timeout=2))
+            duplicate = tutor_service.retry_follow_up_proposal(
+                "web-tutor", submission_id
+            )
+            release.set()
+            worker.join(timeout=2)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(duplicate.state, "pending")
+        self.assertTrue(duplicate.replayed)
+        self.assertEqual(retries[0].state, "ready")
+        self.assertEqual(completion.call_count, 2)
+
+    def test_persisted_pending_follow_up_can_resume_after_restart(self) -> None:
+        self._complete_follow_up_source()
+        submission_id = str(uuid4())
+        self._persist_pending_follow_up(submission_id, abandoned_claim=True)
+        with tutor_service._FOLLOW_UP_RUNNING_GUARD:
+            tutor_service._FOLLOW_UP_RUNNING.clear()
+        config_patch, credentials = self._ready_provider()
+
+        with config_patch as configured, mock.patch.object(
+            providers,
+            "chat_completion",
+            return_value=json.dumps(
+                {
+                    "title": "Vim Plugin Engineering",
+                    "goal": "Build maintainable Vim plugins around deliberate workflows.",
+                }
+            ),
+        ) as completion:
+            configured["provider_is_configured"].return_value = True
+            configured["effective_provider_credentials"].return_value = credentials
+            resumed = tutor_service.retry_follow_up_proposal(
+                "web-tutor", submission_id
+            )
+
+        self.assertEqual(resumed.state, "ready")
+        completion.assert_called_once()
+
+    def test_persisted_pending_follow_up_has_one_cross_process_provider_owner(
+        self,
+    ) -> None:
+        self._complete_follow_up_source()
+        submission_id = str(uuid4())
+        self._persist_pending_follow_up(submission_id)
+        context = multiprocessing.get_context("spawn")
+        start = context.Event()
+        release = context.Event()
+        ready = context.Queue()
+        provider_calls = context.Queue()
+        results = context.Queue()
+        processes = [
+            context.Process(
+                target=_retry_follow_up_process,
+                args=(
+                    str(self.home),
+                    submission_id,
+                    ready,
+                    start,
+                    release,
+                    provider_calls,
+                    results,
+                ),
+            )
+            for _index in range(2)
+        ]
+
+        try:
+            for process in processes:
+                process.start()
+            for _process in processes:
+                ready.get(timeout=5)
+            start.set()
+            provider_calls.get(timeout=5)
+            with self.assertRaises(queue.Empty):
+                provider_calls.get(timeout=0.5)
+            release.set()
+            outcomes = [results.get(timeout=5) for _process in processes]
+        finally:
+            release.set()
+            for process in processes:
+                process.join(timeout=5)
+                if process.is_alive():
+                    process.terminate()
+                    process.join(timeout=5)
+
+        self.assertNotIn("error", {outcome[0] for outcome in outcomes})
+        self.assertEqual({outcome[0] for outcome in outcomes}, {"pending", "ready"})
+        with self.assertRaises(queue.Empty):
+            provider_calls.get_nowait()
+        self.assertEqual(
+            tutor_service.follow_up_proposal_status("web-tutor", submission_id).state,
+            "ready",
+        )
+
+    def test_stale_follow_up_claim_cannot_publish_over_new_owner(self) -> None:
+        self._complete_follow_up_source()
+        submission_id = str(uuid4())
+        self._persist_pending_follow_up(submission_id)
+        first_record, first_token = tutor_service._claim_follow_up_record(
+            "web-tutor", submission_id, "first-owner"
+        )
+        self.assertIsNotNone(first_token)
+        second_record, second_token = tutor_service._claim_follow_up_record(
+            "web-tutor", submission_id, "second-owner"
+        )
+        self.assertIsNotNone(second_token)
+        assert first_token is not None
+        assert second_token is not None
+
+        stale_result = tutor_service._finish_claimed_follow_up_record(
+            first_record,
+            first_token,
+            {"state": "ready", "title": "Stale title", "goal": "Stale goal"},
+        )
+        current = tutor_service.follow_up_proposal_status("web-tutor", submission_id)
+
+        self.assertTrue(stale_result.replayed)
+        self.assertEqual(stale_result.state, "pending")
+        self.assertIsNotNone(current)
+        assert current is not None
+        self.assertEqual(current.state, "pending")
+        committed = tutor_service._finish_claimed_follow_up_record(
+            second_record,
+            second_token,
+            {"state": "ready", "title": "Current title", "goal": "Current goal"},
+        )
+        self.assertEqual(committed.state, "ready")
+        self.assertEqual(committed.title, "Current title")
 
     def _create_interview_course(self, topic: str = "Interview Curriculum") -> str:
         cli.cmd_new(

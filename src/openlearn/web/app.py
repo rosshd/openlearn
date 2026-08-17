@@ -33,7 +33,23 @@ class WebServices(Protocol):
 
     def configure_provider(self, request: Any) -> Any: ...
 
-    def dashboard(self) -> Any: ...
+    def dashboard(self, selected_slug: str | None = None) -> Any: ...
+
+    def activate_course(self, slug: str) -> Any: ...
+
+    def course_settings(self, slug: str) -> Any: ...
+
+    def preview_course_settings(self, slug: str, request: Any) -> Any: ...
+
+    def confirm_course_settings(self, slug: str, request: Any) -> Any: ...
+
+    def course_deletion(self, slug: str) -> Any: ...
+
+    def delete_course(self, slug: str, request: Any) -> Any: ...
+
+    def course_growth(self, slug: str, request: Any) -> Any: ...
+
+    def follow_up_proposal(self, slug: str, request: Any) -> Any: ...
 
     def course_templates(self) -> Any: ...
 
@@ -71,7 +87,7 @@ class WebServices(Protocol):
 
     def progress(self) -> Any: ...
 
-    def due_reviews(self) -> Any: ...
+    def due_reviews(self, slug: str | None = None) -> Any: ...
 
     def grade_review(self, request: Any) -> Any: ...
 
@@ -104,8 +120,40 @@ class PlaceholderServices:
     def configure_provider(self, request: Any) -> dict[str, Any]:
         return {"ok": False, "error": self.reason}
 
-    def dashboard(self) -> dict[str, Any]:
-        return {"courses": self._courses, "active_course": None, "due_reviews": 0}
+    def dashboard(self, selected_slug: str | None = None) -> dict[str, Any]:
+        return {
+            "courses": self._courses,
+            "active_course": None,
+            "selected_course": None,
+            "active_slug": None,
+            "selected_slug": None,
+            "due_reviews": 0,
+            "starters": [],
+        }
+
+    def activate_course(self, slug: str) -> dict[str, Any]:
+        return {"ok": False, "slug": slug, "error": self.reason}
+
+    def course_settings(self, slug: str) -> dict[str, Any]:
+        return {"ok": False, "missing": True, "slug": slug, "error": self.reason}
+
+    def preview_course_settings(self, slug: str, request: Any) -> dict[str, Any]:
+        return {"ok": False, "slug": slug, "error": self.reason}
+
+    def confirm_course_settings(self, slug: str, request: Any) -> dict[str, Any]:
+        return {"ok": False, "slug": slug, "error": self.reason}
+
+    def course_deletion(self, slug: str) -> dict[str, Any]:
+        return {"ok": False, "missing": True, "slug": slug, "error": self.reason}
+
+    def delete_course(self, slug: str, request: Any) -> dict[str, Any]:
+        return {"ok": False, "slug": slug, "error": self.reason}
+
+    def course_growth(self, slug: str, request: Any) -> dict[str, Any]:
+        return {"ok": False, "slug": slug, "error": self.reason}
+
+    def follow_up_proposal(self, slug: str, request: Any) -> dict[str, Any]:
+        return {"ok": False, "slug": slug, "error": self.reason}
 
     def course_templates(self) -> list[dict[str, Any]]:
         return []
@@ -168,7 +216,7 @@ class PlaceholderServices:
     def progress(self) -> dict[str, Any]:
         return {"courses": []}
 
-    def due_reviews(self) -> dict[str, Any]:
+    def due_reviews(self, slug: str | None = None) -> dict[str, Any]:
         return {"items": [], "count": 0}
 
     def grade_review(self, request: Any) -> dict[str, Any]:

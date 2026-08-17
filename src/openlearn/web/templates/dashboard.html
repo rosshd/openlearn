@@ -1,63 +1,204 @@
 {% extends "base.html" %}
 {% block content %}
-<section class="dashboard-shell" aria-labelledby="dashboard-title">
+<section class="dashboard-shell course-library-dashboard" aria-labelledby="dashboard-title"
+  data-selected-course="{{ dashboard.selected_slug or '' }}" data-active-course="{{ dashboard.active_slug or '' }}">
   <div class="section-heading">
     <div>
-      <p class="eyebrow">Your workbench</p>
-      <h1 id="dashboard-title">{% if dashboard.courses %}Pick up where you left off.{% else %}Choose what you want to learn.{% endif %}</h1>
+      <p class="eyebrow">Local-first learning</p>
+      <h1 id="dashboard-title">{% if dashboard.courses %}Your courses{% else %}What do you want to learn?{% endif %}</h1>
     </div>
   </div>
 
-  {% if dashboard.active_course %}
-  <article class="resume-bench">
-    <div>
-      <p class="eyebrow">Ready to resume</p>
-      <h2>{{ dashboard.active_course.title }}</h2>
-      <p><strong>Current objective:</strong> {{ dashboard.active_course.next_move or dashboard.active_course.summary }}</p>
-    </div>
-    <div class="resume-meta">
-      <span>{{ dashboard.active_course.progress or 0 }}% {% if dashboard.active_course.is_interview %}first-pass coverage{% else %}complete{% endif %}</span>
-      <a class="primary-action" href="{{ url_for('focus', slug=dashboard.active_course.slug) }}">Recommended next action: return to the bench <span aria-hidden="true">→</span></a>
-      <a class="quiet-link" href="{{ url_for('progress') }}">View detailed progress</a>
-    </div>
-  </article>
-  {% else %}
-  <article class="empty-bench">
-    <div class="bench-grid" aria-hidden="true"></div>
-    <p class="eyebrow">Clear bench</p>
-    <h2>Start with a goal, not a syllabus.</h2>
-    <p>Choose a starter course or tell openlearn what you want to make sense of. Teaching begins after one short context prompt.</p>
-    <a class="primary-action" href="{{ url_for('new_course') }}">Choose a starting point <span aria-hidden="true">→</span></a>
-  </article>
-  {% endif %}
-
-  <div class="dashboard-grid">
+  <div class="dashboard-grid course-library-grid">
     <section class="course-list" aria-labelledby="courses-title">
       <div class="panel-heading">
-        <h2 id="courses-title">Courses</h2>
-        <div class="panel-heading-actions">
-          {% if dashboard.courses %}<a class="primary-action compact course-add-action" href="{{ url_for('new_course') }}">Add another course <span aria-hidden="true">+</span></a>{% endif %}
-        </div>
+        <h2 id="courses-title">Your courses</h2>
+        <details class="new-course-menu">
+          <summary class="primary-action compact">New course <span aria-hidden="true">+</span></summary>
+          <div aria-label="New course choices">
+            <a href="{{ url_for('new_course') }}#starter-courses"><strong>Starter course</strong><small>Begin with a proven course path.</small></a>
+            <a href="{{ url_for('new_course') }}#custom-course"><strong>Custom course</strong><small>Describe anything you want to learn.</small></a>
+            <a href="{{ url_for('quick_learn') }}"><strong>Quick Learn</strong><small>Learn from one bounded source.</small></a>
+          </div>
+        </details>
       </div>
-      {% for course in dashboard.courses %}
-      <a class="course-row" href="{{ url_for('focus', slug=course.slug) }}">
-        <span><strong>{{ course.title }}</strong><small>{{ course.current_unit or 'Ready to learn' }}</small></span>
-        <span class="course-progress">{{ course.progress or 0 }}%{% if course.is_interview %} covered{% endif %}</span>
-      </a>
+
+      {% if dashboard.courses %}
+        <div class="course-rows" aria-label="Saved courses">
+        {% for course in dashboard.courses %}
+          <a class="course-row{% if course.selected %} is-selected{% endif %}" href="{{ url_for('dashboard') }}?course={{ course.slug }}"
+            data-course-preview-link data-course-slug="{{ course.slug }}" data-course-title="{{ course.title }}"
+            aria-controls="selected-course-preview" {% if course.selected %}aria-current="true"{% endif %}>
+            <span>
+              <strong>{{ course.title }}</strong>
+              <small>{{ course.current_topic }}</small>
+              <small>{{ course.coverage_summary }}</small>
+            </span>
+            <span class="course-row-state">
+              {% if course.active %}<small class="status-chip">Active</small>{% endif %}
+              {% if course.review_due %}<small class="status-chip">{{ course.review_due }} due</small>{% endif %}
+              {% if course.first_pass_complete %}<small class="status-chip">First pass complete</small>{% endif %}
+            </span>
+          </a>
+        {% endfor %}
+        </div>
+        <a class="preview-jump quiet-link" href="#selected-course-preview">View selected course preview</a>
       {% else %}
-      <p class="quiet-copy">Your active courses will stay here, ready on this machine.</p>
-      {% endfor %}
+        <div class="empty-course-library">
+          <p>Choose a starter with a ready-made path, or create a course around your own goal.</p>
+          <div class="starter-grid" aria-label="Recommended starter courses">
+          {% for starter in dashboard.starters %}
+            <a class="starter-tile" href="{{ url_for('new_course') }}?template={{ starter.id }}">
+              <span class="starter-index">{{ "%02d"|format(loop.index) }}</span>
+              <strong>{{ starter.title }}</strong>
+              <small>{{ starter.description }}</small>
+            </a>
+          {% endfor %}
+          </div>
+        </div>
+      {% endif %}
     </section>
-    <aside class="review-panel" aria-labelledby="review-title">
-      <p class="eyebrow">Review tray</p>
-      <h2 id="review-title">{{ dashboard.due_reviews or 0 }} due</h2>
-      <p>Reviews appear when your learning evidence says a concept is ready to revisit.</p>
-      <a class="primary-action compact" href="{{ url_for('review') }}">Review what is due</a>
+
+    {% if dashboard.selected_course %}
+    {% set course = dashboard.selected_course %}
+    <section class="course-preview" id="selected-course-preview" tabindex="-1"
+      data-course-preview aria-labelledby="selected-course-title">
+      <div class="panel-heading">
+        <div>
+          <p class="eyebrow">{% if course.active %}Active course{% else %}Course preview{% endif %}</p>
+          <h2 id="selected-course-title">{{ course.title }}</h2>
+        </div>
+        <a class="quiet-link" href="{{ url_for('course_settings', slug=course.slug) }}">Course settings</a>
+      </div>
+      <p>{{ course.goal }}</p>
+
+      <div class="course-next-move">
+        <p class="eyebrow">Current topic</p>
+        <h3>{{ course.current_topic }}</h3>
+        <p>{{ course.coverage_summary }}</p>
+        {% if course.blocker %}
+        <div class="inline-notice" role="status">
+          <strong>{{ course.blocker.message }}</strong>
+          <p>{{ course.blocker.action }} to keep this course moving.</p>
+        </div>
+        {% endif %}
+        <form class="course-activation-form" method="post" action="{{ url_for('activate_course', slug=course.slug) }}">
+          <button class="primary-action" type="submit">{% if course.blocker %}{{ course.blocker.action }}{% else %}Continue learning{% endif %} <span aria-hidden="true">→</span></button>
+        </form>
+        {% if not course.active and dashboard.active_course %}
+        <p class="field-note">{{ dashboard.active_course.title }} stays active until you continue this course.</p>
+        {% endif %}
+      </div>
+
+      {% if course.upcoming %}
+      <section aria-labelledby="upcoming-title">
+        <p class="eyebrow">Coming up</p>
+        <h3 id="upcoming-title">Next in this course</h3>
+        <ol class="course-path-preview">
+        {% for item in course.upcoming %}
+          <li><strong>{{ item.title }}</strong>{% if item.unit_title and item.unit_title != item.title %}<small>{{ item.unit_title }}</small>{% endif %}</li>
+        {% endfor %}
+        </ol>
+      </section>
+      {% endif %}
+
+      <details class="course-path-disclosure">
+        <summary>View full course path</summary>
+        <ol>
+        {% for item in course.path %}
+          <li data-path-status="{{ item.status }}"><span>{{ item.title }}</span><small>{{ item.status|replace('-', ' ')|title }}</small></li>
+        {% else %}
+          <li>The course path will appear after setup.</li>
+        {% endfor %}
+        </ol>
+      </details>
+
+      {% if course.review.actionable %}
+      <section class="course-action-panel" aria-labelledby="review-action-title">
+        <p class="eyebrow">Ready to revisit</p>
+        <h3 id="review-action-title">{{ course.review.due }} review item{{ '' if course.review.due == 1 else 's' }} due</h3>
+        {% if course.review.kind == 'canonical' %}
+        <form method="post" action="{{ url_for('course_growth', slug=course.slug) }}">
+          <input type="hidden" name="action" value="practice"><input type="hidden" name="submission_id" value="{{ review_submission_id }}">
+          <button class="primary-action compact" type="submit">Start focused review</button>
+        </form>
+        {% else %}
+        <a class="primary-action compact" href="{{ url_for('review') }}?course={{ course.slug }}">Start focused review</a>
+        {% endif %}
+      </section>
+      {% endif %}
+
+      {% if course.first_pass_complete %}
+      <section class="course-action-panel" aria-labelledby="growth-title">
+        <p class="eyebrow">First pass complete</p>
+        <h3 id="growth-title">Keep building readiness</h3>
+        <p>{{ course.readiness_summary }}</p>
+        {% if course.weak_areas %}<p><strong>Needs more work:</strong> {{ course.weak_areas|join(', ') }}</p>{% endif %}
+        <div class="form-footer">
+          <form method="post" action="{{ url_for('course_growth', slug=course.slug) }}">
+            <input type="hidden" name="action" value="practice"><input type="hidden" name="submission_id" value="{{ submission_id }}">
+            <button type="submit">Practice weak areas</button>
+          </form>
+          <form method="post" action="{{ url_for('course_growth', slug=course.slug) }}">
+            <input type="hidden" name="action" value="deepen"><input type="hidden" name="submission_id" value="{{ secondary_submission_id }}">
+            <button type="submit">Go deeper</button>
+          </form>
+        </div>
+      </section>
+      {% endif %}
+
+      {% if course.recommendation %}
+      <section class="course-action-panel follow-up-panel" data-follow-up-panel aria-labelledby="follow-up-title">
+        <p class="eyebrow">Suggested next course</p>
+        <h3 id="follow-up-title">{{ course.recommendation.title }}</h3>
+        <p>{{ course.recommendation.goal }}</p>
+        {% if course.recommendation.kind == 'curated' %}
+          <a class="primary-action compact" href="{{ url_for('new_course') }}?template={{ course.recommendation.template_id }}">Review this course</a>
+        {% else %}
+          {% if follow_up_proposal and follow_up_proposal.ok %}
+            {% if follow_up_proposal.state == 'ready' %}
+              <p><strong>{{ follow_up_proposal.title }}</strong><br>{{ follow_up_proposal.goal }}</p>
+              <form method="post" action="{{ url_for('course_follow_up', slug=course.slug) }}"
+                data-follow-up-form data-endpoint="{{ url_for('follow_up_api', slug=course.slug) }}">
+                <input type="hidden" name="action" value="confirm"><input type="hidden" name="submission_id" value="{{ follow_up_proposal.submission_id }}">
+                <button class="primary-action compact" type="submit">Create this course</button>
+              </form>
+            {% elif follow_up_proposal.state == 'error' %}
+              <p role="alert">{{ follow_up_proposal.error_message }}</p>
+              <form method="post" action="{{ url_for('course_follow_up', slug=course.slug) }}"
+                data-follow-up-form data-endpoint="{{ url_for('follow_up_api', slug=course.slug) }}">
+                <input type="hidden" name="action" value="retry"><input type="hidden" name="submission_id" value="{{ follow_up_proposal.submission_id }}">
+                <button type="submit">Retry proposal</button>
+              </form>
+            {% else %}
+              <p class="follow-up-status" role="status">This proposal was interrupted or is still being built.</p>
+              <form method="post" action="{{ url_for('course_follow_up', slug=course.slug) }}"
+                data-follow-up-form data-endpoint="{{ url_for('follow_up_api', slug=course.slug) }}">
+                <input type="hidden" name="action" value="retry"><input type="hidden" name="submission_id" value="{{ follow_up_proposal.submission_id }}">
+                <button type="submit">Resume proposal</button>
+              </form>
+            {% endif %}
+          {% else %}
+            <form method="post" action="{{ url_for('course_follow_up', slug=course.slug) }}"
+              data-follow-up-form data-endpoint="{{ url_for('follow_up_api', slug=course.slug) }}">
+              <label for="follow-up-interests">What should it focus on? <span class="optional">Optional</span></label>
+              <textarea id="follow-up-interests" name="interests" maxlength="2000" rows="2"></textarea>
+              <input type="hidden" name="action" value="generate"><input type="hidden" name="submission_id" data-uuid value="{{ follow_up_submission_id }}">
+              <button class="primary-action compact" type="submit">Propose a focused course</button>
+            </form>
+          {% endif %}
+          <p class="follow-up-status" role="status" aria-live="polite" data-follow-up-status hidden></p>
+        {% endif %}
+      </section>
+      {% endif %}
+    </section>
+    {% else %}
+    <aside class="course-preview empty-preview" id="selected-course-preview" aria-label="Course preview">
+      <p class="eyebrow">Course preview</p>
+      <h2>Your next course starts here.</h2>
+      <p>Select a starter or create a course around a goal you care about.</p>
     </aside>
-  </div>
-  <div class="dashboard-grid" aria-label="Workbench entry points">
-    <a class="work-panel" href="{{ url_for('quick_learn') }}"><strong>Quick Learn</strong><br><small>Start from a bounded local source or public repository.</small></a>
-    <div class="work-panel"><strong>Settings and local data</strong><br><a href="{{ url_for('setup') }}">Provider settings</a> · <a href="{{ url_for('data') }}">Data management</a></div>
+    {% endif %}
   </div>
 </section>
 {% endblock %}

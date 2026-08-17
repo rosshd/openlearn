@@ -3,6 +3,8 @@
   "slug": "algorithms",
   "goal": "Understand and implement core CS algorithms and data structures",
   "tags": ["cs", "intermediate"],
+  "specializes_template_ids": ["technical-interview-prep"],
+  "specializes_tags": ["algorithms", "data-structures"],
   "units": [
     "Unit 1: Complexity Analysis - Big O, time vs space, best/worst/average",
     "Unit 2: Arrays and Strings - two-pointer, sliding window, in-place ops",

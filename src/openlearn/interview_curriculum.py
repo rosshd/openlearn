@@ -240,7 +240,7 @@ class MaterializedInterviewRoute:
 
 CANONICAL_STATE_SCHEMA_VERSION = 1
 
-ProgressionIntent = Literal["continue", "skip", "revisit", "practice"]
+ProgressionIntent = Literal["continue", "skip", "revisit", "practice", "deepen"]
 
 
 @dataclass(frozen=True)
@@ -924,7 +924,7 @@ def resolve_progression_target(
     now: datetime | None = None,
 ) -> ProgressionResolution:
     """Resolve one deterministic instructional target without awarding mastery."""
-    if intent not in {"continue", "skip", "revisit", "practice"}:
+    if intent not in {"continue", "skip", "revisit", "practice", "deepen"}:
         raise ValueError("unsupported interview progression intent")
     state = copy.deepcopy(dict(canonical_state))
     bundle_id = state.get("bundle_id")
@@ -1013,7 +1013,7 @@ def resolve_progression_target(
             raise CurriculumBundleError("requested interview skill is absent from the route")
         selected = by_id[str(explicit_skill_id)]
         reason = "explicit_revisit"
-    elif intent == "practice":
+    elif intent in {"practice", "deepen"}:
         candidates = [(item, skill_id) for item, skill_id in route_items if skill_id in exposed]
         due_candidates = [pair for pair in candidates if pair[1] in due]
         weak_candidates = [
@@ -1027,7 +1027,11 @@ def resolve_progression_target(
         remaining = [
             pair for pair in candidates if pair[1] not in due | weak and pair[1] in ready
         ]
-        pool = due_candidates or weak_candidates or unready_candidates or remaining
+        pool = (
+            weak_candidates or unready_candidates or remaining or due_candidates
+            if intent == "deepen"
+            else due_candidates or weak_candidates or unready_candidates or remaining
+        )
         selected = pool[commit_index % len(pool)][0] if pool else None
         if selected is None:
             return ProgressionResolution(state, None, "caught_up", caught_up=True)
@@ -1039,7 +1043,7 @@ def resolve_progression_target(
         )
         evidence_kind = (
             "delayed_retrieval"
-            if selected_skill in due
+            if selected_skill in due and intent == "practice"
             else _next_evidence_kind(state, selected, bundle)
         )
         target = _progression_target(
@@ -1051,7 +1055,9 @@ def resolve_progression_target(
         )
         state["committed_check_target"] = _check_target(target, practice=True)
         return ProgressionResolution(
-            state, target, "practice_now"
+            state,
+            target,
+            "explicit_deepen" if intent == "deepen" else "practice_now",
         )
     else:
         excluded = {deferred_skill_id} if deferred_skill_id else set()

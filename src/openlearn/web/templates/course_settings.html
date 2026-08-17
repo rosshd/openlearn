@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="create-shell course-management-shell" aria-labelledby="course-settings-title">
+  <div class="section-heading">
+    <div>
+      <p class="eyebrow">Course settings</p>
+      <h1 id="course-settings-title">Shape {{ settings.title }}</h1>
+    </div>
+    <a class="quiet-link" href="{{ url_for('dashboard') }}?course={{ settings.slug }}">Back to course preview</a>
+  </div>
+
+  {% if settings_error %}<div class="error-summary" role="alert" tabindex="-1">{{ settings_error }}</div>{% endif %}
+
+  <form class="work-panel form-stack course-settings-form" method="post" action="{{ url_for('preview_course_settings', slug=settings.slug) }}">
+    <label for="settings-title">Course name</label>
+    <input id="settings-title" name="title" maxlength="200" required value="{{ settings.title }}">
+    <label for="settings-goal">Learning goal</label>
+    <textarea id="settings-goal" name="goal" rows="4" maxlength="4000" required>{{ settings.goal }}</textarea>
+    <label for="settings-difficulty">Learning depth</label>
+    <select id="settings-difficulty" name="difficulty">
+      <option value="efficient" {% if settings.difficulty == 'efficient' %}selected{% endif %}>Efficient - essentials first</option>
+      <option value="proficient" {% if settings.difficulty == 'proficient' %}selected{% endif %}>Proficient - balanced practice</option>
+      <option value="deep" {% if settings.difficulty == 'deep' %}selected{% endif %}>Deep - more explanation and checks</option>
+    </select>
+    <div class="field-grid">
+      <label for="weekly-minutes">Minutes each week<input id="weekly-minutes" name="weekly_minutes" type="number" min="15" max="10080" required value="{{ settings.weekly_minutes }}"></label>
+      <label for="session-minutes">Minutes each session<input id="session-minutes" name="session_minutes" type="number" min="15" max="10080" required value="{{ settings.session_minutes }}"></label>
+    </div>
+
+    {% if settings.is_interview %}
+    <fieldset>
+      <legend>Interview target</legend>
+      {% set role = settings.role_family or settings.interview.role_family or '' %}
+      <label for="role-family">Role family
+        <select id="role-family" name="role_family">{% for item in settings.role_options %}<option value="{{ item.value }}" {% if role == item.value %}selected{% endif %}>{{ item.label }}</option>{% endfor %}</select>
+      </label>
+      {% set level = settings.target_level or settings.interview.target_level or '' %}
+      <label for="target-level">Target level
+        <select id="target-level" name="target_level">{% for item in settings.level_options %}<option value="{{ item.value }}" {% if level == item.value %}selected{% endif %}>{{ item.label }}</option>{% endfor %}</select>
+      </label>
+      <label for="interview-date">Interview date<input id="interview-date" name="interview_date" type="date" value="{{ settings.interview_date or settings.interview.interview_date or '' }}"></label>
+      <label for="interview-focus">Interview focus
+        <select id="interview-focus" name="interview_focus">
+          {% set focus = settings.interview_focus or settings.interview.interview_focus or '' %}
+          <option value="" {% if not focus %}selected{% endif %}>Keep current focus</option>
+          <option value="coding" {% if focus == 'coding' %}selected{% endif %}>Coding interviews</option>
+          <option value="balanced" {% if focus == 'balanced' %}selected{% endif %}>Coding and system design</option>
+          <option value="system_design" {% if focus == 'system_design' %}selected{% endif %}>System-design heavy</option>
+        </select>
+      </label>
+    </fieldset>
+    {% else %}
+      <input type="hidden" name="role_family" value=""><input type="hidden" name="target_level" value=""><input type="hidden" name="interview_date" value=""><input type="hidden" name="interview_focus" value="">
+    {% endif %}
+
+    <label for="course-outline">Replace course outline <span class="optional">Optional</span></label>
+    <textarea id="course-outline" name="outline" rows="8" maxlength="20000" placeholder="Leave blank to keep the current path. Use numbered units when replacing a custom course outline.">{{ settings.outline or '' }}</textarea>
+    <details>
+      <summary>Current course path</summary>
+      <ol>{% for item in settings.path %}<li>{{ item.title }}</li>{% else %}<li>The path has not been built yet.</li>{% endfor %}</ol>
+    </details>
+    <div class="form-footer">
+      <p class="field-note">Preview changes before they are saved. Your course address and compatible learning evidence stay the same.</p>
+      <button class="primary-action" type="submit">Preview changes</button>
+    </div>
+  </form>
+
+  {% if settings_preview %}
+  <section class="work-panel settings-confirmation" aria-labelledby="confirm-settings-title">
+    <p class="eyebrow">Review changes</p>
+    <h2 id="confirm-settings-title">Confirm changes</h2>
+    <dl>
+      <dt>Name</dt><dd>{{ settings_preview.title }}</dd>
+      <dt>Goal</dt><dd>{{ settings_preview.goal }}</dd>
+      <dt>Learning depth</dt><dd>{{ settings_preview.difficulty|title }}</dd>
+      <dt>Pace</dt><dd>{{ settings_preview.weekly_minutes }} minutes weekly, {{ settings_preview.session_minutes }} minutes per session</dd>
+    </dl>
+    <form method="post" action="{{ url_for('confirm_course_settings', slug=settings.slug) }}">
+      <input type="hidden" name="title" value="{{ settings.title }}">
+      <input type="hidden" name="goal" value="{{ settings.goal }}">
+      <input type="hidden" name="difficulty" value="{{ settings.difficulty }}">
+      <input type="hidden" name="weekly_minutes" value="{{ settings.weekly_minutes }}">
+      <input type="hidden" name="session_minutes" value="{{ settings.session_minutes }}">
+      <input type="hidden" name="outline" value="{{ settings.outline or '' }}">
+      <input type="hidden" name="role_family" value="{{ settings.role_family or '' }}">
+      <input type="hidden" name="target_level" value="{{ settings.target_level or '' }}">
+      <input type="hidden" name="interview_date" value="{{ settings.interview_date or '' }}">
+      <input type="hidden" name="interview_focus" value="{{ settings.interview_focus or '' }}">
+      <input type="hidden" name="expected_payload_hash" value="{{ settings_preview.payload_hash }}">
+      <input type="hidden" name="submission_id" value="{{ submission_id }}">
+      <button class="primary-action" type="submit">Save course settings</button>
+    </form>
+  </section>
+  {% endif %}
+
+  <section class="work-panel danger-zone" aria-labelledby="danger-zone-title">
+    <p class="eyebrow">Course management</p>
+    <h2 id="danger-zone-title">Permanent deletion</h2>
+    <p>Remove this course and its owned learning data after reviewing the consequences.</p>
+    <a class="quiet-link" href="{{ url_for('course_deletion', slug=settings.slug) }}">Review permanent deletion</a>
+  </section>
+</section>
+{% endblock %}

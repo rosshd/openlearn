@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="create-shell course-management-shell" aria-labelledby="delete-course-title">
+  <div class="section-heading">
+    <div><p class="eyebrow">Permanent deletion</p><h1 id="delete-course-title">Delete {{ deletion.title }}?</h1></div>
+    <a class="quiet-link" href="{{ url_for('course_settings', slug=deletion.slug) }}">Back to course settings</a>
+  </div>
+
+  {% if deletion_error %}<div class="error-summary" role="alert" tabindex="-1">{{ deletion_error }}</div>{% endif %}
+
+  <section class="work-panel danger-zone deletion-consequences">
+    <h2>This cannot be undone.</h2>
+    <p>Openlearn will permanently remove the following local data owned by this course:</p>
+    <ul>{% for item in deletion.affected_data %}<li>{{ item }}</li>{% endfor %}</ul>
+    <p>Other courses, global learning activity, and your tutor connection remain in place.</p>
+    <a class="primary-action compact" href="{{ url_for('data') }}">Back up all local data</a>
+  </section>
+
+  <form class="work-panel form-stack deletion-confirmation" method="post" action="{{ url_for('delete_course', slug=deletion.slug) }}">
+    <input type="hidden" name="topic_generation" value="{{ deletion.topic_generation }}">
+    <label for="confirmation-title">Type the exact course name: <strong>{{ deletion.title }}</strong></label>
+    <input id="confirmation-title" name="confirmation_title" autocomplete="off" required>
+    <label for="confirmation-slug">Type the exact course ID: <strong>{{ deletion.slug }}</strong></label>
+    <input id="confirmation-slug" name="confirmation_slug" autocomplete="off" required>
+    <div class="form-footer">
+      <a class="quiet-link" href="{{ url_for('dashboard') }}?course={{ deletion.slug }}">Keep this course</a>
+      <button class="primary-action destructive" type="submit">Permanently delete course</button>
+    </div>
+  </form>
+</section>
+{% endblock %}

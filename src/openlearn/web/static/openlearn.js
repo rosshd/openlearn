@@ -68,9 +68,12 @@ function formPayload(form) {
   return payload;
 }
 
-for (const uuidField of document.querySelectorAll("[data-uuid]")) {
-  if (!uuidField.value) uuidField.value = crypto.randomUUID();
+function initializeUuidFields(scope = document) {
+  for (const uuidField of scope.querySelectorAll("[data-uuid]")) {
+    if (!uuidField.value) uuidField.value = crypto.randomUUID();
+  }
 }
+initializeUuidFields();
 
 const providerSelect = document.querySelector("#provider");
 const providerModel = document.querySelector("#model");
@@ -216,6 +219,168 @@ for (const form of document.querySelectorAll("[data-enter-flow]")) {
     else form.requestSubmit();
   });
 }
+
+let dashboardPreviewRequest = 0;
+const DASHBOARD_RENDERED = "rendered";
+const DASHBOARD_STALE = "stale";
+const DASHBOARD_UNAVAILABLE = "unavailable";
+
+function dashboardUrlForCourse(slug, proposal = null) {
+  const url = new URL(window.location.href);
+  url.hash = "";
+  url.searchParams.set("course", slug);
+  if (proposal) url.searchParams.set("proposal", proposal);
+  else url.searchParams.delete("proposal");
+  return url;
+}
+
+async function renderDashboard(url, {history = "push", focusSlug = null} = {}) {
+  const shell = document.querySelector("[data-selected-course]");
+  if (!shell) return DASHBOARD_UNAVAILABLE;
+  const requestId = ++dashboardPreviewRequest;
+  shell.dataset.previewLoading = "true";
+  shell.setAttribute("aria-busy", "true");
+  try {
+    const response = await fetch(url, {
+      headers: {Accept: "text/html"},
+      credentials: "same-origin",
+    });
+    if (!response.ok) throw new Error("The course preview could not be loaded.");
+    const documentNext = new DOMParser().parseFromString(await response.text(), "text/html");
+    const shellNext = documentNext.querySelector("[data-selected-course]");
+    if (requestId !== dashboardPreviewRequest) return DASHBOARD_STALE;
+    if (!shellNext) return DASHBOARD_UNAVAILABLE;
+    shell.replaceWith(shellNext);
+    initializeUuidFields(shellNext);
+    document.title = documentNext.title;
+    if (history === "push") window.history.pushState({openlearnDashboard: true}, "", url);
+    else if (history === "replace") window.history.replaceState({openlearnDashboard: true}, "", url);
+    const selected = shellNext.querySelector("[data-course-preview-link][aria-current='true']");
+    if (focusSlug) shellNext.querySelector(`[data-course-slug="${CSS.escape(focusSlug)}"]`)?.focus();
+    announce(`${selected?.dataset.courseTitle || "Course"} preview updated. Continue learning when you are ready to switch.`);
+    return DASHBOARD_RENDERED;
+  } finally {
+    if (requestId === dashboardPreviewRequest) {
+      const current = document.querySelector("[data-selected-course]");
+      delete current?.dataset.previewLoading;
+      current?.removeAttribute("aria-busy");
+    }
+  }
+}
+
+document.addEventListener("click", async (event) => {
+  const link = event.target.closest("[data-course-preview-link]");
+  if (
+    !link
+    || event.defaultPrevented
+    || event.button !== 0
+    || event.metaKey
+    || event.ctrlKey
+    || event.shiftKey
+    || event.altKey
+  ) return;
+  event.preventDefault();
+  link.setAttribute("aria-busy", "true");
+  try {
+    const result = await renderDashboard(link.href, {focusSlug: link.dataset.courseSlug});
+    if (result === DASHBOARD_UNAVAILABLE) {
+      window.location.assign(link.href);
+    }
+  } catch (_error) {
+    window.location.assign(link.href);
+  }
+});
+
+window.addEventListener("popstate", async () => {
+  if (!document.querySelector("[data-selected-course]")) return;
+  try {
+    await renderDashboard(window.location.href, {history: "none"});
+  } catch (_error) {
+    window.location.reload();
+  }
+});
+
+function followUpStatus(form) {
+  const panel = form.closest("[data-follow-up-panel]");
+  let status = panel?.querySelector("[data-follow-up-status]");
+  if (!status && panel) {
+    status = document.createElement("p");
+    status.className = "follow-up-status";
+    status.dataset.followUpStatus = "";
+    status.setAttribute("role", "status");
+    status.setAttribute("aria-live", "polite");
+    panel.append(status);
+  }
+  return {panel, status};
+}
+
+async function requestFollowUp(form) {
+  const {panel, status} = followUpStatus(form);
+  const submit = form.querySelector('[type="submit"]');
+  const action = form.elements.action.value;
+  const submissionId = form.elements.submission_id.value;
+  const slug = document.querySelector("[data-selected-course]")?.dataset.selectedCourse;
+  const previewGeneration = dashboardPreviewRequest;
+  if (!submit || !slug || form.dataset.submitting === "true") return;
+  form.dataset.submitting = "true";
+  submit.disabled = true;
+  submit.setAttribute("aria-busy", "true");
+  panel?.setAttribute("aria-busy", "true");
+  if (status) {
+    status.hidden = false;
+    status.dataset.state = "pending";
+    status.textContent = action === "confirm"
+      ? "Creating your course…"
+      : action === "retry"
+        ? "Trying the proposal again…"
+        : "Building a focused proposal…";
+  }
+  announce(status?.textContent || "Working on your follow-up course.");
+  try {
+    const result = await requestJson(form.dataset.endpoint, {
+      method: "POST",
+      body: JSON.stringify(formPayload(form)),
+    });
+    const selectedSlug = result.course_slug || slug;
+    const proposal = action === "confirm" ? null : submissionId;
+    if (status) status.textContent = action === "confirm" ? "Course created." : "Proposal ready.";
+    const currentSlug = document.querySelector("[data-selected-course]")?.dataset.selectedCourse;
+    if (previewGeneration === dashboardPreviewRequest && currentSlug === slug) {
+      await renderDashboard(dashboardUrlForCourse(selectedSlug, proposal), {history: "push"});
+      announce(action === "confirm" ? "Follow-up course created and selected." : "Your focused course proposal is ready to review.");
+    } else {
+      announce(action === "confirm" ? "Follow-up course created. Your current course preview was kept." : "Your focused course proposal is ready. Your current course preview was kept.");
+    }
+  } catch (error) {
+    if (error.payload?.state === "setup_required") {
+      const setupUrl = new URL(appUrl("/setup"), window.location.origin);
+      const returnUrl = dashboardUrlForCourse(slug);
+      setupUrl.searchParams.set("next", `${returnUrl.pathname}${returnUrl.search}`);
+      window.location.assign(setupUrl);
+      return;
+    }
+    if (status) {
+      status.hidden = false;
+      status.dataset.state = "error";
+      status.setAttribute("role", "alert");
+      status.textContent = error.message;
+      status.focus();
+    }
+    announce(error.message);
+  } finally {
+    delete form.dataset.submitting;
+    submit.disabled = false;
+    submit.removeAttribute("aria-busy");
+    panel?.removeAttribute("aria-busy");
+  }
+}
+
+document.addEventListener("submit", (event) => {
+  const form = event.target.closest("[data-follow-up-form]");
+  if (!form) return;
+  event.preventDefault();
+  void requestFollowUp(form);
+});
 
 const turnForm = document.querySelector("[data-turn-form]");
 const chatForm = document.querySelector("[data-chat-form]");

@@ -1009,27 +1009,13 @@ def edit_profile(
     now: Clock = _utcnow,
 ) -> dict[str, object]:
     value = load_profile(path)
-    current = value["profile"]
-    assert isinstance(current, dict)
-    normalized = normalize_profile_update(current, changes)
-    if normalized == current:
+    updated = profile_edit_projection(value, changes, now=now)
+    if updated == value:
         return value
-    current_revision = value["profile_revision"]
-    assert isinstance(current_revision, int)
-    revision = current_revision + 1
-    value["profile"] = normalized
-    value["profile_revision"] = revision
-    value["updated_at"] = _timestamp(now)
-    value["recommendations"] = None
-    value["curriculum_allocation"] = None
-    placement = value["placement"]
-    assert isinstance(placement, dict)
-    if placement.get("status") in {"provisional", "stale"}:
-        placement["status"] = "stale"
-        placement["updated_at"] = _timestamp(now)
-    elif placement.get("status") == "in_progress":
-        value["placement"] = _empty_placement_for_reset(placement)
-    _write(path, value)
+    value = updated
+    revision = value["profile_revision"]
+    assert isinstance(revision, int)
+    _write(path, updated)
     append_event(
         "interview_profile_edited",
         {
@@ -1040,6 +1026,40 @@ def edit_profile(
         },
     )
     return value
+
+
+def profile_edit_projection(
+    value: Mapping[str, object],
+    changes: Mapping[str, object],
+    *,
+    now: Clock = _utcnow,
+) -> dict[str, object]:
+    """Return the exact profile document an edit would publish, without writing."""
+    projected = copy.deepcopy(dict(value))
+    current = projected.get("profile")
+    if not isinstance(current, dict):
+        raise ValueError("interview-prep profile is malformed")
+    normalized = normalize_profile_update(current, changes)
+    if normalized == current:
+        return projected
+    current_revision = projected.get("profile_revision")
+    if not isinstance(current_revision, int) or current_revision < 1:
+        raise ValueError("interview-prep profile revision is invalid")
+    timestamp = _timestamp(now)
+    projected["profile"] = normalized
+    projected["profile_revision"] = current_revision + 1
+    projected["updated_at"] = timestamp
+    projected["recommendations"] = None
+    projected["curriculum_allocation"] = None
+    placement = projected.get("placement")
+    if not isinstance(placement, dict):
+        raise ValueError("interview-prep placement is malformed")
+    if placement.get("status") in {"provisional", "stale"}:
+        placement["status"] = "stale"
+        placement["updated_at"] = timestamp
+    elif placement.get("status") == "in_progress":
+        projected["placement"] = _empty_placement_for_reset(placement)
+    return projected
 
 
 def normalize_profile_update(

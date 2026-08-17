@@ -8573,19 +8573,125 @@ def cmd_delete(args: argparse.Namespace) -> int:
         )
 
     delete_topic_files(slug)
-    if get_active_topic() == slug:
-        clear_active_topic()
+    clear_active_topic(slug)
     print(f"Deleted topic: {slug}")
     return 0
 
 
-def delete_topic_files(slug: str) -> None:
+def _read_deletion_tombstone(slug: str) -> dict[str, object] | None:
+    path = topic_deletion_tombstone_path(slug)
+    if not path.exists():
+        return None
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise OpenLearnError(f"course deletion record is unreadable: {slug}") from exc
+    if (
+        not isinstance(value, dict)
+        or value.get("schema_version") != 1
+        or value.get("slug") != slug
+        or value.get("deleted_generation") is not None
+        and not isinstance(value.get("deleted_generation"), str)
+        or "deleted_title" in value
+        and not isinstance(value.get("deleted_title"), str)
+    ):
+        raise OpenLearnError(f"course deletion record is malformed: {slug}")
+    return value
+
+
+def read_topic_deletion_tombstone(slug: str) -> dict[str, object] | None:
+    """Return one validated durable deletion record for replay checks."""
+    with topic_store_locks(slug, include_journal=True):
+        return _read_deletion_tombstone(slug)
+
+
+def _delete_owned_directory(path: Path) -> None:
+    if path.is_symlink():
+        durable_unlink(path)
+        return
+    if path.exists():
+        shutil.rmtree(path)
+        fsync_directory(path.parent)
+
+
+def _delete_topic_owned_artifacts(slug: str) -> None:
+    for path in (
+        topic_path(slug),
+        topic_backup_path(topic_path(slug)),
+        topic_state_path(slug),
+        interview_profile_path(slug),
+        interview_edit_journal_path(slug),
+        topic_activity_journal_path(slug),
+        topic_turn_journal_path(slug),
+        interview_reconciliation_journal_path(slug),
+        interview_reconciliation_receipt_path(slug),
+        interview_route_journal_path(slug),
+        course_settings_journal_path(slug),
+        topic_events_path(slug),
+    ):
+        durable_unlink(path)
+    for directory in (
+        topic_data_dir(slug),
+        topics_dir() / "drills" / slug,
+        attempt_store().topic_dir(slug),
+        topics_dir() / "interview-attempts" / slug,
+    ):
+        _delete_owned_directory(directory)
+
+
+def recover_tombstoned_topics() -> None:
+    """Finish durable topic deletions before exposing topic listings."""
+    if not topics_dir().exists():
+        return
+    suffix = ".deleted.json"
+    for path in sorted(topics_dir().glob(f".*{suffix}")):
+        slug = path.name[1 : -len(suffix)]
+        if not slug or slugify(slug) != slug:
+            raise OpenLearnError(f"course deletion record has invalid slug: {path.name}")
+        with topic_store_locks(slug, include_journal=True):
+            if _read_deletion_tombstone(slug) is not None:
+                _delete_topic_owned_artifacts(slug)
+
+
+def delete_topic_files(
+    slug: str,
+    *,
+    expected_generation: str | None = None,
+    expected_title: str | None = None,
+    allow_replay: bool = False,
+) -> bool:
+    """Delete one course generation and its owned artifacts.
+
+    Returns ``True`` for a new deletion and ``False`` for an allowed replay of
+    the same tombstoned generation.
+    """
     with topic_store_locks(slug, include_journal=True):
         generation = current_topic_generation(slug)
+        prior = _read_deletion_tombstone(slug)
+        if expected_generation is not None and generation != expected_generation:
+            if (
+                allow_replay
+                and generation is None
+                and prior is not None
+                and prior.get("deleted_generation") == expected_generation
+            ):
+                _delete_topic_owned_artifacts(slug)
+                return False
+            raise OpenLearnError(f"topic generation changed before deletion: {slug}")
+        if generation is None:
+            if allow_replay and prior is not None:
+                _delete_topic_owned_artifacts(slug)
+                return False
+            raise OpenLearnError(f"topic not found: {slug}")
+        metadata, _body = parse_topic(topic_path(slug).read_text(encoding="utf-8"))
+        current_title = str(metadata.get("topic") or slug.replace("-", " ").title())
+        if expected_title is not None and current_title != expected_title:
+            raise OpenLearnError(f"topic title changed before deletion: {slug}")
         tombstone = {
             "schema_version": 1,
             "slug": slug,
             "deleted_generation": generation,
+            "deleted_title": current_title,
             "deletion_id": f"deletion_{uuid4().hex}",
             "deleted_at": datetime.now(timezone.utc).isoformat(),
         }
@@ -8598,6 +8704,7 @@ def delete_topic_files(slug: str) -> None:
         _topic_delete_checkpoint("after_tombstone")
         durable_unlink(topic_path(slug))
         _topic_delete_checkpoint("after_topic")
+        durable_unlink(topic_backup_path(topic_path(slug)))
         durable_unlink(topic_state_path(slug))
         durable_unlink(interview_profile_path(slug))
         durable_unlink(interview_edit_journal_path(slug))
@@ -8609,11 +8716,16 @@ def delete_topic_files(slug: str) -> None:
         durable_unlink(interview_reconciliation_journal_path(slug))
         durable_unlink(interview_reconciliation_receipt_path(slug))
         durable_unlink(interview_route_journal_path(slug))
+        durable_unlink(course_settings_journal_path(slug))
         _topic_delete_checkpoint("after_journals")
-        data_dir = topic_data_dir(slug)
-        if data_dir.exists():
-            shutil.rmtree(data_dir)
-            fsync_directory(data_dir.parent)
+        for directory in (
+            topic_data_dir(slug),
+            topics_dir() / "drills" / slug,
+            attempt_store().topic_dir(slug),
+            topics_dir() / "interview-attempts" / slug,
+        ):
+            _delete_owned_directory(directory)
+        return True
 
 
 def _topic_delete_checkpoint(_stage: str) -> None:
@@ -15759,6 +15871,14 @@ def interview_route_journal_path(slug: str) -> Path:
     return topics_dir() / f".{slug}.interview-route.json"
 
 
+def course_settings_journal_path(slug: str) -> Path:
+    return topics_dir() / f".{slug}.course-settings.json"
+
+
+def course_settings_receipt_path(slug: str, submission_id: str) -> Path:
+    return topic_data_dir(slug) / "operations" / "course-settings" / f"{submission_id}.json"
+
+
 def topic_deletion_tombstone_path(slug: str) -> Path:
     return topics_dir() / f".{slug}.deleted.json"
 
@@ -16596,6 +16716,7 @@ def list_topics() -> list[TopicSummary]:
 def recent_topic_paths() -> list[Path]:
     if not topics_dir().exists():
         return []
+    recover_tombstoned_topics()
     return sorted(topics_dir().glob("*.md"), key=lambda path: path.stat().st_mtime, reverse=True)
 
 
@@ -16683,11 +16804,47 @@ def set_active_topic(slug: str) -> None:
         )
 
 
-def clear_active_topic() -> None:
+def activate_topic_without_study(slug: str) -> None:
+    """Select a course without recording study activity or dropping global keys."""
+    if _DRY_RUN:
+        return
+    if not topic_path(slug).exists() or topic_deletion_tombstone_path(slug).exists():
+        raise OpenLearnError(f"topic not found: {slug}")
+    project_home().mkdir(parents=True, exist_ok=True)
     path = state_path()
-    if path.exists():
-        with file_lock(path):
-            path.unlink(missing_ok=True)
+    with file_lock(path):
+        existing: dict[str, object] = {}
+        if path.exists():
+            try:
+                value = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(value, dict):
+                    existing = value
+            except (OSError, json.JSONDecodeError):
+                existing = {}
+        existing["active_topic"] = slug
+        existing["updated"] = datetime.now(timezone.utc).isoformat()
+        write_text_atomic(path, json.dumps(existing, indent=2, sort_keys=True) + "\n")
+
+
+def clear_active_topic(expected_slug: str | None = None) -> bool:
+    """Clear only active-course identity while preserving global learner state."""
+    path = state_path()
+    if not path.exists():
+        return False
+    with file_lock(path):
+        if not path.exists():
+            return False
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return False
+        if not isinstance(value, dict) or "active_topic" not in value:
+            return False
+        if expected_slug is not None and value.get("active_topic") != expected_slug:
+            return False
+        del value["active_topic"]
+        write_text_atomic(path, json.dumps(value, indent=2, sort_keys=True) + "\n")
+        return True
 
 
 def _load_state_unlocked(slug: str) -> dict[str, object]:

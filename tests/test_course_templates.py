@@ -55,6 +55,27 @@ class CourseTemplateTests(unittest.TestCase):
 
         self.assertEqual(template.entry_mode, "interview_prep")
 
+    def test_loads_valid_specialization_metadata(self) -> None:
+        self.write_template(
+            specializes_template_ids=["git"],
+            specializes_tags=["data-structures", "graphs"],
+        )
+
+        template = course_templates.load_course_template("python-basics")
+
+        self.assertEqual(template.specializes_template_ids, ("git",))
+        self.assertEqual(template.specializes_tags, ("data-structures", "graphs"))
+
+    def test_rejects_non_normalized_specialization_tags(self) -> None:
+        for tags in (["Graphs"], ["graph search"], ["graphs", "graphs"]):
+            with self.subTest(tags=tags):
+                self.write_template(specializes_tags=tags)
+                with self.assertRaisesRegex(
+                    course_templates.CourseTemplateError,
+                    "specializes_tags must",
+                ):
+                    course_templates.load_course_template("python-basics")
+
     def test_technical_interview_template_projects_its_versioned_bundle(self) -> None:
         self.resource_patch.stop()
         try:

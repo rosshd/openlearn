@@ -5782,6 +5782,34 @@ class CliStorageTests(unittest.TestCase):
         self.assertFalse(cli.topic_path("delete-me").exists())
         self.assertIsNone(cli.get_active_topic())
 
+    def test_delete_active_topic_preserves_global_state_fields(self) -> None:
+        call_silent(cli.cmd_init, Namespace())
+        call_silent(cli.cmd_new, Namespace(topic="Delete Me", goal="temporary"))
+        cli.write_text_atomic(
+            cli.state_path(),
+            json.dumps(
+                {
+                    "active_topic": "delete-me",
+                    "study_streak": 5,
+                    "longest_streak": 9,
+                    "last_study_date": "2026-08-16",
+                    "custom": {"keep": True},
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+        )
+
+        call_silent(cli.cmd_delete, Namespace(topic="delete-me", yes=True, all=False))
+
+        saved = json.loads(cli.state_path().read_text(encoding="utf-8"))
+        self.assertNotIn("active_topic", saved)
+        self.assertEqual(saved["study_streak"], 5)
+        self.assertEqual(saved["longest_streak"], 9)
+        self.assertEqual(saved["last_study_date"], "2026-08-16")
+        self.assertEqual(saved["custom"], {"keep": True})
+
     def test_delete_topic_rejects_missing_topic(self) -> None:
         call_silent(cli.cmd_init, Namespace())
 

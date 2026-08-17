@@ -56,6 +56,67 @@ class CourseCreateRequest(BaseModel):
         return canonical_uuid(value)
 
 
+class CourseSettingsRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    goal: str = Field(min_length=1, max_length=4000)
+    difficulty: Literal["efficient", "proficient", "deep"]
+    weekly_minutes: int = Field(ge=15, le=10_080)
+    session_minutes: int = Field(ge=15, le=10_080)
+    outline: str = Field(default="", max_length=20_000)
+    role_family: str = Field(default="", max_length=64)
+    target_level: str = Field(default="", max_length=64)
+    interview_date: str = Field(default="", max_length=64)
+    interview_focus: str = Field(default="", max_length=64)
+
+    @model_validator(mode="after")
+    def valid_pace(self) -> CourseSettingsRequest:
+        if self.session_minutes > self.weekly_minutes:
+            raise ValueError("Session minutes cannot exceed weekly minutes")
+        return self
+
+
+class CourseSettingsConfirmationRequest(CourseSettingsRequest):
+    expected_payload_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    submission_id: str = Field(min_length=1, max_length=64)
+
+    @field_validator("submission_id")
+    @classmethod
+    def valid_submission_id(cls, value: str) -> str:
+        return canonical_uuid(value)
+
+
+class CourseDeletionRequest(BaseModel):
+    confirmation_slug: str = Field(min_length=1, max_length=64)
+    confirmation_title: str = Field(min_length=1, max_length=200)
+    topic_generation: str = Field(min_length=1, max_length=128)
+
+    @field_validator("confirmation_slug")
+    @classmethod
+    def valid_confirmation_slug(cls, value: str) -> str:
+        return canonical_slug(value)
+
+
+class CourseGrowthRequest(BaseModel):
+    action: Literal["practice", "deepen"]
+    submission_id: str = Field(min_length=1, max_length=64)
+
+    @field_validator("submission_id")
+    @classmethod
+    def valid_submission_id(cls, value: str) -> str:
+        return canonical_uuid(value)
+
+
+class FollowUpProposalRequest(BaseModel):
+    action: Literal["generate", "retry", "confirm", "status"] = "generate"
+    interests: str = Field(default="", max_length=2000)
+    submission_id: str = Field(min_length=1, max_length=64)
+
+    @field_validator("submission_id")
+    @classmethod
+    def valid_submission_id(cls, value: str) -> str:
+        return canonical_uuid(value)
+
+
 class TutorSubmissionRequest(BaseModel):
     intent: str
     text: str = Field(default="", max_length=32000)

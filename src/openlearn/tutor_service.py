@@ -9,8 +9,9 @@ import threading
 from collections.abc import Mapping
 from contextlib import nullcontext
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Literal
 from uuid import UUID, uuid4
 
@@ -18,7 +19,7 @@ from openlearn.models import TutorSessionKind
 
 
 TurnIntent = Literal["answer", "question", "confusion", "navigation"]
-ProgressionIntent = Literal["continue", "skip", "practice", "revisit"]
+ProgressionIntent = Literal["continue", "skip", "practice", "revisit", "deepen"]
 OperationStatus = Literal[
     "saved",
     "reserved",
@@ -37,6 +38,18 @@ class TutorOperationError(RuntimeError):
 
 
 class TutorConflictError(TutorOperationError):
+    pass
+
+
+class FollowUpProposalError(TutorOperationError):
+    pass
+
+
+class FollowUpProposalConflictError(FollowUpProposalError):
+    pass
+
+
+class FollowUpProviderNotReadyError(FollowUpProposalError):
     pass
 
 
@@ -88,6 +101,11 @@ _FUTURES_GUARD = threading.Lock()
 _RUNNING: set[tuple[str, str]] = set()
 _LIVE_TURNS: dict[tuple[str, str], _LiveTurnState] = {}
 _OPERATION_TIMEOUT = timedelta(minutes=3)
+_FOLLOW_UP_SCHEMA_VERSION = 1
+_FOLLOW_UP_INTEREST_LIMIT = 2_000
+_FOLLOW_UP_CLAIM_TIMEOUT = timedelta(minutes=5)
+_FOLLOW_UP_RUNNING: dict[tuple[str, str], str] = {}
+_FOLLOW_UP_RUNNING_GUARD = threading.Lock()
 
 
 def _progression_checkpoint(_stage: str) -> None:
@@ -336,6 +354,504 @@ def course_revision(slug: str) -> int:
     internal = _internal_state(state)
     value = internal.get("course_revision")
     return value if isinstance(value, int) and value >= 0 else 0
+
+
+def _follow_up_proposal_path(slug: str, submission_id: str):
+    from openlearn import cli
+
+    return cli.topic_data_dir(slug) / "follow-up-proposals" / f"{submission_id}.json"
+
+
+def _follow_up_payload_hash(
+    slug: str,
+    generation: str,
+    interests: str,
+    weak_areas: tuple[str, ...],
+) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            {
+                "slug": slug,
+                "generation": generation,
+                "interests": interests,
+                "weak_areas": weak_areas,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _proposal_from_record(
+    record: Mapping[str, object], *, replayed: bool = False
+):
+    from openlearn.application import FollowUpProposal
+
+    required_strings = (
+        "source_slug",
+        "submission_id",
+        "state",
+        "interests",
+        "payload_hash",
+    )
+    if record.get("schema_version") != _FOLLOW_UP_SCHEMA_VERSION or any(
+        not isinstance(record.get(key), str) for key in required_strings
+    ):
+        raise FollowUpProposalError("saved follow-up proposal is malformed")
+    state = str(record["state"])
+    if state not in {"pending", "ready", "error", "confirmed"}:
+        raise FollowUpProposalError("saved follow-up proposal has an invalid state")
+    weak_raw = record.get("weak_areas")
+    if not isinstance(weak_raw, list) or any(not isinstance(item, str) for item in weak_raw):
+        raise FollowUpProposalError("saved follow-up proposal has malformed weak areas")
+    claim = record.get("claim")
+    if claim is not None:
+        token = claim.get("token") if isinstance(claim, dict) else None
+        owner_id = claim.get("owner_id") if isinstance(claim, dict) else None
+        owner_pid = claim.get("owner_pid") if isinstance(claim, dict) else None
+        expires_at = claim.get("expires_at") if isinstance(claim, dict) else None
+        if (
+            not isinstance(claim, dict)
+            or not isinstance(token, str)
+            or not token
+            or not isinstance(owner_id, str)
+            or not owner_id
+            or isinstance(owner_pid, bool)
+            or not isinstance(owner_pid, int)
+            or owner_pid <= 0
+            or not isinstance(expires_at, str)
+        ):
+            raise FollowUpProposalError("saved follow-up proposal has a malformed claim")
+        try:
+            expiration = datetime.fromisoformat(expires_at)
+        except ValueError as exc:
+            raise FollowUpProposalError(
+                "saved follow-up proposal has a malformed claim"
+            ) from exc
+        if expiration.tzinfo is None:
+            raise FollowUpProposalError("saved follow-up proposal has a malformed claim")
+    return FollowUpProposal(
+        source_slug=str(record["source_slug"]),
+        submission_id=str(record["submission_id"]),
+        state=state,
+        interests=str(record["interests"]),
+        weak_areas=tuple(weak_raw),
+        title=str(record.get("title") or ""),
+        goal=str(record.get("goal") or ""),
+        error_code=(
+            str(record["error_code"])
+            if isinstance(record.get("error_code"), str)
+            else None
+        ),
+        error_message=(
+            str(record["error_message"])
+            if isinstance(record.get("error_message"), str)
+            else None
+        ),
+        created_slug=(
+            str(record["created_slug"])
+            if isinstance(record.get("created_slug"), str)
+            else None
+        ),
+        replayed=replayed,
+    )
+
+
+def _read_follow_up_record_unlocked(path: Path) -> dict[str, object] | None:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise FollowUpProposalError("saved follow-up proposal cannot be read") from exc
+    if not isinstance(value, dict):
+        raise FollowUpProposalError("saved follow-up proposal is malformed")
+    _proposal_from_record(value)
+    return value
+
+
+def _read_follow_up_record(slug: str, submission_id: str) -> dict[str, object] | None:
+    from openlearn import cli
+
+    path = _follow_up_proposal_path(slug, submission_id)
+    with cli.file_lock(path):
+        return _read_follow_up_record_unlocked(path)
+
+
+def _write_follow_up_record_unlocked(path: Path, record: Mapping[str, object]) -> None:
+    from openlearn import cli
+
+    cli.write_text_atomic(
+        path,
+        json.dumps(dict(record), indent=2, sort_keys=True) + "\n",
+    )
+    path.chmod(0o600)
+
+
+def _write_follow_up_record(record: Mapping[str, object]) -> None:
+    from openlearn import cli
+
+    slug = str(record["source_slug"])
+    path = _follow_up_proposal_path(slug, str(record["submission_id"]))
+    with cli.file_lock(path):
+        cli.raise_if_topic_tombstoned(slug)
+        _write_follow_up_record_unlocked(path, record)
+
+
+def _reserve_follow_up_record(
+    record: Mapping[str, object],
+) -> dict[str, object] | None:
+    """Atomically publish one pending record or return the winner."""
+    from openlearn import cli
+
+    slug = str(record["source_slug"])
+    submission_id = str(record["submission_id"])
+    path = _follow_up_proposal_path(slug, submission_id)
+    with cli.file_lock(path):
+        existing = _read_follow_up_record_unlocked(path)
+        if existing is not None:
+            return existing
+        cli.raise_if_topic_tombstoned(slug)
+        _write_follow_up_record_unlocked(path, record)
+    return None
+
+
+def _follow_up_claim_is_active(
+    record: Mapping[str, object], operation_key: tuple[str, str]
+) -> bool:
+    claim = record.get("claim")
+    if not isinstance(claim, dict):
+        return False
+    expiration_raw = claim.get("expires_at")
+    owner_id = claim.get("owner_id")
+    owner_pid = claim.get("owner_pid")
+    if (
+        not isinstance(expiration_raw, str)
+        or not isinstance(owner_id, str)
+        or not isinstance(owner_pid, int)
+    ):
+        return False
+    try:
+        expiration = datetime.fromisoformat(expiration_raw)
+    except ValueError:
+        return False
+    if expiration.tzinfo is None or expiration <= datetime.now(timezone.utc):
+        return False
+    if owner_pid == os.getpid():
+        with _FOLLOW_UP_RUNNING_GUARD:
+            return _FOLLOW_UP_RUNNING.get(operation_key) == owner_id
+    if os.name == "nt":
+        return True
+    try:
+        os.kill(owner_pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _claim_follow_up_record(
+    slug: str, submission_id: str, owner_id: str
+) -> tuple[dict[str, object], str | None]:
+    """Claim a retryable proposal with one durable cross-process owner."""
+    from openlearn import cli
+
+    path = _follow_up_proposal_path(slug, submission_id)
+    operation_key = (slug, submission_id)
+    with cli.file_lock(path):
+        record = _read_follow_up_record_unlocked(path)
+        if record is None:
+            raise FollowUpProposalError("follow-up proposal not found")
+        if record.get("state") not in {"pending", "error"}:
+            return record, None
+        if _follow_up_claim_is_active(record, operation_key):
+            return record, None
+        token = str(uuid4())
+        claimed = {
+            **record,
+            "state": "pending",
+            "error_code": None,
+            "error_message": None,
+            "claim": {
+                "token": token,
+                "owner_id": owner_id,
+                "owner_pid": os.getpid(),
+                "expires_at": (
+                    datetime.now(timezone.utc) + _FOLLOW_UP_CLAIM_TIMEOUT
+                ).isoformat(),
+            },
+            "updated_at": _now(),
+        }
+        cli.raise_if_topic_tombstoned(slug)
+        _write_follow_up_record_unlocked(path, claimed)
+    return claimed, token
+
+
+def _finish_claimed_follow_up_record(
+    record: Mapping[str, object],
+    claim_token: str,
+    changes: Mapping[str, object],
+):
+    """Publish a provider result only while this worker still owns the claim."""
+    from openlearn import cli
+
+    slug = str(record["source_slug"])
+    submission_id = str(record["submission_id"])
+    path = _follow_up_proposal_path(slug, submission_id)
+    with cli.file_lock(path):
+        current = _read_follow_up_record_unlocked(path)
+        if current is None:
+            raise FollowUpProposalError("follow-up proposal not found")
+        claim = current.get("claim")
+        if not isinstance(claim, dict) or claim.get("token") != claim_token:
+            return replace(_proposal_from_record(current), replayed=True)
+        finished = {**current, **changes, "updated_at": _now()}
+        finished.pop("claim", None)
+        cli.raise_if_topic_tombstoned(slug)
+        _write_follow_up_record_unlocked(path, finished)
+    return _proposal_from_record(finished)
+
+
+def _run_follow_up_generation(slug: str, submission_id: str):
+    operation_key = (slug, submission_id)
+    owner_id = str(uuid4())
+    with _FOLLOW_UP_RUNNING_GUARD:
+        already_running = operation_key in _FOLLOW_UP_RUNNING
+        if not already_running:
+            _FOLLOW_UP_RUNNING[operation_key] = owner_id
+    if already_running:
+        current = _read_follow_up_record(slug, submission_id)
+        if current is None:
+            raise FollowUpProposalError("follow-up proposal not found")
+        return replace(_proposal_from_record(current), replayed=True)
+    try:
+        claimed, claim_token = _claim_follow_up_record(slug, submission_id, owner_id)
+        if claim_token is None:
+            return replace(_proposal_from_record(claimed), replayed=True)
+        return _generate_follow_up_record(claimed, claim_token)
+    finally:
+        with _FOLLOW_UP_RUNNING_GUARD:
+            if _FOLLOW_UP_RUNNING.get(operation_key) == owner_id:
+                _FOLLOW_UP_RUNNING.pop(operation_key, None)
+
+
+def follow_up_proposal_status(slug: str, submission_id: str):
+    """Return one durable proposal operation without starting or retrying it."""
+    sid = _normalize_submission_id(submission_id)
+    record = _read_follow_up_record(slug, sid)
+    return _proposal_from_record(record) if record is not None else None
+
+
+def _parse_follow_up_response(raw: str) -> tuple[str, str]:
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise FollowUpProposalError("provider returned an invalid follow-up proposal") from exc
+    if not isinstance(value, dict) or set(value) != {"title", "goal"}:
+        raise FollowUpProposalError("provider returned an invalid follow-up proposal")
+    title = value.get("title")
+    goal = value.get("goal")
+    if (
+        not isinstance(title, str)
+        or not isinstance(goal, str)
+        or title != title.strip()
+        or goal != goal.strip()
+        or not title
+        or not goal
+        or len(title) > 120
+        or len(goal) > 2_000
+        or any(character in title for character in "\r\n<>")
+    ):
+        raise FollowUpProposalError("provider returned an invalid follow-up proposal")
+    return title, goal
+
+
+def _generate_follow_up_record(record: dict[str, object], claim_token: str):
+    from openlearn import config, providers
+
+    try:
+        credentials = config.effective_provider_credentials()
+        raw = providers.chat_completion(
+            credentials,
+            system=(
+                "Create one focused advanced course proposal. Return JSON only with exactly "
+                "two string fields: title and goal. The title must be plain text under 120 "
+                "characters. The goal must be a concrete learner-facing sentence. Do not "
+                "include reasoning, Markdown, or additional fields."
+            ),
+            user=json.dumps(
+                {
+                    "source_course": record["source_title"],
+                    "source_goal": record["source_goal"],
+                    "weak_areas": record["weak_areas"],
+                    "learner_interests": record["interests"],
+                },
+                sort_keys=True,
+            ),
+        )
+        title, goal = _parse_follow_up_response(raw)
+    except (providers.ProviderError, config.ConfigError):
+        return _finish_claimed_follow_up_record(
+            record,
+            claim_token,
+            {
+                "state": "error",
+                "error_code": "provider_unavailable",
+                "error_message": (
+                    "The tutor provider could not create this proposal. Check the connection "
+                    "or retry in a moment."
+                ),
+            },
+        )
+    except FollowUpProposalError:
+        return _finish_claimed_follow_up_record(
+            record,
+            claim_token,
+            {
+                "state": "error",
+                "error_code": "invalid_provider_response",
+                "error_message": (
+                    "The tutor returned an unusable course proposal. Retry with the same request."
+                ),
+            },
+        )
+    return _finish_claimed_follow_up_record(
+        record,
+        claim_token,
+        {
+            "state": "ready",
+            "title": title,
+            "goal": goal,
+            "error_code": None,
+            "error_message": None,
+        },
+    )
+
+
+def request_follow_up_proposal(
+    slug: str, *, interests: str, submission_id: str
+):
+    """Explicitly generate one idempotent proposal without creating a course."""
+    from openlearn import application, cli, config
+
+    sid = _normalize_submission_id(submission_id)
+    normalized_interests = interests.strip()
+    if len(normalized_interests) > _FOLLOW_UP_INTEREST_LIMIT:
+        raise FollowUpProposalError("follow-up interests must be at most 2000 characters")
+    snapshot = application.course(slug)
+    recommendation = snapshot.card.library.recommendation
+    if not snapshot.card.library.first_pass_complete:
+        raise FollowUpProposalError(
+            "Finish the course's first pass before generating a specialized follow-up."
+        )
+    if recommendation is not None and recommendation.kind == "curated":
+        raise FollowUpProposalError(
+            "This course already has a curated specialized follow-up."
+        )
+    generation = cli.current_topic_generation(slug)
+    if generation is None:
+        raise FollowUpProposalError("source course no longer exists")
+    weak_areas = snapshot.card.library.weak_areas
+    payload_hash = _follow_up_payload_hash(
+        slug, generation, normalized_interests, weak_areas
+    )
+    existing = _read_follow_up_record(slug, sid)
+    if existing is not None:
+        if existing.get("payload_hash") != payload_hash:
+            raise FollowUpProposalConflictError(
+                "submission ID was already used for a different follow-up proposal"
+            )
+        return replace(_proposal_from_record(existing), replayed=True)
+    if not config.provider_is_configured(require_verified=True):
+        raise FollowUpProviderNotReadyError(
+            "Connect and verify a tutor provider before generating a follow-up course."
+        )
+    record: dict[str, object] = {
+        "schema_version": _FOLLOW_UP_SCHEMA_VERSION,
+        "source_slug": slug,
+        "source_generation": generation,
+        "source_title": snapshot.card.title,
+        "source_goal": snapshot.card.goal,
+        "submission_id": sid,
+        "payload_hash": payload_hash,
+        "state": "pending",
+        "interests": normalized_interests,
+        "weak_areas": list(weak_areas),
+        "title": "",
+        "goal": "",
+        "error_code": None,
+        "error_message": None,
+        "created_slug": None,
+        "updated_at": _now(),
+    }
+    winner = _reserve_follow_up_record(record)
+    if winner is not None:
+        if winner.get("payload_hash") != payload_hash:
+            raise FollowUpProposalConflictError(
+                "submission ID was already used for a different follow-up proposal"
+            )
+        return replace(_proposal_from_record(winner), replayed=True)
+    return _run_follow_up_generation(slug, sid)
+
+
+def retry_follow_up_proposal(slug: str, submission_id: str):
+    """Retry one saved provider error without creating a second operation."""
+    from openlearn import config
+
+    sid = _normalize_submission_id(submission_id)
+    record = _read_follow_up_record(slug, sid)
+    if record is None:
+        raise FollowUpProposalError("follow-up proposal not found")
+    if record.get("state") not in {"pending", "error"}:
+        return replace(_proposal_from_record(record), replayed=True)
+    if not config.provider_is_configured(require_verified=True):
+        raise FollowUpProviderNotReadyError(
+            "Connect and verify a tutor provider before retrying this proposal."
+        )
+    return _run_follow_up_generation(slug, sid)
+
+
+def confirm_follow_up_proposal(slug: str, submission_id: str):
+    """Create a generated course exactly once after explicit confirmation."""
+    from openlearn import application
+
+    sid = _normalize_submission_id(submission_id)
+    record = _read_follow_up_record(slug, sid)
+    if record is None:
+        raise FollowUpProposalError("follow-up proposal not found")
+    state = record.get("state")
+    if state == "confirmed" and isinstance(record.get("created_slug"), str):
+        return application.FollowUpCourseResult(
+            source_slug=slug,
+            submission_id=sid,
+            course_slug=str(record["created_slug"]),
+            created=False,
+        )
+    if state != "ready":
+        raise FollowUpProposalError("follow-up proposal is not ready for confirmation")
+    created = application.create_course(
+        application.CourseCreationRequest(
+            name=str(record["title"]),
+            goal=str(record["goal"]),
+            submission_id=sid,
+        )
+    )
+    confirmed = {
+        **record,
+        "state": "confirmed",
+        "created_slug": created.course.slug,
+        "updated_at": _now(),
+    }
+    _write_follow_up_record(confirmed)
+    return application.FollowUpCourseResult(
+        source_slug=slug,
+        submission_id=sid,
+        course_slug=created.course.slug,
+        created=created.created,
+    )
 
 
 def operation_result(slug: str, submission_id: str) -> TutorTurnResult | None:
@@ -1946,7 +2462,7 @@ def resume_interview_progression(
         not isinstance(sid, str)
         or not isinstance(prompt, str)
         or not isinstance(revision, int)
-        or progression_intent not in {"continue", "skip", "practice", "revisit"}
+        or progression_intent not in {"continue", "skip", "practice", "revisit", "deepen"}
     ):
         raise TutorOperationError("The saved interview reservation is incomplete.")
     if _future_active(slug, sid):

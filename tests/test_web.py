@@ -88,9 +88,9 @@ def test_default_web_app_runs_setup_dashboard_course_and_tutor_flow(
     client: TestClient,
 ) -> None:
     empty_dashboard = client.get("/").text
-    assert "Choose what you want to learn" in empty_dashboard
-    assert "Choose a starting point" in empty_dashboard
-    assert "Add another course" not in empty_dashboard
+    assert "What do you want to learn?" in empty_dashboard
+    assert "Technical Interview Prep" in empty_dashboard
+    assert "New course" in empty_dashboard
 
     new_course = client.get("/courses/new")
     assert "Technical Interview Prep" in new_course.text
@@ -125,13 +125,13 @@ def test_default_web_app_runs_setup_dashboard_course_and_tutor_flow(
     assert 'data-tool-open="chat"' in focus.text
     assert "placement test" not in focus.text.lower()
     assert "**Lesson:**" not in focus.text
-    assert "Pick up where you left off" in client.get("/dashboard").text
+    assert "Your courses" in client.get("/dashboard").text
     dashboard_html = client.get("/dashboard").text
     dashboard_header = dashboard_html.split('class="course-list"', 1)[0]
-    assert "Add another course" not in dashboard_header
+    assert "New course" not in dashboard_header
     courses_panel = dashboard_html.split('class="course-list"', 1)[1]
-    assert "Add another course" in courses_panel
-    assert "course-add-action" in courses_panel
+    assert "New course" in courses_panel
+    assert "new-course-menu" in courses_panel
     course_heading = courses_panel.split("</div>", 2)[0]
     assert "<span>1</span>" not in course_heading
     assert 'class="course-tool"' not in courses_panel
@@ -1000,10 +1000,314 @@ def test_dashboard_groups_discoverable_learning_practice_and_settings_paths(
     assert response.status_code == 200
     assert "/courses/new" in response.text
     assert "/quick-learn" in response.text
-    assert "/review" in response.text
+    assert "/review" not in response.text
     assert "/progress" in response.text
     assert "/setup" in response.text
     assert "/data" in response.text
+
+
+def test_dashboard_previews_course_without_activation_and_continue_activates(
+    client: TestClient,
+) -> None:
+    first = application.create_course(
+        application.CourseCreationRequest(name="Active Course", goal="Keep learning")
+    ).course
+    second = application.create_course(
+        application.CourseCreationRequest(name="Preview Course", goal="Inspect first")
+    ).course
+    application.activate_course(first.slug)
+
+    preview = client.get(f"/dashboard?course={second.slug}")
+
+    assert preview.status_code == 200
+    assert f'data-selected-course="{second.slug}"' in preview.text
+    assert f'data-active-course="{first.slug}"' in preview.text
+    assert cli.get_active_topic() == first.slug
+    token = preview.cookies["openlearn_csrf"]
+
+    continued = client.post(
+        f"/courses/{second.slug}/activate",
+        headers={"x-csrf-token": token},
+        follow_redirects=False,
+    )
+
+    assert continued.status_code == 303
+    assert cli.get_active_topic() == second.slug
+
+
+def test_dashboard_hides_empty_review_and_shows_course_path_and_management(
+    client: TestClient,
+) -> None:
+    course = application.create_course(
+        application.CourseCreationRequest(name="Path Course", goal="See what comes next")
+    ).course
+
+    response = client.get(f"/dashboard?course={course.slug}")
+
+    assert response.status_code == 200
+    assert "0 due" not in response.text
+    assert "View full course path" in response.text
+    assert f'/courses/{course.slug}/settings' in response.text
+    assert "Quick Learn" in response.text
+    assert "Settings and local data" not in response.text
+
+
+def test_dashboard_offers_resume_for_a_persisted_pending_follow_up(
+    client: TestClient,
+) -> None:
+    course = application.create_course(
+        application.CourseCreationRequest(
+            name="Completed Course", goal="Build a focused next step"
+        )
+    ).course
+    topic = cli.read_topic(course.slug)
+    metadata = dict(topic.metadata)
+    metadata["course_completed"] = True
+    metadata["course_units"] = [
+        {"unit": 1, "title": "Unit 1: Foundations", "slide_count": 1}
+    ]
+    cli.write_topic(topic.path, metadata, topic.body)
+    submission_id = str(uuid4())
+    generation = cli.current_topic_generation(course.slug)
+    assert generation is not None
+    tutor_service._reserve_follow_up_record(
+        {
+            "schema_version": tutor_service._FOLLOW_UP_SCHEMA_VERSION,
+            "source_slug": course.slug,
+            "source_generation": generation,
+            "source_title": course.card.title,
+            "source_goal": course.card.goal,
+            "submission_id": submission_id,
+            "payload_hash": tutor_service._follow_up_payload_hash(
+                course.slug, generation, "Go deeper", ()
+            ),
+            "state": "pending",
+            "interests": "Go deeper",
+            "weak_areas": [],
+            "title": "",
+            "goal": "",
+            "error_code": None,
+            "error_message": None,
+            "created_slug": None,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+
+    response = client.get(
+        f"/dashboard?course={course.slug}&proposal={submission_id}"
+    )
+
+    assert response.status_code == 200
+    assert 'name="action" value="retry"' in response.text
+    assert "Resume proposal" in response.text
+
+
+def test_unknown_follow_up_status_uses_stable_not_found_envelope(
+    client: TestClient,
+) -> None:
+    course = application.create_course(
+        application.CourseCreationRequest(name="Proposal Status", goal="Track proposals")
+    ).course
+    token = csrf(client, "/dashboard")
+
+    response = client.post(
+        f"/api/courses/{course.slug}/follow-up",
+        headers={"x-csrf-token": token},
+        json={"action": "status", "submission_id": str(uuid4())},
+    )
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "ok": False,
+        "missing": True,
+        "state": "missing",
+        "error": "Follow-up proposal not found.",
+    }
+
+
+def test_empty_dashboard_embeds_varied_starters_and_creation_choices(
+    client: TestClient,
+) -> None:
+    response = client.get("/dashboard")
+
+    assert response.status_code == 200
+    assert response.text.index("Technical Interview Prep") < response.text.index(
+        "Computer Networking"
+    )
+    assert "Starter course" in response.text
+    assert "Custom course" in response.text
+    assert "Quick Learn" in response.text
+    assert "Choose a starting point" not in response.text
+
+
+def test_course_settings_preview_confirm_and_permanent_deletion(
+    client: TestClient,
+) -> None:
+    created = application.create_course(
+        application.CourseCreationRequest(name="Managed Course", goal="Original goal")
+    ).course
+    settings = client.get(f"/courses/{created.slug}/settings")
+    token = settings.cookies["openlearn_csrf"]
+
+    preview = client.post(
+        f"/courses/{created.slug}/settings/preview",
+        headers={"x-csrf-token": token},
+        data={
+            "title": "Managed Course Renamed",
+            "goal": "Updated goal",
+            "difficulty": "deep",
+            "weekly_minutes": "180",
+            "session_minutes": "45",
+            "outline": "",
+        },
+    )
+
+    assert preview.status_code == 200
+    assert "Confirm changes" in preview.text
+    submission_id = str(uuid4())
+    confirmation_data = {
+        "title": "Managed Course Renamed",
+        "goal": "Updated goal",
+        "difficulty": "deep",
+        "weekly_minutes": "180",
+        "session_minutes": "45",
+        "outline": "",
+        "expected_payload_hash": preview.text.split(
+            'name="expected_payload_hash" value="', 1
+        )[1].split('"', 1)[0],
+        "submission_id": submission_id,
+    }
+    confirmed = client.post(
+        f"/courses/{created.slug}/settings/confirm",
+        headers={"x-csrf-token": token},
+        data=confirmation_data,
+        follow_redirects=False,
+    )
+    assert confirmed.status_code == 303
+    assert application.course(created.slug).card.title == "Managed Course Renamed"
+    revision = cli.load_state(created.slug)["_openlearn_internal"]["course_revision"]
+    replayed = client.post(
+        f"/courses/{created.slug}/settings/confirm",
+        headers={"x-csrf-token": token},
+        data=confirmation_data,
+        follow_redirects=False,
+    )
+    assert replayed.status_code == 303
+    assert cli.load_state(created.slug)["_openlearn_internal"]["course_revision"] == revision
+
+    deletion = client.get(f"/courses/{created.slug}/delete")
+    assert deletion.status_code == 200
+    assert "Back up all local data" in deletion.text
+    assert "course content" in deletion.text
+    deletion_data = {
+        "confirmation_slug": created.slug,
+        "confirmation_title": "Managed Course Renamed",
+        "topic_generation": deletion.text.split(
+            'name="topic_generation" value="', 1
+        )[1].split('"', 1)[0],
+    }
+    deleted = client.post(
+        f"/courses/{created.slug}/delete",
+        headers={"x-csrf-token": token},
+        data=deletion_data,
+        follow_redirects=False,
+    )
+    assert deleted.status_code == 303
+    assert not cli.topic_path(created.slug).exists()
+    replayed_deletion = client.post(
+        f"/courses/{created.slug}/delete",
+        headers={"x-csrf-token": token},
+        data=deletion_data,
+        follow_redirects=False,
+    )
+    assert replayed_deletion.status_code == 303
+
+
+def test_interview_settings_can_clear_date_without_clearing_focus(
+    client: TestClient,
+) -> None:
+    created = application.create_course(
+        application.CourseCreationRequest(
+            name="Interview Date Settings",
+            template_id="technical-interview-prep",
+        )
+    ).course
+    application.accept_interview_curriculum(
+        created.slug, action="skip", submission_id=str(uuid4())
+    )
+    seeded = application.preview_course_settings(
+        created.slug,
+        application.CourseSettingsChange(
+            interview_fields={
+                "interview_date": "2026-09-15",
+                "interview_focus": "balanced",
+            }
+        ),
+    )
+    application.confirm_course_settings(seeded, submission_id=str(uuid4()))
+    profile = interview_prep.load_profile(cli.interview_profile_path(created.slug))
+    values = profile["profile"]
+    assert isinstance(values, dict)
+
+    settings = client.get(f"/courses/{created.slug}/settings")
+    token = settings.cookies["openlearn_csrf"]
+    form = {
+        "title": created.card.title,
+        "goal": created.card.goal,
+        "difficulty": created.mastery_profile,
+        "weekly_minutes": str(values["weekly_minutes"]),
+        "session_minutes": str(values["session_minutes"]),
+        "outline": "",
+        "role_family": "",
+        "target_level": "",
+        "interview_date": "",
+        "interview_focus": "",
+    }
+    preview = client.post(
+        f"/courses/{created.slug}/settings/preview",
+        headers={"x-csrf-token": token},
+        data=form,
+    )
+    assert preview.status_code == 200
+    payload_hash = preview.text.split(
+        'name="expected_payload_hash" value="', 1
+    )[1].split('"', 1)[0]
+    confirmed = client.post(
+        f"/courses/{created.slug}/settings/confirm",
+        headers={"x-csrf-token": token},
+        data={
+            **form,
+            "expected_payload_hash": payload_hash,
+            "submission_id": str(uuid4()),
+        },
+        follow_redirects=False,
+    )
+
+    assert confirmed.status_code == 303
+    saved = interview_prep.load_profile(cli.interview_profile_path(created.slug))
+    assert saved["profile"]["interview_date"] == ""
+    assert saved["placement"]["survey"]["interview_focus"] == "balanced"
+
+
+def test_course_creation_has_a_no_javascript_form_fallback(client: TestClient) -> None:
+    page = client.get("/courses/new?template=technical-interview-prep")
+    token = page.cookies["openlearn_csrf"]
+
+    created = client.post(
+        "/courses/new",
+        headers={"x-csrf-token": token},
+        data={
+            "title": "No JavaScript Interview Prep",
+            "goal": "Prepare for a coding interview.",
+            "experience": "",
+            "template_id": "technical-interview-prep",
+            "submission_id": str(uuid4()),
+        },
+        follow_redirects=False,
+    )
+
+    assert created.status_code == 303
+    assert "/placement" in created.headers["location"] or "/setup" in created.headers["location"]
 
 
 def test_starter_courses_prioritize_variety_and_use_bounded_horizontal_browsing(
