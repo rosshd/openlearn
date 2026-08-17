@@ -189,7 +189,7 @@ def test_every_normal_response_has_browser_security_headers(client: TestClient) 
         in response.headers["content-security-policy"]
     )
     assert response.headers["x-content-type-options"] == "nosniff"
-    assert response.headers["referrer-policy"] == "no-referrer"
+    assert response.headers["referrer-policy"] == "same-origin"
     assert response.headers["x-frame-options"] == "DENY"
     assert "openlearn_csrf=" in response.headers["set-cookie"]
     assert "HttpOnly" in response.headers["set-cookie"]

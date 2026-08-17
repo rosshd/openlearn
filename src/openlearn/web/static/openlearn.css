@@ -309,6 +309,8 @@ h2 { font-size: clamp(1.35rem, 3vw, 2rem); line-height: 1.1; letter-spacing: -0.
 .deletion-consequences { border-left: 5px solid var(--error); }
 .destructive { border-color: var(--error); background: var(--error); color: #fffaf0; box-shadow: 4px 4px 0 color-mix(in srgb, var(--error) 40%, var(--graphite)); }
 .deletion-confirmation strong { overflow-wrap: anywhere; }
+.confirmation-check { padding: 1rem; border: 1px solid var(--line-strong); background: var(--surface-raised); display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 0.75rem; align-items: start; cursor: pointer; }
+.confirmation-check input { width: 1.2rem; height: 1.2rem; margin-top: 0.15rem; accent-color: var(--error); }
 
 .starter-grid { width: 100%; min-width: 0; display: grid; grid-auto-flow: column; grid-auto-columns: calc((100% - 1.5rem) / 3); gap: 0.75rem; padding: 1rem 0 0.35rem; overflow-x: auto; overscroll-behavior-inline: contain; scroll-snap-type: inline mandatory; scrollbar-width: thin; }
 .starter-tile { min-height: 7.5rem; padding: 1rem; border: 1px solid var(--line); background: var(--surface-raised); display: flex; flex-direction: column; align-items: flex-start; text-align: left; scroll-snap-align: start; cursor: pointer; }

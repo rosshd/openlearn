@@ -18,10 +18,12 @@
 
   <form class="work-panel form-stack deletion-confirmation" method="post" action="{{ url_for('delete_course', slug=deletion.slug) }}">
     <input type="hidden" name="topic_generation" value="{{ deletion.topic_generation }}">
-    <label for="confirmation-title">Type the exact course name: <strong>{{ deletion.title }}</strong></label>
-    <input id="confirmation-title" name="confirmation_title" autocomplete="off" required>
-    <label for="confirmation-slug">Type the exact course ID: <strong>{{ deletion.slug }}</strong></label>
-    <input id="confirmation-slug" name="confirmation_slug" autocomplete="off" required>
+    <input type="hidden" name="confirmation_title" value="{{ deletion.title }}">
+    <input type="hidden" name="confirmation_slug" value="{{ deletion.slug }}">
+    <label class="confirmation-check">
+      <input type="checkbox" name="confirmation" value="delete" required>
+      <span>I understand that <strong>{{ deletion.title }}</strong> and its local learning data will be permanently deleted.</span>
+    </label>
     <div class="form-footer">
       <a class="quiet-link" href="{{ url_for('dashboard') }}?course={{ deletion.slug }}">Keep this course</a>
       <button class="primary-action destructive" type="submit">Permanently delete course</button>

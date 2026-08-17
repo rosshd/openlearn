@@ -1199,16 +1199,34 @@ def test_course_settings_preview_confirm_and_permanent_deletion(
     assert deletion.status_code == 200
     assert "Back up all local data" in deletion.text
     assert "course content" in deletion.text
+    assert "Type the exact course name" not in deletion.text
+    assert "Type the exact course ID" not in deletion.text
+    assert 'name="confirmation" value="delete"' in deletion.text
     deletion_data = {
+        "confirmation": "delete",
         "confirmation_slug": created.slug,
         "confirmation_title": "Managed Course Renamed",
         "topic_generation": deletion.text.split(
             'name="topic_generation" value="', 1
         )[1].split('"', 1)[0],
     }
+    unchecked = client.post(
+        f"/courses/{created.slug}/delete",
+        headers={
+            "cookie": f"openlearn_csrf={token}",
+            "origin": "http://testserver",
+        },
+        data={key: value for key, value in deletion_data.items() if key != "confirmation"},
+        follow_redirects=False,
+    )
+    assert unchecked.status_code == 422
+    assert cli.topic_path(created.slug).exists()
     deleted = client.post(
         f"/courses/{created.slug}/delete",
-        headers={"x-csrf-token": token},
+        headers={
+            "cookie": f"openlearn_csrf={token}",
+            "origin": "http://testserver",
+        },
         data=deletion_data,
         follow_redirects=False,
     )

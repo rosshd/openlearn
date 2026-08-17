@@ -86,6 +86,7 @@ class CourseSettingsConfirmationRequest(CourseSettingsRequest):
 
 
 class CourseDeletionRequest(BaseModel):
+    confirmation: Literal["delete"]
     confirmation_slug: str = Field(min_length=1, max_length=64)
     confirmation_title: str = Field(min_length=1, max_length=200)
     topic_generation: str = Field(min_length=1, max_length=128)
