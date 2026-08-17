@@ -1214,6 +1214,16 @@ def test_real_browser_course_library_preview_history_responsive_and_no_js(
                 page.goto(bootstrap_url)
                 page.goto(f"{app_url}/dashboard?course={active.slug}")
                 _assert_no_page_overflow(page)
+                workspace = page.locator("[data-course-workspace]")
+                playwright.expect(workspace).to_be_visible()
+                assert workspace.bounding_box()["width"] >= 1100
+                playwright.expect(page.locator(".course-controls-panel")).to_be_visible()
+                playwright.expect(
+                    page.get_by_role("link", name="Change course outline")
+                ).to_be_visible()
+                assert page.locator(".course-library-dashboard h1").evaluate(
+                    "heading => parseFloat(getComputedStyle(heading).fontSize) <= 40"
+                )
 
                 preview_row = page.locator(f'[data-course-slug="{preview.slug}"]')
                 preview_row.click()

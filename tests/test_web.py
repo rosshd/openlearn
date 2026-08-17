@@ -127,9 +127,8 @@ def test_default_web_app_runs_setup_dashboard_course_and_tutor_flow(
     assert "**Lesson:**" not in focus.text
     assert "Your courses" in client.get("/dashboard").text
     dashboard_html = client.get("/dashboard").text
-    dashboard_header = dashboard_html.split('class="course-list"', 1)[0]
-    assert "New course" not in dashboard_header
-    courses_panel = dashboard_html.split('class="course-list"', 1)[1]
+    dashboard_intro, courses_panel = dashboard_html.split("data-course-workspace", 1)
+    assert "New course" not in dashboard_intro
     assert "New course" in courses_panel
     assert "new-course-menu" in courses_panel
     course_heading = courses_panel.split("</div>", 2)[0]
@@ -1046,8 +1045,14 @@ def test_dashboard_hides_empty_review_and_shows_course_path_and_management(
 
     assert response.status_code == 200
     assert "0 due" not in response.text
+    assert 'data-course-workspace' in response.text
+    assert 'data-course-coverage' in response.text
+    assert 'class="course-controls-panel"' in response.text
     assert "View full course path" in response.text
     assert f'/courses/{course.slug}/settings' in response.text
+    assert f'/courses/{course.slug}/delete' in response.text
+    assert "Change course outline" in response.text
+    assert "View progress" in response.text
     assert "Quick Learn" in response.text
     assert "Settings and local data" not in response.text
 

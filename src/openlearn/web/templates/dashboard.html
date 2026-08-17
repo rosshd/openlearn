@@ -3,27 +3,29 @@
 {% block content %}
 <section class="dashboard-shell course-library-dashboard" aria-labelledby="dashboard-title"
   data-selected-course="{{ dashboard.selected_slug or '' }}" data-active-course="{{ dashboard.active_slug or '' }}">
-  <div class="section-heading">
+  <header class="course-library-intro">
     <div>
-      <p class="eyebrow">{% if dashboard.courses %}Your learning workspace{% else %}Build your learning path{% endif %}</p>
-      <h1 id="dashboard-title">{% if dashboard.courses %}Your courses{% else %}Choose your first course{% endif %}</h1>
+      <p class="eyebrow">Course library</p>
+      <h1 id="dashboard-title">{% if dashboard.courses %}Choose a course and see its path{% else %}Choose your first course{% endif %}</h1>
     </div>
-  </div>
+    <p>{% if dashboard.courses %}Preview the next topics before you enter a course. Your active course changes only when you continue learning.{% else %}Start with a proven path, or build one around your own goal. Every course stays editable as you learn.{% endif %}</p>
+  </header>
 
-  <div class="dashboard-grid course-library-grid{% if not dashboard.courses %} is-empty{% endif %}">
+  <section class="course-library-frame" data-course-workspace>
+    <div class="library-toolbar">
+      <h2 id="courses-title">Your courses</h2>
+      <details class="new-course-menu">
+        <summary class="primary-action compact">New course <span aria-hidden="true">+</span></summary>
+        <div aria-label="New course choices">
+          <a href="{{ url_for('new_course') }}#starter-courses"><strong>Starter course</strong><small>Begin with a proven course path.</small></a>
+          <a href="{{ url_for('new_course') }}#custom-course"><strong>Custom course</strong><small>Describe anything you want to learn.</small></a>
+          <a href="{{ url_for('quick_learn') }}"><strong>Quick Learn</strong><small>Learn from one bounded source.</small></a>
+        </div>
+      </details>
+    </div>
+
+    <div class="dashboard-grid course-library-grid{% if not dashboard.courses %} is-empty{% endif %}">
     <section class="course-list" aria-labelledby="courses-title">
-      <div class="panel-heading">
-        <h2 id="courses-title">Your courses</h2>
-        <details class="new-course-menu">
-          <summary class="primary-action compact">New course <span aria-hidden="true">+</span></summary>
-          <div aria-label="New course choices">
-            <a href="{{ url_for('new_course') }}#starter-courses"><strong>Starter course</strong><small>Begin with a proven course path.</small></a>
-            <a href="{{ url_for('new_course') }}#custom-course"><strong>Custom course</strong><small>Describe anything you want to learn.</small></a>
-            <a href="{{ url_for('quick_learn') }}"><strong>Quick Learn</strong><small>Learn from one bounded source.</small></a>
-          </div>
-        </details>
-      </div>
-
       {% if dashboard.courses %}
         <div class="course-rows" aria-label="Saved courses">
         {% for course in dashboard.courses %}
@@ -46,7 +48,7 @@
         <a class="preview-jump quiet-link" href="#selected-course-preview">View selected course preview</a>
       {% else %}
         <div class="empty-course-library" data-empty-course-library>
-          <p>Start with a proven path, or create a course around your own goal. You can adjust it as you learn.</p>
+          <p>Three strong starting points, each with a ready-made course path.</p>
           <div class="starter-grid" aria-label="Recommended starter courses">
           {% for starter in dashboard.starters %}
             <a class="starter-tile" href="{{ url_for('new_course') }}?template={{ starter.id }}">
@@ -66,17 +68,19 @@
       data-course-preview aria-labelledby="selected-course-title">
       <div class="panel-heading">
         <div>
-          <p class="eyebrow">{% if course.active %}Active course{% else %}Course preview{% endif %}</p>
+          <p class="eyebrow">{% if course.active %}Active course{% else %}Selected course{% endif %}</p>
           <h2 id="selected-course-title">{{ course.title }}</h2>
         </div>
-        <a class="quiet-link" href="{{ url_for('course_settings', slug=course.slug) }}">Course settings</a>
       </div>
       <p>{{ course.goal }}</p>
+      <div class="course-coverage" data-course-coverage>
+        <progress value="{{ course.coverage.percent }}" max="100" aria-label="{{ course.coverage_summary }}">{{ course.coverage.percent }}%</progress>
+        <span>{{ course.coverage_summary }}</span>
+      </div>
 
       <div class="course-next-move">
         <p class="eyebrow">Current topic</p>
         <h3>{{ course.current_topic }}</h3>
-        <p>{{ course.coverage_summary }}</p>
         {% if course.blocker %}
         <div class="inline-notice" role="status">
           <strong>{{ course.blocker.message }}</strong>
@@ -193,7 +197,27 @@
       </section>
       {% endif %}
     </section>
+
+    <aside class="course-controls-panel" aria-labelledby="course-controls-title">
+      <p class="eyebrow">Manage</p>
+      <h2 id="course-controls-title">Course controls</h2>
+      <nav aria-label="Selected course controls">
+        <a href="{{ url_for('course_settings', slug=course.slug) }}">
+          <strong>Course settings</strong><small>Name, goal, pace, and depth</small>
+        </a>
+        <a href="{{ url_for('course_settings', slug=course.slug) }}#course-outline">
+          <strong>Change course outline</strong><small>Adjust the path without losing progress</small>
+        </a>
+        <a href="{{ url_for('progress') }}?course={{ course.slug }}">
+          <strong>View progress</strong><small>Coverage, readiness, and review</small>
+        </a>
+        <a class="danger-link" href="{{ url_for('course_deletion', slug=course.slug) }}">
+          <strong>Delete course</strong><small>Review affected local data first</small>
+        </a>
+      </nav>
+    </aside>
     {% endif %}
-  </div>
+    </div>
+  </section>
 </section>
 {% endblock %}
