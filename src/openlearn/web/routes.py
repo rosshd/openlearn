@@ -134,6 +134,31 @@ def _setup_redirect(request: Request) -> RedirectResponse:
     return RedirectResponse(target, status_code=303)
 
 
+def _course_creation_redirect(
+    request: Request,
+    result: dict[str, Any],
+    *,
+    provider_ready: bool,
+) -> RedirectResponse:
+    slug = str(result["slug"])
+    if result.get("state") == "placement_recommended":
+        destination = request.url_for("placement", slug=slug)
+        if not provider_ready:
+            destination = request.url_for("setup").include_query_params(
+                next=destination.path
+            )
+        return RedirectResponse(destination, status_code=303)
+    operation_id = result.get("operation_id")
+    destination = (
+        request.url_for(
+            "course_initializing", slug=slug, operation_id=operation_id
+        )
+        if operation_id
+        else request.url_for("focus", slug=slug)
+    )
+    return RedirectResponse(destination, status_code=303)
+
+
 def _safe_setup_destination(request: Request) -> str:
     destination = request.query_params.get("next", "")
     if (
@@ -211,6 +236,14 @@ async def _dashboard_response(request: Request) -> Any:
         except ValueError as error:
             raise HTTPException(status_code=404, detail="Course not found") from error
     snapshot = public_mapping(await _call_dashboard(request, selected_slug))
+    starters = snapshot.get("starters") if not snapshot.get("courses") else []
+    starters = starters if isinstance(starters, list) else []
+    starter_submission_ids = {
+        str(starter["id"]): str(uuid4())
+        for starter in starters
+        if isinstance(starter, dict)
+        and isinstance(starter.get("id"), str)
+    }
     proposal = None
     proposal_id = request.query_params.get("proposal")
     selected = snapshot.get("selected_course")
@@ -231,6 +264,7 @@ async def _dashboard_response(request: Request) -> Any:
         _context(
             request,
             dashboard=snapshot,
+            starter_submission_ids=starter_submission_ids,
             follow_up_proposal=proposal,
             page_title="Your courses",
         ),
@@ -255,6 +289,93 @@ async def new_course(request: Request) -> Any:
             course_templates=templates,
             selected_template=selected_template,
             page_title="Start a course",
+        ),
+    )
+
+
+@router.post(
+    "/courses/starters/{template_id}/start",
+    name="start_starter_course",
+)
+async def start_starter_course(request: Request, template_id: str) -> Any:
+    templates = await _call(request, "course_templates")
+    template = next(
+        (item for item in templates if item.get("id") == template_id),
+        None,
+    )
+    if template is None:
+        raise HTTPException(status_code=404, detail="Starter course not found")
+    try:
+        form = await request.form()
+        payload = CourseCreateRequest(
+            title=str(template["title"]),
+            goal=str(template["description"]),
+            experience="",
+            template_id=template_id,
+            submission_id=str(form.get("submission_id", "")),
+        )
+    except (ValidationError, ValueError, KeyError) as error:
+        raise HTTPException(status_code=422, detail="Invalid starter request") from error
+
+    entry_mode = template.get("entry_mode")
+    provider_ready = await _provider_ready(request)
+    if entry_mode != "interview_prep" and not provider_ready:
+        next_page = request.url_for(
+            "resume_starter_course", template_id=template_id
+        ).include_query_params(
+            submission_id=payload.submission_id
+        )
+        setup_page = request.url_for("setup").include_query_params(
+            next=f"{next_page.path}?{next_page.query}"
+        )
+        return RedirectResponse(setup_page, status_code=303)
+
+    result = public_mapping(await _call(request, "create_course", payload))
+    if not result.get("ok"):
+        return _templates(request).TemplateResponse(
+            request,
+            "course_create.html",
+            _context(
+                request,
+                course_templates=templates,
+                selected_template=template,
+                create_error=str(result.get("error") or "Course creation failed."),
+                page_title="Start a course",
+            ),
+            status_code=422,
+        )
+    return _course_creation_redirect(
+        request,
+        result,
+        provider_ready=provider_ready,
+    )
+
+
+@router.get(
+    "/courses/starters/{template_id}/resume",
+    response_class=HTMLResponse,
+    name="resume_starter_course",
+)
+async def resume_starter_course(request: Request, template_id: str) -> Any:
+    templates = await _call(request, "course_templates")
+    template = next(
+        (item for item in templates if item.get("id") == template_id),
+        None,
+    )
+    if template is None:
+        raise HTTPException(status_code=404, detail="Starter course not found")
+    try:
+        submission_id = canonical_uuid(request.query_params.get("submission_id", ""))
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail="Invalid starter request") from error
+    return _templates(request).TemplateResponse(
+        request,
+        "starter_resume.html",
+        _context(
+            request,
+            starter=template,
+            starter_submission_id=submission_id,
+            page_title=f"Continue to {template['title']}",
         ),
     )
 
@@ -337,23 +458,11 @@ async def create_course_form(request: Request) -> Any:
             ),
             status_code=422,
         )
-    slug = str(result["slug"])
-    if result.get("state") == "placement_recommended":
-        destination = request.url_for("placement", slug=slug)
-        if not provider_ready:
-            destination = request.url_for("setup").include_query_params(
-                next=destination.path
-            )
-        return RedirectResponse(destination, status_code=303)
-    operation_id = result.get("operation_id")
-    destination = (
-        request.url_for(
-            "course_initializing", slug=slug, operation_id=operation_id
-        )
-        if operation_id
-        else request.url_for("focus", slug=slug)
+    return _course_creation_redirect(
+        request,
+        result,
+        provider_ready=provider_ready,
     )
-    return RedirectResponse(destination, status_code=303)
 
 
 @router.post("/courses/{slug}/activate", name="activate_course")

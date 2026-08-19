@@ -8,6 +8,7 @@ import socket
 import subprocess
 import sys
 import time
+from urllib.parse import parse_qs, urlsplit
 from urllib.request import Request, urlopen
 from uuid import uuid4
 
@@ -1468,7 +1469,17 @@ def test_real_browser_unverified_provider_stays_in_setup(
                 playwright.expect(page.locator("[data-theme-toggle]")).to_be_visible()
                 assert page.locator(".local-status").count() == 0
                 _assert_no_page_overflow(page)
-                page.goto(f"{app_url}/setup")
+                starter_tiles.first.click()
+                page.wait_for_url("**/setup?next=**")
+                assert "/courses/new" not in page.url
+                setup_url = urlsplit(page.url)
+                assert setup_url.path.endswith("/setup")
+                assert parse_qs(setup_url.query)["next"][0].endswith(
+                    "/courses/technical-interview-prep/placement"
+                )
+                assert (
+                    home / "learning-topics" / "technical-interview-prep.md"
+                ).exists()
                 page.set_viewport_size({"width": 320, "height": 720})
                 _assert_no_page_overflow(page)
                 playwright.expect(
@@ -1487,7 +1498,7 @@ def test_real_browser_unverified_provider_stays_in_setup(
                 assert page.locator("[data-form-error]").evaluate(
                     "summary => summary === document.activeElement"
                 )
-                assert page.url.endswith("/setup")
+                assert urlsplit(page.url).path.endswith("/setup")
                 assert page.locator("#api-key").input_value() == (
                     "browser-secret-must-clear"
                 )

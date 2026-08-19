@@ -83,6 +83,11 @@ function initializeUuidFields(scope = document) {
 }
 initializeUuidFields();
 
+const starterResumeForm = document.querySelector("[data-starter-resume-form]");
+if (starterResumeForm) {
+  window.requestAnimationFrame(() => starterResumeForm.requestSubmit());
+}
+
 const providerSelect = document.querySelector("#provider");
 const providerModel = document.querySelector("#model");
 const providerBaseUrl = document.querySelector("#base-url");

@@ -6,6 +6,7 @@ from pathlib import Path
 import time
 from types import SimpleNamespace
 from datetime import date, datetime, timedelta, timezone
+from urllib.parse import parse_qs, urlsplit
 from uuid import uuid4
 
 import pytest
@@ -1153,6 +1154,111 @@ def test_empty_dashboard_embeds_varied_starters_and_creation_choices(
     assert 'data-theme-toggle' in response.text
     assert 'class="local-status"' not in response.text
     assert 'class="utilities-menu"' not in response.text
+
+
+def test_dashboard_starter_starts_once_and_enters_placement(
+    client: TestClient,
+) -> None:
+    dashboard = client.get("/dashboard")
+    token = dashboard.cookies["openlearn_csrf"]
+    submission_id = str(uuid4())
+    start_path = "/courses/starters/technical-interview-prep/start"
+
+    assert dashboard.status_code == 200
+    assert f'{start_path}"' in dashboard.text
+    assert 'method="post"' in dashboard.text
+    assert "/courses/new?template=technical-interview-prep" not in dashboard.text
+
+    first = client.post(
+        start_path,
+        headers={"x-csrf-token": token},
+        data={"submission_id": submission_id},
+        follow_redirects=False,
+    )
+
+    assert first.status_code == 303
+    assert first.headers["location"].endswith(
+        "/courses/technical-interview-prep/placement"
+    )
+    assert len(application.dashboard().courses) == 1
+
+    replay = client.post(
+        start_path,
+        headers={"x-csrf-token": token},
+        data={"submission_id": submission_id},
+        follow_redirects=False,
+    )
+
+    assert replay.status_code == 303
+    assert replay.headers["location"] == first.headers["location"]
+    assert len(application.dashboard().courses) == 1
+    assert client.get(start_path).status_code == 405
+
+    missing = client.post(
+        "/courses/starters/not-a-template/start",
+        headers={"x-csrf-token": token},
+        data={"submission_id": str(uuid4())},
+        follow_redirects=False,
+    )
+
+    assert missing.status_code == 404
+    assert len(application.dashboard().courses) == 1
+
+
+def test_provider_setup_resumes_non_interview_starter_without_creation_form(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    services = client.app.state.services
+    monkeypatch.setattr(services, "ensure_provider_ready", lambda: {"ready": False})
+    dashboard = client.get("/dashboard")
+    token = dashboard.cookies["openlearn_csrf"]
+    submission_id = str(uuid4())
+    start_path = "/courses/starters/networking/start"
+
+    setup = client.post(
+        start_path,
+        headers={"x-csrf-token": token},
+        data={"submission_id": submission_id},
+        follow_redirects=False,
+    )
+
+    assert setup.status_code == 303
+    setup_url = urlsplit(setup.headers["location"])
+    assert setup_url.path.endswith("/setup")
+    resume_path = parse_qs(setup_url.query)["next"][0]
+    assert resume_path.endswith(
+        f"/courses/starters/networking/resume?submission_id={submission_id}"
+    )
+    assert "/courses/new" not in resume_path
+    assert application.dashboard().courses == ()
+
+    resume = client.get(resume_path)
+
+    assert resume.status_code == 200
+    assert f'{start_path}"' in resume.text
+    assert f'value="{submission_id}"' in resume.text
+    assert "Continue to Computer Networking" in resume.text
+    assert "data-starter-resume-form" in resume.text
+
+    assert client.get(
+        f"/courses/starters/not-a-template/resume?submission_id={submission_id}"
+    ).status_code == 404
+    assert client.get(
+        "/courses/starters/networking/resume?submission_id=not-a-uuid"
+    ).status_code == 422
+
+    monkeypatch.setattr(services, "ensure_provider_ready", lambda: {"ready": True})
+    created = client.post(
+        start_path,
+        headers={"x-csrf-token": token},
+        data={"submission_id": submission_id},
+        follow_redirects=False,
+    )
+
+    assert created.status_code == 303
+    assert "/courses/computer-networking/initializing/" in created.headers["location"]
+    assert len(application.dashboard().courses) == 1
 
 
 def test_course_settings_preview_confirm_and_permanent_deletion(

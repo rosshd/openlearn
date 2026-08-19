@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="centered-state" aria-labelledby="starter-resume-title" data-starter-resume>
+  <p class="eyebrow">Provider connected</p>
+  <h1 id="starter-resume-title">Starting {{ starter.title }}.</h1>
+  <p>Your starter course details are ready. Continue into its saved course path.</p>
+  <form method="post" action="{{ url_for('start_starter_course', template_id=starter.id) }}" data-starter-resume-form>
+    <input type="hidden" name="submission_id" value="{{ starter_submission_id }}">
+    <button class="primary-action" type="submit">
+      <span>Continue to {{ starter.title }}</span><span aria-hidden="true">→</span>
+    </button>
+  </form>
+  <p class="field-note">This page continues automatically. The button remains available if JavaScript is disabled.</p>
+</section>
+{% endblock %}

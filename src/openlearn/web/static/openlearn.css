@@ -339,9 +339,10 @@ h2 { font-size: clamp(1.35rem, 3vw, 2rem); line-height: 1.1; letter-spacing: -0.
 .confirmation-check input { width: 1.2rem; height: 1.2rem; margin-top: 0.15rem; accent-color: var(--error); }
 
 .starter-grid { width: 100%; min-width: 0; display: grid; grid-auto-flow: column; grid-auto-columns: calc((100% - 1.5rem) / 3); gap: 0.75rem; padding: 1rem 0 0.35rem; overflow-x: auto; overscroll-behavior-inline: contain; scroll-snap-type: inline mandatory; scrollbar-width: thin; }
+.starter-grid > form { min-width: 0; }
 .empty-course-library .starter-grid { grid-auto-flow: row; grid-auto-columns: auto; grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .empty-course-library .starter-tile { min-height: 9.5rem; }
-.starter-tile { min-height: 7.5rem; padding: 1rem; border: 1px solid var(--line); background: var(--surface-raised); display: flex; flex-direction: column; align-items: flex-start; text-align: left; text-decoration: none; scroll-snap-align: start; cursor: pointer; }
+.starter-tile { width: 100%; height: 100%; min-height: 7.5rem; padding: 1rem; border: 1px solid var(--line); background: var(--surface-raised); display: flex; flex-direction: column; align-items: flex-start; text-align: left; text-decoration: none; scroll-snap-align: start; cursor: pointer; }
 .starter-tile:hover, .starter-tile[aria-pressed="true"] { border-color: var(--orange); box-shadow: inset 0 -4px var(--orange); }
 .starter-tile small { margin-top: 0.5rem; color: var(--graphite-soft); }
 .starter-index { margin-bottom: 0.7rem; color: var(--orange-ink); font: 700 0.72rem/1 ui-monospace, monospace; }

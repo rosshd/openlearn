@@ -50,11 +50,14 @@
           <p>Three strong starting points, each with a ready-made course path.</p>
           <div class="starter-grid" aria-label="Recommended starter courses">
           {% for starter in dashboard.starters %}
-            <a class="starter-tile" href="{{ url_for('new_course') }}?template={{ starter.id }}">
-              <span class="starter-index">{{ "%02d"|format(loop.index) }}</span>
-              <strong>{{ starter.title }}</strong>
-              <small>{{ starter.description }}</small>
-            </a>
+            <form method="post" action="{{ url_for('start_starter_course', template_id=starter.id) }}">
+              <input type="hidden" name="submission_id" value="{{ starter_submission_ids[starter.id] }}">
+              <button class="starter-tile" type="submit">
+                <span class="starter-index">{{ "%02d"|format(loop.index) }}</span>
+                <strong>{{ starter.title }}</strong>
+                <small>{{ starter.description }}</small>
+              </button>
+            </form>
           {% endfor %}
           </div>
         </div>
