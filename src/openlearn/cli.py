@@ -18176,7 +18176,7 @@ def system_prompt(
     options_prompt = course_options_prompt(topic.metadata)
     pending_prompt = pending_question_prompt(topic.metadata)
     verify_prompt = pending_verify_prompt(topic.metadata)
-    hint_prompt = pending_hint_prompt(topic.metadata)
+    hint_prompt = "" if interview_target is not None else pending_hint_prompt(topic.metadata)
     coding_drill_prompt = coding_drill_action_prompt(topic.metadata)
     tier = difficulty_tier(topic.metadata)
     move_prompt = tier_move_prompt(topic.metadata, tier)
@@ -18191,6 +18191,11 @@ def system_prompt(
     model_metadata.pop("enter_advance_cue", None)
     model_metadata.pop("pending_learner_prompt", None)
     model_metadata.pop("interview_curriculum", None)
+    if interview_target is not None:
+        # Judge-authored hints are untrusted suggestions and can mention a nearby
+        # interview skill. The pinned curriculum target and remediation state
+        # already contain everything the tutor needs to correct this answer.
+        model_metadata.pop("pending_hint", None)
     model_pending = model_metadata.get("pending_question")
     normalized_pending = pending_question_for_model(model_pending)
     if normalized_pending is not model_pending:

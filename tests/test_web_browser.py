@@ -982,6 +982,83 @@ def test_stream_preview_is_separate_smooth_and_bounded() -> None:
         browser.close()
 
 
+def test_answer_commit_keeps_text_until_feedback_reloads() -> None:
+    playwright = pytest.importorskip("playwright.sync_api")
+    javascript = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "openlearn"
+        / "web"
+        / "static"
+        / "openlearn.js"
+    )
+    document = """
+      <meta name="csrf-token" content="test-token">
+      <main data-focus-shell data-course-slug="technical-interview-prep"
+            data-revision="3">
+        <article data-current-move>
+          <div data-move-content>Explain indexed traversal.</div>
+          <div data-tutor-stream-preview hidden><div data-tutor-stream-text></div></div>
+        </article>
+        <form data-turn-form>
+          <input name="submission_id" value="answer-operation">
+          <input name="expected_revision" value="3">
+          <input name="intent" value="answer">
+          <textarea name="text" required>My saved answer</textarea>
+          <button type="submit">Send answer</button>
+        </form>
+        <p data-operation-state hidden tabindex="-1"><span data-operation-message></span></p>
+        <div data-chat-conversation></div>
+      </main>
+      <script>
+        window.fetch = async (url, options = {}) => {
+          if (url.includes('/turns') && options.method === 'POST') {
+            return new Response(JSON.stringify({
+              state: 'saved', operation_id: 'answer-operation', message_kind: 'answer',
+            }), {status: 200, headers: {'Content-Type': 'application/json'}});
+          }
+          return new Promise((resolve) => { window.resolveAnswerOperation = resolve; });
+        };
+      </script>
+      <script src="/openlearn.js"></script>
+    """
+    loads = 0
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch()
+        page = browser.new_page()
+
+        def serve_focus(route) -> None:
+            nonlocal loads
+            loads += 1
+            route.fulfill(body=document, content_type="text/html")
+
+        page.route(
+            "http://openlearn.test/openlearn.js",
+            lambda route: route.fulfill(path=str(javascript)),
+        )
+        page.route("http://openlearn.test/focus", serve_focus)
+        page.goto("http://openlearn.test/focus")
+        page.get_by_role("button", name="Send answer").click()
+        page.wait_for_function("() => typeof window.resolveAnswerOperation === 'function'")
+        assert page.locator('textarea[name="text"]').input_value() == "My saved answer"
+        assert page.locator('textarea[name="text"]').is_disabled()
+        page.evaluate(
+            """
+            window.resolveAnswerOperation(new Response(JSON.stringify({
+              state: 'committed', message_kind: 'answer',
+              preview_text: 'Feedback: Try the boundary again.',
+            }), {status: 200, headers: {'Content-Type': 'application/json'}}));
+            """
+        )
+        page.wait_for_function("() => performance.getEntriesByType('navigation').length === 1")
+        playwright.expect(page.locator('textarea[name="text"]')).to_be_enabled(timeout=6_000)
+        assert loads >= 2
+        playwright.expect(
+            page.get_by_role("button", name="Show next lesson")
+        ).to_have_count(0)
+        browser.close()
+
+
 def test_next_lesson_handoff_restores_unsent_chat_draft() -> None:
     playwright = pytest.importorskip("playwright.sync_api")
     javascript = (

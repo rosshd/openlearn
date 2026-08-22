@@ -1323,15 +1323,20 @@ function showNextLessonHandoff() {
   syncNextLessonHandoff();
 }
 
-async function pollOperation(operationId) {
+async function pollOperation(operationId, submittedIntent = "") {
   const result = await waitForOperation(
     operationId,
     setOperationState,
     (preview) => renderTutorPreview(preview),
   );
   if (result.state === "committed") {
-    clearTurnComposer();
     await finishTutorPreview(result.preview_text || "");
+    if (result.message_kind === "answer" || submittedIntent === "answer") {
+      storeChatDraft();
+      window.location.reload();
+      return;
+    }
+    clearTurnComposer();
     showNextLessonHandoff();
     return;
   }
@@ -1433,10 +1438,15 @@ async function submitTurn(overrideIntent = null) {
       method: "POST",
       body: JSON.stringify(payload),
     });
-    if (result.operation_id) await pollOperation(result.operation_id);
+    if (result.operation_id) await pollOperation(result.operation_id, payload.intent);
     else if (result.state === "committed") {
-      clearTurnComposer();
-      showNextLessonHandoff();
+      if (result.message_kind === "answer" || payload.intent === "answer") {
+        storeChatDraft();
+        window.location.reload();
+      } else {
+        clearTurnComposer();
+        showNextLessonHandoff();
+      }
     }
     else if (result.state === "retryable_error") {
       setOperationState(result.error || "Your response is saved. Retry when the provider is available.", true, result);

@@ -810,8 +810,10 @@ class TutorServiceTests(TestCase):
 
     def test_wrong_interview_answer_then_continue_remains_on_exact_target(self) -> None:
         slug = self._create_interview_course()
+        captured_remediation_prompt = ""
 
         def provider(_model: str, system: str, _user: str) -> str:
+            nonlocal captured_remediation_prompt
             if "calibrated JSON judge" in system:
                 return json.dumps(
                     {
@@ -821,9 +823,13 @@ class TutorServiceTests(TestCase):
                         "answer_kind": "production",
                         "is_transfer": False,
                         "weak_spots_add": ["Dynamic programming"],
+                        "answer_hint": (
+                            "Would a hash map find repeating characters more efficiently?"
+                        ),
                     }
                 )
             if "Pending question to grade:" in system and "Stored question:" in system:
+                captured_remediation_prompt = system
                 return (
                     "**Feedback:**\nThe boundary reasoning needs another attempt.\n\n"
                     "**Check:**\nExplain how indexed traversal avoids crossing an array boundary."
@@ -858,6 +864,14 @@ class TutorServiceTests(TestCase):
                 expected_revision=3,
             )
 
+        self.assertNotIn("hash map", captured_remediation_prompt.casefold())
+        answer_receipts = [
+            value
+            for value in cli.load_state(slug)["_openlearn_internal"]["turn_results"].values()
+            if value.get("message_kind") == "answer"
+        ]
+        self.assertEqual(len(answer_receipts), 1)
+        self.assertIn("boundary reasoning needs another attempt", json.dumps(answer_receipts[0]))
         state = cli.load_state(slug)
         canonical = state["interview_curriculum"]
         self.assertIn("concept.arrays-strings", canonical["evidence"]["weak"])

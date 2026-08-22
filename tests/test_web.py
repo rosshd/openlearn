@@ -3269,6 +3269,7 @@ def test_operation_status_exposes_safe_preview_and_recovery_code(
     status = OpenLearnWebServices().operation_status("existing-course", result.submission_id)
 
     assert status["preview_text"] == "A partial explanation"
+    assert status["message_kind"] == "answer"
     assert status["error_code"] == "provider_unavailable"
     assert status["show_provider_recovery"] is True
     assert "move" not in status
@@ -3297,6 +3298,27 @@ def test_committed_operation_status_uses_final_move_as_preview(
     status = OpenLearnWebServices().operation_status("existing-course", result.submission_id)
 
     assert status["preview_text"] == "Final complete response"
+    assert status["message_kind"] == "answer"
+
+
+def test_answer_operations_reload_feedback_without_lesson_handoff() -> None:
+    javascript = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "openlearn"
+        / "web"
+        / "static"
+        / "openlearn.js"
+    ).read_text(encoding="utf-8")
+    poll_start = javascript.index("async function pollOperation")
+    poll_end = javascript.index("function clearTurnComposer", poll_start)
+    poll_body = javascript[poll_start:poll_end]
+
+    assert 'result.message_kind === "answer"' in poll_body
+    assert "window.location.reload()" in poll_body
+    assert poll_body.index('result.message_kind === "answer"') < poll_body.index(
+        "showNextLessonHandoff()"
+    )
 
 
 def test_initialization_refresh_recovers_orphaned_saved_operation(

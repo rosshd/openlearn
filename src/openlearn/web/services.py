@@ -1902,6 +1902,7 @@ class OpenLearnWebServices:
             "state": result.status,
             "submission_id": result.submission_id,
             "operation_id": result.submission_id,
+            "message_kind": result.message_kind,
             "move": _move(result.move),
         }
 
@@ -1928,6 +1929,7 @@ class OpenLearnWebServices:
             return {"state": "retryable_error", "error": "This operation is no longer available."}
         return {
             "state": result.status,
+            "message_kind": result.message_kind,
             "error": result.error_message or "",
             "error_code": result.error_code or "",
             "show_provider_recovery": _show_provider_recovery(result.error_code),
