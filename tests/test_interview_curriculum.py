@@ -385,6 +385,14 @@ def test_target_validator_allows_python_dotted_names_but_rejects_known_skill_ids
     )
     assert (
         interview_curriculum.target_response_error(
+            "**Lesson:** Reason about indexed sequences, mutation, traversal, and "
+            "boundary conditions.",
+            target,
+        )
+        == "response copies formal skill description"
+    )
+    assert (
+        interview_curriculum.target_response_error(
             "**Lesson:** Switch to concept.hashing next.",
             target,
         )
@@ -775,6 +783,12 @@ def test_check_targets_pin_problem_identity_and_active_depth() -> None:
     assert "**Lesson:**" in practice_fallback
     assert "**Example:**" in practice_fallback
     assert "**Check:**" in practice_fallback
+    assert "starts at 0" in practice_fallback
+    assert "'cat'" in practice_fallback
+    assert "indexed sequences" not in practice_fallback
+    assert "representation" not in practice_fallback
+    assert "invariant" not in practice_fallback
+    assert "indexed traversal" not in practice_fallback
 
     revisit = interview_curriculum.resolve_progression_target(
         state, intent="revisit", explicit_skill_id=first.target.skill_id

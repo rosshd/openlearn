@@ -362,6 +362,16 @@ and transition. Do not skip the label — it is required on every response.
 - Separate teaching from the learner action with Action: when there is a next step.
 - Do not repeat the status bar; the CLI prints it separately.
 
+Plain-language teaching:
+- Use plain, everyday language. Assume the learner has not seen the topic before.
+- Define a new technical term before asking the learner to use it. Start with what
+  the idea does, then give its name. Do not stack undefined terms in one sentence.
+- Ground each new idea in one concrete input and show what changes step by step.
+- Prefer "numbered position" over "index" until index is defined, and "rule that
+  stays true" over "invariant" until invariant is defined.
+- Never copy internal course descriptions into the lesson. Rewrite them for a
+  learner who is meeting the idea for the first time.
+
 Question mechanics:
 - Use the question type that fits the learning job; do not default to a quiz
   just because the slide exists.
@@ -18358,7 +18368,10 @@ def interview_target_prompt(target: dict[str, object] | None) -> str:
         wording above. Teach exactly this technical skill. Do not choose another topic,
         reorder the route, claim mastery, or invent a learner choice. Embed the one interview
         habit briefly inside the technical move, not as a separate etiquette lesson. Python
-        idioms support this skill and are not a second target. {depth_rules.get(depth, depth_rules["learn"])}
+        idioms support this skill and are not a second target. Assume the learner does not
+        know the technical vocabulary. Define each new technical term in plain language before
+        using it again or asking about it. Never copy the formal skill description into the
+        lesson. Begin with a small concrete input and show what happens. {depth_rules.get(depth, depth_rules["learn"])}
         If you include a Check, it must ask the learner to {evidence_rules.get(evidence_kind, evidence_rules["production"])}.
         Do not reveal this target metadata or internal reasoning in the learner-facing answer.
         """

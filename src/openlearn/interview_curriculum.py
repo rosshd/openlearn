@@ -581,6 +581,12 @@ def target_response_error(answer: str, target: Mapping[str, object]) -> str | No
     ):
         return "response invents a learner choice"
     depth = str(target.get("depth_mode") or "learn")
+    description = str(target.get("skill_description") or "").strip()
+    if depth in {"learn", "practice"} and description:
+        normalized_answer = " ".join(answer.casefold().split())
+        normalized_description = " ".join(description.casefold().split())
+        if normalized_description in normalized_answer:
+            return "response copies formal skill description"
     if depth in {"practice", "review", "verify"} and not re.search(
         r"(?im)^\s*(?:\*\*)?Check:(?:\*\*)?",
         answer,
@@ -818,46 +824,193 @@ def apply_answer_judgment(
 def deterministic_target_fallback(target: Mapping[str, object]) -> str:
     """Return one learner-facing bundle-bound move when provider output is unsafe."""
     label = str(target.get("skill_label") or "this skill")
-    description = str(target.get("skill_description") or "Build the core technical model.")
     depth = str(target.get("depth_mode") or "learn")
     evidence_kind = str(target.get("evidence_kind") or "production")
-    habit = str(target.get("embedded_habit") or "Explain the key decision aloud.")
-    hooks = target.get("python_hooks")
-    python_text = ""
-    if isinstance(hooks, list) and hooks:
-        python_text = f" In Python, use {str(hooks[0]).rstrip('.')} where it supports the approach."
+    skill_ref = target.get("skill_ref")
+    skill_id = str(skill_ref.get("skill_id") or "") if isinstance(skill_ref, Mapping) else ""
+    lesson, example = _plain_skill_guide(skill_id, label)
     if depth == "verify":
         check_move = {
-            "recognition": "identify the correct representation and justify the choice",
-            "explanation": "explain the invariant or core representation in your own words",
-            "production": "produce or trace the approach on one concrete input",
-            "transfer": "apply the skill to a new concrete input",
-            "delayed_retrieval": "retrieve the approach and apply it without a refresher",
-        }.get(evidence_kind, "produce or trace the approach on one concrete input")
-        return (
-            f"**Check:**\nVerify {label} without a refresher: {check_move}. {habit}"
-        )
+            "recognition": "say when you would use it and why",
+            "explanation": "explain the main idea in your own words",
+            "production": "show the steps on one small input",
+            "transfer": "use it on a new small input",
+            "delayed_retrieval": "use it without looking back at the lesson",
+        }.get(evidence_kind, "show the steps on one small input")
+        return f"**Check:**\nFor {label}, {check_move}. Explain each choice as you go."
     if depth == "practice":
         check_move = {
-            "recognition": "identify the right representation and justify it",
-            "explanation": "explain the key invariant in your own words",
-            "production": "trace or produce the key implementation step",
-            "transfer": "apply the approach to a new small example",
-            "delayed_retrieval": "retrieve and apply the approach without a refresher",
-        }.get(evidence_kind, "trace or produce the key implementation step")
+            "recognition": "say when you would use this idea and why",
+            "explanation": "explain the main idea in your own words",
+            "production": "show the next step on a small input and explain why",
+            "transfer": "use the idea on a new small input",
+            "delayed_retrieval": "use the idea without looking back at the lesson",
+        }.get(evidence_kind, "show the next step on a small input and explain why")
         return (
-            f"**Lesson:**\n{label}: {description} Start by naming the representation "
-            f"and the invariant it must preserve.{python_text}\n\n"
-            "**Example:**\nOn a small input, state the expected output and trace one "
-            "decision while checking that the invariant still holds.\n\n"
-            f"**Check:**\nFor {label}, {check_move}. {habit}"
+            f"**Lesson:**\n{lesson}\n\n"
+            f"**Example:**\n{example}\n\n"
+            f"**Check:**\nFor {label}, {check_move}."
         )
     if depth == "review":
         return (
-            f"**Check:**\nRetrieve {label}: summarize the core idea, then name one edge case "
-            f"that could break an implementation. {habit}"
+            f"**Check:**\nFor {label}, summarize the main idea and give one input that "
+            "could break a careless solution."
         )
-    return f"**Lesson:**\n{label}: {description} {habit}{python_text}".strip()
+    return f"**Lesson:**\n{lesson}\n\n**Example:**\n{example}"
+
+
+def _plain_skill_guide(skill_id: str, label: str) -> tuple[str, str]:
+    """Return a small explanation that does not expose formal curriculum prose."""
+    guides = {
+        "concept.arrays-strings": (
+            "Arrays and strings keep items in order. Each item has a numbered "
+            "position, called an index, and the first index starts at 0.",
+            "In 'cat', 'c' is at index 0, 'a' is at index 1, and 't' is at index 2. "
+            "A loop can visit those characters one at a time.",
+        ),
+        "concept.hashing": (
+            "A dictionary stores a value under a key, and a set remembers whether a "
+            "value has appeared. Both usually let you find saved information quickly.",
+            "While reading 'level', a set can remember each letter. The second 'e' is "
+            "easy to spot because 'e' is already in the set.",
+        ),
+        "concept.constraint-reading": (
+            "Problem limits tell you how much work your solution can afford. A small "
+            "input may allow checking every pair, while a large input may need one pass.",
+            "With 10 numbers, checking every pair is manageable. With one million "
+            "numbers, that same plan would do far too much work.",
+        ),
+        "concept.complexity-analysis": (
+            "Time complexity describes how the work grows as the input gets larger. "
+            "Space complexity describes how much extra memory the solution uses.",
+            "A loop over 5 items takes 5 steps. A loop over 100 items takes about 100 "
+            "steps, so the work grows with the input size.",
+        ),
+        "pattern.two-pointers": (
+            "Two pointers means keeping two positions in the same list or string and "
+            "moving them according to a clear rule.",
+            "To compare a word from both ends, start one position at the first letter "
+            "and one at the last, then move both toward the middle.",
+        ),
+        "pattern.sliding-window": (
+            "A sliding window is one continuous part of a list or string. Move its left "
+            "or right edge instead of rebuilding that part from scratch each time.",
+            "For 'abcd', a window of length 2 visits 'ab', then 'bc', then 'cd'.",
+        ),
+        "pattern.prefix-suffix-aggregation": (
+            "A prefix summary stores an answer for everything up to each position. A "
+            "suffix summary does the same from each position to the end.",
+            "For [2, 3, 4], the running prefix sums are [2, 5, 9]. The second value is "
+            "5 because 2 + 3 = 5.",
+        ),
+        "pattern.intervals": (
+            "An interval is a range with a start and an end. Sorting ranges by their "
+            "start makes overlaps easier to find and combine.",
+            "The ranges [1, 4] and [3, 6] overlap, so they can be combined into [1, 6].",
+        ),
+        "pattern.binary-search": (
+            "Binary search works on ordered choices. Check the middle, then discard the "
+            "half that cannot contain the answer.",
+            "To find 7 in [1, 4, 7, 9, 12], check 7 in the middle and finish in one step.",
+        ),
+        "concept.linked-structures": (
+            "A linked structure is made of nodes. Each node stores a value and a link to "
+            "another node, so changing a link changes how the nodes connect.",
+            "If A points to B and B points to C, changing A to point to C removes B from "
+            "that path.",
+        ),
+        "concept.stacks-queues": (
+            "A stack removes the newest item first. A queue removes the oldest item first.",
+            "Stacking plates gives a stack: the last plate placed on top comes off first. "
+            "A checkout line gives a queue: the first person in line leaves first.",
+        ),
+        "concept.trees": (
+            "A tree connects items in parent-and-child levels. Most tree problems ask you "
+            "to visit nodes, follow a path, or combine answers from smaller branches.",
+            "If A has children B and C, visiting A before B and C is one possible tree walk.",
+        ),
+        "concept.heaps": (
+            "A heap keeps the smallest or largest item easy to remove, without fully "
+            "sorting everything else.",
+            "A min-heap holding 8, 2, and 5 lets you remove 2 first.",
+        ),
+        "concept.tries": (
+            "A trie stores words one letter at a time and shares the beginning letters "
+            "between words.",
+            "'car' and 'cat' share the path c -> a, then split at r and t.",
+        ),
+        "concept.graphs": (
+            "A graph is a set of items and the connections between them. The items are "
+            "called nodes, and the connections are called edges.",
+            "Cities can be nodes and direct roads can be edges. A graph search can find "
+            "whether one city can reach another.",
+        ),
+        "pattern.bfs": (
+            "Breadth-first search visits all nearby nodes before moving farther away. A "
+            "queue keeps that visit order.",
+            "Starting at A, first visit every node one edge from A, then every node two "
+            "edges away.",
+        ),
+        "pattern.dfs": (
+            "Depth-first search follows one path as far as it can, then comes back to try "
+            "another path.",
+            "Starting at A, follow A -> B -> C. If C has nowhere new to go, return to B.",
+        ),
+        "concept.union-find": (
+            "Union-find keeps track of which items belong to the same group. It can join "
+            "two groups and quickly check whether two items are connected.",
+            "If A is joined to B and B is joined to C, union-find reports that A and C "
+            "are in the same group.",
+        ),
+        "pattern.topological-ordering": (
+            "Topological ordering puts tasks in an order that respects their dependencies. "
+            "A task appears only after everything it needs.",
+            "If testing needs compiled code, compilation must come before testing.",
+        ),
+        "concept.shortest-paths": (
+            "A shortest-path method finds the cheapest way to move from one node to "
+            "another. The right method depends on whether connections have costs.",
+            "If every road counts as one step, breadth-first search finds a route with the "
+            "fewest roads.",
+        ),
+        "concept.recursion": (
+            "A recursive function solves a problem by calling itself on a smaller version. "
+            "It needs a stopping case so the calls eventually end.",
+            "To count down from 3, print 3 and count down from 2. Stop when the number "
+            "reaches 0.",
+        ),
+        "pattern.backtracking": (
+            "Backtracking tries one choice, continues from it, and undoes the choice when "
+            "that path cannot work.",
+            "To build two-letter choices from A and B, try A first, finish that path, then "
+            "remove A and try B.",
+        ),
+        "pattern.greedy": (
+            "A greedy method makes the best-looking choice at each step. It is correct only "
+            "when those local choices can be shown to lead to the best final answer.",
+            "Choosing the meeting that ends first leaves the most room for later meetings.",
+        ),
+        "concept.dynamic-programming-state": (
+            "Dynamic programming saves answers to smaller repeated problems. A state is the "
+            "small piece of information that identifies which answer was saved.",
+            "For climbing stairs, saved answer n can mean the number of ways to reach step n.",
+        ),
+        "pattern.dynamic-programming": (
+            "Dynamic programming avoids solving the same smaller problem more than once by "
+            "saving each answer and reusing it.",
+            "To compute later Fibonacci numbers, save the earlier numbers instead of "
+            "recomputing them every time.",
+        ),
+    }
+    return guides.get(
+        skill_id,
+        (
+            f"We will learn {label} through one small problem. First state what goes in, "
+            "what answer must come out, and one step that moves toward that answer.",
+            "Use the smallest useful input. Write down what changes after one step and "
+            "why that step helps.",
+        ),
+    )
 
 
 def _check_target(target: ProgressionTarget, *, practice: bool = False) -> dict[str, object]:

@@ -680,6 +680,7 @@ class TutorServiceTests(TestCase):
             )
 
         system = captured["system"]
+        normalized_system = " ".join(system.split())
         self.assertIn("coding-interview@1.0.0@interview-mastery-v1@concept.arrays-strings", system)
         self.assertIn("Arrays and strings", system)
         self.assertIn("Reason about indexed sequences", system)
@@ -687,6 +688,15 @@ class TutorServiceTests(TestCase):
         self.assertIn("Evidence goal:", system)
         self.assertIn("enumerate", system)
         self.assertIn("Clarify input and output", system)
+        self.assertIn(
+            "Assume the learner does not know the technical vocabulary",
+            normalized_system,
+        )
+        self.assertIn("Define each new technical term in plain language", normalized_system)
+        self.assertIn(
+            "Never copy the formal skill description into the lesson",
+            normalized_system,
+        )
         self.assertNotIn("choose the next topic", system.casefold())
         receipt = next(
             value

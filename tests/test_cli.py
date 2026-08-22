@@ -18407,6 +18407,9 @@ class PromptInstructionTests(unittest.TestCase):
         self.assertIn("Avoid NOT and EXCEPT questions", rules)
         self.assertIn("**Check:** is the explicit grading contract", rules)
         self.assertIn("off-topic redirects under another label", rules)
+        self.assertIn("Use plain, everyday language", rules)
+        self.assertIn("Define a new technical term before asking the learner to use it", rules)
+        self.assertIn("one concrete input", rules)
 
     def test_system_prompt_includes_exact_pending_question_to_grade(self) -> None:
         topic = cli.Topic(
