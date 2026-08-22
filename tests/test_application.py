@@ -635,6 +635,10 @@ class ApplicationQueryTests(unittest.TestCase):
         state["interview_curriculum"] = interview_curriculum.record_progression_commit(
             resolution.state, resolution.target.skill_id
         )
+        state["pending_question"] = {
+            "kind": "free_response",
+            "question": "Explain the key invariant before choosing indexed traversal.",
+        }
         cli.write_text_atomic(
             cli.topic_state_path(slug),
             json.dumps(state, indent=2, sort_keys=True) + "\n",
@@ -645,6 +649,8 @@ class ApplicationQueryTests(unittest.TestCase):
             "Start the practice lesson.",
             "**Check:** Explain the arrays invariant.",
         )
+        state_bytes = cli.topic_state_path(slug).read_bytes()
+        topic_bytes = cli.topic_path(slug).read_bytes()
 
         projection = application.interview_learning(slug)
 
@@ -653,6 +659,13 @@ class ApplicationQueryTests(unittest.TestCase):
         self.assertIn("**Example:**", projection.committed_lesson.content)
         self.assertIn("**Check:**", projection.committed_lesson.content)
         self.assertIn("Arrays and strings", projection.committed_lesson.content)
+        self.assertEqual(
+            projection.pending_prompt,
+            "**Check:**\nFor Arrays and strings, explain the main idea in your own words.",
+        )
+        self.assertNotIn("invariant", projection.pending_prompt)
+        self.assertEqual(cli.topic_state_path(slug).read_bytes(), state_bytes)
+        self.assertEqual(cli.topic_path(slug).read_bytes(), topic_bytes)
 
     def test_identical_committed_lesson_text_keeps_distinct_source_ids(self) -> None:
         created = application.create_course(

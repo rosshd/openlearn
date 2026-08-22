@@ -717,6 +717,13 @@ def interview_learning(slug: str) -> InterviewLearningProjection | None:
     assert isinstance(canonical, dict)
     position, next_target, active = _learning_positions(canonical)
     lesson = _committed_lesson(body, position, canonical)
+    stored_prompt = (
+        str(metadata["pending_question"].get("question") or "")
+        if isinstance(metadata.get("pending_question"), Mapping)
+        else ""
+    )
+    lesson_prompt = cli.extract_pending_question_text(lesson.content)
+    pending_prompt = lesson_prompt if stored_prompt and lesson_prompt else stored_prompt
     coverage, readiness, route_skills, deferred_values = _learning_progress(canonical, metadata)
     revision, operation = _learning_operation(canonical, state, active, readiness)
     deferred_skill, deferred_explanation = _deferred_projection(
@@ -732,11 +739,7 @@ def interview_learning(slug: str) -> InterviewLearningProjection | None:
         operation=operation,
         coverage=coverage,
         readiness=readiness,
-        pending_prompt=(
-            str(metadata["pending_question"].get("question") or "")
-            if isinstance(metadata.get("pending_question"), Mapping)
-            else ""
-        ),
+        pending_prompt=pending_prompt,
         saved_response=(
             str(state.get("pending_learner_prompt") or "")
             if isinstance(state.get("pending_learner_prompt"), str)
