@@ -9,7 +9,7 @@ from unittest import mock
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from openlearn import application, cli, interview_prep
+from openlearn import application, cli, interview_curriculum, interview_prep
 
 
 class ApplicationQueryTests(unittest.TestCase):
@@ -613,6 +613,46 @@ class ApplicationQueryTests(unittest.TestCase):
         self.assertEqual(projection.position.skill_id, second["skill_ref"]["skill_id"])
         self.assertEqual(projection.position.emphasis, "Practice")
         self.assertEqual(projection.committed_lesson.title, projection.position.skill_label)
+
+    def test_practice_lesson_repairs_a_historical_check_only_response(self) -> None:
+        created = application.create_course(
+            application.CourseCreationRequest(
+                name="Check Only Practice Lesson",
+                template_id="technical-interview-prep",
+            )
+        )
+        slug = created.course.slug
+        application.accept_interview_curriculum(
+            slug, action="skip", submission_id=str(uuid4())
+        )
+        state = cli.load_state(slug)
+        canonical = state["interview_curriculum"]
+        canonical["route"]["skills"][0]["depth_mode"] = "practice"
+        resolution = interview_curriculum.resolve_progression_target(
+            canonical, intent="continue"
+        )
+        assert resolution.target is not None
+        state["interview_curriculum"] = interview_curriculum.record_progression_commit(
+            resolution.state, resolution.target.skill_id
+        )
+        cli.write_text_atomic(
+            cli.topic_state_path(slug),
+            json.dumps(state, indent=2, sort_keys=True) + "\n",
+        )
+        cli.append_session(
+            cli.read_topic(slug),
+            "next",
+            "Start the practice lesson.",
+            "**Check:** Explain the arrays invariant.",
+        )
+
+        projection = application.interview_learning(slug)
+
+        assert projection is not None
+        self.assertIn("**Lesson:**", projection.committed_lesson.content)
+        self.assertIn("**Example:**", projection.committed_lesson.content)
+        self.assertIn("**Check:**", projection.committed_lesson.content)
+        self.assertIn("Arrays and strings", projection.committed_lesson.content)
 
     def test_identical_committed_lesson_text_keeps_distinct_source_ids(self) -> None:
         created = application.create_course(

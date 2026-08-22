@@ -376,12 +376,29 @@ def _learning_positions(
     return position, next_target, active
 
 
-def _committed_lesson(body: str, position: InterviewConceptProjection) -> InterviewCommittedLesson:
+def _committed_lesson(
+    body: str,
+    position: InterviewConceptProjection,
+    canonical: Mapping[str, object],
+) -> InterviewCommittedLesson:
     from openlearn import cli
+    from openlearn import interview_curriculum
 
     _context, session_log = cli.split_session_log(body)
     latest = cli.last_tutor_lesson_entry_from_entries(cli.session_entries(session_log))
     content = latest[1]["response"] if latest is not None else ""
+    committed_target = canonical.get("committed_target")
+    if isinstance(committed_target, Mapping):
+        target = dict(committed_target)
+        target.setdefault("skill_label", position.skill_label)
+        target.setdefault("unit_label", position.unit_label)
+        target.setdefault("section_label", position.section_label)
+        try:
+            response_error = interview_curriculum.target_response_error(content, target)
+        except interview_curriculum.CurriculumBundleError:
+            response_error = None
+        if response_error is not None:
+            content = interview_curriculum.deterministic_target_fallback(target)
     lesson_id = (
         cli.tutor_lesson_entry_id(latest[1])
         if latest is not None
@@ -699,7 +716,7 @@ def interview_learning(slug: str) -> InterviewLearningProjection | None:
     canonical = state["interview_curriculum"]
     assert isinstance(canonical, dict)
     position, next_target, active = _learning_positions(canonical)
-    lesson = _committed_lesson(body, position)
+    lesson = _committed_lesson(body, position, canonical)
     coverage, readiness, route_skills, deferred_values = _learning_progress(canonical, metadata)
     revision, operation = _learning_operation(canonical, state, active, readiness)
     deferred_skill, deferred_explanation = _deferred_projection(

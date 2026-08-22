@@ -763,6 +763,18 @@ def test_check_targets_pin_problem_identity_and_active_depth() -> None:
         )
         == "retrieval target has no Check"
     )
+    assert (
+        interview_curriculum.target_response_error(
+            "**Check:** Explain the invariant.", practice.target.to_dict()
+        )
+        == "practice target has no teaching content"
+    )
+    practice_fallback = interview_curriculum.deterministic_target_fallback(
+        practice.target.to_dict()
+    )
+    assert "**Lesson:**" in practice_fallback
+    assert "**Example:**" in practice_fallback
+    assert "**Check:**" in practice_fallback
 
     revisit = interview_curriculum.resolve_progression_target(
         state, intent="revisit", explicit_skill_id=first.target.skill_id

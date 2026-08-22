@@ -486,7 +486,7 @@ def target_identity(target: Mapping[str, object]) -> str:
 
 
 def target_response_error(answer: str, target: Mapping[str, object]) -> str | None:
-    """Reject explicit target replacement, invented choices, or private reasoning."""
+    """Reject output that breaks the pinned target or its learning-depth contract."""
     skill_ref = target.get("skill_ref")
     skill_id = skill_ref.get("skill_id") if isinstance(skill_ref, Mapping) else None
     if not isinstance(skill_id, str):
@@ -580,11 +580,20 @@ def target_response_error(answer: str, target: Mapping[str, object]) -> str | No
         answer,
     ):
         return "response invents a learner choice"
-    if str(target.get("depth_mode") or "learn") in {"practice", "review", "verify"} and not re.search(
+    depth = str(target.get("depth_mode") or "learn")
+    if depth in {"practice", "review", "verify"} and not re.search(
         r"(?im)^\s*(?:\*\*)?Check:(?:\*\*)?",
         answer,
     ):
         return "retrieval target has no Check"
+    if depth in {"learn", "practice"}:
+        has_teaching_content = any(
+            section_kind.casefold() in {"lesson", "example", "hint", "feedback"}
+            and len(re.findall(r"\b[\w'-]+\b", section_text)) >= 3
+            for section_kind, section_text in learner_sections
+        )
+        if not has_teaching_content:
+            return f"{depth} target has no teaching content"
     return None
 
 
@@ -837,7 +846,11 @@ def deterministic_target_fallback(target: Mapping[str, object]) -> str:
             "delayed_retrieval": "retrieve and apply the approach without a refresher",
         }.get(evidence_kind, "trace or produce the key implementation step")
         return (
-            f"**Check:**\nFor {label}, {check_move}. {habit}{python_text}"
+            f"**Lesson:**\n{label}: {description} Start by naming the representation "
+            f"and the invariant it must preserve.{python_text}\n\n"
+            "**Example:**\nOn a small input, state the expected output and trace one "
+            "decision while checking that the invariant still holds.\n\n"
+            f"**Check:**\nFor {label}, {check_move}. {habit}"
         )
     if depth == "review":
         return (

@@ -729,7 +729,11 @@ class TutorServiceTests(TestCase):
         slug = self._create_interview_course()
 
         def check(_model: str, _system: str, _user: str) -> str:
-            return "**Check:**\nExplain how indexed traversal finds an array boundary."
+            return (
+                "**Lesson:**\nAn array boundary uses len(values) as an exclusive upper "
+                "bound, so valid indices stop at len(values) - 1.\n\n"
+                "**Check:**\nExplain how indexed traversal finds an array boundary."
+            )
 
         with mock.patch.object(cli, "call_openai", new=check):
             submit_turn(
@@ -814,7 +818,11 @@ class TutorServiceTests(TestCase):
                     "**Feedback:**\nThe boundary reasoning needs another attempt.\n\n"
                     "**Check:**\nExplain how indexed traversal avoids crossing an array boundary."
                 )
-            return "**Check:**\nExplain how indexed traversal avoids crossing an array boundary."
+            return (
+                "**Lesson:**\nUse len(values) as the exclusive upper bound when traversing "
+                "an indexed sequence.\n\n"
+                "**Check:**\nExplain how indexed traversal avoids crossing an array boundary."
+            )
 
         with mock.patch.object(cli, "call_openai", new=provider):
             submit_turn(
@@ -873,7 +881,11 @@ class TutorServiceTests(TestCase):
                     "**Feedback:**\nUse the length as the exclusive upper bound.\n\n"
                     "**Check:**\nExplain how indexed traversal avoids crossing an array boundary."
                 )
-            return "**Check:**\nExplain how indexed traversal finds an array boundary."
+            return (
+                "**Lesson:**\nAn indexed traversal must stop before len(values), which is "
+                "outside the valid index range.\n\n"
+                "**Check:**\nExplain how indexed traversal finds an array boundary."
+            )
 
         with mock.patch.object(cli, "call_openai", new=provider):
             submit_turn(
