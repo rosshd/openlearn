@@ -697,6 +697,7 @@ class TutorServiceTests(TestCase):
             "Never copy the formal skill description into the lesson",
             normalized_system,
         )
+        self.assertIn('translate it to "the rule that stays true."', normalized_system)
         self.assertNotIn("choose the next topic", system.casefold())
         receipt = next(
             value

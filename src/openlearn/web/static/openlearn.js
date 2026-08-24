@@ -773,7 +773,14 @@ function closeTool({updateUrl = true} = {}) {
 }
 
 for (const button of document.querySelectorAll("[data-tool-open]")) {
-  button.addEventListener("click", () => openTool(button.dataset.toolOpen, button));
+  button.addEventListener("click", () => {
+    const tool = button.dataset.toolOpen;
+    const alreadyOpen = focusShell?.dataset.toolActive === tool
+      && !toolSurface?.hidden
+      && toolSurface?.getAttribute("aria-hidden") !== "true";
+    if (alreadyOpen) closeTool();
+    else openTool(tool, button);
+  });
 }
 toolSurface?.querySelector("[data-tool-close]")?.addEventListener("click", () => closeTool());
 
@@ -1515,6 +1522,15 @@ function appendPresentationBlocks(container, blocks) {
         list.append(itemNode);
       }
       container.append(list);
+    } else if (block.kind === "definition") {
+      const note = document.createElement("aside");
+      note.className = "term-note";
+      const term = document.createElement("strong");
+      term.textContent = block.term || "Term";
+      const definition = document.createElement("span");
+      definition.textContent = block.text || "";
+      note.append(term, definition);
+      container.append(note);
     } else {
       const content = document.createElement("p");
       content.textContent = block.text || "";

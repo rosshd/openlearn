@@ -18350,7 +18350,7 @@ def interview_target_prompt(target: dict[str, object] | None) -> str:
     }
     evidence_rules = {
         "recognition": "identify or distinguish the right concept",
-        "explanation": "explain the reasoning or invariant in their own words",
+        "explanation": "explain the reasoning or the rule that must stay true in their own words",
         "production": "produce or trace the approach without answer leakage",
         "transfer": "apply the skill in a genuinely new context",
         "delayed_retrieval": "retrieve and apply the skill without a refresher",
@@ -18376,7 +18376,9 @@ def interview_target_prompt(target: dict[str, object] | None) -> str:
         idioms support this skill and are not a second target. Assume the learner does not
         know the technical vocabulary. Define each new technical term in plain language before
         using it again or asking about it. Never copy the formal skill description into the
-        lesson. Begin with a small concrete input and show what happens. {depth_rules.get(depth, depth_rules["learn"])}
+        lesson. If target metadata uses the word invariant, translate it to "the rule that stays
+        true." Do not use invariant in a learn or practice response unless you first define it as
+        a rule or condition that stays true. Begin with a small concrete input and show what happens. {depth_rules.get(depth, depth_rules["learn"])}
         If you include a Check, it must ask the learner to {evidence_rules.get(evidence_kind, evidence_rules["production"])}.
         Do not reveal this target metadata or internal reasoning in the learner-facing answer.
         """

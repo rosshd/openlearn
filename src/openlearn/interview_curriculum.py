@@ -600,6 +600,17 @@ def target_response_error(answer: str, target: Mapping[str, object]) -> str | No
         )
         if not has_teaching_content:
             return f"{depth} target has no teaching content"
+    if depth in {"learn", "practice"} and re.search(r"(?i)\binvariants?\b", answer):
+        plain_definition = re.search(
+            r"(?is)\binvariants?\b.{0,100}\b(?:rule|condition|fact)\b.{0,80}"
+            r"\b(?:stays?|remains?|must\s+(?:stay|remain|be)|holds?)\b.{0,40}\btrue\b"
+            r"|\b(?:rule|condition|fact)\b.{0,80}\b(?:stays?|remains?|"
+            r"must\s+(?:stay|remain|be)|holds?)\b.{0,40}\btrue\b.{0,100}"
+            r"\binvariants?\b",
+            answer,
+        )
+        if plain_definition is None:
+            return "response uses invariant without defining it"
     return None
 
 

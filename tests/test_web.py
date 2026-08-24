@@ -28,6 +28,7 @@ from openlearn.web.services import (
     OpenLearnWebServices,
     _course_initialization_prompt,
     _focus_progress,
+    _pending_prompt_text,
     _plain_text,
     _present_response,
 )
@@ -3080,6 +3081,61 @@ def test_present_response_leaves_terminal_advance_cue_to_web_controls() -> None:
 
 def test_plain_text_removes_inline_markdown_markers() -> None:
     assert _plain_text("Use *indices* and `left_pointer`.") == "Use indices and left_pointer."
+
+
+def test_pending_prompt_text_removes_the_internal_check_label() -> None:
+    assert _pending_prompt_text("**Check:**\nWhich value is at position 1?") == (
+        "Which value is at position 1?"
+    )
+
+
+def test_present_response_defines_invariant_when_saved_tutor_text_did_not() -> None:
+    kind, blocks = _present_response(
+        "**Feedback:**\nThe key invariant is that each value stays at its index."
+    )
+
+    assert kind == "Feedback"
+    assert blocks[0] == {
+        "kind": "definition",
+        "term": "Invariant",
+        "text": "A rule or condition that stays true while an algorithm runs.",
+    }
+    assert blocks[1]["text"] == "The key invariant is that each value stays at its index."
+
+
+def test_focus_actions_share_three_control_levels_without_underlined_buttons() -> None:
+    repository = Path(__file__).resolve().parents[1]
+    css = (repository / "src/openlearn/web/static/openlearn.css").read_text(
+        encoding="utf-8"
+    )
+    javascript = (repository / "src/openlearn/web/static/openlearn.js").read_text(
+        encoding="utf-8"
+    )
+    template = (repository / "src/openlearn/web/templates/focus.html").read_text(
+        encoding="utf-8"
+    )
+
+    assert ".secondary-action, button:not([class])" in css
+    assert ".quiet-action, .tool-button, .quiet-link, .exit-link" in css
+    assert ".tool-actions button:not(.primary-action)" in css
+    assert ".rail-button[aria-expanded=\"true\"]" in css
+    assert ".tool-button, .quiet-link, .exit-link { min-height" not in css
+    quiet_start = css.index(".quiet-action, .tool-button, .quiet-link, .exit-link")
+    quiet_end = css.index(".quiet-action:hover", quiet_start)
+    quiet_controls = css[quiet_start:quiet_end]
+    assert "text-decoration: none" in quiet_controls
+    assert "underline" not in quiet_controls
+    assert 'data-move-type="{{ course.move.kind|lower }}"' in template
+    assert '<span class="prompt-label">Your turn</span>' in template
+
+    handler_start = javascript.index(
+        'for (const button of document.querySelectorAll("[data-tool-open]"))'
+    )
+    handler_end = javascript.index(
+        'toolSurface?.querySelector("[data-tool-close]")', handler_start
+    )
+    handler = javascript[handler_start:handler_end]
+    assert "closeTool()" in handler
 
 
 def test_focus_renders_a_pending_check_once(client: TestClient) -> None:

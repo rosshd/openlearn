@@ -78,7 +78,7 @@ body {
 button, input, textarea, select { font: inherit; }
 button, a { -webkit-tap-highlight-color: transparent; }
 a { color: inherit; }
-button { min-height: 2.75rem; color: inherit; }
+button { min-height: 2.75rem; border-radius: var(--radius); color: inherit; }
 
 :focus-visible { outline: 3px solid var(--orange); outline-offset: 3px; }
 
@@ -154,7 +154,60 @@ button { min-height: 2.75rem; color: inherit; }
 .new-course-menu > div a { align-items: flex-start; flex-direction: column; }
 .new-course-menu small { color: var(--graphite-soft); }
 .saved-state span { width: 0.5rem; height: 0.5rem; border-radius: 50%; background: var(--teal); }
-.tool-button, .quiet-link, .exit-link { min-height: 2.75rem; border: 0; background: none; text-decoration: underline; text-decoration-color: var(--line); text-underline-offset: 0.25rem; cursor: pointer; }
+.secondary-action, button:not([class]) {
+  min-height: 2.75rem;
+  padding: 0.65rem 0.9rem;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--surface-raised);
+  color: var(--graphite);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.55rem;
+  font-weight: 720;
+  text-decoration: none;
+  cursor: pointer;
+  transition: border-color 180ms ease, background-color 180ms ease, color 180ms ease, transform 180ms ease;
+}
+.secondary-action:hover, button:not([class]):hover {
+  border-color: var(--orange);
+  background: color-mix(in srgb, var(--orange) 9%, var(--surface-raised));
+  transform: translateY(-1px);
+}
+.secondary-action[aria-expanded="true"] {
+  border-color: var(--orange);
+  background: color-mix(in srgb, var(--orange) 11%, var(--surface-raised));
+}
+.quiet-action, .tool-button, .quiet-link, .exit-link {
+  min-height: 2.75rem;
+  padding: 0.65rem 0.8rem;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--graphite-soft);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  font-weight: 700;
+  text-decoration: none;
+  cursor: pointer;
+  transition: border-color 180ms ease, background-color 180ms ease, color 180ms ease;
+}
+.quiet-action:hover, .tool-button:hover, .quiet-link:hover, .exit-link:hover {
+  border-color: var(--line);
+  background: var(--surface-raised);
+  color: var(--graphite);
+}
+.focus-status .exit-link { color: inherit; }
+.focus-status .exit-link:hover { background: color-mix(in srgb, var(--chrome-ink) 10%, transparent); color: inherit; }
+.secondary-action:disabled, button:not([class]):disabled,
+.quiet-action:disabled, .tool-button:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+  transform: none;
+}
 
 main { width: min(100%, var(--measure)); margin-inline: auto; padding: clamp(2rem, 5vw, 5rem) clamp(1rem, 4vw, 3rem); }
 .dashboard-main { width: min(100%, 90rem); padding: clamp(1.35rem, 2.8vw, 2.5rem) clamp(1rem, 2.5vw, 2.25rem); }
@@ -374,8 +427,10 @@ h2 { font-size: clamp(1.35rem, 3vw, 2rem); line-height: 1.1; letter-spacing: -0.
   transition: flex-basis var(--surface-motion-duration) cubic-bezier(0.4, 0, 0.2, 1);
 }
 .focus-shell[data-tool-active] .tool-rail { flex-basis: 6.5rem; }
-.rail-button { min-height: 3.5rem; padding: 0.6rem; border: 1px solid var(--line); background: transparent; display: grid; gap: 0.2rem; text-align: left; cursor: pointer; }
+.rail-button { min-height: 3.5rem; padding: 0.6rem; border: 1px solid var(--line); border-radius: var(--radius); background: transparent; display: grid; gap: 0.2rem; text-align: left; cursor: pointer; transition: border-color 180ms ease, background-color 180ms ease, transform 180ms ease; }
 .rail-button span { color: var(--orange); }
+.rail-button:hover { border-color: var(--line-strong); background: var(--surface-raised); transform: translateX(2px); }
+.rail-button[aria-expanded="true"] { border-color: var(--orange); background: color-mix(in srgb, var(--orange) 11%, var(--surface-raised)); box-shadow: inset 3px 0 var(--orange); }
 .focus-column {
   min-width: 0;
   flex: 0 1 44rem;
@@ -387,8 +442,14 @@ h2 { font-size: clamp(1.35rem, 3vw, 2rem); line-height: 1.1; letter-spacing: -0.
 .move-surface { min-height: min(48vh, 33rem); padding: clamp(1.4rem, 5vw, 3.2rem); border: 1px solid var(--line-strong); border-top: 7px solid var(--orange); background: var(--surface); box-shadow: var(--shadow); }
 .move-surface[data-streaming] { overflow: visible; }
 .move-surface h1 { max-width: 20ch; font-size: clamp(2rem, 5vw, 3.5rem); }
-.move-content { max-width: 60ch; font-size: 1.08rem; line-height: 1.72; }
+.move-surface[data-move-type="feedback"], .move-surface[data-move-type="hint"] { border-top-color: var(--teal); }
+.move-content { max-width: 62ch; font-size: 1.08rem; line-height: 1.76; }
 .move-content p, .move-content ul, .move-content ol { margin-bottom: 1.15rem; }
+.move-content > p:first-child { font-size: 1.12rem; }
+.move-content ul, .move-content ol { padding: 0.8rem 0.9rem 0.8rem 2.2rem; border-left: 3px solid var(--line-strong); background: var(--surface-raised); }
+.term-note { margin: 0 0 1.2rem; padding: 0.8rem 0.9rem; border: 1px solid var(--line); border-left: 4px solid var(--orange); background: var(--surface-raised); display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 0.7rem; align-items: baseline; }
+.term-note strong { color: var(--orange-ink); font: 750 0.75rem/1.2 ui-monospace, monospace; letter-spacing: 0.06em; text-transform: uppercase; }
+.term-note span { color: var(--graphite-soft); font-size: 0.96rem; line-height: 1.5; }
 .move-content li + li { margin-top: 0.45rem; }
 .move-content pre, .history-item pre {
   max-width: 100%;
@@ -402,8 +463,9 @@ h2 { font-size: clamp(1.35rem, 3vw, 2rem); line-height: 1.1; letter-spacing: -0.
   font: 0.92rem/1.6 ui-monospace, SFMono-Regular, Consolas, monospace;
 }
 .move-number { color: var(--graphite-soft); font: 700 0.75rem/1 ui-monospace, monospace; }
-.prompt-block { margin-top: 2rem; padding: 1.2rem; border-left: 5px solid var(--teal); background: var(--teal-soft); }
+.prompt-block { margin-top: 2rem; padding: 1.1rem 1.2rem; border: 1px solid color-mix(in srgb, var(--teal) 55%, var(--line)); border-left: 5px solid var(--teal); background: color-mix(in srgb, var(--teal-soft) 68%, var(--surface-raised)); }
 .prompt-block p { margin: 0; font-weight: 680; white-space: pre-line; }
+.prompt-label { margin-bottom: 0.55rem; display: block; color: var(--teal); font: 750 0.72rem/1 ui-monospace, monospace; letter-spacing: 0.09em; text-transform: uppercase; }
 .tutor-stream-preview {
   box-sizing: border-box;
   max-width: 60ch;
@@ -539,8 +601,7 @@ h2 { font-size: clamp(1.35rem, 3vw, 2rem); line-height: 1.1; letter-spacing: -0.
 .operation-state.error { color: var(--danger); }
 .operation-state a { color: inherit; font-weight: 720; }
 .operation-actions { display: flex; gap: 0.6rem; flex-wrap: wrap; }
-.secondary-actions { display: flex; gap: 1rem; justify-content: center; }
-.secondary-actions button { min-height: 2.75rem; border: 0; background: transparent; text-decoration: underline; text-underline-offset: 0.25rem; cursor: pointer; }
+.secondary-actions { display: flex; gap: 0.65rem; justify-content: center; }
 .chat-source-label { margin: 0 0 0.45rem; font-size: 0.75rem; font-weight: 720; }
 .learning-tool {
   min-width: 0;
@@ -588,7 +649,7 @@ h2 { font-size: clamp(1.35rem, 3vw, 2rem); line-height: 1.1; letter-spacing: -0.
 .chat-form textarea { min-height: 7rem; resize: vertical; }
 .code-editor { resize: vertical; tab-size: 4; white-space: pre; font: 0.9rem/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; }
 .tool-actions { display: flex; flex-wrap: wrap; gap: 0.65rem; }
-.tool-actions button, .tool-form button { min-height: 2.75rem; padding: 0.6rem 0.8rem; border: 1px solid var(--line-strong); background: transparent; cursor: pointer; }
+.tool-actions button:not(.primary-action), .tool-form button:not(.primary-action) { min-height: 2.75rem; padding: 0.6rem 0.8rem; }
 .tool-form { display: grid; gap: 0.65rem; padding: 0.9rem; border: 1px solid var(--line); background: var(--surface); }
 .code-result, .source-results, .video-consent { padding: 0.9rem; border: 1px solid var(--line); background: var(--surface); }
 .code-result pre { max-height: 20rem; margin: 0.8rem 0 0; padding: 0.9rem; background: var(--chrome); color: var(--chrome-ink); overflow: auto; white-space: pre-wrap; }

@@ -789,6 +789,23 @@ def test_check_targets_pin_problem_identity_and_active_depth() -> None:
     assert "representation" not in practice_fallback
     assert "invariant" not in practice_fallback
     assert "indexed traversal" not in practice_fallback
+    assert (
+        interview_curriculum.target_response_error(
+            "**Feedback:**\nThe key invariant is that positions stay fixed.\n\n"
+            "**Check:**\nWhich value is at position 1?",
+            practice.target.to_dict(),
+        )
+        == "response uses invariant without defining it"
+    )
+    assert (
+        interview_curriculum.target_response_error(
+            "**Feedback:**\nAn invariant is a rule that stays true while an algorithm "
+            "runs. Here, each value stays at its numbered position.\n\n"
+            "**Check:**\nWhich value is at position 1?",
+            practice.target.to_dict(),
+        )
+        is None
+    )
 
     revisit = interview_curriculum.resolve_progression_target(
         state, intent="revisit", explicit_skill_id=first.target.skill_id

@@ -176,7 +176,7 @@ def _focus_progress(progress: CourseProgress) -> dict[str, object]:
 def _interview_focus_projection(
     projection: application.InterviewLearningProjection,
 ) -> dict[str, object]:
-    prompt = _plain_text(projection.pending_prompt) if projection.pending_prompt else ""
+    prompt = _pending_prompt_text(projection.pending_prompt)
     answer = projection.committed_lesson.content
     presented = _without_check_section(answer) if prompt else answer
     response_kind, blocks = _present_response(presented)
@@ -378,6 +378,19 @@ def _plain_text(value: str) -> str:
     return text.strip()
 
 
+def _pending_prompt_text(value: str | None) -> str:
+    if not value:
+        return ""
+    without_label = re.sub(
+        r"^\s*(?:\*\*)?Check\s*:(?:\*\*)?\s*",
+        "",
+        value,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    return _plain_text(without_label)
+
+
 _CHECK_SECTION = re.compile(
     r"^\s*(?:\*\*)?Check\s*:(?:\*\*)?\s*.*?"
     r"(?=^\s*(?:\*\*)?(?:Lesson|Feedback|Example|Hint|Next)\s*:(?:\*\*)?|\Z)",
@@ -458,6 +471,25 @@ def _present_response(value: str) -> tuple[str, list[dict[str, object]]]:
             blocks[0]["text"] = remainder
         else:
             blocks.pop(0)
+    visible_text = " ".join(
+        str(block.get("text") or "")
+        for block in blocks
+        if block.get("kind") == "paragraph"
+    )
+    defines_invariant = re.search(
+        r"(?is)\b(?:rule|condition)\b.{0,80}\b(?:stays?|remains?|must\s+(?:stay|"
+        r"remain|be))\b.{0,40}\btrue\b",
+        visible_text,
+    )
+    if re.search(r"(?i)\binvariants?\b", visible_text) and defines_invariant is None:
+        blocks.insert(
+            0,
+            {
+                "kind": "definition",
+                "term": "Invariant",
+                "text": "A rule or condition that stays true while an algorithm runs.",
+            },
+        )
     return label, blocks
 
 
@@ -1762,7 +1794,7 @@ class OpenLearnWebServices:
         pending = topic.metadata.get("pending_question")
         prompt = ""
         if isinstance(pending, dict) and isinstance(pending.get("question"), str):
-            prompt = _plain_text(str(pending["question"]))
+            prompt = _pending_prompt_text(str(pending["question"]))
         requires_response = bool(prompt)
         presented_answer = _without_check_section(answer) if prompt else answer
         response_kind, blocks = _present_response(presented_answer)

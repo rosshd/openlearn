@@ -249,6 +249,11 @@ def test_real_browser_course_polling_theme_conflict_and_keyboard_submit(
                 first.get_by_role("button", name="Chat", exact=True).click()
                 playwright.expect(first.locator('[data-tool-panel="chat"]')).to_be_visible()
                 playwright.expect(first.locator(".focus-column")).to_be_visible()
+                first.get_by_role("button", name="Chat", exact=True).click()
+                playwright.expect(first.locator("[data-tool-surface]")).to_be_hidden()
+                assert "tool=" not in first.url
+                first.get_by_role("button", name="Chat", exact=True).click()
+                playwright.expect(first.locator('[data-tool-panel="chat"]')).to_be_visible()
                 first.locator("#chat-question").fill("Can you explain that another way?")
                 with first.expect_response(
                     lambda response: response.url.endswith("/turns")

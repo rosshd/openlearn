@@ -30,7 +30,7 @@
     </aside>
     {% endif %}
 
-    <article class="move-surface" data-current-move>
+    <article class="move-surface" data-current-move data-move-type="{{ course.move.kind|lower }}">
       <div class="move-header">
         <p class="eyebrow" data-move-kind>{{ course.move.kind or 'Current move' }}</p>
         <span class="move-number">{{ course.move.position or course.position or 'Now' }}</span>
@@ -39,6 +39,7 @@
       <div class="move-content" data-move-content>
         {% for block in course.move.blocks or [] %}
           {% if block.kind == 'paragraph' %}<p>{{ block.text }}</p>
+          {% elif block.kind == 'definition' %}<aside class="term-note"><strong>{{ block.term }}</strong><span>{{ block.text }}</span></aside>
           {% elif block.kind == 'unordered_list' %}<ul>{% for item in block['items'] %}<li>{{ item }}</li>{% endfor %}</ul>
           {% elif block.kind == 'ordered_list' %}<ol>{% for item in block['items'] %}<li>{{ item }}</li>{% endfor %}</ol>
           {% elif block.kind == 'code' %}<pre><code{% if block.language %} data-language="{{ block.language }}"{% endif %}>{{ block.text }}</code></pre>
@@ -46,7 +47,7 @@
         {% endfor %}
         {% if course.move.content %}<p>{{ course.move.content }}</p>{% endif %}
       </div>
-      {% if course.move.prompt %}<div class="prompt-block" data-move-prompt><p>{{ course.move.prompt }}</p></div>{% endif %}
+      {% if course.move.prompt %}<div class="prompt-block" data-move-prompt><span class="prompt-label">Your turn</span><p>{{ course.move.prompt }}</p></div>{% endif %}
       <div class="tutor-stream-preview" data-tutor-stream-preview role="status" aria-live="polite" aria-atomic="false" hidden>
         <p class="stream-label"><span class="stream-pulse" aria-hidden="true"></span>Tutor response</p>
         <div data-tutor-stream-text></div><span class="stream-caret" aria-hidden="true"></span>
@@ -71,7 +72,7 @@
       {% if course.caught_up %}
       <div class="lesson-actions">
         <button class="primary-action" type="button" data-navigation-intent="practice">Practice now</button>
-        <button class="tool-button" type="button" data-tool-open="chat" aria-expanded="false" aria-controls="learning-tool-surface">Ask a question</button>
+        <button class="secondary-action" type="button" data-tool-open="chat" aria-expanded="false" aria-controls="learning-tool-surface">Ask a question</button>
       </div>
       {% endif %}
     {% elif course.requires_response %}
@@ -82,19 +83,19 @@
       <label class="sr-only" for="learner-response">Your response</label>
       <textarea id="learner-response" name="text" rows="5" maxlength="32000" autocomplete="off" required placeholder="Work through your thinking here…">{{ course.saved_response or '' }}</textarea>
       <div class="composer-footer">
-        <button class="tool-button" type="button" data-tool-open="chat" aria-expanded="false" aria-controls="learning-tool-surface">Ask a question or get unstuck</button>
+        <button class="secondary-action" type="button" data-tool-open="chat" aria-expanded="false" aria-controls="learning-tool-surface">Ask a question or get unstuck</button>
         <button class="primary-action" type="submit" data-composer-submit><span data-composer-submit-label>Send answer</span> <span aria-hidden="true" data-composer-submit-hint>⌘↵</span></button>
       </div>
     </form>
     <nav class="secondary-actions" aria-label="Lesson navigation">
-      <button type="button" data-navigation-intent="skip">Skip for now</button>
-      <button type="button" data-navigation-intent="next">Next concept</button>
+      <button class="quiet-action" type="button" data-navigation-intent="skip">Skip for now</button>
+      <button class="secondary-action" type="button" data-navigation-intent="next">Next concept</button>
     </nav>
     {% else %}
     <div class="lesson-actions">
       <button class="primary-action" type="button" data-navigation-intent="next">Continue <span aria-hidden="true">→</span></button>
-      {% if course.is_interview %}<button type="button" data-navigation-intent="skip">Skip for now</button>{% endif %}
-      <button class="tool-button" type="button" data-tool-open="chat" aria-expanded="false" aria-controls="learning-tool-surface">Ask a question</button>
+      {% if course.is_interview %}<button class="quiet-action" type="button" data-navigation-intent="skip">Skip for now</button>{% endif %}
+      <button class="secondary-action" type="button" data-tool-open="chat" aria-expanded="false" aria-controls="learning-tool-surface">Ask a question</button>
     </div>
     {% endif %}
     <div class="operation-state" data-operation-state role="status" aria-live="polite" aria-atomic="true" tabindex="-1" hidden>
