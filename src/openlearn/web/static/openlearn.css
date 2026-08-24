@@ -601,7 +601,9 @@ h2 { font-size: clamp(1.35rem, 3vw, 2rem); line-height: 1.1; letter-spacing: -0.
 .operation-state.error { color: var(--danger); }
 .operation-state a { color: inherit; font-weight: 720; }
 .operation-actions { display: flex; gap: 0.6rem; flex-wrap: wrap; }
-.secondary-actions { display: flex; gap: 0.65rem; justify-content: center; }
+.secondary-actions { display: grid; gap: 0.65rem; justify-items: center; }
+.check-choice-note { max-width: 58ch; margin: 0; color: var(--graphite-soft); font-size: 0.88rem; line-height: 1.5; text-align: center; }
+.check-choice-actions { display: flex; gap: 0.65rem; justify-content: center; flex-wrap: wrap; }
 .chat-source-label { margin: 0 0 0.45rem; font-size: 0.75rem; font-weight: 720; }
 .learning-tool {
   min-width: 0;

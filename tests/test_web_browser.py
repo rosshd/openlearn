@@ -647,13 +647,13 @@ def test_real_browser_restored_historical_chat_draft_submits_without_advancing(
                         "I would state the invariant and trace one example."
                     )
                     page.locator("#learner-response").press("Control+Enter")
+                    playwright.expect(
+                        page.get_by_role("button", name="Show next lesson")
+                    ).to_be_visible()
+                    page.get_by_role("button", name="Show next lesson").click()
                 else:
                     page.get_by_role("button", name="Close learning tool").click()
                     page.get_by_role("button", name="Continue", exact=True).click()
-                playwright.expect(
-                    page.get_by_role("button", name="Show next lesson")
-                ).to_be_visible()
-                page.get_by_role("button", name="Show next lesson").click()
                 page.wait_for_function(
                     "previous => Number(document.querySelector('[data-focus-shell]').dataset.revision) > previous",
                     arg=historical_revision,

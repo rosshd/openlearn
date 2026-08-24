@@ -88,8 +88,11 @@
       </div>
     </form>
     <nav class="secondary-actions" aria-label="Lesson navigation">
-      <button class="quiet-action" type="button" data-navigation-intent="skip">Skip for now</button>
-      <button class="secondary-action" type="button" data-navigation-intent="next">Next concept</button>
+      <p class="check-choice-note">Checks are recommended, not required. If this is a refresher, move on without answering. That will not mark the check as passed, and openlearn can bring the concept back for review.</p>
+      <div class="check-choice-actions">
+        <button class="quiet-action" type="button" data-navigation-intent="skip">Review this later</button>
+        <button class="secondary-action" type="button" data-navigation-intent="next">I understand this - next concept</button>
+      </div>
     </nav>
     {% else %}
     <div class="lesson-actions">

@@ -2648,10 +2648,37 @@ def test_side_chat_polling_has_no_lesson_preview_sink() -> None:
         'chatForm?.querySelector("textarea")?.addEventListener', chat_start
     )
 
-    assert "renderTutorPreview(preview)" in javascript[poll_start:poll_end]
+    assert (
+        "renderTutorPreview(navigationPreview(preview, submittedIntent))"
+        in javascript[poll_start:poll_end]
+    )
     assert "await waitForOperation(result.operation_id" in javascript[chat_start:chat_end]
     assert "renderTutorPreview" not in javascript[chat_start:chat_end]
     assert '"[data-progression-action], [data-navigation-intent]"' in javascript
+
+
+def test_navigation_preview_hides_the_old_check_and_reloads_the_new_move() -> None:
+    javascript = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "openlearn"
+        / "web"
+        / "static"
+        / "openlearn.js"
+    ).read_text(encoding="utf-8")
+    preview_start = javascript.index("function navigationPreview")
+    preview_end = javascript.index("function tutorPreviewNodes", preview_start)
+    preview = javascript[preview_start:preview_end]
+    poll_start = javascript.index("async function pollOperation")
+    poll_end = javascript.index("function clearTurnComposer", poll_start)
+    polling = javascript[poll_start:poll_end]
+
+    assert 'new Set(["next", "skip", "practice"])' in javascript
+    assert "Check\\s*:" in preview
+    assert 'querySelector("[data-move-prompt]")?.setAttribute("hidden", "")' in preview
+    reload_branch = "if (navigationIntents.has(submittedIntent) && !chatInFlight)"
+    assert reload_branch in polling
+    assert polling.index(reload_branch) < polling.index("showNextLessonHandoff();")
 
 
 def test_completed_tutor_stream_keeps_card_visible_and_resizes_preview_only() -> None:
@@ -3051,6 +3078,74 @@ def test_passive_interview_lesson_offers_skip_without_awarding_readiness(
     assert after["evidence"]["ready"] == ready_before
     assert cursor_id not in after["evidence"]["ready"]
     assert any(item["skill_id"] == cursor_id for item in after["deferred"])
+
+
+def test_optional_interview_check_advances_without_awarding_readiness(
+    client: TestClient,
+) -> None:
+    token = csrf(client, "/courses/new")
+    created = client.post(
+        "/api/courses",
+        headers={"x-csrf-token": token},
+        json={
+            "title": "Interview Refresher",
+            "goal": "Refresh interview patterns.",
+            "experience": "I have used these patterns before.",
+            "template_id": "technical-interview-prep",
+            "submission_id": str(uuid4()),
+        },
+    ).json()
+    slug = created["slug"]
+    application.accept_interview_curriculum(
+        slug, action="skip", submission_id=str(uuid4())
+    )
+    initialized = OpenLearnWebServices().start_course_initialization(slug)
+    wait_for_operation(client, slug, initialized["operation_id"])
+    question = "Explain how an array index identifies one stored value."
+    cli.save_pending_question(
+        cli.read_topic(slug),
+        f"**Check:**\n{question}",
+        "",
+        question_text=question,
+    )
+    before_projection = application.interview_learning(slug)
+    assert before_projection is not None
+    before = cli.load_state(slug)["interview_curriculum"]
+    ready_before = list(before["evidence"]["ready"])
+    current_skill = before_projection.position.skill_id
+    page = client.get(f"/courses/{slug}")
+    assert "Checks are recommended, not required." in page.text
+    assert "I understand this - next concept" in page.text
+    assert "Review this later" in page.text
+
+    advanced = client.post(
+        f"/api/courses/{slug}/turns",
+        headers={"x-csrf-token": token},
+        json={
+            "intent": "next",
+            "text": "",
+            "submission_id": str(uuid4()),
+            "expected_revision": tutor_service.course_revision(slug),
+        },
+    )
+    assert advanced.status_code == 202
+    wait_for_operation(client, slug, advanced.json()["operation_id"])
+
+    after_projection = application.interview_learning(slug)
+    assert after_projection is not None
+    after = cli.load_state(slug)["interview_curriculum"]
+    assert after_projection.committed_lesson.lesson_id != (
+        before_projection.committed_lesson.lesson_id
+    )
+    assert after_projection.position.skill_id != current_skill
+    assert after["evidence"]["ready"] == ready_before
+    assert current_skill not in after["evidence"]["ready"]
+    assert all(
+        item["skill_id"] != current_skill for item in after.get("deferred", [])
+    )
+    page = client.get(f"/courses/{slug}")
+    assert page.text.count("data-move-prompt") <= 1
+    assert question not in page.text
 
 
 def test_focus_progress_clamps_invalid_internal_percentages() -> None:

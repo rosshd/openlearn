@@ -1053,6 +1053,35 @@ let tutorPreviewCommitRate = 2200;
 let tutorPreviewDrainResolve = null;
 let tutorPreviewTextNode = null;
 const tutorPreviewHeightCache = new Map();
+const navigationIntents = new Set(["next", "skip", "practice"]);
+
+function navigationPreview(preview, intent) {
+  if (!navigationIntents.has(intent)) return preview || "";
+  return (preview || "").replace(
+    /(?:^|\n)\s*(?:\*\*)?Check\s*:(?:\*\*)?[\s\S]*$/i,
+    "",
+  ).trimEnd();
+}
+
+function prepareNavigationPreview(intent) {
+  if (!navigationIntents.has(intent)) return;
+  const surface = document.querySelector("[data-current-move]");
+  surface?.querySelector("[data-move-prompt]")?.setAttribute("hidden", "");
+  setTutorPreviewLabel(
+    intent === "practice" ? "Preparing practice" : "Preparing the next concept",
+  );
+}
+
+function setTutorPreviewLabel(text) {
+  const surface = document.querySelector("[data-current-move]");
+  const label = surface?.querySelector(".stream-label");
+  if (label) {
+    const pulse = label.querySelector(".stream-pulse");
+    label.replaceChildren();
+    if (pulse) label.append(pulse);
+    label.append(text);
+  }
+}
 
 function tutorPreviewNodes() {
   const surface = document.querySelector("[data-current-move]");
@@ -1244,6 +1273,7 @@ function restoreTutorSurfaceAfterError() {
   region.removeAttribute("aria-busy");
   surface.querySelector("[data-move-content]")?.removeAttribute("hidden");
   surface.querySelector("[data-move-prompt]")?.removeAttribute("hidden");
+  setTutorPreviewLabel("Tutor response");
   delete surface.dataset.streaming;
 }
 
@@ -1334,11 +1364,16 @@ async function pollOperation(operationId, submittedIntent = "") {
   const result = await waitForOperation(
     operationId,
     setOperationState,
-    (preview) => renderTutorPreview(preview),
+    (preview) => renderTutorPreview(navigationPreview(preview, submittedIntent)),
   );
   if (result.state === "committed") {
-    await finishTutorPreview(result.preview_text || "");
+    await finishTutorPreview(navigationPreview(result.preview_text, submittedIntent));
     if (result.message_kind === "answer" || submittedIntent === "answer") {
+      storeChatDraft();
+      window.location.reload();
+      return;
+    }
+    if (navigationIntents.has(submittedIntent) && !chatInFlight) {
       storeChatDraft();
       window.location.reload();
       return;
@@ -1438,6 +1473,7 @@ async function submitTurn(overrideIntent = null) {
     payload.intent = overrideIntent;
     payload.text = "";
   }
+  prepareNavigationPreview(payload.intent);
   lockTurnForm(true);
   setOperationState("Saving your response locally…");
   try {
@@ -1450,19 +1486,25 @@ async function submitTurn(overrideIntent = null) {
       if (result.message_kind === "answer" || payload.intent === "answer") {
         storeChatDraft();
         window.location.reload();
+      } else if (navigationIntents.has(payload.intent) && !chatInFlight) {
+        storeChatDraft();
+        window.location.reload();
       } else {
         clearTurnComposer();
         showNextLessonHandoff();
       }
     }
     else if (result.state === "retryable_error") {
+      restoreTutorSurfaceAfterError();
       setOperationState(result.error || "Your response is saved. Retry when the provider is available.", true, result);
       lockTurnForm(false);
     } else {
+      restoreTutorSurfaceAfterError();
       setOperationState(result.message || "Your response is saved.");
       lockTurnForm(false);
     }
   } catch (error) {
+    restoreTutorSurfaceAfterError();
     setOperationState(error.message, true);
     lockTurnForm(false);
   }
