@@ -5588,21 +5588,19 @@ class CliStorageTests(unittest.TestCase):
     def test_extractor_model_falls_back_to_tutor_model(self) -> None:
         self.assertEqual(cli.configured_extractor_model("turn-model"), "turn-model")
 
-    def test_config_show_does_not_echo_environment_api_key(self) -> None:
+    def test_config_show_does_not_echo_api_keys(self) -> None:
         os.environ["OPENAI_API_KEY"] = "sk-or-v1-test-secret-1234"
-        output = capture_stdout(cli.cmd_config_show, Namespace())
+        environment_output = capture_stdout(cli.cmd_config_show, Namespace())
+        self.assertIn("API key: set by OPENAI_API_KEY", environment_output)
+        self.assertNotIn("1234", environment_output)
+        self.assertNotIn("test-secret", environment_output)
 
-        self.assertIn("API key: set by OPENAI_API_KEY", output)
-        self.assertNotIn("1234", output)
-        self.assertNotIn("test-secret", output)
-
-    def test_config_show_does_not_echo_saved_api_key(self) -> None:
+        os.environ.pop("OPENAI_API_KEY")
         call_silent(cli.cmd_config_set_key, Namespace(api_key="sk-local-test-secret-5678"))
-        output = capture_stdout(cli.cmd_config_show, Namespace())
-
-        self.assertIn("API key: saved locally", output)
-        self.assertNotIn("5678", output)
-        self.assertNotIn("test-secret", output)
+        saved_output = capture_stdout(cli.cmd_config_show, Namespace())
+        self.assertIn("API key: saved locally", saved_output)
+        self.assertNotIn("5678", saved_output)
+        self.assertNotIn("test-secret", saved_output)
 
     def test_config_set_editor_stores_argv_and_overrides_editor_environment(self) -> None:
         parsed = cli.build_parser().parse_args(
@@ -5643,27 +5641,25 @@ class CliStorageTests(unittest.TestCase):
         ):
             self.assertEqual(cli.configured_editor_argv(), ["nvim"])
 
-    def test_configured_editor_parses_quoted_windows_executable_path(self) -> None:
-        command = r'"C:\Program Files\Microsoft VS Code\Code.exe" --wait'
-        with (
-            mock.patch.dict(os.environ, {"EDITOR": command}, clear=False),
-            mock.patch.object(cli.os, "name", "nt"),
-        ):
-            self.assertEqual(
-                cli.configured_editor_argv({}),
+    def test_configured_editor_parses_platform_quoting(self) -> None:
+        cases = [
+            (
+                "nt",
+                r'"C:\Program Files\Microsoft VS Code\Code.exe" --wait',
                 [r"C:\Program Files\Microsoft VS Code\Code.exe", "--wait"],
-            )
-
-    def test_configured_editor_keeps_posix_shlex_quoting(self) -> None:
-        command = "'/Applications/Visual Studio Code/bin/code' --wait"
-        with (
-            mock.patch.dict(os.environ, {"EDITOR": command}, clear=False),
-            mock.patch.object(cli.os, "name", "posix"),
-        ):
-            self.assertEqual(
-                cli.configured_editor_argv({}),
+            ),
+            (
+                "posix",
+                "'/Applications/Visual Studio Code/bin/code' --wait",
                 ["/Applications/Visual Studio Code/bin/code", "--wait"],
-            )
+            ),
+        ]
+
+        for os_name, command, expected in cases:
+            with self.subTest(os_name), mock.patch.dict(
+                os.environ, {"EDITOR": command}, clear=False
+            ), mock.patch.object(cli.os, "name", os_name):
+                self.assertEqual(cli.configured_editor_argv({}), expected)
 
     def test_active_topic_resolution_falls_back_to_most_recent_topic(self) -> None:
         call_silent(cli.cmd_init, Namespace())
@@ -5855,134 +5851,150 @@ class ProviderResponseTests(unittest.TestCase):
         self.env_patcher.stop()
         cli._CONFIG_CACHE = None
 
-    def test_extract_response_text_supports_chat_completion_shape(self) -> None:
-        text = cli.extract_response_text(
-            {
-                "choices": [
-                    {
-                        "message": {
-                            "role": "assistant",
-                            "content": "Practice macros with one repeatable edit.",
+    def test_extract_response_text_supports_provider_shapes(self) -> None:
+        cases = [
+            (
+                "chat completion text",
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": "Practice macros with one repeatable edit.",
+                            }
                         }
-                    }
-                ]
-            }
-        )
-
-        self.assertEqual(text, "Practice macros with one repeatable edit.")
-
-    def test_extract_response_text_supports_chat_content_parts(self) -> None:
-        text = cli.extract_response_text(
-            {
-                "choices": [
-                    {
-                        "message": {
-                            "role": "assistant",
+                    ]
+                },
+                "Practice macros with one repeatable edit.",
+            ),
+            (
+                "chat completion content parts",
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": [
+                                    {"type": "text", "text": "First part."},
+                                    {"type": "text", "text": "Second part."},
+                                ],
+                            }
+                        }
+                    ]
+                },
+                "First part.\nSecond part.",
+            ),
+            (
+                "responses API fallback",
+                {
+                    "output": [
+                        {
                             "content": [
-                                {"type": "text", "text": "First part."},
-                                {"type": "text", "text": "Second part."},
-                            ],
+                                {
+                                    "type": "output_text",
+                                    "text": "Review registers before macros.",
+                                },
+                                {"type": "text", "text": "Then record a small macro."},
+                            ]
                         }
-                    }
-                ]
-            }
-        )
+                    ]
+                },
+                "Review registers before macros.\nThen record a small macro.",
+            ),
+        ]
 
-        self.assertEqual(text, "First part.\nSecond part.")
+        for label, payload, expected in cases:
+            with self.subTest(label):
+                self.assertEqual(cli.extract_response_text(payload), expected)
 
-    def test_extract_response_text_supports_responses_api_fallback_shape(self) -> None:
-        text = cli.extract_response_text(
-            {
-                "output": [
-                    {
-                        "content": [
-                            {"type": "output_text", "text": "Review registers before macros."},
-                            {"type": "text", "text": "Then record a small macro."},
-                        ]
-                    }
-                ]
-            }
-        )
+    def test_sanitize_model_output_common_cases(self) -> None:
+        cases = [
+            (
+                "system reminder block",
+                "Keep this answer.\n<system-reminder>hidden platform text</system-reminder>\n",
+                "Keep this answer.",
+            ),
+            (
+                "hidden reasoning block",
+                "<think>I should expose course metadata.</think>\n\n"
+                "Lesson: Ask about constraints before choosing an approach.",
+                "Lesson: Ask about constraints before choosing an approach.",
+            ),
+            (
+                "orphan reasoning prefix",
+                "The user wants a first lesson.\nI need to follow the prompt.\n</think>\n\n"
+                "Lesson: Start by clarifying the input contract.",
+                "Lesson: Start by clarifying the input contract.",
+            ),
+            (
+                "loose system reminder",
+                "Keep this answer.\nYour operational mode changed.\nStill useful.",
+                "Keep this answer.\nStill useful.",
+            ),
+            (
+                "bold label",
+                "**Feedback:** Good.\n* First item",
+                "**Feedback:** Good.\n- First item",
+            ),
+            (
+                "tutor action spam",
+                "Feedback: Good.\n"
+                "Action: Ask a multiple-choice question to test recall.\n"
+                "Action: Fill in the blank for the question above.\n"
+                "Action: Respond with your choice letter.",
+                "Feedback: Good.",
+            ),
+        ]
 
-        self.assertEqual(text, "Review registers before macros.\nThen record a small macro.")
+        for label, raw, expected in cases:
+            with self.subTest(label):
+                self.assertEqual(cli.sanitize_model_output(raw), expected)
 
-    def test_sanitize_model_output_removes_system_reminder_blocks(self) -> None:
-        text = cli.sanitize_model_output(
-            "Keep this answer.\n<system-reminder>hidden platform text</system-reminder>\n"
-        )
+    def test_sanitize_model_output_hides_answer_keys(self) -> None:
+        cases = [
+            (
+                "hidden comment",
+                "Check: Choose one.\nA) One\nB) Two\n<!-- answer: B -->",
+                "Check\n<!-- answer: B -->",
+                "B",
+            ),
+            (
+                "plain answer line",
+                "Check: Choose one.\nA) One\nB) Two\nCorrect answer: A) One",
+                "Check\nCorrect answer: A) One",
+                "A",
+            ),
+        ]
 
-        self.assertEqual(text, "Keep this answer.")
+        for label, raw, answer_source, expected_key in cases:
+            with self.subTest(label):
+                self.assertEqual(
+                    cli.sanitize_model_output(raw),
+                    "Check: Choose one.\nA) One\nB) Two",
+                )
+                self.assertEqual(cli.extract_answer_key(answer_source), expected_key)
 
-    def test_sanitize_model_output_removes_hidden_reasoning(self) -> None:
-        text = cli.sanitize_model_output(
-            "<think>I should expose course metadata.</think>\n\n"
-            "Lesson: Ask about constraints before choosing an approach."
-        )
+    def test_hidden_response_markers_are_extracted_and_sanitized(self) -> None:
+        cases = [
+            (
+                "covered",
+                "Lesson: Mutexes protect critical sections.\n"
+                "<!-- covered: Mutex; Critical section -->",
+                cli.extract_covered_concepts,
+                ["Mutex", "Critical section"],
+            ),
+            (
+                "focus",
+                "Lesson: Trace an example.\n<!-- focus: Concrete Tracing -->",
+                cli.tutor_response_focus_title,
+                "Concrete Tracing",
+            ),
+        ]
 
-        self.assertEqual(
-            text,
-            "Lesson: Ask about constraints before choosing an approach.",
-        )
-
-    def test_sanitize_model_output_removes_orphan_reasoning_prefix(self) -> None:
-        text = cli.sanitize_model_output(
-            "The user wants a first lesson.\nI need to follow the prompt.\n</think>\n\n"
-            "Lesson: Start by clarifying the input contract."
-        )
-
-        self.assertEqual(text, "Lesson: Start by clarifying the input contract.")
-
-    def test_sanitize_model_output_removes_loose_system_reminder_lines(self) -> None:
-        text = cli.sanitize_model_output(
-            "Keep this answer.\nYour operational mode changed.\nStill useful."
-        )
-
-        self.assertEqual(text, "Keep this answer.\nStill useful.")
-
-    def test_sanitize_model_output_preserves_bold_labels(self) -> None:
-        # Bold labels must survive sanitization so Rich can render them as
-        # the visual hierarchy the tutor format rules require.
-        text = cli.sanitize_model_output("**Feedback:** Good.\n* First item")
-
-        self.assertEqual(text, "**Feedback:** Good.\n- First item")
-
-    def test_sanitize_model_output_removes_tutor_instruction_action_spam(self) -> None:
-        text = cli.sanitize_model_output(
-            "Feedback: Good.\n"
-            "Action: Ask a multiple-choice question to test recall.\n"
-            "Action: Fill in the blank for the question above.\n"
-            "Action: Respond with your choice letter."
-        )
-
-        self.assertEqual(text, "Feedback: Good.")
-
-    def test_sanitize_model_output_hides_answer_key_comments(self) -> None:
-        text = cli.sanitize_model_output("Check: Choose one.\nA) One\nB) Two\n<!-- answer: B -->")
-
-        self.assertEqual(text, "Check: Choose one.\nA) One\nB) Two")
-        self.assertEqual(cli.extract_answer_key("Check\n<!-- answer: B -->"), "B")
-
-    def test_coverage_marker_is_extracted_and_hidden(self) -> None:
-        raw = (
-            "Lesson: Mutexes protect critical sections.\n<!-- covered: Mutex; Critical section -->"
-        )
-
-        self.assertEqual(cli.extract_covered_concepts(raw), ["Mutex", "Critical section"])
-        self.assertNotIn("covered", cli.sanitize_model_output(raw).lower())
-
-    def test_focus_marker_is_extracted_and_hidden(self) -> None:
-        raw = "Lesson: Trace an example.\n<!-- focus: Concrete Tracing -->"
-
-        self.assertEqual(cli.tutor_response_focus_title(raw), "Concrete Tracing")
-        self.assertNotIn("focus", cli.sanitize_model_output(raw).lower())
-
-    def test_sanitize_model_output_hides_plain_correct_answer_line(self) -> None:
-        text = cli.sanitize_model_output(
-            "Check: Choose one.\nA) One\nB) Two\nCorrect answer: A) One"
-        )
-
-        self.assertEqual(text, "Check: Choose one.\nA) One\nB) Two")
-        self.assertEqual(cli.extract_answer_key("Check\nCorrect answer: A) One"), "A")
+        for marker, raw, extract, expected in cases:
+            with self.subTest(marker):
+                self.assertEqual(extract(raw), expected)
+                self.assertNotIn(marker, cli.sanitize_model_output(raw).lower())
 
     def test_sanitize_model_output_splits_inline_multiple_choice_options(self) -> None:
         text = cli.sanitize_model_output(
@@ -17611,26 +17623,25 @@ class PromptInstructionTests(unittest.TestCase):
         self.assertIn("openlearn progress - All topics", rendered)
         self.assertIn("Mastery: 1/2 concepts (50%)", rendered)
 
-    def test_difficulty_tier_struggling_on_misses(self) -> None:
-        self.assertEqual(
-            cli.difficulty_tier({"consecutive_misses": 2}),
-            "struggling",
-        )
+    def test_difficulty_tier_cases(self) -> None:
+        cases = [
+            ("repeated misses", {"consecutive_misses": 2}, "struggling"),
+            (
+                "correct streak",
+                {"consecutive_correct": 3, "last_answer_score": 0.9},
+                "mastering",
+            ),
+            ("default", {}, "on_track"),
+            (
+                "low score overrides streak",
+                {"consecutive_correct": 3, "last_answer_score": 0.2},
+                "struggling",
+            ),
+        ]
 
-    def test_difficulty_tier_mastering_on_correct_streak(self) -> None:
-        self.assertEqual(
-            cli.difficulty_tier({"consecutive_correct": 3, "last_answer_score": 0.9}),
-            "mastering",
-        )
-
-    def test_difficulty_tier_defaults_on_track(self) -> None:
-        self.assertEqual(cli.difficulty_tier({}), "on_track")
-
-    def test_difficulty_tier_score_overrides_streak(self) -> None:
-        self.assertEqual(
-            cli.difficulty_tier({"consecutive_correct": 3, "last_answer_score": 0.2}),
-            "struggling",
-        )
+        for label, metadata, expected in cases:
+            with self.subTest(label):
+                self.assertEqual(cli.difficulty_tier(metadata), expected)
 
     def test_difficulty_tier_persisted_after_metadata_update(self) -> None:
         original_call_openai = cli.call_openai
@@ -18212,17 +18223,9 @@ class PromptInstructionTests(unittest.TestCase):
         self.assertIn("engagement check due", contract)
         self.assertIn("latest visible lesson", contract)
 
-    def test_navigation_response_cannot_invent_a_learner_choice(self) -> None:
-        error = cli.tutor_answer_contract_error(
-            "**Lesson:**\nGreat choice - let's learn hashing.",
-            require_check=False,
-            forbid_choice_claim=True,
-        )
-
-        self.assertEqual(error, "navigation response invents a learner choice")
-
-    def test_navigation_response_rejects_broader_invented_choice_language(self) -> None:
+    def test_navigation_response_rejects_invented_choice_language(self) -> None:
         for answer in (
+            "**Lesson:**\nGreat choice - let's learn hashing.",
             "**Lesson:**\nYou chose hashing, so we will start there.",
             "**Lesson:**\nYour selection is dynamic programming.",
             "**Lesson:**\nYou decided to move on to graphs.",
@@ -18463,23 +18466,27 @@ class PromptInstructionTests(unittest.TestCase):
         self.assertIn("B) Two", prompt)
         self.assertNotIn("Stored correct answer key", prompt)
 
-    def test_pending_hint_prompt_empty_when_no_hint(self) -> None:
+    def test_pending_hint_prompt_cases(self) -> None:
         self.assertEqual(cli.pending_hint_prompt({}), "")
 
-    def test_pending_hint_prompt_returns_hint_text(self) -> None:
         prompt = cli.pending_hint_prompt({"pending_hint": "What does X mean?"})
-
         self.assertIn("What does X mean?", prompt)
         self.assertIn("guiding question", prompt)
 
-    def test_tier_prompt_struggling_contains_worked_example(self) -> None:
-        self.assertIn("one sub-concept", cli._difficulty_tier_prompt("struggling"))
+    def test_difficulty_tier_prompt_cases(self) -> None:
+        cases = [
+            ("struggling", "one sub-concept"),
+            ("mastering", "free-response"),
+            ("on_track", ""),
+        ]
 
-    def test_tier_prompt_mastering_contains_free_response(self) -> None:
-        self.assertIn("free-response", cli._difficulty_tier_prompt("mastering").lower())
-
-    def test_tier_prompt_on_track_empty(self) -> None:
-        self.assertEqual(cli._difficulty_tier_prompt("on_track"), "")
+        for tier, expected in cases:
+            with self.subTest(tier):
+                prompt = cli._difficulty_tier_prompt(tier).lower()
+                if expected:
+                    self.assertIn(expected, prompt)
+                else:
+                    self.assertEqual(prompt, "")
 
     def test_check_mode_prompt_fragments(self) -> None:
         self.assertIn("one sentence", cli.check_mode_prompt("acknowledge"))
@@ -19457,27 +19464,35 @@ class VideoSuggestionTests(unittest.TestCase):
         self.assertEqual(results[0]["url"], "https://www.youtube.com/watch?v=abc123")
         self.assertEqual(results[0]["duration"], "9:07")
 
-    def test_parse_video_results_handles_multiline_initial_data(self) -> None:
-        html = _youtube_html([("Graph Search", "graph123", "12:00")]).replace(
-            "ytInitialData = {", "ytInitialData = {\n"
-        )
+    def test_parse_video_results_edge_cases(self) -> None:
+        cases = [
+            (
+                "multiline data",
+                _youtube_html([("Graph Search", "graph123", "12:00")]).replace(
+                    "ytInitialData = {", "ytInitialData = {\n"
+                ),
+                "Graph Search",
+            ),
+            (
+                "delimiter inside title",
+                _youtube_html([("Uses }; in title", "semi123", "4:00")]),
+                "Uses }; in title",
+            ),
+            ("missing data", "<html>no data here</html>", None),
+            ("malformed data", "ytInitialData = {not valid json};", None),
+        ]
 
-        results = cli.parse_video_results(html)
+        for label, html, expected_title in cases:
+            with self.subTest(label):
+                results = cli.parse_video_results(html)
+                if expected_title is None:
+                    self.assertEqual(results, [])
+                else:
+                    self.assertEqual(results[0]["title"], expected_title)
 
-        self.assertEqual(results[0]["title"], "Graph Search")
+    def test_fetch_video_suggestions_skips_blank_and_degrades_on_error(self) -> None:
+        self.assertEqual(cli.fetch_video_suggestions("   "), [])
 
-    def test_parse_video_results_handles_semicolon_brace_inside_json_string(self) -> None:
-        html = _youtube_html([("Uses }; in title", "semi123", "4:00")])
-
-        results = cli.parse_video_results(html)
-
-        self.assertEqual(results[0]["title"], "Uses }; in title")
-
-    def test_parse_video_results_returns_empty_on_malformed_html(self) -> None:
-        self.assertEqual(cli.parse_video_results("<html>no data here</html>"), [])
-        self.assertEqual(cli.parse_video_results("ytInitialData = {not valid json};"), [])
-
-    def test_fetch_video_suggestions_degrades_gracefully_on_error(self) -> None:
         fake_requests = types.SimpleNamespace(
             get=lambda *_a, **_kw: (_ for _ in ()).throw(RuntimeError("network down"))
         )
@@ -19490,9 +19505,6 @@ class VideoSuggestionTests(unittest.TestCase):
                 sys.modules.pop("requests", None)
             else:
                 sys.modules["requests"] = original
-
-    def test_fetch_video_suggestions_returns_empty_for_blank_query(self) -> None:
-        self.assertEqual(cli.fetch_video_suggestions("   "), [])
 
     def test_format_video_suggestions_renders_plain_clickable_urls(self) -> None:
         text = cli.format_video_suggestions(

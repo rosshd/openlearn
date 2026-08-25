@@ -45,28 +45,33 @@ class StreakTests(unittest.TestCase):
         self.assertEqual(stats.format_days(1), "1 day")
         self.assertEqual(stats.format_days(2), "2 days")
 
-    def test_streak_counts_consecutive_days_ending_today(self) -> None:
-        dates = {date(2026, 7, 1), date(2026, 7, 2), date(2026, 7, 3)}
+    def test_current_streak_cases(self) -> None:
+        cases = [
+            (
+                "consecutive through today",
+                {date(2026, 7, 1), date(2026, 7, 2), date(2026, 7, 3)},
+                date(2026, 7, 3),
+                3,
+            ),
+            (
+                "alive before today's session",
+                {date(2026, 7, 1), date(2026, 7, 2)},
+                date(2026, 7, 3),
+                2,
+            ),
+            (
+                "broken by a gap",
+                {date(2026, 6, 28), date(2026, 6, 29), date(2026, 7, 2)},
+                date(2026, 7, 2),
+                1,
+            ),
+            ("two idle days", {date(2026, 6, 30)}, date(2026, 7, 2), 0),
+            ("no activity", set(), date(2026, 7, 2), 0),
+        ]
 
-        self.assertEqual(stats.current_streak(dates, date(2026, 7, 3)), 3)
-
-    def test_streak_alive_when_today_has_no_session_yet(self) -> None:
-        dates = {date(2026, 7, 1), date(2026, 7, 2)}
-
-        self.assertEqual(stats.current_streak(dates, date(2026, 7, 3)), 2)
-
-    def test_streak_broken_by_gap(self) -> None:
-        dates = {date(2026, 6, 28), date(2026, 6, 29), date(2026, 7, 2)}
-
-        self.assertEqual(stats.current_streak(dates, date(2026, 7, 2)), 1)
-
-    def test_streak_zero_after_two_idle_days(self) -> None:
-        dates = {date(2026, 6, 30)}
-
-        self.assertEqual(stats.current_streak(dates, date(2026, 7, 2)), 0)
-
-    def test_streak_empty_dates(self) -> None:
-        self.assertEqual(stats.current_streak(set(), date(2026, 7, 2)), 0)
+        for label, dates, today, expected in cases:
+            with self.subTest(label):
+                self.assertEqual(stats.current_streak(dates, today), expected)
 
     def test_longest_streak_across_gaps(self) -> None:
         dates = {
@@ -89,37 +94,55 @@ class SessionMinutesTests(unittest.TestCase):
 
         self.assertEqual(spans, [(ts(1, 9, 0), ts(1, 9, 40)), (ts(1, 14, 0), ts(1, 14, 0))])
 
-    def test_minutes_in_window_clips_and_floors(self) -> None:
-        spans = [(ts(1, 9, 0), ts(1, 9, 40)), (ts(1, 14, 0), ts(1, 14, 0))]
+    def test_minutes_in_window_cases(self) -> None:
+        cases = [
+            (
+                "clip and floor",
+                [(ts(1, 9, 0), ts(1, 9, 40)), (ts(1, 14, 0), ts(1, 14, 0))],
+                ts(1, 0),
+                ts(1, 23),
+                41.0,
+            ),
+            (
+                "outside window",
+                [(ts(1, 9, 0), ts(1, 9, 40))],
+                ts(2, 0),
+                ts(2, 23),
+                0.0,
+            ),
+            ("no spans", [], ts(1, 0), ts(1, 23), 0.0),
+            (
+                "partial overlap",
+                [(ts(1, 9, 0), ts(1, 10, 0))],
+                ts(1, 9, 30),
+                ts(1, 23),
+                30.0,
+            ),
+        ]
 
-        minutes = stats.minutes_in_window(spans, ts(1, 0), ts(1, 23))
+        for label, spans, start, end, expected in cases:
+            with self.subTest(label):
+                self.assertEqual(stats.minutes_in_window(spans, start, end), expected)
 
-        self.assertEqual(minutes, 41.0)
+    def test_week_window_normalizes_aware_and_naive_times(self) -> None:
+        cases = [
+            (
+                "aware",
+                datetime(2026, 7, 2, 15, 30, tzinfo=timezone.utc),
+                datetime(2026, 6, 29, tzinfo=timezone.utc),
+                datetime(2026, 7, 2, 15, 30, tzinfo=timezone.utc),
+            ),
+            (
+                "naive",
+                datetime(2026, 6, 29, 0, 5),
+                datetime(2026, 6, 29, tzinfo=timezone.utc),
+                datetime(2026, 6, 29, 0, 5, tzinfo=timezone.utc),
+            ),
+        ]
 
-    def test_minutes_in_window_excludes_outside_spans(self) -> None:
-        spans = [(ts(1, 9, 0), ts(1, 9, 40))]
-
-        self.assertEqual(stats.minutes_in_window(spans, ts(2, 0), ts(2, 23)), 0.0)
-        self.assertEqual(stats.minutes_in_window([], ts(1, 0), ts(1, 23)), 0.0)
-
-    def test_minutes_in_window_partial_overlap(self) -> None:
-        spans = [(ts(1, 9, 0), ts(1, 10, 0))]
-
-        self.assertEqual(stats.minutes_in_window(spans, ts(1, 9, 30), ts(1, 23)), 30.0)
-
-    def test_week_window_starts_monday_utc(self) -> None:
-        now = datetime(2026, 7, 2, 15, 30, tzinfo=timezone.utc)
-
-        start, end = stats.week_window(now)
-
-        self.assertEqual(start, datetime(2026, 6, 29, tzinfo=timezone.utc))
-        self.assertEqual(end, now)
-
-    def test_week_window_accepts_naive_now(self) -> None:
-        start, end = stats.week_window(datetime(2026, 6, 29, 0, 5))
-
-        self.assertEqual(start, datetime(2026, 6, 29, tzinfo=timezone.utc))
-        self.assertEqual(end, datetime(2026, 6, 29, 0, 5, tzinfo=timezone.utc))
+        for label, now, expected_start, expected_end in cases:
+            with self.subTest(label):
+                self.assertEqual(stats.week_window(now), (expected_start, expected_end))
 
 
 class UnitMasteryTests(unittest.TestCase):
