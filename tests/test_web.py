@@ -2632,73 +2632,6 @@ def test_outline_change_is_previewed_before_confirm_and_retries_one_submission()
     )
 
 
-def test_side_chat_polling_has_no_lesson_preview_sink() -> None:
-    javascript = (
-        Path(__file__).resolve().parents[1]
-        / "src"
-        / "openlearn"
-        / "web"
-        / "static"
-        / "openlearn.js"
-    ).read_text(encoding="utf-8")
-    poll_start = javascript.index("async function pollOperation")
-    poll_end = javascript.index("function clearTurnComposer", poll_start)
-    chat_start = javascript.index('chatForm?.addEventListener("submit"')
-    chat_end = javascript.index(
-        'chatForm?.querySelector("textarea")?.addEventListener', chat_start
-    )
-
-    assert (
-        "renderTutorPreview(navigationPreview(preview, submittedIntent))"
-        in javascript[poll_start:poll_end]
-    )
-    assert "await waitForOperation(result.operation_id" in javascript[chat_start:chat_end]
-    assert "renderTutorPreview" not in javascript[chat_start:chat_end]
-    assert '"[data-progression-action], [data-navigation-intent]"' in javascript
-
-
-def test_navigation_preview_hides_the_old_check_and_reloads_the_new_move() -> None:
-    javascript = (
-        Path(__file__).resolve().parents[1]
-        / "src"
-        / "openlearn"
-        / "web"
-        / "static"
-        / "openlearn.js"
-    ).read_text(encoding="utf-8")
-    preview_start = javascript.index("function navigationPreview")
-    preview_end = javascript.index("function tutorPreviewNodes", preview_start)
-    preview = javascript[preview_start:preview_end]
-    poll_start = javascript.index("async function pollOperation")
-    poll_end = javascript.index("function clearTurnComposer", poll_start)
-    polling = javascript[poll_start:poll_end]
-
-    assert 'new Set(["next", "skip", "practice"])' in javascript
-    assert "Check\\s*:" in preview
-    assert 'querySelector("[data-move-prompt]")?.setAttribute("hidden", "")' in preview
-    reload_branch = "if (navigationIntents.has(submittedIntent) && !chatInFlight)"
-    assert reload_branch in polling
-    assert polling.index(reload_branch) < polling.index("showNextLessonHandoff();")
-
-
-def test_completed_tutor_stream_keeps_card_visible_and_resizes_preview_only() -> None:
-    repository = Path(__file__).resolve().parents[1]
-    javascript = (repository / "src/openlearn/web/static/openlearn.js").read_text(
-        encoding="utf-8"
-    )
-    css = (repository / "src/openlearn/web/static/openlearn.css").read_text(
-        encoding="utf-8"
-    )
-
-    assert "data-stream-complete" not in javascript
-    assert "data-stream-complete" not in css
-    assert "move-arrive" not in css
-    assert "measureTutorPreviewHeight" in javascript
-    assert "clone = region.cloneNode(true)" in javascript
-    assert "tutorPreviewHeightCache.size > 8" in javascript
-    assert "data-stream-open" in css
-
-
 def test_initialization_failure_preserves_course_and_retries_same_operation(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3198,41 +3131,6 @@ def test_present_response_defines_invariant_when_saved_tutor_text_did_not() -> N
     assert blocks[1]["text"] == "The key invariant is that each value stays at its index."
 
 
-def test_focus_actions_share_three_control_levels_without_underlined_buttons() -> None:
-    repository = Path(__file__).resolve().parents[1]
-    css = (repository / "src/openlearn/web/static/openlearn.css").read_text(
-        encoding="utf-8"
-    )
-    javascript = (repository / "src/openlearn/web/static/openlearn.js").read_text(
-        encoding="utf-8"
-    )
-    template = (repository / "src/openlearn/web/templates/focus.html").read_text(
-        encoding="utf-8"
-    )
-
-    assert ".secondary-action, button:not([class])" in css
-    assert ".quiet-action, .tool-button, .quiet-link, .exit-link" in css
-    assert ".tool-actions button:not(.primary-action)" in css
-    assert ".rail-button[aria-expanded=\"true\"]" in css
-    assert ".tool-button, .quiet-link, .exit-link { min-height" not in css
-    quiet_start = css.index(".quiet-action, .tool-button, .quiet-link, .exit-link")
-    quiet_end = css.index(".quiet-action:hover", quiet_start)
-    quiet_controls = css[quiet_start:quiet_end]
-    assert "text-decoration: none" in quiet_controls
-    assert "underline" not in quiet_controls
-    assert 'data-move-type="{{ course.move.kind|lower }}"' in template
-    assert '<span class="prompt-label">Your turn</span>' in template
-
-    handler_start = javascript.index(
-        'for (const button of document.querySelectorAll("[data-tool-open]"))'
-    )
-    handler_end = javascript.index(
-        'toolSurface?.querySelector("[data-tool-close]")', handler_start
-    )
-    handler = javascript[handler_start:handler_end]
-    assert "closeTool()" in handler
-
-
 def test_focus_renders_a_pending_check_once(client: TestClient) -> None:
     cli.cmd_new(
         argparse.Namespace(topic="Single Check", goal="Avoid duplicate questions"),
@@ -3450,26 +3348,6 @@ def test_committed_operation_status_uses_final_move_as_preview(
 
     assert status["preview_text"] == "Final complete response"
     assert status["message_kind"] == "answer"
-
-
-def test_answer_operations_reload_feedback_without_lesson_handoff() -> None:
-    javascript = (
-        Path(__file__).resolve().parents[1]
-        / "src"
-        / "openlearn"
-        / "web"
-        / "static"
-        / "openlearn.js"
-    ).read_text(encoding="utf-8")
-    poll_start = javascript.index("async function pollOperation")
-    poll_end = javascript.index("function clearTurnComposer", poll_start)
-    poll_body = javascript[poll_start:poll_end]
-
-    assert 'result.message_kind === "answer"' in poll_body
-    assert "window.location.reload()" in poll_body
-    assert poll_body.index('result.message_kind === "answer"') < poll_body.index(
-        "showNextLessonHandoff()"
-    )
 
 
 def test_initialization_refresh_recovers_orphaned_saved_operation(

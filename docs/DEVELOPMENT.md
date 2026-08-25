@@ -20,7 +20,8 @@ pip install -e .[dev]
 
 | Command | Purpose |
 | --- | --- |
-| `make check` | Green gate: ruff, unittest, pytest, mocked smoke |
+| `make check` | Green gate: Ruff, pytest, and mocked interface smoke |
+| `make unit` | Compatibility entry point for direct `unittest` runs |
 | `make review` | Gate plus evidence bundle under `.artifacts/review/` |
 | `make e2e` | Full mocked manual smoke flow |
 | `make oci-live` | Opt-in live Docker/Podman runner boundary tests using only a pre-provisioned pinned image |
@@ -29,8 +30,9 @@ pip install -e .[dev]
 | `make worktree NAME=<task> TYPE=<type>` | Create a safe repo-local task worktree |
 | `make finish NAME=<task>` | Remove a clean, merged repo-local task worktree and branch |
 
-GitHub Actions runs the unittest lane across Ubuntu, Windows, and macOS on Python 3.11 and 3.13.
-Local `pytest` workflow smoke tests use `pexpect`; POSIX pty tests are skipped on Windows.
+GitHub Actions runs pytest across Ubuntu, Windows, and macOS on Python 3.11 through 3.13.
+Pytest collects the older `unittest.TestCase` suites, so `make check` does not run them a second time through `unittest`.
+Workflow smoke tests use `pexpect`; POSIX pty tests are skipped on Windows.
 The OCI live lane is excluded from `make check`, never pulls an image, and skips with runtime/image diagnostics unless `OPENLEARN_RUN_OCI_TESTS=1` and a supported runtime already has the pinned image.
 Run it with `make oci-live` after explicitly provisioning Docker or Podman and the exact image printed by `openlearn doctor`.
 The workflow-dispatch OCI job explicitly pre-provisions that image before invoking the same no-pull lane.

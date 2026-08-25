@@ -13,7 +13,7 @@ description: >
 make check
 ```
 
-`check` runs ruff, unittest, pytest, and the mocked smoke flow.
+`check` runs Ruff, pytest (including `unittest.TestCase` suites), and the mocked smoke flows.
 Do not push or call code changes done on a red gate.
 
 ## Review Evidence

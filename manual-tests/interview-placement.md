@@ -1,9 +1,9 @@
-# Technical Interview Prep curriculum journey
+# Technical Interview Prep journey
 
-This smoke flow verifies the accelerated placement, first technical lesson, provider recovery, CLI handoff, side chat, and long-term continuation contract.
-Use an isolated learner home so the test cannot read or modify real courses, provider configuration, or credentials.
+This journey verifies rapid placement, course outline confirmation, the first technical lesson, optional checks, provider recovery, side chat, and CLI handoff.
+Use an isolated learner home so the test cannot read or modify real courses or credentials.
 
-## Start an isolated Maker Bench
+## Start an isolated web app
 
 ```bash
 export OPENLEARN_HOME="$(mktemp -d)"
@@ -12,90 +12,91 @@ openlearn web --no-browser
 ```
 
 Open the printed loopback URL.
-Choose Technical Interview Prep from Starter courses.
-The setup must explain that placement is a rapid confidence survey and must offer Start placement, Skip placement, and a back action.
-It must not ask for an editor, coding language, container runtime, or executable coding sample.
+Choose Technical Interview Prep from the starter courses.
+The setup must describe placement as a short confidence survey.
+It must offer Start placement, Skip placement, and a back action.
+It must not ask for an editor, container runtime, or executable coding sample.
 
-## Complete accelerated placement
+## Complete rapid placement
 
-Start placement.
-Choose a role family, target level, and interview mix.
-For each visible topic, select one confidence value from 1 through 5.
-Only one topic should be active at a time, and selecting a number should advance immediately.
-Use the review screen to change one answer, then submit it.
+Choose a role family, target level, and interview focus.
+Coding, balanced, and system-design focuses must show different relevant topics.
 
-The suggested course outline must begin with a technical target from the pinned route.
-Coding, balanced, and system-design focuses must show different relevant topics and route ordering.
-Communication, edge cases, complexity, testing, and interview habits should be embedded in technical sections rather than presented as a long behavior-first opening unit.
-Choose Change course outline and verify that only bounded role, level, focus, date, study-time, confidence, pacing, and optional-unit controls are available.
-Preview the change, then confirm it.
+Rate one visible topic at a time from 1 through 5.
+Selecting a value must advance immediately.
+Review all ratings at the end, change one answer, and submit.
 
-Repeat the journey once with Skip placement.
-Skipping must create a conservative baseline route and must not claim mastery, readiness, or coding fluency.
+The proposed course path must start with a useful technical topic.
+Communication, edge cases, complexity, and testing should appear alongside technical lessons instead of forming a long behavior-first opening.
 
-## Verify the first technical lesson
+Choose Change course outline.
+The editor must limit changes to the supported role, level, focus, schedule, confidence, pacing, and optional-topic controls.
+Preview the new path before confirming it.
 
-With mock mode still enabled, confirm the outline and wait for the first lesson.
-The large lesson title must be the canonical skill label, not `Current lesson`, `Step 1`, or a tutor-request count.
-The first card must teach technical content immediately while embedding only the relevant interview habit.
-If the card does not require an answer, it must show Continue, Skip for now, and Ask a question without an answer textarea.
+Repeat once with Skip placement.
+Skipping must create a conservative route without claiming mastery, readiness, or coding fluency.
 
-Select Continue.
-The committed lesson must remain readable while the next target is reserved and generated.
-A separate status area must name the exact next target.
-When generation commits, the card should swap once without clearing unsent text or snapping through intermediate heights.
+## Verify the first lesson
 
-Select Skip for now on a passive lesson.
-The interface must explain that the skill was deferred without mastery credit and show that it will return after other work or in a later session.
-First-pass coverage may increase from a committed lesson, while readiness work remains a separate count.
+Confirm the course path and wait for the first lesson.
+The lesson title must name the current technical idea.
+The first card must teach that idea before asking the learner to use it.
+
+When a check is present, verify these actions:
+
+- Send answer submits the learner's response.
+- I understand this - next concept advances without awarding mastery or marking the check as passed.
+- Review this later defers the concept and explains that it will return.
+- Ask a question opens side chat without replacing the lesson.
+
+Choose I understand this - next concept.
+The old check must leave the screen when generation starts.
+The next lesson must replace the old card automatically.
+The new check must appear only in its styled check box.
+There must not be two visible checks or a second Show next lesson step.
+
+Submit one answer on another lesson.
+The saved answer must remain visible until feedback loads.
+Feedback must replace the response area cleanly and keep the next response field usable.
+
+## Verify side chat
+
+Open Chat, ask about the visible lesson, and submit.
+The answer must appear in the side panel while the lesson stays visible.
+The question must remain tied to the lesson occurrence that was open when it was asked.
+
+Click Chat again.
+The side panel must close and the lesson must return to its normal width.
+Open it once more and confirm the conversation remains available.
 
 ## Verify provider recovery
 
-Run this part with a temporary local endpoint or a non-secret test provider configuration that can be made unavailable.
-Never enter a maintainer key or another person's credential.
-Start Continue, make the endpoint unavailable, and wait for the provider error.
-The last committed lesson and exact saved target must remain visible.
-The page must offer Retry same target, Cancel, and Provider settings.
+Use only mock mode, a temporary local endpoint, or a non-secret test provider account.
+Never enter a maintainer credential.
 
-Restore the endpoint and choose Retry same target.
-The same target and operation must commit once without skipping or duplicating a curriculum skill.
-If the response had already reached the generated checkpoint before interruption, recovery must not call the provider again.
+Start a lesson transition and make the endpoint unavailable.
+The committed lesson and saved target must remain available.
+The page must offer retry and provider-settings recovery without losing the course position.
 
-## Hand off between Maker Bench and CLI
+Restore the endpoint and retry.
+The saved target must commit once without skipping or duplication.
+
+## Verify CLI handoff
 
 Stop the web server and keep the isolated learner home.
-Run:
 
 ```bash
 openlearn status technical-interview-prep
 openlearn resume technical-interview-prep
 ```
 
-The CLI must show the same unit, section, skill, first-pass coverage, readiness work, and revision that Maker Bench showed.
-It must not print a generic unit-slide position or ask the model to choose the next topic.
-If the course is caught up, the CLI must offer `/practice` instead of advancing beyond the route.
+The CLI must show the same current topic, coverage, readiness work, and revision.
+It must not ask the model to choose a separate course position.
 
-Restart Maker Bench with the same isolated learner home.
+Restart the web app with the same learner home.
 The course must reopen at the same committed lesson without repeating a completed target.
-Open Ask a question and submit a question about the visible lesson.
-Advance the course before the answer finishes when practical.
-The side-chat answer must remain labeled with the original lesson occurrence and must not change the curriculum cursor or course revision.
-
-## Verify long-term continuation
-
-Advance until at least one skill is exposed, one is deferred, and one check is answered incorrectly.
-Reload the page and restart the CLI between turns.
-The incorrect skill must remain weak or due for verification rather than being treated as covered mastery.
-The deferred skill must return after another committed target or a new study session.
-
-After every accepted route skill has one committed first pass, ordinary Continue must disappear.
-The interface must show caught-up state and a real next retrieval date only when matching scheduled review data exists.
-Choose Practice now or `/practice`.
-Practice must select a covered skill without moving the saved forward cursor or awarding mastery by itself.
 
 ## Inspect durable state
-
-Use only the isolated learner home.
 
 ```bash
 openlearn interview placement technical-interview-prep status
@@ -103,9 +104,9 @@ openlearn status technical-interview-prep
 openlearn data inventory
 ```
 
-The placement profile must report confidence-placement v4 and `mastery_update_applied: false`.
-The topic state must contain one pinned curriculum bundle and version, one stable full skill reference, and no active generic slide-based progression authority for the interview course.
-The topic transcript and event log must remain parseable after every restart.
+Placement must report confidence-placement v4 with `mastery_update_applied: false`.
+The topic state must keep one pinned curriculum bundle and stable skill references.
+The transcript and event log must remain parseable after restarts.
 
 Create an ordinary algorithms course as a compatibility check:
 
@@ -113,4 +114,4 @@ Create an ordinary algorithms course as a compatibility check:
 openlearn new ordinary-algorithms --goal "Learn algorithms outside interview prep" --template algorithms
 ```
 
-The ordinary course must not create an adjacent interview profile, canonical interview route, rapid placement survey, or interview-only recovery controls.
+The ordinary course must not create an interview profile, confidence survey, or interview-only recovery controls.

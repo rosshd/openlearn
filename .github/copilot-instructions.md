@@ -3,10 +3,10 @@
 ## Commands
 
 - Install editable package: `python -m pip install -e .`
-- Run the test suite: `python -m unittest`
-- Run one test method: `python -m unittest tests.test_cli.CliStorageTests.test_new_topic_starts_unstarted`
-- Run one test class: `python -m unittest tests.test_cli.CliStorageTests`
-- CI runs `python -m unittest` on Ubuntu, Windows, and macOS for Python 3.11 and 3.13.
+- Run the repository gate: `make check`
+- Run one test: `python -m pytest -q tests/test_cli.py::CliStorageTests::test_new_topic_starts_unstarted`
+- Run one file: `python -m pytest -q tests/test_cli.py`
+- CI runs pytest on Ubuntu, Windows, and macOS for Python 3.11 through 3.13.
 - From source without installing: `PYTHONPATH=src python -m openlearn ...`
 - Manual UX seed flow: `openlearn test` or `openlearn test --reset --resume`
 

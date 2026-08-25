@@ -1,85 +1,54 @@
-# openLearn Plan
+# Product plan
 
-## Positioning
+This is the canonical current plan for openlearn.
+GitHub issues hold scoped implementation work.
+Git history holds completed milestone and implementation plans.
 
-openLearn is a local-first AI tutor for people who want durable learning, not answer delivery.
-The product promise is simple: bring your own model access, keep your learning files, and let the tutor adapt from your actual answers.
+## Product direction
 
-## MVP Scope
+openlearn is a local-first tutor for learning a broad topic through focused lessons, useful checks, and persistent progress.
+The local web app is the default interface.
+The CLI remains a complete keyboard-first interface over the same learner home.
 
-- CLI-first course creation, tutoring, review, imports, drills, and progress.
-- Markdown topic files with JSON metadata.
-- Local learner state, event logs, and source summaries.
-- OpenAI-compatible provider calls with configurable base URL and model.
-- First-run onboarding that can configure OpenAI, Anthropic-compatible APIs, Ollama, or a custom OpenAI-compatible provider.
-- Mockable tests and smoke flows.
+Technical Interview Prep is the reference course used to improve tutor behavior and lesson design.
+The tutor must remain useful for other subjects without assuming that every course is academic or interview-focused.
 
-## User Workflow
+## Current baseline
 
-```bash
-openlearn new vim --goal "Use Vim comfortably for real editing"
-openlearn resume
-```
+- Local course files and learner state remain the source of truth.
+- Users bring their own hosted provider key or use a configured local endpoint.
+- Course creation supports templates, custom topics, and Quick Learn imports.
+- Technical Interview Prep uses role context and rapid confidence ratings instead of a placement coding test.
+- Lessons teach one focused idea and keep checks optional for refreshers.
+- The web lesson page supports side chat and early optional tools without making them prerequisites.
+- The CLI supports the same course, provider, progress, and data-management workflows.
 
-The tutor should then:
+## Before the first public release
 
-1. Resume from the active or recent topic.
-2. Teach one compact step.
-3. Ask for effortful recall or a hands-on check when useful.
-4. Judge the answer.
-5. Update local learner state.
-6. Schedule review or advance only when evidence supports it.
+1. Complete repeated manual learning journeys from a fresh learner home.
+2. Close every blocker involving provider setup, course creation, placement, lesson progression, resume, and deletion.
+3. Verify installation and the local web app from built wheel and source distributions.
+4. Verify macOS, Windows, and Linux on supported Python versions.
+5. Finish accessibility, dark-mode, responsive-layout, and plain-language review.
+6. Run the public release dogfood gate with learner-owned provider accounts or local endpoints.
+7. Build one immutable release candidate and publish only its matching tag and artifacts.
 
-## Quick Learn
+## Early work after the first release
 
-Quick Learn is the shortest path from source material to active tutoring.
-It turns one file, one folder, a coding repository, a study guide PDF, or a command list into an immediate learning session.
+- Improve the code workspace for real course practice and interview simulation.
+- Improve consent-based video lessons and source grounding.
+- Add math rendering when math-heavy courses become a tested priority.
+- Add more specialized course templates based on observed learning bottlenecks.
+- Explore community course discovery and ratings after template quality and moderation rules exist.
 
-Target flow:
+## Hosted product direction
 
-1. Choose `Quick Learn` from the main menu.
-2. Pick a file, bounded folder, or public GitHub repository.
-3. openLearn imports and summarizes sources.
-4. For a new session, start teaching immediately with no course-outline confirmation.
-5. Run on the efficient mastery profile throughout, optimizing for coverage per minute over deep mastery.
-6. Use fewer, denser slides and a course-wide coverage ledger so concepts are not re-taught across units.
+The downloadable Community edition remains bring-your-own-provider and local-first.
+A later hosted subscription may provide managed model usage, sync, and simpler setup.
+Hosted work must not weaken local data ownership or place a maintainer API key in a public client.
 
-Design requirements:
+## Release standard
 
-- Small files should start quickly.
-- Large folders should scale depth without wasting turns on boilerplate.
-- Coding repositories should teach architecture, entry points, workflows, and risky concepts before trivia.
-- Test guides should extract topics, formulas, definitions, weak spots, and likely practice questions.
-- Command lists should prioritize recall, usage context, and hands-on checks.
-- The flow should create normal local topic files and context summaries so it remains inspectable.
-- Quick Learn topics should remain visibly separate from normal courses.
-- Repository ingestion must be bounded, exclude secrets and generated files, and never execute imported code.
-
-## Product Constraints
-
-- Local-first beats hosted convenience unless the user explicitly opts in.
-- Storage remains inspectable and portable.
-- Prompt changes need behavior tests or smoke evidence.
-- Add dependencies only when they simplify real product behavior.
-- Do not optimize for learner comfort at the expense of durable retrieval.
-
-## Roadmap
-
-| Area | Direction |
-| --- | --- |
-| Course start | Faster templates, clearer options, better imported-context use |
-| Quick Learn | File, folder, or public GitHub import that starts teaching immediately |
-| Learner state | Stronger concept identity, event log, mastery evidence, rolling pass rate |
-| Tutor quality | Calibrated judge, anti-gaming checks, explicit move policy |
-| Practice | Cumulative retrieval, coding drills, video suggestions, due reviews |
-| Providers | Keep OpenAI-compatible base; add broader provider ergonomics when needed |
-| Interface | Preserve CLI speed; explore richer TUI after tutor quality is strong |
-| Distribution | Package cleanly without compromising local-first defaults |
-
-## Differentiators
-
-- Own your learning data.
-- Bring your own model, whether hosted with a key or local and keyless.
-- Transparent local memory.
-- Tutor behavior optimized for retrieval, transfer, and mastery.
-- No subscription required for the core local workflow.
+The first public release is ready only when a new user can install openlearn, configure a provider, start a useful course, complete a lesson, leave, and resume without maintainer help or lost work.
+Automated checks support that decision.
+Human learning journeys make the final call.

@@ -101,7 +101,7 @@ validate: check
 
 # --- The one obvious command --------------------------------------------------
 # Fully green gate: lint + tests + focused and interface-wide mock smoke.
-check: lint unit pytest smoke e2e
+check: lint pytest smoke e2e
 	@echo "check: all green"
 
 # --- Review-before-PR: run the gate and collect evidence ----------------------
