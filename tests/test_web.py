@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Iterator
+from concurrent.futures import wait
 import json
 from pathlib import Path
 import time
@@ -30,12 +32,22 @@ from openlearn.web.services import (
 
 
 @pytest.fixture
-def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
+def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     monkeypatch.setenv("OPENLEARN_HOME", str(tmp_path))
     monkeypatch.setenv("OPENLEARN_MOCK", "1")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     cli.clear_config_cache()
-    return TestClient(create_app(testing=True))
+    with TestClient(create_app(testing=True)) as test_client:
+        try:
+            yield test_client
+        finally:
+            # A committed receipt can precede post-commit worker cleanup. Keep
+            # this temporary home active until every worker has finished.
+            with tutor_service._FUTURES_GUARD:
+                futures = tuple(tutor_service._FUTURES.values())
+            if futures:
+                _done, unfinished = wait(futures, timeout=5)
+                assert not unfinished, "tutor workers must finish before home cleanup"
 
 
 def csrf(client: TestClient, path: str = "/") -> str:
