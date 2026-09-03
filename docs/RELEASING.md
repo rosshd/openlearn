@@ -12,7 +12,7 @@ Learner homes are outside package artifacts and must not be changed by release w
 4. Keep the resulting `.artifacts/release-candidate/` directory immutable.
 5. Run `make release-verify`, `make release-smoke-wheel`, and `make release-smoke-sdist` against that same candidate.
 6. Complete the installed-artifact CLI and Maker Bench journey in [the manual-test guide](../manual-tests/README.txt) without importing the source checkout.
-7. Run `make review` and confirm the `Tests` workflow is green for the exact release commit on `main`.
+7. Optionally run `make review` to collect local gate evidence, then confirm the `Tests` workflow is green for the exact release commit on `main`.
 8. Compare the local `SHA256SUMS` file with the candidate attached to that successful `Tests` run.
 
 The tag version, `openlearn.__version__`, and `openlearn --version` must agree.

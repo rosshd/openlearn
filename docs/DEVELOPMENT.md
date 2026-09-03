@@ -22,7 +22,7 @@ pip install -e .[dev]
 | --- | --- |
 | `make check` | Green gate: Ruff, pytest, and mocked interface smoke |
 | `make unit` | Compatibility entry point for direct `unittest` runs |
-| `make review` | Gate plus evidence bundle under `.artifacts/review/` |
+| `make review` | Optional `make check` evidence bundle under `.artifacts/review/`; not an independent review |
 | `make e2e` | Full mocked manual smoke flow |
 | `make oci-live` | Opt-in live Docker/Podman runner boundary tests using only a pre-provisioned pinned image |
 | `make typecheck` | Pyright, useful but non-blocking |

@@ -1,0 +1,85 @@
+name: Factory work
+description: Propose one bounded, dispatchable repository change
+title: ""
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Keep this issue to one observable outcome and name every permission needed to finish it.
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Outcome
+      description: State one observable result.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance-checks
+    attributes:
+      label: Acceptance checks
+      description: List testable checkboxes that prove the outcome.
+      placeholder: "- [ ] Observable check"
+    validations:
+      required: true
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints
+      description: Name behavior, compatibility, data, UX, and operational limits that must remain true.
+    validations:
+      required: true
+  - type: textarea
+    id: non-goals
+    attributes:
+      label: Non-goals
+      description: Exclude nearby work that does not belong in this issue.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Link current source, failures, measurements, screenshots, issues, or external facts.
+    validations:
+      required: true
+  - type: dropdown
+    id: risk
+    attributes:
+      label: Risk
+      description: Select the highest plausible impact and explain recovery below.
+      options:
+        - Low
+        - Medium
+        - High
+    validations:
+      required: true
+  - type: textarea
+    id: risk-impact-and-recovery
+    attributes:
+      label: Risk impact and recovery
+      description: Describe the failure impact and recovery path for the selected risk.
+    validations:
+      required: true
+  - type: textarea
+    id: permissions
+    attributes:
+      label: Permissions
+      description: List allowed repository writes and separately authorize any external, destructive, secret, paid, data, or production action.
+    validations:
+      required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies
+      description: Link every blocking issue or write None.
+      placeholder: None
+    validations:
+      required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification
+      description: List exact commands and observable evidence required before completion.
+    validations:
+      required: true
