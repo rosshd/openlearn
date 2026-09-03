@@ -104,9 +104,9 @@ validate: check
 check: lint unit pytest smoke e2e
 	@echo "check: all green"
 
-# --- Review-before-PR: run the gate and collect evidence ----------------------
-# Writes logs + diff to $(REVIEW_DIR)/<timestamp>/ for the agent (or you) to
-# summarize risk against. Fails loudly if the gate is red.
+# --- Optional evidence collection --------------------------------------------
+# Reruns the gate and writes logs + diff to $(REVIEW_DIR)/<timestamp>/.
+# This does not replace an independent review.
 review:
 	@stamp=$$(date +%Y%m%d-%H%M%S); out="$(REVIEW_DIR)/$$stamp"; mkdir -p "$$out"; \
 	echo "Evidence: $$out"; \

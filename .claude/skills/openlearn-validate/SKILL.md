@@ -16,13 +16,14 @@ make check
 `check` runs ruff, unittest, pytest, and the mocked smoke flow.
 Do not push or call code changes done on a red gate.
 
-## Review Evidence
+## Optional evidence collection
 
 ```bash
 make review
 ```
 
 This writes `.artifacts/review/<timestamp>/check.log`, `diff.stat`, and `diff.patch`.
+It is an optional evidence collector and does not replace the bounded independent review.
 Report what changed, what ran, pass or fail status, risk, and any skipped coverage.
 
 ## Rules
