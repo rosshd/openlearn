@@ -12,7 +12,7 @@ import pytest
 from tests.dogfood.artifacts import EvidenceBundle, MissionMetadata
 from tests.dogfood.codex_driver import CodexDecision, CodexDecisionError, DecisionContext
 from tests.dogfood.explorer import Explorer, ExplorerLimits
-from tests.dogfood.pty_runner import PtyMissionRunner
+from tests.dogfood.pty_runner import PtyMissionRunner, PtyObservation
 from tests.dogfood.support import POSIX_PTY_ONLY
 
 
@@ -118,6 +118,41 @@ def test_explorer_dispatches_text_and_named_keys_and_links_exact_observations(
     ]
     assert source.contexts[1].prior_actions == ("submit_text:hello",)
     assert read_manifest(bundle)["status"] == "completed"
+
+
+def test_explorer_waits_for_program_output_before_requesting_a_decision(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = FakeSource(
+        [
+            CodexDecision(action="submit_text", text="99"),
+            CodexDecision(action="stop", reason="feedback observed"),
+        ]
+    )
+    explorer, _bundle = make_explorer(tmp_path, source, "")
+    observations = iter(
+        [
+            PtyObservation("", "timeout", False),
+            PtyObservation("Menu> ", "quiet", False),
+            PtyObservation("99", "quiet", False),
+            PtyObservation("\n", "quiet", False),
+            PtyObservation("Invalid choice\nMenu> ", "quiet", False),
+        ]
+    )
+    sent: list[str] = []
+    monkeypatch.setattr(explorer.runner, "start", lambda: None)
+    monkeypatch.setattr(explorer.runner, "observe", lambda **_kwargs: next(observations))
+    monkeypatch.setattr(explorer.runner, "sendline", sent.append)
+    monkeypatch.setattr(explorer.runner, "close", lambda: None)
+
+    result = explorer.run()
+
+    assert result.status == "stopped"
+    assert sent == ["99"]
+    assert len(source.contexts) == 2
+    assert source.contexts[0].observation == "Menu> "
+    assert source.contexts[1].observation.endswith("Invalid choice\nMenu> ")
 
 
 @pytest.mark.parametrize(

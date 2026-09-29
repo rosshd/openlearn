@@ -82,6 +82,7 @@ class Explorer:
         self._history = ""
         self._observation_chars_seen = 0
         self._prior_actions: list[str] = []
+        self._pending_echo = ""
         self._finalized = False
 
     def run(self) -> ExplorerResult:
@@ -116,6 +117,18 @@ class Explorer:
                     return self._fail("elapsed_exhausted", "Explorer elapsed-time budget exhausted.")
                 if self._turns >= self._limits.max_turns:
                     return self._fail("turn_exhausted", "Explorer turn budget exhausted.")
+
+                fresh_output = observation.text
+                if self._pending_echo and fresh_output.startswith(self._pending_echo):
+                    fresh_output = fresh_output[len(self._pending_echo) :]
+                    self._pending_echo = ""
+                elif self._pending_echo.startswith(fresh_output):
+                    self._pending_echo = self._pending_echo[len(fresh_output) :]
+                    fresh_output = ""
+                else:
+                    self._pending_echo = ""
+                if not fresh_output:
+                    continue
 
                 bounded, truncated, original_chars = self._bounded_observation()
                 turns_remaining = self._limits.max_turns - self._turns
@@ -152,6 +165,13 @@ class Explorer:
                     assert decision.reason is not None
                     return self._fail("stopped", f"Explorer stopped: {decision.reason}")
                 self._dispatch(decision)
+                if decision.action == "submit_text":
+                    assert decision.text is not None
+                    self._pending_echo = f"{decision.text}\n"
+                elif decision.action == "press_key" and decision.key == "enter":
+                    self._pending_echo = "\n"
+                else:
+                    self._pending_echo = ""
                 self._prior_actions.append(_summarize_action(decision))
         except KeyboardInterrupt:
             self._finalize_failure("KeyboardInterrupt: explorer interrupted.")
