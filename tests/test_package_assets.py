@@ -14,6 +14,22 @@ from zipfile import ZipFile
 
 
 REPOSITORY = Path(__file__).resolve().parents[1]
+TEACHING_LESSON = """
+<div data-focus-shell data-revision="1">
+  <article data-current-move>
+    <h1 id="move-title">Arrays and strings</h1>
+    <div data-move-content><p>Walk through the input before choosing an approach.</p></div>
+  </article>
+  <button type="button" data-navigation-intent="next">Continue</button>
+</div>
+"""
+ANSWER_COMPOSER = """
+<form data-turn-form>
+  <textarea name="text" required></textarea>
+  <button type="submit">Send answer</button>
+</form>
+"""
+NEXT_BUTTON = '<button type="button" data-navigation-intent="next">Continue</button>'
 RELEASE_SCRIPT = REPOSITORY / "scripts" / "release_artifacts.py"
 SPEC = importlib.util.spec_from_file_location("release_artifacts", RELEASE_SCRIPT)
 assert SPEC is not None and SPEC.loader is not None
@@ -34,6 +50,50 @@ def _wheel(path: Path, *, extra: tuple[str, bytes] | None = None) -> None:
 
 
 class ReleaseArtifactPolicyTests(unittest.TestCase):
+    def test_installed_teaching_surface_accepts_navigation_or_answer_composer(self) -> None:
+        for lesson in (TEACHING_LESSON, TEACHING_LESSON.replace(NEXT_BUTTON, ANSWER_COMPOSER)):
+            with self.subTest(lesson=lesson):
+                release_artifacts._assert_teaching_surface(lesson)
+
+    def test_installed_teaching_surface_rejects_missing_or_unusable_lesson(self) -> None:
+        invalid = {
+            "missing shell": TEACHING_LESSON.replace("data-focus-shell", "data-other"),
+            "missing move": TEACHING_LESSON.replace("data-current-move", "data-other"),
+            "empty title": TEACHING_LESSON.replace("Arrays and strings", ""),
+            "missing content": TEACHING_LESSON.replace("data-move-content", "data-other"),
+            "empty content": TEACHING_LESSON.replace(
+                "Walk through the input before choosing an approach.", " "
+            ),
+            "missing controls": TEACHING_LESSON.replace(NEXT_BUTTON, ""),
+            "disabled navigation": TEACHING_LESSON.replace(
+                'type="button"', 'type="button" disabled'
+            ),
+            "hidden navigation": TEACHING_LESSON.replace('type="button"', 'type="button" hidden'),
+            "hidden lesson": TEACHING_LESSON.replace("data-focus-shell", "data-focus-shell hidden"),
+            "unrelated chat control": TEACHING_LESSON.replace(
+                'data-navigation-intent="next"', 'data-tool-open="chat"'
+            ),
+            "marker text only": "data-focus-shell data-turn-form data-move-content",
+            "unusable composer": TEACHING_LESSON.replace(
+                NEXT_BUTTON, ANSWER_COMPOSER.replace("<textarea", "<textarea disabled")
+            ),
+            "missing answer submit": TEACHING_LESSON.replace(
+                NEXT_BUTTON, '<form data-turn-form><textarea name="text"></textarea></form>'
+            ),
+            "disabled answer submit": TEACHING_LESSON.replace(
+                NEXT_BUTTON, ANSWER_COMPOSER.replace('type="submit"', 'type="submit" disabled')
+            ),
+            "readonly answer": TEACHING_LESSON.replace(
+                NEXT_BUTTON, ANSWER_COMPOSER.replace("<textarea", "<textarea readonly")
+            ),
+        }
+        for case, lesson in invalid.items():
+            with self.subTest(case=case):
+                with self.assertRaisesRegex(
+                    release_artifacts.ReleaseArtifactError, "interactive teaching"
+                ):
+                    release_artifacts._assert_teaching_surface(lesson)
+
     def test_built_wheel_contains_every_versioned_interview_asset(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             output = Path(raw)
@@ -115,7 +175,7 @@ class ReleaseArtifactPolicyTests(unittest.TestCase):
                     (
                         "http://127.0.0.1:9123/_openlearn/test/courses/"
                         "technical-interview-prep"
-                    ): b"data-focus-shell data-turn-form",
+                    ): TEACHING_LESSON.encode("utf-8"),
                 }
                 if isinstance(request, release_artifacts.Request):
                     payload = json.loads(request.data or b"{}")

@@ -59,10 +59,9 @@ def _revision(page) -> int:
     return int(page.locator("[data-focus-shell]").get_attribute("data-revision"))
 
 
-def _show_new_revision(page, previous: int) -> None:
-    page.get_by_role("button", name="Show next lesson").click()
+def _wait_for_new_revision(page, previous: int) -> None:
     page.wait_for_function(
-        "previous => Number(document.querySelector('[data-focus-shell]').dataset.revision) > previous",
+        "previous => Number(document.querySelector('[data-focus-shell]')?.dataset.revision) > previous",
         arg=previous,
     )
 
@@ -242,8 +241,18 @@ def test_real_browser_course_polling_theme_conflict_and_keyboard_submit(
                         first.locator("#learner-response").press("Control+Enter")
                     assert first_saved.value.status == 202
                 else:
-                    first.locator("body").press("Enter")
-                _show_new_revision(first, passive_revision)
+                    playwright.expect(first.locator("[data-move-content]")).not_to_be_empty()
+                    playwright.expect(
+                        first.get_by_role("button", name="Continue", exact=False)
+                    ).to_be_enabled()
+                    with first.expect_response(
+                        lambda response: response.url.endswith("/turns")
+                    ) as next_saved:
+                        first.locator("body").press("Enter")
+                    assert next_saved.value.status == 202
+                _wait_for_new_revision(first, passive_revision)
+                playwright.expect(first.locator("[data-current-move]")).to_be_visible()
+                playwright.expect(first.locator("[data-show-next-lesson]")).to_have_count(0)
 
                 lesson_title = first.locator("#move-title").inner_text()
                 first.get_by_role("button", name="Chat", exact=True).click()
@@ -510,7 +519,7 @@ def test_real_browser_course_polling_theme_conflict_and_keyboard_submit(
                 saved_body = saved_response.json()
                 assert saved_body["state"] == "saved"
                 assert saved_body["operation_id"]
-                _show_new_revision(first, initial_revision)
+                _wait_for_new_revision(first, initial_revision)
                 playwright.expect(first.locator("[data-current-move]")).to_be_visible()
 
                 stale.locator("#learner-response").fill("This tab still has an old revision.")
@@ -542,7 +551,7 @@ def test_real_browser_course_polling_theme_conflict_and_keyboard_submit(
                 ) as retried:
                     stale.locator("#learner-response").press("Control+Enter")
                 assert retried.value.status == 202
-                _show_new_revision(stale, refreshed_revision)
+                _wait_for_new_revision(stale, refreshed_revision)
                 browser.close()
         finally:
             process.terminate()
