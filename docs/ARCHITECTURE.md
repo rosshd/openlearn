@@ -12,6 +12,7 @@ Bare `openlearn` launches the Maker Bench web interface.
 
 Supporting modules:
 
+- `answer_assessment.py`: pure answer-evidence normalization, token overlap, and gaming-suspicion checks used by CLI tutor turns.
 - `constants.py`: prompt constants, defaults, limits, profile values, and option labels.
 - `models.py`: dataclasses for topic and pending-context state.
 - `onboarding.py`: provider presets, credential validation, first-run configuration persistence, and initial destination launch.
@@ -21,6 +22,10 @@ Supporting modules:
 
 Split only when it pays for itself.
 Likely split points are provider calls, topic storage, import handling, and tutor policy.
+
+For deterministic answer-evidence changes, start in `src/openlearn/answer_assessment.py` and its direct tests in `tests/test_answer_assessment.py`.
+The thresholds remain in `src/openlearn/constants.py`; `src/openlearn/cli.py` imports the helpers for existing callers and applies their results to learner state.
+Changes to mastery policy, prompts, or state transitions still belong to the CLI tutor flow and its behavior tests.
 
 ## Storage
 

@@ -43,6 +43,15 @@ from typing import Literal, Protocol
 from platformdirs import user_data_dir
 
 from openlearn import __version__, code_runner
+from openlearn.answer_assessment import (
+    answer_eval_is_transfer,
+    answer_tokens as answer_tokens,
+    detect_gaming_suspected,
+    judge_gameable,
+    normalized_answer_kind,
+    token_trigrams as token_trigrams,
+    trigram_jaccard as trigram_jaccard,
+)
 from openlearn import data_management
 from openlearn import interview_attempts
 from openlearn import interview_prep
@@ -87,8 +96,6 @@ from openlearn.constants import (
     DEFAULT_COURSE_OPTIONS,
     DEFAULT_MAX_TOKENS,
     DEFAULT_MODEL,
-    GAMING_MIN_ANSWER_TOKENS,
-    GAMING_OVERLAP_TRIGRAM_JACCARD,
     MANUAL_TEST_CONTEXT,
     MANUAL_TEST_CONTEXT_FILENAME,
     MANUAL_TEST_COURSE_GOAL,
@@ -8023,51 +8030,6 @@ def profile_impasse_frequency(profile: object) -> str:
     if isinstance(profile, str):
         return str(PROFILES[normalize_mastery_profile(profile)]["impasse_probe_frequency"])
     return "medium"
-
-
-def answer_tokens(text: str) -> list[str]:
-    return re.findall(r"[a-z0-9]+", text.lower())
-
-
-def token_trigrams(tokens: list[str]) -> set[tuple[str, str, str]]:
-    if len(tokens) < 3:
-        return set()
-    return set(zip(tokens, tokens[1:], tokens[2:]))
-
-
-def trigram_jaccard(left: str, right: str) -> float:
-    left_trigrams = token_trigrams(answer_tokens(left))
-    right_trigrams = token_trigrams(answer_tokens(right))
-    if not left_trigrams or not right_trigrams:
-        return 0.0
-    return len(left_trigrams & right_trigrams) / len(left_trigrams | right_trigrams)
-
-
-def normalized_answer_kind(value: object) -> str:
-    return (
-        value if isinstance(value, str) and value in {"recognition", "production"} else "production"
-    )
-
-
-def answer_eval_is_transfer(value: object) -> bool:
-    return value is True
-
-
-def judge_gameable(value: object) -> bool:
-    return value is True
-
-
-def detect_gaming_suspected(
-    learner_prompt: str, shown_text: str, answer_kind: str, gameable: bool
-) -> tuple[bool, float, int]:
-    tokens = answer_tokens(learner_prompt)
-    overlap = trigram_jaccard(learner_prompt, shown_text)
-    overlap_suspected = (
-        answer_kind == "production"
-        and len(tokens) >= GAMING_MIN_ANSWER_TOKENS
-        and overlap >= GAMING_OVERLAP_TRIGRAM_JACCARD
-    )
-    return overlap_suspected or gameable, overlap, len(tokens)
 
 
 def concept_is_mastered(record: dict[str, object], profile: dict[str, object]) -> bool:
