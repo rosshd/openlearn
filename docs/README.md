@@ -3,6 +3,10 @@
 This index separates current product documentation from implementation references and test procedures.
 Completed plans remain available in Git history instead of living beside current instructions.
 
+## Start here
+
+- [What a session looks like](../README.md#what-a-session-looks-like) shows an illustrative lesson exchange and explains the limits of saved learner evidence.
+
 ## Use openlearn
 
 - [Install](INSTALL.md) covers supported platforms, first launch, upgrades, and uninstalling.
@@ -24,6 +28,16 @@ Completed plans remain available in Git history instead of living beside current
 - [Agent runs](AGENT_RUNS.md) defines branch, worktree, review, and shipping discipline.
 - [Releasing](RELEASING.md) defines artifact creation, verification, publication, and correction.
 - [Interview problem catalog](INTERVIEW_PROBLEM_CATALOG.md) defines rights and versioning for bundled practice problems.
+
+### Code entry points
+
+| Area | Start with |
+| --- | --- |
+| Teaching and turn judging | [`cli.py`](../src/openlearn/cli.py), [`answer_assessment.py`](../src/openlearn/answer_assessment.py), and [`tutor_service.py`](../src/openlearn/tutor_service.py) |
+| Course progression and persistence | [`courses.py`](../src/openlearn/courses.py) and [`interview_curriculum.py`](../src/openlearn/interview_curriculum.py) |
+| Web interface | [`routes.py`](../src/openlearn/web/routes.py) and [`web/templates/`](../src/openlearn/web/templates/) |
+| Terminal interface and commands | [`cli.py`](../src/openlearn/cli.py) |
+| Tests | [`tests/`](../tests/) and [`tests/workflows/`](../tests/workflows/) |
 
 ## Evaluation
 

@@ -4,43 +4,64 @@
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
 [![Python 3.11-3.13](https://img.shields.io/badge/python-3.11--3.13-blue.svg)](pyproject.toml)
 
-openlearn is a local-first AI tutor.
-It keeps courses, progress, and imported study material in files you own.
-Model-backed lessons use your chosen provider account or a local OpenAI-compatible endpoint.
+openlearn is a work-in-progress, local-first AI tutor.
+A learning session turns a topic or study material into focused lessons, invites you to try ideas, gives feedback, and saves course notes and practice history so you can return later.
+Courses and learner records stay in files under your local learner home.
+Model-backed lessons use a provider account you configure or a local OpenAI-compatible endpoint.
 
-The local web app is the default interface.
-The terminal interface uses the same courses and learner state.
+## What a session looks like
 
-## Install
+This exchange is illustrative, written for this README, and is not a transcript or live evaluation result.
 
-openlearn supports Python 3.11 through 3.13 on macOS, Linux, and Windows.
+**Tutor:** `alias = items` gives `alias` another name for the same list.
+`copy = items[:]` makes a separate shallow copy.
+
+**Check:** If `items = [1, 2]`, `alias = items`, and `copy = items[:]`, then `alias.append(3)`, what is `items`?
+
+**Learner:** `[1, 2]`, because I appended to `alias`.
+
+**Feedback:** Both names refer to one list, so `items` is `[1, 2, 3]`.
+The slice copy stays `[1, 2]`.
+
+**Return to practice:** After a later lesson, predict `values[0]` after `values = [4]`, `again = values`, and `again[0] = 9`.
+
+Saved answers, tutor judgments, and course progress show what openlearn recorded.
+They do not establish that a learner retained an idea or can use it in a new situation.
+The separate [outcome evaluation](docs/OUTCOME_EVAL.md) is an opt-in scripted evaluation lane, not a claim about learner outcomes.
+
+## Quickstart
+
+Use Python 3.11 through 3.13 on macOS, Linux, or Windows.
+To run the current source checkout on macOS or Linux:
 
 ```bash
-python -m pip install --upgrade openlearn
+git clone https://github.com/rosshd/openlearn.git
+cd openlearn
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -e .
 openlearn
 ```
 
-Running `openlearn` opens the local web app in your browser.
-It listens only on loopback and exchanges its one-time launch capability for an HttpOnly session cookie.
+Set `python` to a supported version before creating the environment.
+The local web app opens in your browser.
+Create a course or choose a bundled template, then configure a provider before starting a model-backed lesson.
+Use `openlearn cli` for the terminal interface.
+See [installation](docs/INSTALL.md) for published-package installation, Windows setup, upgrades, uninstalling, headless launch, and optional code execution.
 
-Use the terminal interface instead:
-
-```bash
-openlearn cli
-```
-
-See [installation](docs/INSTALL.md) for virtual environments, upgrades, uninstalling, headless launch, and the optional code runner.
+To install a published release instead, run `python -m pip install --upgrade openlearn` in an environment using Python 3.11 through 3.13.
+A published release may not include changes from the current source checkout.
+For the contributor setup, including development dependencies, see [Development](docs/DEVELOPMENT.md).
 
 ## Start learning
 
-The web app can create a broad custom course or start from a bundled template.
-Technical Interview Prep is the main reference course and uses a short confidence survey to tailor its route.
-The survey asks about role goals and topic familiarity.
-It does not require an editor or a coding test.
+The web app can create a custom course or start from a bundled template.
+Technical Interview Prep uses a short confidence survey to tailor its route to role goals and topic familiarity.
+The survey does not require an editor or a coding test.
 
 Lessons teach one focused idea at a time.
 Checks are recommended but optional for refreshers.
-Moving past a check does not award false mastery credit, and the concept remains available for later practice.
+Moving past a check does not award mastery credit, and the concept remains available for later practice.
 
 Quick Learn starts a temporary focused course from source material:
 
@@ -89,8 +110,7 @@ openlearn doctor
 Run `openlearn --help` or `openlearn <command> --help` for the current command reference.
 Run `openlearn cli` for the keyboard-first menu and tutor REPL.
 
-Secure Python checks require an existing Docker or Podman runtime and the pinned runner image shown by `openlearn doctor`.
-`--reduced-isolation` runs learner code as a local subprocess and is not a sandbox.
+Python code checks are optional; see [installation](docs/INSTALL.md) for runtime and isolation details.
 
 ## Local data
 
