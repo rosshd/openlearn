@@ -87,6 +87,14 @@ def read_manifest(bundle: EvidenceBundle) -> dict[str, object]:
     return json.loads((bundle.root / "manifest.json").read_text(encoding="utf-8"))
 
 
+def script_observations(monkeypatch, explorer: Explorer, observations: list[PtyObservation]) -> None:
+    sequence = iter(observations)
+    monkeypatch.setattr(explorer.runner, "start", lambda: None)
+    monkeypatch.setattr(explorer.runner, "observe", lambda **_kwargs: next(sequence))
+    monkeypatch.setattr(explorer.runner, "sendline", lambda _text="": None)
+    monkeypatch.setattr(explorer.runner, "close", lambda: None)
+
+
 def test_explorer_dispatches_text_and_named_keys_and_links_exact_observations(
     tmp_path: Path,
 ) -> None:
@@ -196,6 +204,7 @@ def test_explorer_dispatches_each_allow_listed_named_key(
 )
 def test_explorer_finalizes_bounded_terminal_states(
     tmp_path: Path,
+    monkeypatch,
     decisions: list[CodexDecision | BaseException],
     max_turns: int,
     expected_status: str,
@@ -204,7 +213,7 @@ def test_explorer_finalizes_bounded_terminal_states(
     explorer, bundle = make_explorer(
         tmp_path,
         source,
-        "import time; print('Menu> ', flush=True); time.sleep(30)",
+        "",
         limits=ExplorerLimits(
             max_turns=max_turns,
             max_elapsed_seconds=2,
@@ -212,6 +221,11 @@ def test_explorer_finalizes_bounded_terminal_states(
             quiet_interval=0.02,
             observation_timeout=0.1,
         ),
+    )
+    script_observations(
+        monkeypatch,
+        explorer,
+        [PtyObservation("Menu> ", "quiet", False)] * 2,
     )
 
     result = explorer.run()
@@ -226,14 +240,20 @@ def test_explorer_finalizes_eof_interruption_and_rejects_viewport_controls(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    eof_explorer, eof_bundle = make_explorer(tmp_path / "eof", FakeSource([]), "print('bye')")
+    eof_explorer, eof_bundle = make_explorer(tmp_path / "eof", FakeSource([]), "")
+    script_observations(monkeypatch, eof_explorer, [PtyObservation("bye\n", "eof", False)])
     assert eof_explorer.run().status == "pty_eof"
     assert read_manifest(eof_bundle)["status"] == "failed"
 
     control_explorer, control_bundle = make_explorer(
         tmp_path / "control",
         FakeSource([]),
-        "import sys; sys.stdout.write('menu\\x1b[2J'); sys.stdout.flush()",
+        "",
+    )
+    script_observations(
+        monkeypatch,
+        control_explorer,
+        [PtyObservation("menu\x1b[2J", "quiet", True)],
     )
     assert control_explorer.run().status == "unsupported_terminal_controls"
     assert read_manifest(control_bundle)["status"] == "failed"
@@ -241,8 +261,9 @@ def test_explorer_finalizes_eof_interruption_and_rejects_viewport_controls(
     interrupted_explorer, interrupted_bundle = make_explorer(
         tmp_path / "interrupt",
         FakeSource([]),
-        "import time; time.sleep(30)",
+        "",
     )
+    script_observations(monkeypatch, interrupted_explorer, [])
 
     def interrupt(**_kwargs):
         raise KeyboardInterrupt
@@ -255,12 +276,13 @@ def test_explorer_finalizes_eof_interruption_and_rejects_viewport_controls(
 
 def test_explorer_retains_latest_bounded_observation_and_truncation_metadata(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
     source = FakeSource([CodexDecision(action="stop", reason="enough")])
     explorer, bundle = make_explorer(
         tmp_path,
         source,
-        "print('0123456789' * 20, flush=True); import time; time.sleep(30)",
+        "",
         limits=ExplorerLimits(
             max_turns=1,
             max_elapsed_seconds=2,
@@ -268,6 +290,11 @@ def test_explorer_retains_latest_bounded_observation_and_truncation_metadata(
             quiet_interval=0.02,
             observation_timeout=0.1,
         ),
+    )
+    script_observations(
+        monkeypatch,
+        explorer,
+        [PtyObservation("0123456789" * 20 + "\n", "quiet", False)],
     )
 
     explorer.run()
