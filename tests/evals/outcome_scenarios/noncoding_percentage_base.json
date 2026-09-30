@@ -1,0 +1,52 @@
+{
+  "name": "noncoding_percentage_base",
+  "family": "core_learning_comparison",
+  "persona": "A learner who can multiply decimals but assumes equal percentage increases and decreases cancel.",
+  "description": "Repair the changing-base misconception, then independently transfer it to population change and retrieve with a new price example.",
+  "topic": "percentage base",
+  "goal": "Apply successive percentages to their current bases",
+  "mastery_profile": "proficient",
+  "context": {
+    "lesson.summary.txt": "Prior knowledge: decimal multiplication and finding a percentage of a quantity. Misconception: a 20 percent rise and a 20 percent fall cancel. Each change uses the current quantity as its base. Training: a $100 price rises 20 percent then falls 20 percent. Unfamiliar transfer: a town of 2000 people grows 10 percent then loses 10 percent. Delayed retrieval: a $80 price falls 25 percent then rises 25 percent. Require both the calculation and an explanation of the changing base."
+  },
+  "state": {
+    "review_session_active": true,
+    "pending_question": {
+      "kind": "free_response",
+      "question": "A $100 price rises 20 percent then falls 20 percent. What is the final price, and why?",
+      "created": "2026-01-01",
+      "focus": "percentage base",
+      "concept_id": "percentage-base"
+    },
+    "review_due": [{"concept": "percentage base", "due": "2026-01-01", "difficulty": "hard"}]
+  },
+  "turns": [
+    {"role": "assistant", "content": "A $100 price rises 20 percent then falls 20 percent. What is the final price, and why?"},
+    {"role": "user", "content": "I can multiply decimals. It returns to $100 because plus 20 percent and minus 20 percent cancel."},
+    {"role": "assistant", "content": null},
+    {"role": "user", "content": "The rise gives $120, and the fall takes 20 percent of $120, or $24, leaving $96. The second base is larger."},
+    {"role": "assistant", "content": null},
+    {"role": "user", "content": "Independently, a town of 2000 people grows 10 percent to 2200, then loses 10 percent of 2200, or 220, ending at 1980. The changes use different populations as bases."},
+    {"role": "assistant", "content": null},
+    {"role": "user", "content": "Without notes, $80 falling 25 percent becomes $60. Rising 25 percent of $60 adds $15, so it ends at $75. The equal percentages do not undo each other because the base changed."},
+    {"role": "assistant", "content": null}
+  ],
+  "rubric": [
+    "address the changing-base misconception with bounded support and respect explicit navigation",
+    "require calculation and explanation rather than recognition of a rule",
+    "distinguish supported practice from independent transfer and simulated delayed retrieval"
+  ],
+  "turn_rubrics": [
+    ["ask which quantity the second percentage uses or give one targeted hint"],
+    ["acknowledge the corrected calculation and fade support before unfamiliar transfer"],
+    ["judge the population calculation as unfamiliar transfer only when independent and production-grade"],
+    ["judge the price calculation as scheduled retrieval without claiming real human retention"]
+  ],
+  "outcome_schedule": [
+    {"gap_days_before": 0, "probe": "practice"},
+    {"gap_days_before": 0, "probe": "practice"},
+    {"gap_days_before": 0, "probe": "transfer"},
+    {"gap_days_before": 3, "probe": "retrieval"}
+  ],
+  "maximum_probes": 4
+}
