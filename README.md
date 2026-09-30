@@ -5,9 +5,10 @@
 [![Python 3.11-3.13](https://img.shields.io/badge/python-3.11--3.13-blue.svg)](pyproject.toml)
 
 openlearn is a work-in-progress, local-first AI tutor.
-A learning session turns a topic or study material into focused lessons, invites you to try ideas, gives feedback, and saves course notes and practice history so you can return later.
+A learning session starts with a goal, teaches one focused idea, offers a useful optional check, gives feedback, and saves progress for later retrieval.
 Courses and learner records stay in files under your local learner home.
 Model-backed lessons use a provider account you configure or a local OpenAI-compatible endpoint.
+The web app and keyboard-first CLI support the same teaching policy and learner state, with presentation features suited to each interface.
 
 ## What a session looks like
 
@@ -56,7 +57,7 @@ For the contributor setup, including development dependencies, see [Development]
 ## Start learning
 
 The web app can create a custom course or start from a bundled template.
-Technical Interview Prep uses a short confidence survey to tailor its route to role goals and topic familiarity.
+Technical Interview Prep is a supported reference course and uses a short confidence survey to tailor its route to role goals and topic familiarity.
 The survey does not require an editor or a coding test.
 
 Lessons teach one focused idea at a time.
@@ -109,6 +110,7 @@ openlearn doctor
 
 Run `openlearn --help` or `openlearn <command> --help` for the current command reference.
 Run `openlearn cli` for the keyboard-first menu and tutor REPL.
+The optional TUI remains supported in its current form.
 
 Python code checks are optional; see [installation](docs/INSTALL.md) for runtime and isolation details.
 

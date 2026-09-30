@@ -5,16 +5,19 @@ Agents should use `.claude/skills/openlearn-architecture/` for operational rules
 
 ## Current Shape
 
-openLearn is a Python CLI with one package, `openlearn`.
-`src/openlearn/cli.py` still owns most behavior: commands, REPL, menu flow, topic storage orchestration, prompt construction, imports, and provider calls.
+openLearn is a Python application with one package, `openlearn`, and web and terminal interfaces.
+`src/openlearn/cli.py` still owns most behavior: commands, REPL, menu flow, topic storage orchestration, prompts other than the shared first-lesson policy, imports, and provider calls.
 First-run provider setup lives in `src/openlearn/onboarding.py` and is invoked by `openlearn cli` when provider configuration is not yet usable.
 Bare `openlearn` launches the Maker Bench web interface.
+`src/openlearn/lesson_policy.py` owns the shared first-lesson prompt, response recognition, validation, and fallback used when a course starts through either interface.
+The interfaces retain their own presentation and interaction flows while using the same learner home and first-lesson policy.
 
 Supporting modules:
 
 - `answer_assessment.py`: pure answer-evidence normalization, token overlap, and gaming-suspicion checks used by CLI tutor turns.
 - `constants.py`: prompt constants, defaults, limits, profile values, and option labels.
 - `models.py`: dataclasses for topic and pending-context state.
+- `lesson_policy.py`: shared first-lesson prompt, response recognition, validation, and fallback for CLI and web course starts.
 - `onboarding.py`: provider presets, credential validation, first-run configuration persistence, and initial destination launch.
 - `stats.py`: read-only aggregation helpers for the stats dashboard.
 - `text.py`: parsing, trimming, metadata-update helpers, answer-key extraction, and context compaction.

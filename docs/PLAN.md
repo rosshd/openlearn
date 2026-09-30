@@ -6,22 +6,25 @@ Git history holds completed milestone and implementation plans.
 
 ## Product direction
 
-openlearn is a local-first tutor for learning a broad topic through focused lessons, useful checks, and persistent progress.
-The local web app is the default interface.
-The CLI remains a complete keyboard-first interface over the same learner home.
+openlearn is a local-first tutor built around a general learning loop: set a goal, study one focused lesson, try an optional useful check, get feedback, save progress, and return to retrieve the idea later.
+The local web app remains the default interface, and the keyboard-first CLI also supports this core loop.
+They share teaching policy and learner state, while presentation features may differ by interface.
+The optional TUI remains supported in its current form, with no further expansion planned.
 
-Technical Interview Prep is the reference course used to improve tutor behavior and lesson design.
-The tutor must remain useful for other subjects without assuming that every course is academic or interview-focused.
+Technical Interview Prep is a supported reference course for improving general tutor behavior and lesson design.
+It is not a separate interview-training product scope.
+The tutor must remain useful across subjects without assuming every course is academic or interview-focused.
 
 ## Current baseline
 
 - Local course files and learner state remain the source of truth.
 - Users bring their own hosted provider key or use a configured local endpoint.
 - Course creation supports templates, custom topics, and Quick Learn imports.
-- Technical Interview Prep uses role context and rapid confidence ratings instead of a placement coding test.
+- Technical Interview Prep remains available as a course with role context and rapid confidence ratings.
 - Lessons teach one focused idea and keep checks optional for refreshers.
-- The web lesson page supports side chat and early optional tools without making them prerequisites.
-- The CLI supports the same course, provider, progress, and data-management workflows.
+- Existing source imports, coding tools, interview records, and terminal workflows remain supported.
+- Web and CLI use shared teaching policy and learner state; interface-specific presentation does not need exact feature parity.
+- The CLI remains a complete keyboard-first interface over the same learner home.
 
 ## Before the first public release
 
@@ -33,19 +36,13 @@ The tutor must remain useful for other subjects without assuming that every cour
 6. Run the public release dogfood gate with learner-owned provider accounts or local endpoints.
 7. Build one immutable release candidate and publish only its matching tag and artifacts.
 
-## Early work after the first release
+## Scope boundary
 
-- Improve the code workspace for real course practice and interview simulation.
-- Improve consent-based video lessons and source grounding.
-- Add math rendering when math-heavy courses become a tested priority.
-- Add more specialized course templates based on observed learning bottlenecks.
-- Explore community course discovery and ratings after template quality and moderation rules exist.
+- Keep new work centered on the general tutoring loop and evidence from its use.
+- Defer new interview simulations, additional language support, activity adapters, automatic research or diagrams, community features, and hosted or sync work until a later explicit scope decision.
+- Existing imports, coding tools, interview records, templates, and terminal workflows continue to work; this boundary does not remove them.
 
-## Hosted product direction
-
-The downloadable Community edition remains bring-your-own-provider and local-first.
-A later hosted subscription may provide managed model usage, sync, and simpler setup.
-Hosted work must not weaken local data ownership or place a maintainer API key in a public client.
+This scope boundary does not change current release requirements or data ownership.
 
 ## Release standard
 

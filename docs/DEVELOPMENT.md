@@ -16,6 +16,16 @@ pip install -e .[dev]
 4. Run `make check`.
 5. Report what changed, what ran, and remaining risk.
 
+## Product scope
+
+Keep product changes centered on the general tutoring loop: a learner sets a goal, studies a focused lesson, can try a useful check, gets feedback, saves progress, and can return to retrieve the idea later.
+Technical Interview Prep is a supported reference course, not a separate expanding interview-training product.
+Preserve existing imports, coding tools, interview records, and terminal workflows.
+Defer new interview simulations, language expansion, activity adapters, automatic research or diagrams, community features, and hosted or sync work until a later explicit scope decision.
+The optional TUI remains supported, but its feature set is frozen.
+The web and CLI share teaching policy and learner state; interface-specific presentation does not require exact UI parity.
+See the [product plan](PLAN.md) for the current scope and release direction.
+
 ## Commands
 
 | Command | Purpose |
