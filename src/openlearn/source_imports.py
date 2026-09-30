@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, TypeAlias
@@ -101,6 +102,7 @@ class CourseSource:
     context_file: str
     summary_file: str
     checksum: str
+    context_checksum: str | None = None
 
 
 @dataclass(frozen=True)
@@ -266,6 +268,7 @@ def _import_context(
                 context_file=saved.name,
                 summary_file=summary.name,
                 checksum=checksum,
+                context_checksum=hashlib.sha256(saved.read_bytes()).hexdigest(),
             ),
         )
         if not persisted:
@@ -315,6 +318,7 @@ def _persist_source(course_slug: str, source: CourseSource) -> bool:
                 "context_file": source.context_file,
                 "summary_file": source.summary_file,
                 "checksum": source.checksum,
+                "context_checksum": source.context_checksum,
             }
         )
         metadata[COURSE_SOURCES_METADATA_KEY] = sources
@@ -350,6 +354,11 @@ def _parse_source(value: object) -> CourseSource | None:
         context_file=str(fields["context_file"]),
         summary_file=str(fields["summary_file"]),
         checksum=str(fields["checksum"]),
+        context_checksum=(
+            value["context_checksum"]
+            if isinstance(value.get("context_checksum"), str)
+            else None
+        ),
     )
 
 

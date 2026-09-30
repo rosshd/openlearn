@@ -853,6 +853,10 @@ def build_parser() -> argparse.ArgumentParser:
     chat_parser.add_argument("topic", help="Topic slug")
     chat_parser.add_argument("prompt", help="Question or request")
     chat_parser.add_argument("--model", default=None, help="Override model for this request")
+    chat_parser.add_argument(
+        "--source-mode", action="store_true",
+        help="Preview screened class context and confirm one OpenRouter tutoring request",
+    )
     add_dry_run_argument(chat_parser)
     chat_parser.set_defaults(func=cmd_chat)
 
@@ -1573,7 +1577,9 @@ def require_safe_source_path(directory: Path, source: Path) -> Path:
     return resolved_source
 
 
-def snapshot_source_file(directory: Path, source: Path) -> SourceSnapshot:
+def snapshot_source_file(
+    directory: Path, source: Path, *, max_bytes: int | None = None
+) -> SourceSnapshot:
     """Read one stable regular-file snapshot without following path symlinks."""
     try:
         root = directory.expanduser().resolve()
@@ -1588,7 +1594,7 @@ def snapshot_source_file(directory: Path, source: Path) -> SourceSnapshot:
         raise OpenLearnError(f"source is not a regular file: {source}")
 
     if os.name == "nt":
-        return _snapshot_source_file_windows(root, lexical_source)
+        return _snapshot_source_file_windows(root, lexical_source, max_bytes=max_bytes)
 
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     cloexec = getattr(os, "O_CLOEXEC", 0)
@@ -1612,7 +1618,7 @@ def snapshot_source_file(directory: Path, source: Path) -> SourceSnapshot:
             os.O_RDONLY | nofollow | cloexec,
             dir_fd=parent_descriptor,
         )
-        data = _read_stable_source_descriptor(file_descriptor, source)
+        data = _read_stable_source_descriptor(file_descriptor, source, max_bytes=max_bytes)
         return SourceSnapshot(
             lexical_source,
             data,
@@ -1627,12 +1633,21 @@ def snapshot_source_file(directory: Path, source: Path) -> SourceSnapshot:
             os.close(descriptor)
 
 
-def _read_stable_source_descriptor(file_descriptor: int, source: Path) -> bytes:
+def _read_stable_source_descriptor(
+    file_descriptor: int, source: Path, *, max_bytes: int | None = None
+) -> bytes:
     before = os.fstat(file_descriptor)
     if not stat.S_ISREG(before.st_mode):
         raise OpenLearnError(f"source is not a regular file: {source}")
+    if max_bytes is not None and before.st_size > max_bytes:
+        raise OpenLearnError("source exceeds the selected text read budget")
     chunks: list[bytes] = []
-    while chunk := os.read(file_descriptor, 1024 * 1024):
+    remaining = max_bytes
+    while chunk := os.read(file_descriptor, min(1024 * 1024, remaining + 1) if remaining is not None else 1024 * 1024):
+        if remaining is not None:
+            remaining -= len(chunk)
+            if remaining < 0:
+                raise OpenLearnError("source exceeds the selected text read budget")
         chunks.append(chunk)
     after = os.fstat(file_descriptor)
     identity_before = (
@@ -1654,7 +1669,9 @@ def _read_stable_source_descriptor(file_descriptor: int, source: Path) -> bytes:
     return b"".join(chunks)
 
 
-def _snapshot_source_file_windows(root: Path, source: Path) -> SourceSnapshot:
+def _snapshot_source_file_windows(
+    root: Path, source: Path, *, max_bytes: int | None = None
+) -> SourceSnapshot:
     import msvcrt
 
     file_descriptor = -1
@@ -1667,7 +1684,7 @@ def _snapshot_source_file_windows(root: Path, source: Path) -> SourceSnapshot:
         opened_path = _windows_final_path_for_handle(handle)
         resolved_root = _windows_final_path_for_root(root)
         _validate_windows_opened_source(root, source, resolved_root, opened_path)
-        data = _read_stable_source_descriptor(file_descriptor, source)
+        data = _read_stable_source_descriptor(file_descriptor, source, max_bytes=max_bytes)
         return SourceSnapshot(
             source,
             data,
@@ -9387,7 +9404,7 @@ def cmd_paste(args: argparse.Namespace) -> int:
 
 
 def cmd_chat(args: argparse.Namespace) -> int:
-    ask_topic(args.topic, args.prompt, args.model)
+    ask_topic(args.topic, args.prompt, args.model, source_mode=getattr(args, "source_mode", False))
     return 0
 
 
@@ -9433,12 +9450,24 @@ def ask_topic(
         | None
     ) = None,
     interview_target: dict[str, object] | None = None,
+    source_mode: bool = False,
 ) -> str:
     topic = read_topic(
         resolve_topic_slug(topic_value) if topic_value is None else slugify(topic_value)
     )
-    set_active_topic(topic.slug)
     model = model or str(topic.metadata.get("model") or configured_model())
+    source_snapshot = None
+    if source_mode:
+        from openlearn import source_context
+
+        source_snapshot = source_context.snapshot(topic, prompt, model, opted_in=True)
+        output_func(source_context.CONSENT_TEXT)
+        output_func(source_context.request_preview(source_snapshot))
+        if input_func("Type 'send source request' to approve, or Enter to cancel: ").strip() != "send source request":
+            raise OpenLearnError("Source request cancelled; no provider call was made.")
+        source_context.ensure_unchanged(topic, source_snapshot, model)
+        prompt = source_snapshot.user
+    set_active_topic(topic.slug)
     is_review_session = topic.metadata.get("review_session_active") is True
     original_metadata = copy.deepcopy(topic.metadata)
     initializing = (
@@ -9464,7 +9493,7 @@ def ask_topic(
         and not explicit_message_kind
         and learner_message_needs_judgment(topic.metadata, prompt)
     )
-    if session_kind != SIDE_CHAT_SESSION_KIND and not initializing and not practice_requested:
+    if session_kind != SIDE_CHAT_SESSION_KIND and not initializing and not practice_requested and not source_mode:
         record_pending_attempt_reflection(topic, prompt)
     is_navigation = explicit_message_kind == "navigation" or (
         not explicit_message_kind
@@ -9544,6 +9573,7 @@ def ask_topic(
             retry_status=output_func,
             persist=False,
             projection_sink=capture_projection,
+            source_context=source_snapshot,
         )
         topic = Topic(
             slug=topic.slug,
@@ -9591,15 +9621,20 @@ def ask_topic(
             engagement_check_due=engagement_check_due,
             interview_target=interview_target,
             response_metadata_sink=capture_response_metadata,
+            source_context=source_snapshot,
         )
     )
     if interview_target is None and initializing:
         # Streaming removes hidden markers and carries coverage separately.
         policy_answer = generated_answer
+        if source_snapshot is not None:
+            policy_answer = source_context.without_ledger(policy_answer)
         if response_metadata.covered_concepts and not extract_covered_concepts(policy_answer):
             declared = "; ".join(response_metadata.covered_concepts)
             policy_answer += f"\n<!-- covered: {declared} -->"
         generated_answer = enforce_first_lesson_response(topic, prompt, policy_answer)
+        if source_snapshot is not None:
+            generated_answer = source_snapshot.attach(generated_answer)
         _visible_initialization, response_metadata = tutor_response_metadata(generated_answer)
     if generated_answer_override is not None or response_metadata == TutorResponseMetadata():
         _visible_override, response_metadata = tutor_response_metadata(
@@ -9804,14 +9839,14 @@ def ask_topic(
         before_metadata=stable_metadata_for_topic(original_metadata),
         after_metadata=stable_metadata_for_topic(projected_metadata),
     )
-    if allow_specialized_actions and coding_drill_action is not None:
+    if allow_specialized_actions and coding_drill_action is not None and not source_mode:
         orchestrate_tutor_coding_drill(
             read_topic(topic.slug),
             coding_drill_action,
             input_func=input_func,
             output_func=output_func,
         )
-    should_finish_turn = session_kind != SIDE_CHAT_SESSION_KIND
+    should_finish_turn = session_kind != SIDE_CHAT_SESSION_KIND and not source_mode
     should_update_metadata = (
         not needs_judgment
         and not is_navigation
@@ -9853,6 +9888,7 @@ def generate_validated_tutor_answer(
     engagement_check_due: bool = False,
     interview_target: dict[str, object] | None = None,
     response_metadata_sink: Callable[[TutorResponseMetadata], object] | None = None,
+    source_context=None,
 ) -> str:
     """Generate, validate, then reveal one tutor response."""
     first_lesson_initializing = (
@@ -9873,7 +9909,12 @@ def generate_validated_tutor_answer(
     }
     enforce_action_labels = engagement_check_due or message_kind in {None, "", "answer", "practice"}
     forbid_choice_claim = message_kind == "navigation"
-    if interview_target is not None:
+    if source_context is not None:
+        from openlearn import source_context as sources
+
+        system = sources.tutor_prompt(source_context, topic.metadata)
+        prompt = source_context.user
+    elif interview_target is not None:
         system = system_prompt(
             topic,
             engagement_check_due=engagement_check_due,
@@ -9908,8 +9949,19 @@ def generate_validated_tutor_answer(
                 forbid_check=forbid_check,
                 forbid_choice_claim=forbid_choice_claim,
             )
+            if source_context is not None:
+                # Only the bounded screened draft may be resent for repair.
+                candidate = sources.screened(candidate, 2000)
+                user = tutor_contract_repair_prompt(
+                    candidate, require_check=require_check, forbid_check=forbid_check,
+                    forbid_choice_claim=forbid_choice_claim,
+                )
         if first_lesson_initializing:
             user = lesson_policy.initialization_generation_prompt(user)
+        if source_context is not None:
+            sources.ensure_unchanged(topic, source_context, model)
+            if len(system) + len(user) > sources.PROMPT_CHAR_LIMIT:
+                raise OpenLearnError("Source request exceeds its budget; no request was sent.")
         stream_options = (
             {"stream_sink": stream_sink}
             if stream_sink is not None and not first_lesson_initializing
@@ -9950,6 +10002,8 @@ def generate_validated_tutor_answer(
                 stream_sink(sanitize_model_output(candidate))
             if response_metadata_sink is not None:
                 response_metadata_sink(candidate_metadata)
+            if source_context is not None:
+                candidate = source_context.attach(candidate)
             emit_tutor_output(sanitize_model_output(candidate), output_func)
             return candidate
         if interview_target is not None:
@@ -9983,6 +10037,11 @@ def generate_validated_tutor_answer(
                 response_metadata_sink(candidate_metadata)
             for line in buffered_output:
                 output_func(line)
+            if source_context is not None:
+                candidate = source_context.attach(candidate)
+                output_func(source_context.ledger.strip())
+                if stream_sink is not None:
+                    stream_sink(sanitize_model_output(candidate))
             return candidate
     raise OpenLearnError(
         "Tutor returned two responses that violated the learner-action contract. "
@@ -14474,6 +14533,9 @@ def save_pending_question(
 
 
 def extract_pending_question_text(text: str) -> str:
+    from openlearn.source_context import without_ledger
+
+    text = without_ledger(text)
     section_pattern = re.compile(
         r"(?i)^\s*(?:\*\*)?"
         r"(Lesson|Feedback|Example|Check|Hint|Next|Action):"
@@ -14762,16 +14824,27 @@ def update_learning_metadata(
     retry_status: Callable[[str], object] | None = None,
     persist: bool = True,
     projection_sink: Callable[[dict[str, object], str], None] | None = None,
+    source_context=None,
 ) -> str:
     previously_shown_text = last_tutor_lesson_response(topic)
     pending_at_answer = topic.metadata.get("pending_question")
     update_prompt = metadata_update_prompt(topic.metadata, learner_prompt, tutor_answer)
+    judge_model = configured_extractor_model(model)
+    if source_context is not None:
+        from openlearn import source_context as sources
+
+        update_prompt = sources.judge_prompt(source_context)
+        judge_model = model
     update: dict[str, object] = {}
     unusable_reason = "an unusable result"
     for attempt in range(1, JUDGE_MAX_ATTEMPTS + 1):
         try:
+            if source_context is not None:
+                from openlearn import source_context as sources
+
+                sources.ensure_unchanged(topic, source_context, judge_model)
             raw_update = call_openai_judgment(
-                configured_extractor_model(model), METADATA_EXTRACTOR_SYSTEM, update_prompt
+                judge_model, METADATA_EXTRACTOR_SYSTEM, update_prompt
             )
             update = parse_metadata_update(raw_update)
         except UnusableModelResponse as exc:

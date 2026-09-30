@@ -76,6 +76,26 @@ Quick Learn accepts supported text and code files, PDFs, DOCX files, bounded loc
 Imports skip hidden directories, generated files, symlinks, binaries, oversized files, and secret-like names.
 Imported code is read as text and is never executed during import.
 
+For a selected course with imported class notes, the opt-in CLI source mode previews its outbound request before asking for confirmation:
+
+```bash
+openlearn chat my-course "quiz me on the current lesson" --source-mode
+```
+
+Source mode is off by default and requires the configured OpenRouter endpoint with `qwen/qwen3.5-flash-02-23`.
+Each request requires typing `send source request` after reviewing the preview.
+It sends bounded, screened selected-course excerpts, the current lesson answer or question, the pending Check, and at most two relevant lesson exchanges.
+It excludes unrelated profiles, goals, preferences, placement, and private notes, and skips optional metadata extraction, videos, and coding-drill actions.
+Screening is limited; inspect the preview for names or sensitive details before confirming.
+No provider grant or opt-in preference is saved.
+Tutor responses and source provenance remain in local history, which ordinary later tutoring may use under its existing behavior.
+This is not an app-wide privacy setting.
+
+The saved excerpt ledger records source IDs, checksums, and actual extracted-text line ranges, not original slide/page numbers or proof that a generated claim is correct.
+Missing, stale, unsafe, or over-budget material is withheld rather than silently replaced by summaries.
+Image-only formulas and direct PPTX ingestion are not supported; review a text/PDF export locally first.
+Activation is CLI-only; the web app can read saved provenance in history but does not enable source mode.
+
 ## Provider setup
 
 Provider setup is available in the web app or through `openlearn init`.

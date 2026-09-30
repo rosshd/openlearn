@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import subprocess
 import tempfile
@@ -52,6 +53,26 @@ class CourseSourceImportTests(unittest.TestCase):
         self.assertEqual(source_imports.list_course_sources("python"), first.sources)
         self.assertTrue((cli.topic_context_dir("python") / first.sources[0].context_file).is_file())
         self.assertTrue((cli.topic_context_dir("python") / first.sources[0].summary_file).is_file())
+
+    def test_extracted_revision_is_distinct_from_original_file_checksum(self) -> None:
+        source = Path(self.home.name) / "equation.md"
+        source.write_bytes(b"mu = sum(x_i) / n")
+        result = self.import_source(source_imports.LocalFileSource(source))
+        record = result.sources[0]
+        saved = cli.topic_context_dir("python") / record.context_file
+        self.assertEqual(record.checksum, hashlib.sha256(source.read_bytes()).hexdigest()[:16])
+        self.assertEqual(record.context_checksum, hashlib.sha256(saved.read_bytes()).hexdigest())
+        self.assertNotEqual(source.read_bytes(), saved.read_bytes())
+        self.assertEqual(source_imports.list_course_sources("python")[0], record)
+
+    def test_legacy_source_record_has_unknown_extracted_revision(self) -> None:
+        record = source_imports._parse_source({
+            "source_id": "file:original", "kind": "file", "label": "notes",
+            "context_file": "notes.txt", "summary_file": "notes.summary.txt",
+            "checksum": "original",
+        })
+        self.assertIsNotNone(record)
+        self.assertIsNone(record.context_checksum)
 
     def test_local_extract_is_deterministic_and_never_contacts_provider(self) -> None:
         source = Path(self.home.name) / "private-notes.md"

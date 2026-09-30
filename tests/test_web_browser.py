@@ -1449,6 +1449,59 @@ def test_real_browser_practice_restores_saved_task_across_reload(
                 process.wait(timeout=5)
 
 
+def test_real_browser_reads_cli_source_provenance_after_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openlearn import source_context, source_imports
+
+    playwright = pytest.importorskip("playwright.sync_api")
+    home = tmp_path / "source-home"
+    monkeypatch.setenv("OPENLEARN_HOME", str(home))
+    monkeypatch.setenv("OPENLEARN_MOCK", "1")
+    monkeypatch.setenv("OPENLEARN_BASE_URL", source_context.APPROVED_BASE_URL)
+    monkeypatch.setenv("OPENLEARN_MODEL", source_context.APPROVED_MODEL)
+    cli.clear_config_cache()
+    cli.cmd_new(argparse.Namespace(topic="Stack notes", goal="Learn stacks"), output_func=lambda _: None)
+    source = tmp_path / "class.md"
+    source.write_text("The required stack rule is last in, first out.\n", encoding="utf-8")
+    record = source_imports.import_course_source(source_imports.CourseSourceImportRequest(
+        "stack-notes", source_imports.LocalFileSource(source), source_context.APPROVED_MODEL,
+    )).sources[0]
+    with mock.patch.object(cli, "call_openai_streaming", return_value="**Lesson:**\nA stack removes the last item pushed.\n\nFor example, B is removed before A when A then B are pushed."):
+        cli.ask_topic("stack-notes", "Explain the stack rule", source_mode=True,
+                      input_func=lambda _: "send source request", output_func=lambda _: None)
+    before = cli.topic_path("stack-notes").read_bytes()
+    port = _free_loopback_port()
+    base_url = f"http://127.0.0.1:{port}"
+    environment = {**os.environ, "OPENLEARN_HOME": str(home), "OPENLEARN_MOCK": "1",
+                   "PYTHONPATH": str(SOURCE_ROOT)}
+    command = f"from openlearn.web.launcher import run; run(port={port}, open_browser=False)"
+    with (tmp_path / "source-web.log").open("wb") as log:
+        process = subprocess.Popen([sys.executable, "-c", command], cwd=tmp_path,
+                                   env=environment, stdout=log, stderr=subprocess.STDOUT)
+        try:
+            bootstrap_url, app_url = _wait_until_ready(base_url, process, home)
+            with playwright.sync_playwright() as runtime:
+                browser = runtime.chromium.launch()
+                page = browser.new_page(viewport={"width": 320, "height": 720})
+                page.goto(bootstrap_url)
+                page.goto(f"{app_url}/courses/stack-notes/history")
+                playwright.expect(page.locator(".history-list")).to_contain_text("Source excerpts provided:")
+                playwright.expect(page.locator(".history-list")).to_contain_text(record.source_id)
+                page.reload()
+                playwright.expect(page.locator(".history-list")).to_contain_text("extracted text lines")
+                assert page.locator('input[name="source_mode"]').count() == 0
+                assert cli.topic_path("stack-notes").read_bytes() == before
+                browser.close()
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+
+
 def test_real_browser_saved_first_lesson_retry_after_restart(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
