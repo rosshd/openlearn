@@ -117,6 +117,42 @@ class PracticeResumeTests(TestCase):
         self.assertEqual(cli.load_pending_learner_prompt("practice"), "my saved attempt")
         judge.assert_not_called()
 
+    def test_repl_resume_activates_requested_pending_topic_before_answer(self) -> None:
+        for name in ("Alpha", "Beta"):
+            cli.cmd_new(argparse.Namespace(topic=name, goal=f"Learn {name}"),
+                        output_func=lambda _text: None)
+        cli.save_pending_question(cli.read_topic("alpha"), cli.sanitize_model_output(CHECK), "A")
+        beta_check = "**Check:**\nWhich value does print display?\nA) Nothing\nB) The argument"
+        cli.save_pending_question(cli.read_topic("beta"), beta_check, "B")
+        cli.set_active_topic("beta")
+        beta_state = copy.deepcopy(cli.load_state("beta"))
+        beta_body = cli.topic_path("beta").read_text()
+        beta_events = cli.topic_events_path("beta").read_text()
+        inputs = iter(("/resume alpha", "A", "/q"))
+        output: list[str] = []
+        with (
+            mock.patch.object(cli, "call_openai", return_value=json.dumps({
+                "message_kind": "answer", "answer_score": 1.0,
+                "last_answer_status": "correct", "answer_kind": "recognition",
+            })) as judge,
+            mock.patch.object(cli, "call_openai_streaming",
+                              return_value="**Next:**\nPress Enter to continue."),
+            mock.patch.object(cli, "maybe_suggest_videos"),
+        ):
+            result = cli.run_repl(input_func=lambda _prompt: next(inputs),
+                                  output_func=output.append, show_intro=False)
+        self.assertEqual(result, 0)
+        self.assertEqual(cli.get_active_topic(), "alpha")
+        self.assertTrue(any("Which value does return send?" in text for text in output))
+        judge.assert_called_once()
+        self.assertIn("Which value does return send?", judge.call_args.args[2])
+        self.assertIn('"answer_key": "A"', judge.call_args.args[2])
+        self.assertTrue(any(event["event_type"] == "answer_judged"
+                            for event in cli.load_event_log(cli.topic_events_path("alpha"))))
+        self.assertEqual(cli.load_state("beta"), beta_state)
+        self.assertEqual(cli.topic_path("beta").read_text(), beta_body)
+        self.assertEqual(cli.topic_events_path("beta").read_text(), beta_events)
+
     def test_interview_next_keeps_explicit_navigation_route(self) -> None:
         with (
             mock.patch.object(cli, "interview_profile_path") as profile,

@@ -14168,6 +14168,8 @@ def cmd_resume(
 ) -> int:
     topic = read_topic(resolve_topic_slug(args.topic))
     if restore_pending and isinstance(topic.metadata.get("pending_question"), dict):
+        if not _DRY_RUN:
+            set_active_topic(topic.slug)
         emit_tutor_output(pending_check_response(topic.metadata), output_func)
         return 0
     model = args.model or str(topic.metadata.get("model") or configured_model())
