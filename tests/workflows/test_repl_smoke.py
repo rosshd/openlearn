@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import json
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,8 @@ if sys.platform == "win32":
     pytest.skip("pexpect.spawn requires a POSIX pty", allow_module_level=True)
 
 import pexpect
+
+from openlearn import cli, lesson_policy
 
 
 def test_menu_quit(spawn_openlearn) -> None:
@@ -111,7 +114,7 @@ def test_quick_learn_file_reaches_repl(spawn_openlearn) -> None:
     proc = spawn_openlearn.spawn("quick", str(source), timeout=10)
     try:
         proc.expect("First lesson")
-        proc.expect("Normal vs Insert")
+        proc.expect("For example,")
         proc.expect("openlearn> ")
         assert "Quick Learn plan" in proc.clean_output
         assert "Traceback" not in proc.clean_output
@@ -120,7 +123,16 @@ def test_quick_learn_file_reaches_repl(spawn_openlearn) -> None:
         proc.expect(pexpect.EOF)
         topic = home / "learning-topics" / "midterm-review.md"
         assert topic.exists()
-        assert '"learning_mode": "quick"' in topic.read_text(encoding="utf-8")
+        metadata, body = cli.parse_topic(topic.read_text(encoding="utf-8"))
+        assert metadata["learning_mode"] == "quick"
+        _context, log = cli.split_session_log(body)
+        lesson = cli.session_entries(log)[-1]["response"]
+        assert lesson_policy.first_lesson_response_is_valid(lesson)
+        assert "<!--" not in lesson
+        state = json.loads(topic.with_suffix(".state.json").read_text(encoding="utf-8"))
+        assert state["slide_coverage"]["1:1"]
+        assert "pending_question" not in state
+        assert metadata["known"] == []
     finally:
         proc.close()
 

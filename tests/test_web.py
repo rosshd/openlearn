@@ -16,7 +16,7 @@ import pytest
 pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient
 
-from openlearn import application, cli, code_runner, courses, data_management
+from openlearn import application, cli, code_runner, courses, data_management, lesson_policy
 from openlearn import config
 from openlearn import interview_prep
 from openlearn import providers
@@ -2494,6 +2494,59 @@ def test_course_creation_is_idempotent_across_initialization_replay(
     assert entries[0]["prompt"] == "Start my first lesson."
     assert "Do not run a placement test" not in topic.body
     assert len(list(cli.topics_dir().glob("idempotent-initialization*.md"))) == 1
+
+
+@pytest.mark.parametrize("invalid", [False, True])
+def test_accepted_plan_initialization_shares_policy_and_survives_restart(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, invalid: bool
+) -> None:
+    created = application.create_course(application.CourseCreationRequest(
+        name="Shared lesson policy", goal="Learn definitions", submission_id=str(uuid4())
+    ))
+    slug = created.course.slug
+    outline = "Units:\n1. Foundations (2 slides)\nConcepts: Definitions"
+    cli.save_course_started(cli.read_topic(slug), "Accepted outline", outline)
+    valid = (
+        "**Lesson:**\nA definition gives a term one precise meaning."
+        "\n\nFor example, a triangle has three straight sides."
+        "\n<!-- covered: Definitions -->"
+    )
+    raw = "**Next:** Press Enter to continue." if invalid else valid
+    calls: list[str] = []
+
+    def provider(_model: str, _system: str, prompt: str) -> str:
+        calls.append(prompt)
+        return raw
+
+    monkeypatch.setattr(cli, "call_openai", provider)
+    monkeypatch.setattr(cli, "maybe_suggest_videos", lambda *_args: None)
+    monkeypatch.setattr(cli, "update_learning_metadata", lambda *_args, **_kwargs: pytest.fail("initialization cannot award assessment credit"))
+    assert _course_initialization_prompt(slug) == cli.first_lesson_prompt(outline)
+    initialized = OpenLearnWebServices().start_course_initialization(slug)
+    assert wait_for_operation(client, slug, initialized["operation_id"])["state"] == "committed"
+    topic = cli.read_topic(slug)
+    _context, log = cli.split_session_log(topic.body)
+    entries = cli.session_entries(log)
+    lesson = entries[-1]["response"]
+    assert lesson_policy.first_lesson_response_is_valid(lesson)
+    assert "<!--" not in lesson
+    assert len(calls) == 1
+    assert "pending_question" not in topic.metadata
+    assert topic.metadata["slide_coverage"] == {"1:1": ["Definitions"]}
+    assert topic.metadata["known"] == []
+    assert not topic.metadata.get("concept_attempts")
+    if not invalid:
+        assert lesson == cli.sanitize_model_output(valid)
+    restarted = TestClient(create_app(testing=True))
+    replayed = OpenLearnWebServices().start_course_initialization(slug)
+    assert replayed["operation_id"] == initialized["operation_id"]
+    assert replayed["state"] == "committed"
+    assert len(calls) == 1
+    page = restarted.get(f"/courses/{slug}").text
+    assert "For example," in page
+    assert "<!-- covered:" not in page
+    history = restarted.get(f"/courses/{slug}/history", headers={"accept": "application/json"})
+    assert history.json()["items"][0]["title"] == "First lesson"
 
 
 def test_course_creation_supports_legacy_adapter_without_entry_mode() -> None:

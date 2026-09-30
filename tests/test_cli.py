@@ -7285,7 +7285,10 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(topic.metadata["mastery_profile"], "efficient")
         self.assertTrue(topic.metadata["course_started"])
         self.assertEqual(topic.metadata["current_unit"], 1)
-        self.assertIn("pending_question", topic.metadata)
+        self.assertNotIn("pending_question", topic.metadata)
+        self.assertIn("Supply", topic.metadata["slide_coverage"]["1:1"])
+        self.assertIn("For example,", topic.body)
+        self.assertNotIn("Check: What happens to quantity supplied", topic.body)
         self.assertTrue((cli.topic_context_dir(topic.slug) / "midterm-review.md").exists())
         self.assertTrue((cli.topic_context_dir(topic.slug) / "midterm-review.summary.txt").exists())
         self.assertEqual(len(prompts), 2)
@@ -7942,15 +7945,15 @@ class InteractiveTests(unittest.TestCase):
         self.assertIn(" - course_plan", body)
         self.assertIn(" - lesson", body)
         self.assertIn("Scope: AI basics", body)
-        self.assertIn("What is AI?", body)
+        self.assertIn("For example,", body)
+        self.assertNotIn("What is AI?", body)
         self.assertIn("college course basics", calls[0][1])
         self.assertIn("Generate course planning or lesson-start material only", calls[0][0])
         self.assertIn("Generate course planning or lesson-start material only", calls[1][0])
         self.assertNotIn("Recent session history", calls[0][0])
-        pending = cli.read_topic("intro-ai").metadata["pending_question"]
-        self.assertEqual(pending["kind"], "free_response")
-        self.assertIn("Check: What is AI?", pending["question"])
-        self.assertNotIn("answer_key", pending)
+        topic = cli.read_topic("intro-ai")
+        self.assertNotIn("pending_question", topic.metadata)
+        self.assertEqual(topic.metadata["slide_coverage"], {"1:1": ["Definitions"]})
 
     def test_first_lesson_without_check_shows_enter_affordance(self) -> None:
         call_silent(
@@ -7999,7 +8002,7 @@ class InteractiveTests(unittest.TestCase):
         self.assertIs(topic.metadata["course_started"], False)
         self.assertNotIn("course_plan", topic.body)
 
-    def test_start_course_trims_first_lesson_before_output_and_save(self) -> None:
+    def test_start_course_replaces_oversized_quiz_before_output_and_save(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Intro AI", goal="basics"))
         original_call_openai = cli.call_openai
         output = []
@@ -8028,15 +8031,15 @@ class InteractiveTests(unittest.TestCase):
         metadata, body = cli.parse_topic(cli.topic_path("intro-ai").read_text(encoding="utf-8"))
         displayed_lesson = " ".join(line for line in output if line.startswith("word"))
 
-        self.assertEqual(len(displayed_lesson.split()), 220)
+        self.assertEqual(displayed_lesson, "")
         self.assertNotIn("word224", displayed_lesson)
         self.assertNotIn("word224", body)
-        pending = cli.read_topic("intro-ai").metadata["pending_question"]
-        self.assertEqual(pending["answer_key"], "C")
-        self.assertIn("Which option is correct after the trim point?", pending["question"])
-        self.assertIn("C) Hidden option", pending["question"])
+        topic = cli.read_topic("intro-ai")
+        self.assertNotIn("pending_question", topic.metadata)
+        self.assertEqual(cli._LAST_RESPONSE_ANSWER_KEY, "")
+        self.assertNotIn("Which option is correct after the trim point?", body)
 
-    def test_start_course_keeps_multiple_choice_question_when_answer_key_is_missing(
+    def test_start_course_replaces_multiple_choice_first_lesson_when_key_is_missing(
         self,
     ) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Intro AI", goal="basics"))
@@ -8062,16 +8065,10 @@ class InteractiveTests(unittest.TestCase):
             cli.call_openai = original_call_openai
 
         topic = cli.read_topic("intro-ai")
-        pending = topic.metadata["pending_question"]
-
-        self.assertEqual(cli.repl_prompt(), "Answer> ")
-        self.assertEqual(pending["kind"], "multiple_choice")
-        self.assertIn("Check: Which description fits AI?", pending["question"])
-        self.assertIn("B) Intelligent task systems", pending["question"])
-        self.assertNotIn("answer_key", pending)
-        prompt = cli.system_prompt(topic)
-        self.assertIn("Stored question: Check: Which description fits AI?", prompt)
-        self.assertIn("B) Intelligent task systems", prompt)
+        self.assertNotIn("pending_question", topic.metadata)
+        self.assertNotEqual(cli.repl_prompt(), "Answer> ")
+        self.assertNotIn("Check: Which description fits AI?", topic.body)
+        self.assertIn("For example,", topic.body)
 
     def test_start_course_rejecting_outline_requests_changes_then_regenerates(self) -> None:
         call_silent(cli.cmd_new, Namespace(topic="Intro AI", goal="basics"))

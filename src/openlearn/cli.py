@@ -42,7 +42,11 @@ from typing import Literal, Protocol
 
 from platformdirs import user_data_dir
 
-from openlearn import __version__, code_runner
+from openlearn import __version__, code_runner, lesson_policy
+from openlearn.lesson_policy import (
+    first_lesson_prompt as first_lesson_prompt,
+    first_lesson_response_is_valid as first_lesson_response_is_valid,
+)
 from openlearn.answer_assessment import (
     answer_eval_is_transfer,
     answer_tokens as answer_tokens,
@@ -5493,6 +5497,7 @@ def teach_first_lesson(
         lesson_prompt,
         retry_status=output_func,
     )
+    raw_lesson = enforce_first_lesson_response(topic, lesson_prompt, raw_lesson)
     _LAST_RESPONSE_ANSWER_KEY = extract_answer_key(raw_lesson)
     covered_concepts = extract_covered_concepts(raw_lesson)
     raw_lesson_for_question = sanitize_model_output(raw_lesson)
@@ -6037,98 +6042,9 @@ def placement_context_prompt(slug: str) -> str:
     return first_lines(path.read_text(encoding="utf-8").strip(), 80)
 
 
-def first_lesson_prompt(outline: str, *, first_activity: str | None = None) -> str:
-    required_activity = (
-        f"The required first activity is {first_activity}. Teach that activity now. "
-        if first_activity
-        else ""
-    )
-    return (
-        "Start teaching unit 1 from this accepted course plan. "
-        f"{required_activity}"
-        "Do not repeat the whole plan. Teach exactly one concept. "
-        "Use exactly one **Lesson:** section and no other primary label. "
-        "Use two short paragraphs: explain the concept first, then start the "
-        "second paragraph with 'For example,' and make it concrete. Keep the "
-        "example accessible without relying on an algorithm, data structure, or "
-        "system component that has not been introduced. Use 2-4 sentences total. Do not append a "
-        "check, question, continuation cue, or learner action. "
-        f"Hard limit: {FIRST_LESSON_WORD_LIMIT} words.\n"
-        "Append <!-- covered: Exact concept label --> using one exact label from "
-        "the current unit's Concepts: line. This marker is hidden from the learner "
-        "and is required for coverage tracking.\n\n"
-        f"Accepted course plan:\n{outline}"
-    )
-
-
 def enforce_first_lesson_response(topic: Topic, prompt: str, answer: str) -> str:
-    """Guarantee that course initialization teaches instead of emitting navigation."""
-    if not prompt.startswith("Start teaching unit 1 from this accepted course plan."):
-        return answer
-    focus = str(topic.metadata.get("current_focus") or "the first course concept")
-    concept = focus
-    valid_concepts: list[str] = []
-    units = topic.metadata.get("course_units")
-    unit_titles: set[str] = set()
-    if isinstance(units, list):
-        unit_titles = {
-            str(unit.get("title") or "")
-            for unit in units
-            if isinstance(unit, dict)
-        }
-    if isinstance(units, list) and units and isinstance(units[0], dict):
-        valid_concepts = unit_concept_labels(units[0])
-        concepts = units[0].get("concepts")
-        if isinstance(concepts, list) and concepts and isinstance(concepts[0], dict):
-            concept = str(concepts[0].get("label") or focus)
-    declared = re.findall(r"<!--\s*covered:\s*(.*?)\s*-->", answer, flags=re.IGNORECASE)
-    valid_concept_keys = {label.casefold() for label in valid_concepts}
-    if first_lesson_response_is_valid(answer) and (
-        not valid_concepts
-        or any(marker.casefold() in valid_concept_keys for marker in declared)
-    ):
-        return answer
-    system_design_heavy = "Coding Pattern Maintenance" in unit_titles
-    if concept.casefold() == "clarifying requirements" and system_design_heavy:
-        lesson = (
-            "Before proposing components, turn the prompt into explicit functional requirements "
-            "and quality attributes. Ask about scale, latency, consistency, and availability only "
-            "when the prompt leaves them open, then state important assumptions aloud.\n\n"
-            "For example, for a link-sharing service, clarify expected traffic, whether reads or "
-            "writes dominate, and whether availability or strict freshness matters most before "
-            "choosing any components."
-        )
-    elif concept.casefold() == "clarifying requirements":
-        lesson = (
-            "Before writing code, restate the required output and ask only about ambiguities "
-            "that could change the solution. This prevents solving the wrong problem and makes "
-            "your tradeoffs easier to explain.\n\n"
-            "For example, for 'return the first repeated value in a list,' clarify whether to "
-            "return the value or its index and what to return when no repeat exists."
-        )
-    else:
-        lesson = (
-            f"Begin {focus} by building a clear mental model of {concept}. Identify what "
-            "information controls the result before working through details.\n\n"
-            "For example, write down the input, required output, and one reason your chosen "
-            "method fits before you commit to the implementation."
-        )
-    return f"**Lesson:**\n{lesson}\n\n<!-- covered: {concept} -->"
-
-
-def first_lesson_response_is_valid(answer: str) -> bool:
-    visible = re.sub(r"<!--.*?-->", "", answer, flags=re.DOTALL).strip()
-    labels = re.findall(
-        r"(?im)^\s*(?:\*\*)?(Lesson|Feedback|Example|Check|Hint|Next|Action):(?:\*\*)?",
-        visible,
-    )
-    if labels != ["Lesson"] or "?" in visible:
-        return False
-    paragraphs = [part.strip() for part in re.split(r"\n\s*\n", visible) if part.strip()]
-    if len(paragraphs) != 2 or not paragraphs[1].casefold().startswith("for example,"):
-        return False
-    sentence_count = len(re.findall(r"[.!](?=\s|$)", visible))
-    return 2 <= sentence_count <= 4 and len(visible.split()) <= FIRST_LESSON_WORD_LIMIT
+    """Keep the CLI compatibility entry point for the shared lesson policy."""
+    return lesson_policy.enforce_first_lesson_response(topic.metadata, prompt, answer)
 
 
 def parse_concept_labels(text: str) -> list[str]:
@@ -9510,16 +9426,22 @@ def ask_topic(
     model = model or str(topic.metadata.get("model") or configured_model())
     is_review_session = topic.metadata.get("review_session_active") is True
     original_metadata = copy.deepcopy(topic.metadata)
+    initializing = (
+        session_kind != SIDE_CHAT_SESSION_KIND
+        and lesson_policy.is_course_initialization_prompt(prompt)
+    )
     has_pending_question = isinstance(topic.metadata.get("pending_question"), dict)
     explicit_message_kind = (
         message_kind_override
         if message_kind_override in {"question", "request", "confusion", "navigation"}
         else ""
     )
-    needs_judgment = not explicit_message_kind and learner_message_needs_judgment(
-        topic.metadata, prompt
+    needs_judgment = (
+        not initializing
+        and not explicit_message_kind
+        and learner_message_needs_judgment(topic.metadata, prompt)
     )
-    if session_kind != SIDE_CHAT_SESSION_KIND:
+    if session_kind != SIDE_CHAT_SESSION_KIND and not initializing:
         record_pending_attempt_reflection(topic, prompt)
     is_navigation = explicit_message_kind == "navigation" or (
         not explicit_message_kind
@@ -9644,6 +9566,14 @@ def ask_topic(
             response_metadata_sink=capture_response_metadata,
         )
     )
+    if interview_target is None and lesson_policy.is_first_lesson_prompt(prompt):
+        # Streaming removes hidden markers and carries coverage separately.
+        policy_answer = generated_answer
+        if response_metadata.covered_concepts and not extract_covered_concepts(policy_answer):
+            declared = "; ".join(response_metadata.covered_concepts)
+            policy_answer += f"\n<!-- covered: {declared} -->"
+        generated_answer = enforce_first_lesson_response(topic, prompt, policy_answer)
+        _visible_initialization, response_metadata = tutor_response_metadata(generated_answer)
     if generated_answer_override is not None or response_metadata == TutorResponseMetadata():
         _visible_override, response_metadata = tutor_response_metadata(
             generated_answer
@@ -9661,8 +9591,6 @@ def ask_topic(
     if interview_target is not None:
         focus_title = str(interview_target.get("skill_label") or "")
     answer = sanitize_model_output(generated_answer)
-    if interview_target is None:
-        answer = enforce_first_lesson_response(topic, prompt, answer)
     if turn_observer is not None:
         turn_observer.publish_phase("validating")
     answer_key = response_metadata.answer_key
@@ -9676,6 +9604,20 @@ def ask_topic(
             projected_metadata["current_focus"] = focus_title
             projected_metadata["last_video_focus"] = None
     previous_pending = projected_metadata.get("pending_question")
+    if interview_target is None and lesson_policy.is_first_lesson_prompt(prompt):
+        unit_number = projected_metadata.get("current_unit")
+        slide = projected_metadata.get("current_slide")
+        if isinstance(unit_number, int) and isinstance(slide, int):
+            labels = unit_concept_labels(course_unit_at(projected_metadata, unit_number))
+            declared_keys = {value.casefold() for value in response_metadata.covered_concepts}
+            covered = [
+                label for label in labels if label.casefold() in declared_keys
+            ]
+            if covered:
+                coverage = projected_metadata.get("slide_coverage")
+                coverage = dict(coverage) if isinstance(coverage, dict) else {}
+                coverage[slide_content_key(unit_number, slide)] = covered
+                projected_metadata["slide_coverage"] = coverage
     question = extract_pending_question_text(answer)
     if question and explicit_check_section_count(answer) == 1:
         reasoning_check = multiple_choice_requires_reasoning(question)
@@ -9845,7 +9787,7 @@ def ask_topic(
         not needs_judgment
         and not is_navigation
         and explicit_message_kind not in {"question", "request", "confusion"}
-        and not prompt.startswith("Start teaching unit 1 from this accepted course plan.")
+        and not initializing
     )
     if should_finish_turn and deferred_updates is None:
         finish_turn_update(
@@ -9884,6 +9826,9 @@ def generate_validated_tutor_answer(
     response_metadata_sink: Callable[[TutorResponseMetadata], object] | None = None,
 ) -> str:
     """Generate, validate, then reveal one tutor response."""
+    first_lesson_initializing = (
+        interview_target is None and lesson_policy.is_first_lesson_prompt(prompt)
+    )
     message_kind = topic.metadata.get("current_turn_message_kind")
     verify_target = (
         isinstance(interview_target, dict)
@@ -9933,7 +9878,11 @@ def generate_validated_tutor_answer(
                 forbid_choice_claim=forbid_choice_claim,
             )
         )
-        stream_options = {"stream_sink": stream_sink} if stream_sink is not None else {}
+        stream_options = (
+            {"stream_sink": stream_sink}
+            if stream_sink is not None and not first_lesson_initializing
+            else {}
+        )
         stream_arguments = {
             "model": model,
             "system": system,
@@ -9953,6 +9902,19 @@ def generate_validated_tutor_answer(
             candidate = call_openai_streaming(**metadata_arguments)
         if candidate_metadata == TutorResponseMetadata():
             _visible_candidate, candidate_metadata = tutor_response_metadata(candidate)
+        if first_lesson_initializing:
+            policy_answer = candidate
+            if candidate_metadata.covered_concepts and not extract_covered_concepts(policy_answer):
+                declared = "; ".join(candidate_metadata.covered_concepts)
+                policy_answer += f"\n<!-- covered: {declared} -->"
+            candidate = enforce_first_lesson_response(topic, prompt, policy_answer)
+            _visible_candidate, candidate_metadata = tutor_response_metadata(candidate)
+            if stream_sink is not None:
+                stream_sink(sanitize_model_output(candidate))
+            if response_metadata_sink is not None:
+                response_metadata_sink(candidate_metadata)
+            emit_tutor_output(sanitize_model_output(candidate), output_func)
+            return candidate
         if interview_target is not None:
             from openlearn import interview_curriculum
 

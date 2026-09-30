@@ -15,6 +15,7 @@ from openlearn import (
     code_workspace,
     config,
     interview_prep,
+    lesson_policy,
     providers,
     source_imports,
     tutor_service,
@@ -55,14 +56,11 @@ from .schemas import (
 )
 
 
-COURSE_INITIALIZATION_PROMPT = "Start my first lesson."
+COURSE_INITIALIZATION_PROMPT = lesson_policy.COURSE_INITIALIZATION_PROMPT
 
 
 def _is_course_initialization_prompt(value: object) -> bool:
-    return isinstance(value, str) and (
-        value == COURSE_INITIALIZATION_PROMPT
-        or value.startswith("Start teaching unit 1 from this accepted course plan.")
-    )
+    return lesson_policy.is_course_initialization_prompt(value)
 
 
 def _course_initialization_id(creation_submission_id: str) -> str:
