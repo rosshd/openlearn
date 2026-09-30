@@ -1039,10 +1039,12 @@ def _clear_live_turn(key: tuple[str, str]) -> None:
 
 
 def _turn_failure(exc: Exception) -> tuple[str, str]:
-    from openlearn import cli
+    from openlearn import cli, lesson_policy
 
     current: BaseException | None = exc
     while current is not None:
+        if isinstance(current, lesson_policy.FirstLessonUnavailable):
+            return "first_lesson_unavailable", lesson_policy.FIRST_LESSON_RETRY_MESSAGE
         if isinstance(current, cli.ProviderRequestError):
             messages = {
                 "provider_credentials": "Your response is saved, but the provider rejected its credentials. Review Provider settings, then retry.",

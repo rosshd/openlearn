@@ -7261,8 +7261,8 @@ class InteractiveTests(unittest.TestCase):
         cli.call_openai_streaming = fake_streaming
         cli.call_openai = lambda *_args, **_kwargs: (
             "Lesson: Supply describes how quantity offered changes with price.\n"
-            "Example: A higher price can increase quantity supplied.\n"
-            "Check: What happens to quantity supplied when price rises?"
+            "\nFor example, a higher price can increase quantity supplied.\n"
+            "<!-- covered: Supply -->"
         )
         try:
             exit_code = cli.quick_learn_from_source(
@@ -7613,6 +7613,12 @@ class InteractiveTests(unittest.TestCase):
         def fake_call_openai(_model, _system, user):
             if "Update this learner" in user:
                 return json.dumps({"last_answer_status": "correct", "known_add": ["copy"]})
+            if "Start teaching unit 1" in user:
+                return (
+                    "**Lesson:**\nCopying saves selected text to the clipboard.\n\n"
+                    "For example, selecting a word and pressing Cmd+C saves that word.\n"
+                    "<!-- covered: Basics -->"
+                )
             return (
                 "Lesson: Copy\n\n"
                 "Example: press Cmd+C.\n\n"
@@ -7908,8 +7914,9 @@ class InteractiveTests(unittest.TestCase):
             if "Create a concise course plan" in user:
                 return "Scope: AI basics\nUnits:\n1. Definitions (2 slides) - Explain AI."
             return (
-                "Lesson: AI is building systems that perform intelligent tasks.\n"
-                "Check: What is AI?"
+                "**Lesson:**\nAI systems perform tasks that normally require intelligence.\n\n"
+                "For example, a speech recognizer turns spoken words into text.\n"
+                "<!-- covered: Definitions -->"
             )
 
         cli.call_openai = fake_call_openai
@@ -7965,7 +7972,11 @@ class InteractiveTests(unittest.TestCase):
         def fake_call_openai(_model: str, _system: str, user: str) -> str:
             if "Create a concise course plan" in user:
                 return "Scope: AI basics\nUnits:\n1. Definitions (2 slides) - Explain AI."
-            return "**Lesson:**\nAI systems perform tasks that normally require intelligence."
+            return (
+                "**Lesson:**\nAI systems perform tasks that normally require intelligence.\n\n"
+                "For example, a speech recognizer turns spoken words into text.\n"
+                "<!-- covered: Definitions -->"
+            )
 
         with mock.patch.object(cli, "call_openai", new=fake_call_openai):
             call_silent(
@@ -8016,6 +8027,12 @@ class InteractiveTests(unittest.TestCase):
         def fake_call_openai(_model: str, _system: str, user: str) -> str:
             if "Create a concise course plan" in user:
                 return "Scope: AI basics\nUnits:\n1. Definitions (1 slide) - Explain AI."
+            if "previous response could not be used" in user:
+                return (
+                    "**Lesson:**\nAI systems perform tasks that normally require intelligence.\n\n"
+                    "For example, a speech recognizer turns spoken words into text.\n"
+                    "<!-- covered: Definitions -->"
+                )
             return long_lesson
 
         cli.call_openai = fake_call_openai
@@ -8048,6 +8065,12 @@ class InteractiveTests(unittest.TestCase):
         def fake_call_openai(_model: str, _system: str, user: str) -> str:
             if "Create a concise course plan" in user:
                 return "Scope: AI basics\nUnits:\n1. Definitions (1 slide) - Explain AI."
+            if "previous response could not be used" in user:
+                return (
+                    "**Lesson:**\nAI systems perform tasks that normally require intelligence.\n\n"
+                    "For example, a speech recognizer turns spoken words into text.\n"
+                    "<!-- covered: Definitions -->"
+                )
             return (
                 "Lesson: AI systems perform tasks.\n"
                 "Check: Which description fits AI?\n"
@@ -8081,7 +8104,11 @@ class InteractiveTests(unittest.TestCase):
                 return "Scope: Too broad"
             if len(calls) == 2:
                 return "Scope: More math and search\nUnits:\n1. Search - Learn BFS."
-            return "Lesson: Breadth-first search explores by depth. Question: What does BFS expand first?"
+            return (
+                "**Lesson:**\nBreadth-first search visits nearer nodes before farther nodes.\n\n"
+                "For example, it visits direct neighbors of the start before their unseen neighbors.\n"
+                "<!-- covered: Search -->"
+            )
 
         cli.call_openai = fake_call_openai
         try:

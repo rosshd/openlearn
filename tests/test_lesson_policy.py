@@ -50,17 +50,14 @@ def test_initialization_does_not_recognize_regular_turns(prompt: object) -> None
     "**Check:** Which is correct?\nA) One\nB) Two\n<!-- answer: B -->",
     "**Lesson:**\nA definition gives a term meaning.",
     VALID_LESSON.replace("Definitions", "Off-topic concept"),
+    VALID_LESSON + "<!-- covered: Off-topic concept -->",
     VALID_LESSON + '<!-- openlearn-action: {"action": "start_coding_drill"} -->',
 ])
-def test_policy_replaces_invalid_first_lesson(course: cli.Topic, answer: str) -> None:
-    guarded = lesson_policy.enforce_first_lesson_response(
-        course.metadata, lesson_policy.first_lesson_prompt(OUTLINE), answer
-    )
-    assert lesson_policy.first_lesson_response_is_valid(guarded)
-    assert cli.extract_covered_concepts(guarded) == ["Definitions"]
-    assert "Check:" not in guarded
-    assert "Next:" not in guarded
-    assert cli.extract_answer_key(guarded) == ""
+def test_policy_rejects_invalid_first_lesson_without_generic_fallback(course: cli.Topic, answer: str) -> None:
+    with pytest.raises(lesson_policy.FirstLessonUnavailable, match="course and input are saved"):
+        lesson_policy.enforce_first_lesson_response(
+            course.metadata, lesson_policy.first_lesson_prompt(OUTLINE), answer
+        )
 
 
 def test_policy_preserves_exact_valid_response(course: cli.Topic) -> None:
@@ -77,14 +74,12 @@ def test_policy_leaves_regular_checks_alone(course: cli.Topic) -> None:
     assert lesson_policy.enforce_first_lesson_response(course.metadata, "Explain definitions", check) == check
 
 
-@pytest.mark.parametrize("answer", [VALID_LESSON, "**Next:** Press Enter to continue."])
-def test_policy_guards_ordinary_sentinel(course: cli.Topic, answer: str) -> None:
+def test_policy_guards_ordinary_sentinel(course: cli.Topic) -> None:
     guarded = lesson_policy.enforce_first_lesson_response(
-        course.metadata, lesson_policy.COURSE_INITIALIZATION_PROMPT, answer
+        course.metadata, lesson_policy.COURSE_INITIALIZATION_PROMPT, VALID_LESSON
     )
     assert lesson_policy.first_lesson_response_is_valid(guarded)
-    if answer == VALID_LESSON:
-        assert guarded == answer
+    assert guarded == VALID_LESSON
 
 
 def test_sentinel_generation_does_not_claim_an_accepted_plan() -> None:
@@ -99,7 +94,13 @@ def test_sentinel_generation_does_not_claim_an_accepted_plan() -> None:
 def test_cli_startup_guards_before_extraction_and_persistence(
     course: cli.Topic, monkeypatch: pytest.MonkeyPatch, answer: str
 ) -> None:
-    monkeypatch.setattr(cli, "call_openai_with_status", lambda *_args, **_kwargs: answer)
+    calls: list[str] = []
+
+    def provider(_model: str, _system: str, prompt: str, **_kwargs) -> str:
+        calls.append(prompt)
+        return answer if len(calls) == 1 else VALID_LESSON
+
+    monkeypatch.setattr(cli, "call_openai_with_status", provider)
     output: list[str] = []
     cli.teach_first_lesson(course, OUTLINE, "mock", output.append)
     stored = cli.read_topic(course.slug)
@@ -110,6 +111,7 @@ def test_cli_startup_guards_before_extraction_and_persistence(
     assert "<!--" not in "\n".join(output)
     assert stored.metadata["slide_coverage"] == {"1:1": ["Definitions"]}
     assert "pending_question" not in stored.metadata
+    assert len(calls) == (1 if answer == VALID_LESSON else 2)
     if answer == VALID_LESSON:
         assert lesson == cli.sanitize_model_output(VALID_LESSON)
 
@@ -126,12 +128,12 @@ def test_ordinary_initialization_preserves_valid_lesson_and_rejects_quiz_metadat
 
     def provider(_model: str, _system: str, prompt: str) -> str:
         calls.append(prompt)
-        return answer
+        return answer if len(calls) == 1 else VALID_LESSON
 
     monkeypatch.setattr(cli, "call_openai", provider)
     monkeypatch.setattr(cli, "update_learning_metadata", lambda *_args, **_kwargs: pytest.fail("initialization is not an assessment"))
     response = cli.ask_topic(course.slug, cli.first_lesson_prompt(OUTLINE), output_func=lambda _: None)
-    assert len(calls) == 1
+    assert len(calls) == (1 if answer == VALID_LESSON else 2)
     assert lesson_policy.first_lesson_response_is_valid(response)
     assert "<!--" not in response
     stored = cli.read_topic(course.slug)
@@ -147,11 +149,11 @@ def test_ordinary_initialization_preserves_valid_lesson_and_rejects_quiz_metadat
 
 @pytest.mark.parametrize("prompt", [cli.first_lesson_prompt(OUTLINE), lesson_policy.COURSE_INITIALIZATION_PROMPT])
 def test_override_initialization_uses_same_guard(course: cli.Topic, prompt: str) -> None:
-    response = cli.ask_topic(
-        course.slug, prompt, output_func=lambda _: None,
-        generated_answer_override="**Check:** Which fits?\nA) First\nB) Second\n<!-- answer: A -->",
-    )
-    assert lesson_policy.first_lesson_response_is_valid(response)
+    with pytest.raises(cli.OpenLearnError, match="Retry the first lesson"):
+        cli.ask_topic(
+            course.slug, prompt, output_func=lambda _: None,
+            generated_answer_override="**Check:** Which fits?\nA) First\nB) Second\n<!-- answer: A -->",
+        )
     assert "pending_question" not in cli.read_topic(course.slug).metadata
 
 
@@ -160,7 +162,8 @@ def test_first_lesson_preview_waits_for_the_guard(
     course: cli.Topic, monkeypatch: pytest.MonkeyPatch, prompt: str
 ) -> None:
     raw = "**Check:** Which fits?\nA) First\nB) Second\n<!-- answer: A -->"
-    monkeypatch.setattr(cli, "call_openai", lambda *_args: raw)
+    answers = iter([raw, VALID_LESSON])
+    monkeypatch.setattr(cli, "call_openai", lambda *_args: next(answers))
     preview: list[str] = []
     output: list[str] = []
     metadata: list[cli.TutorResponseMetadata] = []
@@ -220,10 +223,82 @@ def test_first_lesson_provider_failure_keeps_accepted_plan_for_retry(
         raise cli.OpenLearnError("provider unavailable")
 
     monkeypatch.setattr(cli, "call_openai_with_status", fail)
-    with pytest.raises(cli.OpenLearnError, match="provider unavailable"):
+    with pytest.raises(cli.OpenLearnError, match="openlearn resume policy-fixture"):
         cli.teach_first_lesson(course, OUTLINE, "mock", lambda _: None)
     assert course.path.read_bytes() == before
     monkeypatch.setattr(cli, "call_openai_with_status", lambda *_args, **_kwargs: VALID_LESSON)
     cli.teach_first_lesson(cli.read_topic(course.slug), OUTLINE, "mock", lambda _: None)
     _body, log = cli.split_session_log(cli.read_topic(course.slug).body)
     assert [entry["kind"] for entry in cli.session_entries(log)] == ["course_plan", "lesson"]
+
+
+@pytest.mark.parametrize("system_design", [False, True])
+def test_reviewed_exact_concept_fallback_is_preserved(system_design: bool) -> None:
+    metadata = {
+        "current_focus": "Requirements",
+        "course_units": [{"title": "Coding Pattern Maintenance" if system_design else "Interview",
+                          "concepts": [{"label": "Clarifying requirements"}]}],
+    }
+    answer = lesson_policy.enforce_first_lesson_response(
+        metadata, lesson_policy.COURSE_INITIALIZATION_PROMPT, "**Next:** Continue."
+    )
+    assert lesson_policy.first_lesson_response_is_valid(answer)
+    assert cli.extract_covered_concepts(answer) == ["Clarifying requirements"]
+    assert ("link-sharing service" if system_design else "first repeated value") in answer
+
+
+def test_nonprogramming_course_never_turns_a_label_into_teaching() -> None:
+    metadata = {"current_focus": "Plate tectonics", "course_units": [
+        {"title": "Earth science", "concepts": [{"label": "Mantle convection"}]}]}
+    placeholder = (
+        "**Lesson:**\nBegin Plate tectonics by building a clear mental model of Mantle convection. "
+        "Identify what information controls the result before working through details.\n\n"
+        "For example, write down the input, required output, and one reason your chosen "
+        "method fits before you commit to the implementation.\n<!-- covered: Mantle convection -->"
+    )
+    assert not lesson_policy.first_lesson_response_is_valid(placeholder)
+    for invalid in ("**Next:** Continue.", placeholder):
+        with pytest.raises(lesson_policy.FirstLessonUnavailable):
+            lesson_policy.enforce_first_lesson_response(
+                metadata, lesson_policy.COURSE_INITIALIZATION_PROMPT, invalid
+            )
+
+
+@pytest.mark.parametrize("standalone", [False, True])
+def test_exhausted_repair_preserves_setup_target_and_input_for_resume(
+    course: cli.Topic, monkeypatch: pytest.MonkeyPatch, standalone: bool
+) -> None:
+    before = cli.read_topic(course.slug)
+    before_state = cli.load_state(course.slug)
+    calls: list[str] = []
+
+    def provider(_model: str, _system: str, prompt: str, **_kwargs) -> str:
+        calls.append(prompt)
+        return "**Next:** Continue.<!-- covered: Definitions --><!-- answer: B -->"
+
+    monkeypatch.setattr(cli, "call_openai_with_status", provider)
+    monkeypatch.setattr(cli, "call_openai", provider)
+    preview: list[str] = []
+    with pytest.raises(cli.OpenLearnError, match="openlearn resume policy-fixture"):
+        if standalone:
+            cli.teach_first_lesson(course, OUTLINE, "mock", preview.append)
+        else:
+            cli.ask_topic(course.slug, cli.first_lesson_prompt(OUTLINE), output_func=preview.append)
+    assert len(calls) == 2
+    assert "previous response could not be used" in calls[1]
+    failed = cli.read_topic(course.slug)
+    assert failed.body == before.body
+    assert failed.metadata == before.metadata
+    assert cli.load_state(course.slug) == before_state
+    assert "Next:" not in "\n".join(preview)
+    assert cli.LESSON_ENTER_ADVANCE_PROMPT not in preview
+
+    monkeypatch.setattr(cli, "call_openai_with_status", lambda *_args, **_kwargs: VALID_LESSON)
+    monkeypatch.setattr(cli, "refresh_imported_source_folders", lambda *_args, **_kwargs: None)
+    assert cli.cmd_resume(Namespace(topic=course.slug, model="mock"), output_func=lambda _: None) == 0
+    saved = cli.read_topic(course.slug)
+    _body, log = cli.split_session_log(saved.body)
+    assert [entry["kind"] for entry in cli.session_entries(log)] == ["course_plan", "lesson"]
+    assert saved.metadata["slide_coverage"] == {"1:1": ["Definitions"]}
+    assert saved.metadata["current_unit"] == 1
+    assert saved.metadata["current_slide"] == 1

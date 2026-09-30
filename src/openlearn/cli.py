@@ -5491,13 +5491,25 @@ def teach_first_lesson(
     print_section("First lesson", output_func)
     lesson_prompt = first_lesson_prompt(outline)
     global _LAST_RESPONSE_ANSWER_KEY
-    raw_lesson = call_openai_with_status(
-        model,
-        generation_system_prompt(topic, current_plan=outline),
-        lesson_prompt,
-        retry_status=output_func,
-    )
-    raw_lesson = enforce_first_lesson_response(topic, lesson_prompt, raw_lesson)
+    for attempt in range(2):
+        try:
+            raw_lesson = call_openai_with_status(
+                model,
+                generation_system_prompt(topic, current_plan=outline),
+                lesson_prompt if attempt == 0 else lesson_policy.first_lesson_repair_prompt(lesson_prompt),
+                retry_status=output_func,
+            )
+        except OpenLearnError as error:
+            raise OpenLearnError(
+                f"{lesson_policy.FIRST_LESSON_RETRY_MESSAGE} Use openlearn resume {topic.slug}."
+            ) from error
+        try:
+            raw_lesson = enforce_first_lesson_response(topic, lesson_prompt, raw_lesson)
+        except OpenLearnError:
+            if attempt == 1:
+                raise
+        else:
+            break
     _LAST_RESPONSE_ANSWER_KEY = extract_answer_key(raw_lesson)
     covered_concepts = extract_covered_concepts(raw_lesson)
     raw_lesson_for_question = sanitize_model_output(raw_lesson)
@@ -6044,7 +6056,10 @@ def placement_context_prompt(slug: str) -> str:
 
 def enforce_first_lesson_response(topic: Topic, prompt: str, answer: str) -> str:
     """Keep the CLI compatibility entry point for the shared lesson policy."""
-    return lesson_policy.enforce_first_lesson_response(topic.metadata, prompt, answer)
+    try:
+        return lesson_policy.enforce_first_lesson_response(topic.metadata, prompt, answer)
+    except lesson_policy.FirstLessonUnavailable as error:
+        raise OpenLearnError(f"{error} Use openlearn resume {topic.slug}.") from error
 
 
 def parse_concept_labels(text: str) -> list[str]:
@@ -9868,16 +9883,17 @@ def generate_validated_tutor_answer(
 
         if stream_sink is not None:
             stream_sink("")
-        user = (
-            prompt
-            if attempt == 0
-            else tutor_contract_repair_prompt(
+        if attempt == 0:
+            user = prompt
+        elif first_lesson_initializing:
+            user = lesson_policy.first_lesson_repair_prompt(prompt)
+        else:
+            user = tutor_contract_repair_prompt(
                 candidate,
                 require_check=require_check,
                 forbid_check=forbid_check,
                 forbid_choice_claim=forbid_choice_claim,
             )
-        )
         if first_lesson_initializing:
             user = lesson_policy.initialization_generation_prompt(user)
         stream_options = (
@@ -9909,7 +9925,12 @@ def generate_validated_tutor_answer(
             if candidate_metadata.covered_concepts and not extract_covered_concepts(policy_answer):
                 declared = "; ".join(candidate_metadata.covered_concepts)
                 policy_answer += f"\n<!-- covered: {declared} -->"
-            candidate = enforce_first_lesson_response(topic, prompt, policy_answer)
+            try:
+                candidate = enforce_first_lesson_response(topic, prompt, policy_answer)
+            except OpenLearnError:
+                if attempt == 1:
+                    raise
+                continue
             _visible_candidate, candidate_metadata = tutor_response_metadata(candidate)
             if stream_sink is not None:
                 stream_sink(sanitize_model_output(candidate))
@@ -14173,6 +14194,17 @@ def cmd_resume(args: argparse.Namespace, input_func=input, output_func=print) ->
                 model=model,
                 output_func=output_func,
             )
+    if (
+        not _DRY_RUN
+        and interview_value is None
+        and topic.metadata.get("course_started") is True
+        and topic.metadata.get("current_unit") == 1
+        and topic.metadata.get("current_slide") == 1
+    ):
+        outline = accepted_course_plan(topic)
+        if outline and last_tutor_lesson_entry(topic) is None:
+            teach_first_lesson(topic, outline, model, output_func)
+            return 0
     if not _DRY_RUN:
         topic = restore_learner_preferences_from_history(topic)
         set_active_topic(topic.slug)
@@ -19080,7 +19112,7 @@ def _mock_openai_response(model: str, system: str, user: str) -> str:
             )
         return (
             "**Lesson:**\nNormal vs Insert modes: Normal mode runs commands, while "
-            "Insert mode enters text. "
+            "Insert mode enters text.\n\n"
             "For example, `i` enters Insert mode and `Esc` returns to Normal mode.\n"
             "<!-- covered: Vim modes -->"
         )

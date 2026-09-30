@@ -2119,6 +2119,50 @@ class TutorServiceTests(TestCase):
             )
         self.assertEqual(retried.status, "committed")
 
+    def test_invalid_first_lesson_retry_preserves_saved_payload_and_replays_commit(self) -> None:
+        outline = "Units:\n1. Earth science (2 slides)\nConcepts: Mantle convection"
+        cli.save_course_started(cli.read_topic("web-tutor"), "Accepted earth science", outline)
+        prompt = cli.first_lesson_prompt(outline)
+        submission_id = str(uuid4())
+        before = cli.read_topic("web-tutor")
+        with mock.patch.object(cli, "call_openai_streaming", return_value="**Next:** Continue.") as provider:
+            with self.assertRaises(TutorOperationError):
+                submit_turn(
+                    "web-tutor", prompt, intent="question", submission_id=submission_id,
+                    expected_revision=0, model="mock",
+                )
+        self.assertEqual(provider.call_count, 2)
+        failed = operation_status("web-tutor", submission_id)
+        self.assertEqual(failed.status, "retryable_error")
+        self.assertEqual(failed.error_code, "first_lesson_unavailable")
+        self.assertEqual(course_revision("web-tutor"), 0)
+        self.assertEqual(cli.read_topic("web-tutor").body, before.body)
+        self.assertEqual(cli.load_pending_learner_prompt("web-tutor"), prompt)
+
+        cli.clear_config_cache()
+        valid = (
+            "**Lesson:**\nMantle convection moves hot rock upward and cooler rock downward."
+            "\n\nFor example, rock warmed deep in Earth rises slowly while cooler rock sinks."
+            "\n<!-- covered: Mantle convection -->"
+        )
+        with mock.patch.object(cli, "call_openai_streaming", return_value=valid) as provider:
+            retried = submit_turn(
+                "web-tutor", prompt, intent="question", submission_id=submission_id,
+                expected_revision=0, model="mock",
+            )
+            replay = submit_turn(
+                "web-tutor", prompt, intent="question", submission_id=submission_id,
+                expected_revision=0, model="mock",
+            )
+        self.assertEqual(provider.call_count, 1)
+        self.assertEqual(retried.status, "committed")
+        self.assertEqual(replay, retried)
+        saved = cli.read_topic("web-tutor")
+        self.assertEqual(saved.metadata["slide_coverage"], {"1:1": ["Mantle convection"]})
+        self.assertEqual(saved.metadata["current_unit"], 1)
+        self.assertEqual(saved.metadata["current_slide"], 1)
+        self.assertFalse(saved.metadata.get("known"))
+
     def test_pre_generation_setup_failure_is_durable_and_retryable(self) -> None:
         submission_id = str(uuid4())
         original = tutor_service._interview_progression_state

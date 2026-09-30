@@ -2509,7 +2509,10 @@ def test_web_created_ordinary_course_guards_sentinel_without_an_accepted_plan(
 
     def provider(_model: str, _system: str, prompt: str) -> str:
         calls.append(prompt)
-        return raw
+        return raw if len(calls) == 1 else (
+            "**Lesson:**\nA definition gives a term one precise meaning."
+            "\n\nFor example, a triangle has three straight sides."
+        )
 
     monkeypatch.setattr(cli, "call_openai", provider)
     monkeypatch.setattr(cli, "maybe_suggest_videos", lambda *_args: None)
@@ -2540,7 +2543,8 @@ def test_web_created_ordinary_course_guards_sentinel_without_an_accepted_plan(
     assert not topic.metadata.get("concept_attempts")
     assert not topic.metadata.get("known")
     assert topic.metadata.get("current_focus") != "Wrong focus"
-    assert len(calls) == 1
+    expected_calls = 1 if lesson_policy.first_lesson_response_is_valid(raw) else 2
+    assert len(calls) == expected_calls
     assert "Teach exactly one concept" in calls[0]
     assert "accepted course plan" not in calls[0].lower()
     if lesson_policy.first_lesson_response_is_valid(raw):
@@ -2553,7 +2557,7 @@ def test_web_created_ordinary_course_guards_sentinel_without_an_accepted_plan(
     assert replayed.json()["operation_id"] == operation_id
     assert replayed.json()["created"] is False
     assert wait_for_operation(restarted, slug, operation_id)["state"] == "committed"
-    assert len(calls) == 1
+    assert len(calls) == expected_calls
     assert "For example," in restarted.get(f"/courses/{slug}").text
     history = restarted.get(f"/courses/{slug}/history", headers={"accept": "application/json"})
     assert len(history.json()["items"]) == 1
@@ -2580,7 +2584,7 @@ def test_accepted_plan_initialization_shares_policy_and_survives_restart(
 
     def provider(_model: str, _system: str, prompt: str) -> str:
         calls.append(prompt)
-        return raw
+        return raw if len(calls) == 1 else valid
 
     monkeypatch.setattr(cli, "call_openai", provider)
     monkeypatch.setattr(cli, "maybe_suggest_videos", lambda *_args: None)
@@ -2594,7 +2598,7 @@ def test_accepted_plan_initialization_shares_policy_and_survives_restart(
     lesson = entries[-1]["response"]
     assert lesson_policy.first_lesson_response_is_valid(lesson)
     assert "<!--" not in lesson
-    assert len(calls) == 1
+    assert len(calls) == (2 if invalid else 1)
     assert "pending_question" not in topic.metadata
     assert topic.metadata["slide_coverage"] == {"1:1": ["Definitions"]}
     assert topic.metadata["known"] == []
@@ -2605,7 +2609,7 @@ def test_accepted_plan_initialization_shares_policy_and_survives_restart(
     replayed = OpenLearnWebServices().start_course_initialization(slug)
     assert replayed["operation_id"] == initialized["operation_id"]
     assert replayed["state"] == "committed"
-    assert len(calls) == 1
+    assert len(calls) == (2 if invalid else 1)
     page = restarted.get(f"/courses/{slug}").text
     assert "For example," in page
     assert "<!-- covered:" not in page
@@ -2809,6 +2813,63 @@ def test_initialization_failure_preserves_course_and_retries_same_operation(
     _context, log = cli.split_session_log(topic.body)
     assert len(cli.session_entries(log)) == 1
     assert "Begin the course now" not in client.get(f"/courses/{slug}").text
+
+
+def test_invalid_first_lesson_saves_retry_and_restarts_without_false_coverage(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    created = application.create_course(application.CourseCreationRequest(
+        name="Earth science recovery", goal="Understand mantle convection",
+        submission_id=str(uuid4()),
+    ))
+    slug = created.course.slug
+    outline = "Units:\n1. Plate tectonics (2 slides)\nConcepts: Mantle convection"
+    cli.save_course_started(cli.read_topic(slug), "Accepted earth science plan", outline)
+    before = cli.read_topic(slug)
+    calls: list[str] = []
+
+    def invalid_provider(_model: str, _system: str, prompt: str) -> str:
+        calls.append(prompt)
+        return "**Next:** Continue.<!-- covered: Mantle convection --><!-- focus: Bad target -->"
+
+    monkeypatch.setattr(cli, "call_openai", invalid_provider)
+    monkeypatch.setattr(cli, "maybe_suggest_videos", lambda *_args: None)
+    initialized = OpenLearnWebServices().start_course_initialization(slug)
+    operation_id = initialized["operation_id"]
+    failed = wait_for_operation(client, slug, operation_id, "retryable_error")
+    assert len(calls) == 2
+    assert "course and input are saved" in failed["error"]
+    assert "Retry first lesson" in client.get(f"/courses/{slug}/initializing/{operation_id}").text
+    topic = cli.read_topic(slug)
+    assert topic.body == before.body
+    for key in ("goal", "current_focus", "current_unit", "current_slide", "course_units"):
+        assert topic.metadata[key] == before.metadata[key]
+    for key in ("slide_coverage", "known", "concept_attempts", "srs", "pending_question", "enter_advance_cue"):
+        assert topic.metadata.get(key) == before.metadata.get(key)
+    assert tutor_service.course_revision(slug) == 0
+
+    with TestClient(create_app(testing=True)) as restarted:
+        replay = OpenLearnWebServices().start_course_initialization(slug)
+        assert replay["operation_id"] == operation_id
+        assert replay["state"] == "retryable_error"
+        assert len(calls) == 2
+        valid = (
+            "**Lesson:**\nMantle convection moves hot rock upward and cooler rock downward."
+            "\n\nFor example, rock warmed deep in Earth rises slowly while cooler rock sinks."
+            "\n<!-- covered: Mantle convection -->"
+        )
+        monkeypatch.setattr(cli, "call_openai", lambda *_args: valid)
+        retried = OpenLearnWebServices().retry_course_initialization(slug, operation_id)
+        assert retried["operation_id"] == operation_id
+        assert wait_for_operation(restarted, slug, operation_id, "committed")["state"] == "committed"
+        assert "Mantle convection moves hot rock" in restarted.get(f"/courses/{slug}").text
+    saved = cli.read_topic(slug)
+    _body, log = cli.split_session_log(saved.body)
+    assert [entry["kind"] for entry in cli.session_entries(log)] == ["course_plan", "chat"]
+    assert saved.metadata["slide_coverage"] == {"1:1": ["Mantle convection"]}
+    assert saved.metadata["current_slide"] == 1
+    assert not saved.metadata.get("known")
+    assert tutor_service.operation_status(slug, operation_id).status == "committed"
 
 
 def test_interview_initialization_retry_adopts_exact_canonical_reservation(

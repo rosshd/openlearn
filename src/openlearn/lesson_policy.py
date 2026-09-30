@@ -10,6 +10,26 @@ from openlearn.constants import FIRST_LESSON_WORD_LIMIT
 
 COURSE_INITIALIZATION_PROMPT = "Start my first lesson."
 FIRST_LESSON_PROMPT_PREFIX = "Start teaching unit 1 from this accepted course plan."
+FIRST_LESSON_RETRY_MESSAGE = (
+    "The tutor could not prepare a useful first lesson. Your course and input are saved. "
+    "Retry the first lesson to continue."
+)
+
+
+class FirstLessonUnavailable(ValueError):
+    """No validated teaching or reviewed exact-concept fallback is available."""
+
+
+def first_lesson_repair_prompt(prompt: str) -> str:
+    """Request one fresh lesson without trusting the rejected response's markers."""
+    return (
+        f"{initialization_generation_prompt(prompt)}\n\n"
+        "The previous response could not be used as a first lesson. "
+        "Give a concrete explanation and example of the selected concept, not generic "
+        "advice to build a mental model or identify input and output. "
+        "Use only the course context. If current concept labels exist, use one exact "
+        "label for coverage; otherwise omit coverage markers."
+    )
 
 
 def is_first_lesson_prompt(value: object) -> bool:
@@ -66,7 +86,7 @@ def initialization_generation_prompt(prompt: str) -> str:
 
 
 def enforce_first_lesson_response(metadata: Mapping[str, object], prompt: str, answer: str) -> str:
-    """Guarantee that course initialization teaches instead of emitting navigation."""
+    """Accept teaching, use reviewed content, or stop before recording coverage."""
     if not is_course_initialization_prompt(prompt):
         return answer
     focus = str(metadata.get("current_focus") or "the first course concept")
@@ -95,7 +115,7 @@ def enforce_first_lesson_response(metadata: Mapping[str, object], prompt: str, a
     valid_concept_keys = {label.casefold() for label in valid_concepts}
     if first_lesson_response_is_valid(answer) and (
         not valid_concepts
-        or any(marker.casefold() in valid_concept_keys for marker in declared)
+        or (len(declared) == 1 and declared[0].casefold() in valid_concept_keys)
     ):
         return answer
     system_design_heavy = "Coding Pattern Maintenance" in unit_titles
@@ -117,12 +137,7 @@ def enforce_first_lesson_response(metadata: Mapping[str, object], prompt: str, a
             "return the value or its index and what to return when no repeat exists."
         )
     else:
-        lesson = (
-            f"Begin {focus} by building a clear mental model of {concept}. Identify what "
-            "information controls the result before working through details.\n\n"
-            "For example, write down the input, required output, and one reason your chosen "
-            "method fits before you commit to the implementation."
-        )
+        raise FirstLessonUnavailable(FIRST_LESSON_RETRY_MESSAGE)
     return f"**Lesson:**\n{lesson}\n\n<!-- covered: {concept} -->"
 
 
@@ -130,6 +145,11 @@ def first_lesson_response_is_valid(answer: str) -> bool:
     if re.search(r"<!--\s*openlearn-action\b", answer, flags=re.IGNORECASE):
         return False
     visible = re.sub(r"<!--.*?-->", "", answer, flags=re.DOTALL).strip()
+    if (
+        "by building a clear mental model of" in visible.casefold()
+        and "write down the input, required output" in visible.casefold()
+    ):
+        return False
     labels = re.findall(
         r"(?im)^\s*(?:\*\*)?(Lesson|Feedback|Example|Check|Hint|Next|Action):(?:\*\*)?",
         visible,

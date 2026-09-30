@@ -8,6 +8,7 @@ import socket
 import subprocess
 import sys
 import time
+from unittest import mock
 from urllib.parse import parse_qs, urlsplit
 from urllib.request import Request, urlopen
 from uuid import uuid4
@@ -15,7 +16,7 @@ from uuid import uuid4
 import pytest
 
 from openlearn import application, cli, interview_prep, tutor_service
-from openlearn.web.services import OpenLearnWebServices
+from openlearn.web.services import OpenLearnWebServices, _initialization_id_for_slug
 
 
 SOURCE_ROOT = Path(__file__).resolve().parents[1] / "src"
@@ -1395,6 +1396,64 @@ def test_real_browser_course_library_preview_history_responsive_and_no_js(
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=5)
+
+
+def test_real_browser_saved_first_lesson_retry_after_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    playwright = pytest.importorskip("playwright.sync_api")
+    home = tmp_path / "first-lesson-retry-home"
+    monkeypatch.setenv("OPENLEARN_HOME", str(home))
+    monkeypatch.setenv("OPENLEARN_MOCK", "1")
+    cli.clear_config_cache()
+    course = application.create_course(application.CourseCreationRequest(
+        name="Vim recovery", goal="Learn Vim modes", submission_id=str(uuid4())
+    )).course
+    outline = "Units:\n1. Modes (2 slides)\nConcepts: Vim modes"
+    cli.save_course_started(cli.read_topic(course.slug), "Accepted Vim plan", outline)
+    canonical_id = _initialization_id_for_slug(course.slug)
+    assert canonical_id is not None
+    with mock.patch.object(cli, "call_openai_streaming", return_value="**Next:** Continue."):
+        with pytest.raises(tutor_service.TutorOperationError):
+            tutor_service.submit_turn(
+                course.slug, cli.first_lesson_prompt(outline), intent="question",
+                submission_id=canonical_id, expected_revision=0, model="mock",
+            )
+    port = _free_loopback_port()
+    base_url = f"http://127.0.0.1:{port}"
+    environment = {**os.environ, "OPENLEARN_HOME": str(home), "OPENLEARN_MOCK": "1",
+                   "PYTHONPATH": str(SOURCE_ROOT)}
+    command = f"from openlearn.web.launcher import run; run(port={port}, open_browser=False)"
+    with (tmp_path / "openlearn-first-lesson-retry-web.log").open("wb") as log:
+        process = subprocess.Popen([sys.executable, "-c", command], cwd=tmp_path,
+                                   env=environment, stdout=log, stderr=subprocess.STDOUT)
+        try:
+            bootstrap_url, app_url = _wait_until_ready(base_url, process, home)
+            with playwright.sync_playwright() as runtime:
+                browser = runtime.chromium.launch()
+                page = browser.new_page()
+                page.goto(bootstrap_url)
+                page.goto(f"{app_url}/courses/{course.slug}/initializing/{canonical_id}")
+                playwright.expect(page.get_by_role("button", name="Retry first lesson")).to_be_visible()
+                assert "clear mental model" not in page.locator("body").inner_text()
+                page.reload()
+                page.get_by_role("button", name="Retry first lesson").click()
+                page.wait_for_url(f"**/courses/{course.slug}")
+                playwright.expect(page.locator("[data-focus-shell]")).to_contain_text("Normal vs Insert modes")
+                page.reload()
+                playwright.expect(page.locator("[data-focus-shell]")).to_contain_text("Normal vs Insert modes")
+                browser.close()
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+    result = tutor_service.operation_status(course.slug, canonical_id)
+    assert result is not None and result.status == "committed"
+    _body, log = cli.split_session_log(cli.read_topic(course.slug).body)
+    assert [entry["kind"] for entry in cli.session_entries(log)] == ["course_plan", "chat"]
 
 
 def test_dashboard_ignores_stale_preview_and_follow_up_responses() -> None:
