@@ -72,10 +72,27 @@ def test_policy_preserves_exact_valid_response(course: cli.Topic) -> None:
     assert cli.first_lesson_response_is_valid is lesson_policy.first_lesson_response_is_valid
 
 
-def test_policy_leaves_regular_checks_and_interview_sentinel_alone(course: cli.Topic) -> None:
+def test_policy_leaves_regular_checks_alone(course: cli.Topic) -> None:
     check = "**Check:** Trace the next step?"
-    for prompt in ("Explain definitions", lesson_policy.COURSE_INITIALIZATION_PROMPT):
-        assert lesson_policy.enforce_first_lesson_response(course.metadata, prompt, check) == check
+    assert lesson_policy.enforce_first_lesson_response(course.metadata, "Explain definitions", check) == check
+
+
+@pytest.mark.parametrize("answer", [VALID_LESSON, "**Next:** Press Enter to continue."])
+def test_policy_guards_ordinary_sentinel(course: cli.Topic, answer: str) -> None:
+    guarded = lesson_policy.enforce_first_lesson_response(
+        course.metadata, lesson_policy.COURSE_INITIALIZATION_PROMPT, answer
+    )
+    assert lesson_policy.first_lesson_response_is_valid(guarded)
+    if answer == VALID_LESSON:
+        assert guarded == answer
+
+
+def test_sentinel_generation_does_not_claim_an_accepted_plan() -> None:
+    prompt = lesson_policy.initialization_generation_prompt(lesson_policy.COURSE_INITIALIZATION_PROMPT)
+    assert "Teach exactly one concept" in prompt
+    assert "For example," in prompt
+    assert "accepted course plan" not in prompt.lower()
+    assert lesson_policy.initialization_generation_prompt(cli.first_lesson_prompt(OUTLINE)) == cli.first_lesson_prompt(OUTLINE)
 
 
 @pytest.mark.parametrize("answer", [VALID_LESSON, "**Next:** Press Enter to continue."])
@@ -128,17 +145,19 @@ def test_ordinary_initialization_preserves_valid_lesson_and_rejects_quiz_metadat
         assert response == cli.sanitize_model_output(VALID_LESSON)
 
 
-def test_override_initialization_uses_same_guard(course: cli.Topic) -> None:
+@pytest.mark.parametrize("prompt", [cli.first_lesson_prompt(OUTLINE), lesson_policy.COURSE_INITIALIZATION_PROMPT])
+def test_override_initialization_uses_same_guard(course: cli.Topic, prompt: str) -> None:
     response = cli.ask_topic(
-        course.slug, cli.first_lesson_prompt(OUTLINE), output_func=lambda _: None,
+        course.slug, prompt, output_func=lambda _: None,
         generated_answer_override="**Check:** Which fits?\nA) First\nB) Second\n<!-- answer: A -->",
     )
     assert lesson_policy.first_lesson_response_is_valid(response)
     assert "pending_question" not in cli.read_topic(course.slug).metadata
 
 
+@pytest.mark.parametrize("prompt", [cli.first_lesson_prompt(OUTLINE), lesson_policy.COURSE_INITIALIZATION_PROMPT])
 def test_first_lesson_preview_waits_for_the_guard(
-    course: cli.Topic, monkeypatch: pytest.MonkeyPatch
+    course: cli.Topic, monkeypatch: pytest.MonkeyPatch, prompt: str
 ) -> None:
     raw = "**Check:** Which fits?\nA) First\nB) Second\n<!-- answer: A -->"
     monkeypatch.setattr(cli, "call_openai", lambda *_args: raw)
@@ -146,7 +165,7 @@ def test_first_lesson_preview_waits_for_the_guard(
     output: list[str] = []
     metadata: list[cli.TutorResponseMetadata] = []
     answer = cli.generate_validated_tutor_answer(
-        course, cli.first_lesson_prompt(OUTLINE), "mock",
+        course, prompt, "mock",
         output_func=output.append, stream_sink=preview.append,
         response_metadata_sink=metadata.append,
     )
@@ -155,6 +174,41 @@ def test_first_lesson_preview_waits_for_the_guard(
     assert "<!--" not in "\n".join(preview + output)
     assert metadata[-1].answer_key == ""
     assert metadata[-1].covered_concepts == ("Definitions",)
+
+
+def test_sentinel_side_chat_override_keeps_regular_check(
+    course: cli.Topic, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    check = "**Check:** Trace the next step?"
+    monkeypatch.setattr(cli, "enforce_first_lesson_response", lambda *_args: pytest.fail("side chat must not initialize the course"))
+    assert cli.ask_topic(
+        course.slug, lesson_policy.COURSE_INITIALIZATION_PROMPT,
+        output_func=lambda _: None, generated_answer_override=check,
+        session_kind=cli.SIDE_CHAT_SESSION_KIND, message_kind_override="question",
+    ) == check
+
+
+def test_interview_sentinel_uses_target_fallback_without_ordinary_guard(
+    course: cli.Topic, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from openlearn import interview_curriculum
+
+    check = "**Check:** Produce the next step?"
+    monkeypatch.setattr(cli, "system_prompt", lambda *_args, **_kwargs: "target rules")
+    monkeypatch.setattr(cli, "call_openai", lambda *_args: "**Next:** Continue.")
+    monkeypatch.setattr(cli, "enforce_first_lesson_response", lambda *_args: pytest.fail("interview target owns its first lesson"))
+    monkeypatch.setattr(interview_curriculum, "target_response_error", lambda *_args: "invalid target")
+    monkeypatch.setattr(interview_curriculum, "deterministic_target_fallback", lambda *_args: check)
+    target = {"skill_label": "Definitions", "depth_mode": "learn"}
+    assert cli.generate_validated_tutor_answer(
+        course, lesson_policy.COURSE_INITIALIZATION_PROMPT, "mock",
+        output_func=lambda _: None, interview_target=target,
+    ) == check
+    assert cli.ask_topic(
+        course.slug, lesson_policy.COURSE_INITIALIZATION_PROMPT,
+        output_func=lambda _: None, generated_answer_override="**Next:** Continue.",
+        interview_target=target, message_kind_override="question",
+    ) == check
 
 
 def test_first_lesson_provider_failure_keeps_accepted_plan_for_retry(

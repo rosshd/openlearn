@@ -2496,6 +2496,70 @@ def test_course_creation_is_idempotent_across_initialization_replay(
     assert len(list(cli.topics_dir().glob("idempotent-initialization*.md"))) == 1
 
 
+@pytest.mark.parametrize("raw", [
+    "**Lesson:**\nA definition gives a term one precise meaning.\n\nFor example, a triangle has three straight sides.",
+    "**Lesson:**\nA definition gives a term one precise meaning.\n\nFor example, a triangle has three straight sides.\n<!-- covered: Definitions -->",
+    "**Next:** Press Enter to continue.",
+    "**Check:** Which fits?\nA) First\nB) Second\n<!-- answer: B --><!-- focus: Wrong focus -->",
+])
+def test_web_created_ordinary_course_guards_sentinel_without_an_accepted_plan(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    calls: list[str] = []
+
+    def provider(_model: str, _system: str, prompt: str) -> str:
+        calls.append(prompt)
+        return raw
+
+    monkeypatch.setattr(cli, "call_openai", provider)
+    monkeypatch.setattr(cli, "maybe_suggest_videos", lambda *_args: None)
+    monkeypatch.setattr(cli, "update_learning_metadata", lambda *_args, **_kwargs: pytest.fail("initialization cannot award assessment credit"))
+    token = csrf(client, "/courses/new")
+    payload = {
+        "title": "Unplanned lesson policy", "goal": "Learn definitions",
+        "experience": "", "template_id": None, "submission_id": str(uuid4()),
+    }
+    initialized = client.post("/api/courses", headers={"x-csrf-token": token}, json=payload)
+    assert initialized.status_code == 202
+    slug = initialized.json()["slug"]
+    operation_id = initialized.json()["operation_id"]
+    assert _course_initialization_prompt(slug) == COURSE_INITIALIZATION_PROMPT
+    assert wait_for_operation(client, slug, operation_id)["state"] == "committed"
+    topic = cli.read_topic(slug)
+    _context, log = cli.split_session_log(topic.body)
+    entries = cli.session_entries(log)
+    assert len(entries) == 1
+    assert entries[0]["kind"] == "chat"
+    assert entries[0]["prompt"] == COURSE_INITIALIZATION_PROMPT
+    lesson = entries[0]["response"]
+    assert lesson_policy.first_lesson_response_is_valid(lesson)
+    assert "<!--" not in lesson
+    assert "pending_question" not in topic.metadata
+    assert not topic.metadata.get("course_units")
+    assert not topic.metadata.get("slide_coverage")
+    assert not topic.metadata.get("concept_attempts")
+    assert not topic.metadata.get("known")
+    assert topic.metadata.get("current_focus") != "Wrong focus"
+    assert len(calls) == 1
+    assert "Teach exactly one concept" in calls[0]
+    assert "accepted course plan" not in calls[0].lower()
+    if lesson_policy.first_lesson_response_is_valid(raw):
+        assert lesson == cli.sanitize_model_output(raw)
+    restarted = TestClient(create_app(testing=True))
+    token = csrf(restarted, "/courses/new")
+    replayed = restarted.post("/api/courses", headers={"x-csrf-token": token}, json=payload)
+    assert replayed.status_code == 202
+    assert replayed.json()["slug"] == slug
+    assert replayed.json()["operation_id"] == operation_id
+    assert replayed.json()["created"] is False
+    assert wait_for_operation(restarted, slug, operation_id)["state"] == "committed"
+    assert len(calls) == 1
+    assert "For example," in restarted.get(f"/courses/{slug}").text
+    history = restarted.get(f"/courses/{slug}/history", headers={"accept": "application/json"})
+    assert len(history.json()["items"]) == 1
+    assert history.json()["items"][0]["title"] == "First lesson"
+
+
 @pytest.mark.parametrize("invalid", [False, True])
 def test_accepted_plan_initialization_shares_policy_and_survives_restart(
     client: TestClient, monkeypatch: pytest.MonkeyPatch, invalid: bool

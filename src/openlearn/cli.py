@@ -9566,7 +9566,7 @@ def ask_topic(
             response_metadata_sink=capture_response_metadata,
         )
     )
-    if interview_target is None and lesson_policy.is_first_lesson_prompt(prompt):
+    if interview_target is None and initializing:
         # Streaming removes hidden markers and carries coverage separately.
         policy_answer = generated_answer
         if response_metadata.covered_concepts and not extract_covered_concepts(policy_answer):
@@ -9604,7 +9604,7 @@ def ask_topic(
             projected_metadata["current_focus"] = focus_title
             projected_metadata["last_video_focus"] = None
     previous_pending = projected_metadata.get("pending_question")
-    if interview_target is None and lesson_policy.is_first_lesson_prompt(prompt):
+    if interview_target is None and initializing:
         unit_number = projected_metadata.get("current_unit")
         slide = projected_metadata.get("current_slide")
         if isinstance(unit_number, int) and isinstance(slide, int):
@@ -9827,7 +9827,7 @@ def generate_validated_tutor_answer(
 ) -> str:
     """Generate, validate, then reveal one tutor response."""
     first_lesson_initializing = (
-        interview_target is None and lesson_policy.is_first_lesson_prompt(prompt)
+        interview_target is None and lesson_policy.is_course_initialization_prompt(prompt)
     )
     message_kind = topic.metadata.get("current_turn_message_kind")
     verify_target = (
@@ -9878,6 +9878,8 @@ def generate_validated_tutor_answer(
                 forbid_choice_claim=forbid_choice_claim,
             )
         )
+        if first_lesson_initializing:
+            user = lesson_policy.initialization_generation_prompt(user)
         stream_options = (
             {"stream_sink": stream_sink}
             if stream_sink is not None and not first_lesson_initializing

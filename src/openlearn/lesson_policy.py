@@ -30,14 +30,8 @@ def first_lesson_prompt(outline: str, *, first_activity: str | None = None) -> s
     return (
         f"{FIRST_LESSON_PROMPT_PREFIX} "
         f"{required_activity}"
-        "Do not repeat the whole plan. Teach exactly one concept. "
-        "Use exactly one **Lesson:** section and no other primary label. "
-        "Use two short paragraphs: explain the concept first, then start the "
-        "second paragraph with 'For example,' and make it concrete. Keep the "
-        "example accessible without relying on an algorithm, data structure, or "
-        "system component that has not been introduced. Use 2-4 sentences total. Do not append a "
-        "check, question, continuation cue, or learner action. "
-        f"Hard limit: {FIRST_LESSON_WORD_LIMIT} words.\n"
+        "Do not repeat the whole plan. "
+        f"{first_lesson_instructions()}"
         "Append <!-- covered: Exact concept label --> using one exact label from "
         "the current unit's Concepts: line. This marker is hidden from the learner "
         "and is required for coverage tracking.\n\n"
@@ -45,9 +39,35 @@ def first_lesson_prompt(outline: str, *, first_activity: str | None = None) -> s
     )
 
 
+def first_lesson_instructions() -> str:
+    """The teaching contract shared by planned and unplanned startup."""
+    return (
+        "Teach exactly one concept. "
+        "Use exactly one **Lesson:** section and no other primary label. "
+        "Use two short paragraphs: explain the concept first, then start the "
+        "second paragraph with 'For example,' and make it concrete. Keep the "
+        "example accessible without relying on an algorithm, data structure, or "
+        "system component that has not been introduced. Use 2-4 sentences total. Do not append a "
+        "check, question, continuation cue, or learner action. "
+        f"Hard limit: {FIRST_LESSON_WORD_LIMIT} words.\n"
+    )
+
+
+def initialization_generation_prompt(prompt: str) -> str:
+    """Expand the saved sentinel without claiming that an outline was accepted."""
+    if prompt != COURSE_INITIALIZATION_PROMPT:
+        return prompt
+    return (
+        f"{COURSE_INITIALIZATION_PROMPT} Teach from the course goal and available context. "
+        f"{first_lesson_instructions()}"
+        "If the current unit has a Concepts: line, append <!-- covered: Exact concept label --> "
+        "using one label from it. Otherwise do not invent a coverage label."
+    )
+
+
 def enforce_first_lesson_response(metadata: Mapping[str, object], prompt: str, answer: str) -> str:
     """Guarantee that course initialization teaches instead of emitting navigation."""
-    if not is_first_lesson_prompt(prompt):
+    if not is_course_initialization_prompt(prompt):
         return answer
     focus = str(metadata.get("current_focus") or "the first course concept")
     concept = focus
