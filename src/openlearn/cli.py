@@ -9912,7 +9912,9 @@ def generate_validated_tutor_answer(
     if source_context is not None:
         from openlearn import source_context as sources
 
-        system = sources.tutor_prompt(source_context, topic.metadata)
+        system = sources.tutor_prompt(
+            source_context, topic.metadata, engagement_check_due=engagement_check_due,
+        )
         prompt = source_context.user
     elif interview_target is not None:
         system = system_prompt(

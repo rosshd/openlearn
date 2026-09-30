@@ -7,6 +7,7 @@ import json
 import math
 import re
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from openlearn import cli, source_imports
@@ -242,11 +243,29 @@ def _scoped_state(metadata: dict[str, object]) -> dict[str, object]:
         value = metadata.get(key)
         if type(value) in {int, float} and math.isfinite(value) and 0 <= value <= 1000000:
             state[key] = value
+    remediation = metadata.get("pending_remediation")
+    if isinstance(remediation, dict) and isinstance(remediation.get("stage"), str) and remediation["stage"] in {
+        "hint", "worked_example", "faded_check", "deferred",
+    }:
+        # Preserve move selection, not arbitrary labels, gaps or private notes.
+        clean_remediation = {"stage": remediation["stage"]}
+        due = remediation.get("deferred_review_due")
+        if isinstance(due, str) and len(due) <= 35:
+            try:
+                datetime.fromisoformat(due)
+            except ValueError:
+                pass
+            else:
+                clean_remediation["deferred_review_due"] = due
+        state["pending_remediation"] = clean_remediation
     return state
 
 
-def tutor_prompt(context: SourceContext, metadata: dict[str, object]) -> str:
+def tutor_prompt(
+    context: SourceContext, metadata: dict[str, object], *, engagement_check_due: bool = False,
+) -> str:
     state = dict(context.model_metadata)
+    state.pop("pending_remediation", None)
     state.update(_scoped_state(metadata))
     policy = """You are openLearn, a local-first tutor. Teach one concept per response.
 Use one primary bold label: Lesson, Feedback, Hint, Check, or Next.
@@ -254,11 +273,13 @@ Use Check only for meaningful learner work; do not reveal its answer.
 Grade the stored Check, respecting its answer key. Recognition alone is not
 production/transfer mastery. Respect explicit navigation and bounded remediation.
 Use only the scoped lesson state and source data below, not inferred profiles.
-Questions/requests/confusion should receive an explanation without a new Check.
+Questions/requests/confusion should receive an explanation without a new Check,
+unless the current contract explicitly requires an engagement Check.
 Practice requests require one Check with one clear Action and no solution.
-For navigation teach one uncovered idea without inventing a learner choice.
+For navigation follow the current contract without inventing a learner choice.
+For deferred remediation disclose the saved return date when provided.
 """
-    prompt = policy + cli.tutor_turn_contract(state) + "\nScoped lesson state:\n" + json.dumps(state, ensure_ascii=False) + "\nCurrent relevant lesson:\n" + context.previous_lesson + "\n" + context.prompt + "\n" + SOURCE_POLICY
+    prompt = policy + cli.tutor_turn_contract(state, engagement_check_due=engagement_check_due) + "\nScoped lesson state:\n" + json.dumps(state, ensure_ascii=False) + "\nCurrent relevant lesson:\n" + context.previous_lesson + "\n" + context.prompt + "\n" + SOURCE_POLICY
     if len(prompt) + len(context.user) > PROMPT_CHAR_LIMIT:
         raise cli.OpenLearnError("The screened whole request exceeds its source-mode budget; no request was sent.")
     return prompt

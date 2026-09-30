@@ -231,6 +231,66 @@ def test_invalid_scalar_state_is_not_transmitted(course):
     assert "consecutive_misses" not in context.model_metadata
 
 
+@pytest.mark.parametrize("stage", ["hint", "worked_example", "faded_check", "deferred"])
+def test_source_move_preserves_bounded_remediation_without_private_fields(course, stage):
+    topic, _record = course
+    topic.metadata.update({
+        "current_turn_message_kind": "answer", "last_answer_status": "needs_work",
+        "consecutive_misses": 4, "pending_remediation": {
+            "stage": stage, "label": "PRIVATE_LABEL", "blocking_prerequisite": "PRIVATE_GAP",
+            "notes": "PRIVATE_NOTES", "deferred_review_due": "2026-10-03",
+        },
+    })
+    context = sources.snapshot(topic, "stack", sources.APPROVED_MODEL, opted_in=True)
+    prompt = sources.tutor_prompt(context, topic.metadata)
+    assert cli.remediation_turn_branch(context.model_metadata) in prompt
+    assert "Current branch: stuck learner" not in prompt
+    for private in ("PRIVATE_LABEL", "PRIVATE_GAP", "PRIVATE_NOTES"):
+        assert private not in sources.request_preview(context)
+    if stage == "deferred":
+        assert "bounded remediation is exhausted" in prompt
+        assert "2026-10-03" in prompt
+        assert "Do not ask the failed question again" in prompt
+
+
+def test_invalid_remediation_state_is_not_transmitted(course):
+    topic, _record = course
+    topic.metadata["pending_remediation"] = {"stage": "deferred", "deferred_review_due": "PRIVATE_DATE"}
+    context = sources.snapshot(topic, "stack", sources.APPROVED_MODEL, opted_in=True)
+    assert context.model_metadata["pending_remediation"] == {"stage": "deferred"}
+    topic.metadata["pending_remediation"] = {"stage": "PRIVATE_STAGE"}
+    context = sources.snapshot(topic, "stack", sources.APPROVED_MODEL, opted_in=True)
+    assert "pending_remediation" not in context.model_metadata
+
+
+def test_source_move_uses_updated_remediation_not_consent_time_stage(course):
+    topic, _record = course
+    topic.metadata.update({"current_turn_message_kind": "answer", "last_answer_status": "needs_work",
+                           "pending_remediation": {"stage": "deferred"}})
+    context = sources.snapshot(topic, "stack", sources.APPROVED_MODEL, opted_in=True)
+    updated = {**topic.metadata, "last_answer_status": "correct"}
+    updated.pop("pending_remediation")
+    prompt = sources.tutor_prompt(context, updated)
+    assert "Current branch: correct answer" in prompt
+    assert "bounded remediation is exhausted" not in prompt
+
+
+def test_source_generation_passes_engagement_check_policy(course):
+    topic, _record = course
+    topic.metadata["current_turn_message_kind"] = "navigation"
+    topic.path.write_text(cli.format_topic(topic.metadata, topic.body), encoding="utf-8")
+    topic = cli.read_topic(topic.slug)
+    context = sources.snapshot(topic, "continue stack", sources.APPROVED_MODEL, opted_in=True)
+    with mock.patch.object(cli, "call_openai_streaming", return_value=CHECK) as tutor:
+        cli.generate_validated_tutor_answer(
+            topic, context.user, sources.APPROVED_MODEL, source_context=context,
+            engagement_check_due=True, output_func=lambda _: None,
+        )
+    assert tutor.call_count == 1
+    assert "Current branch: engagement check due" in tutor.call_args.kwargs["system"]
+    assert "Current branch: explicit navigation" not in tutor.call_args.kwargs["system"]
+
+
 def test_read_budget_rejects_oversized_and_symlink_material(course):
     topic, record = course
     path = cli.topic_context_dir(topic.slug) / record.context_file
