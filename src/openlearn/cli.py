@@ -9451,12 +9451,20 @@ def ask_topic(
         if message_kind_override in {"question", "request", "confusion", "navigation"}
         else ""
     )
+    practice_requested = (
+        session_kind != SIDE_CHAT_SESSION_KIND
+        and explicit_message_kind not in {"navigation", "confusion"}
+        and learner_requests_practice(prompt)
+    )
+    restoring_check = practice_requested and has_pending_question
+    if practice_requested:
+        explicit_message_kind = "practice"
     needs_judgment = (
         not initializing
         and not explicit_message_kind
         and learner_message_needs_judgment(topic.metadata, prompt)
     )
-    if session_kind != SIDE_CHAT_SESSION_KIND and not initializing:
+    if session_kind != SIDE_CHAT_SESSION_KIND and not initializing and not practice_requested:
         record_pending_attempt_reflection(topic, prompt)
     is_navigation = explicit_message_kind == "navigation" or (
         not explicit_message_kind
@@ -9473,6 +9481,8 @@ def ask_topic(
             else ("" if needs_judgment else classify_ungraded_learner_message(prompt))
         )
     )
+    if session_kind == SIDE_CHAT_SESSION_KIND and message_kind == "practice":
+        message_kind = "request"
     queued_events: list[tuple[str, str, dict[str, object]]] = []
     state_before = copy.deepcopy(load_state(topic.slug))
     projected_metadata = copy.deepcopy(topic.metadata)
@@ -9567,7 +9577,9 @@ def ask_topic(
     if turn_observer is not None:
         turn_observer.publish_phase("generating")
     generated_answer = (
-        generated_answer_override
+        pending_check_response(topic.metadata)
+        if restoring_check
+        else generated_answer_override
         if generated_answer_override is not None
         else generate_validated_tutor_answer(
             topic,
@@ -9593,7 +9605,7 @@ def ask_topic(
         _visible_override, response_metadata = tutor_response_metadata(
             generated_answer
         )
-    if generated_answer_override is not None and interview_target is not None:
+    if generated_answer_override is not None and interview_target is not None and not restoring_check:
         from openlearn import interview_curriculum
 
         if interview_curriculum.target_response_error(generated_answer, interview_target):
@@ -9606,6 +9618,8 @@ def ask_topic(
     if interview_target is not None:
         focus_title = str(interview_target.get("skill_label") or "")
     answer = sanitize_model_output(generated_answer)
+    if restoring_check:
+        emit_tutor_output(answer, output_func)
     if turn_observer is not None:
         turn_observer.publish_phase("validating")
     answer_key = response_metadata.answer_key
@@ -9614,7 +9628,7 @@ def ask_topic(
         generated_state_hook(answer)
         state_before = copy.deepcopy(load_state(topic.slug))
     projected_metadata.pop("current_turn_message_kind", None)
-    if session_kind != SIDE_CHAT_SESSION_KIND:
+    if session_kind != SIDE_CHAT_SESSION_KIND and not restoring_check:
         if focus_title:
             projected_metadata["current_focus"] = focus_title
             projected_metadata["last_video_focus"] = None
@@ -9634,7 +9648,7 @@ def ask_topic(
                 coverage[slide_content_key(unit_number, slide)] = covered
                 projected_metadata["slide_coverage"] = coverage
     question = extract_pending_question_text(answer)
-    if question and explicit_check_section_count(answer) == 1:
+    if question and explicit_check_section_count(answer) == 1 and not restoring_check:
         reasoning_check = multiple_choice_requires_reasoning(question)
         keyed_recognition = (
             answer_key in {"A", "B", "C", "D"} and not reasoning_check
@@ -9801,7 +9815,7 @@ def ask_topic(
     should_update_metadata = (
         not needs_judgment
         and not is_navigation
-        and explicit_message_kind not in {"question", "request", "confusion"}
+        and explicit_message_kind not in {"question", "request", "confusion", "practice"}
         and not initializing
     )
     if should_finish_turn and deferred_updates is None:
@@ -9849,7 +9863,7 @@ def generate_validated_tutor_answer(
         isinstance(interview_target, dict)
         and interview_target.get("depth_mode") == "verify"
     )
-    require_check = verify_target or engagement_check_due or tutor_turn_requires_check(
+    require_check = message_kind == "practice" or verify_target or engagement_check_due or tutor_turn_requires_check(
         topic.metadata, message_kind=message_kind
     )
     forbid_check = not engagement_check_due and message_kind in {
@@ -9857,7 +9871,7 @@ def generate_validated_tutor_answer(
         "request",
         "confusion",
     }
-    enforce_action_labels = engagement_check_due or message_kind in {None, "", "answer"}
+    enforce_action_labels = engagement_check_due or message_kind in {None, "", "answer", "practice"}
     forbid_choice_claim = message_kind == "navigation"
     if interview_target is not None:
         system = system_prompt(
@@ -10101,9 +10115,34 @@ def finish_turn_update(
 
 def learner_message_needs_judgment(metadata: dict[str, object], prompt: str) -> bool:
     """Return whether this turn may answer an existing learning check."""
-    if learner_requests_advance(prompt):
+    if learner_requests_advance(prompt) or learner_requests_practice(prompt):
         return False
     return isinstance(metadata.get("pending_question"), dict)
+
+
+def learner_requests_practice(prompt: str) -> bool:
+    """Recognize explicit practice commands, including polite question forms."""
+    value = " ".join(prompt.strip().lower().split()).rstrip(".!?")
+    return re.fullmatch(
+        r"(?:(?:can|could|would) you )?(?:please )?"
+        r"(?:quiz me|test me|give me (?:a |one )(?:quiz|check|practice question)|"
+        r"ask me (?:a |one )(?:question|practice question))"
+        r"(?: (?:on|about) [\w -]+)?(?: please)?",
+        value,
+    ) is not None
+
+
+def pending_check_response(metadata: dict[str, object]) -> str:
+    """Display the stored task without regenerating its key or learner state."""
+    pending = metadata.get("pending_question")
+    if (
+        not isinstance(pending, dict)
+        or not isinstance(pending.get("question"), str)
+        or not pending["question"].strip()
+    ):
+        raise OpenLearnError("The saved Check has no task text.")
+    question = sanitize_model_output(pending["question"])
+    return question if explicit_check_section_count(question) == 1 else f"**Check:**\n{question}"
 
 
 def classify_ungraded_learner_message(prompt: str) -> str:
@@ -10111,6 +10150,8 @@ def classify_ungraded_learner_message(prompt: str) -> str:
     value = " ".join(prompt.strip().lower().split())
     if not value:
         return "other"
+    if learner_requests_practice(prompt):
+        return "practice"
     confusion_markers = (
         "i don't understand",
         "i dont understand",
@@ -14122,8 +14163,13 @@ def _continue_canonical_interview_course(
     return 0
 
 
-def cmd_resume(args: argparse.Namespace, input_func=input, output_func=print) -> int:
+def cmd_resume(
+    args: argparse.Namespace, input_func=input, output_func=print, *, restore_pending: bool = True
+) -> int:
     topic = read_topic(resolve_topic_slug(args.topic))
+    if restore_pending and isinstance(topic.metadata.get("pending_question"), dict):
+        emit_tutor_output(pending_check_response(topic.metadata), output_func)
+        return 0
     model = args.model or str(topic.metadata.get("model") or configured_model())
     interview_value = None
     if interview_profile_path(topic.slug).exists():
@@ -14237,7 +14283,7 @@ def cmd_resume(args: argparse.Namespace, input_func=input, output_func=print) ->
 def cmd_next(args: argparse.Namespace, output_func=print) -> int:
     topic = read_topic(resolve_topic_slug(args.topic))
     if interview_profile_path(topic.slug).exists():
-        return cmd_resume(args, output_func=output_func)
+        return cmd_resume(args, output_func=output_func, restore_pending=False)
     set_active_topic(topic.slug)
     set_review_session_active(topic.slug, False)
     print_status_bar(topic, output_func)
@@ -18538,6 +18584,12 @@ def tutor_turn_contract(
             "Current branch: explicit navigation. Move forward directly. The learner only "
             "asked to continue; do not praise a choice or imply that they selected a topic, "
             "example, or approach."
+        )
+    elif message_kind == "practice":
+        branch = (
+            "Current branch: explicit practice request. The request is not an answer. "
+            "Use one **Check:** move with one gradeable task on the current taught focus. "
+            "Withhold the answer until the learner attempts it."
         )
     elif isinstance(message_kind, str) and message_kind not in {"", "answer"}:
         branch = (

@@ -1398,6 +1398,57 @@ def test_real_browser_course_library_preview_history_responsive_and_no_js(
                 process.wait(timeout=5)
 
 
+def test_real_browser_practice_restores_saved_task_across_reload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    playwright = pytest.importorskip("playwright.sync_api")
+    home = tmp_path / "practice-home"
+    monkeypatch.setenv("OPENLEARN_HOME", str(home))
+    monkeypatch.setenv("OPENLEARN_MOCK", "1")
+    cli.clear_config_cache()
+    cli.cmd_new(argparse.Namespace(topic="Practice", goal="Learn return values"),
+                output_func=lambda _text: None)
+    cli.save_course_started(cli.read_topic("practice"), "Accepted plan",
+                            "Units:\n1. Functions (2 slides)\nConcepts: return values")
+    check = "**Check:**\nWhat does return send?\nA) A result\nB) Nothing\n<!-- answer: A -->"
+    with mock.patch.object(cli, "call_openai_streaming", return_value=check):
+        tutor_service.submit_turn("practice", "quiz me", submission_id=str(uuid4()),
+                                  expected_revision=0)
+    pending = cli.load_state("practice")["pending_question"]
+    port = _free_loopback_port()
+    base_url = f"http://127.0.0.1:{port}"
+    environment = {**os.environ, "OPENLEARN_HOME": str(home), "OPENLEARN_MOCK": "1",
+                   "PYTHONPATH": str(SOURCE_ROOT)}
+    command = f"from openlearn.web.launcher import run; run(port={port}, open_browser=False)"
+    with (tmp_path / "practice-web.log").open("wb") as log:
+        process = subprocess.Popen([sys.executable, "-c", command], cwd=tmp_path,
+                                   env=environment, stdout=log, stderr=subprocess.STDOUT)
+        try:
+            bootstrap_url, app_url = _wait_until_ready(base_url, process, home)
+            with playwright.sync_playwright() as runtime:
+                browser = runtime.chromium.launch()
+                page = browser.new_page()
+                page.goto(bootstrap_url)
+                page.goto(f"{app_url}/courses/practice")
+                playwright.expect(page.locator("#learner-response")).to_be_visible()
+                revision = _revision(page)
+                page.locator("#learner-response").fill("Could you please quiz me?")
+                page.locator("#learner-response").press("Control+Enter")
+                _wait_for_new_revision(page, revision)
+                page.reload()
+                playwright.expect(page.locator("[data-focus-shell]")).to_contain_text("What does return send?")
+                assert "answer: A" not in page.locator("body").inner_text()
+                assert cli.load_state("practice")["pending_question"] == pending
+                browser.close()
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+
+
 def test_real_browser_saved_first_lesson_retry_after_restart(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

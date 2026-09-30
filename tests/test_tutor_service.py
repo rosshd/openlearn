@@ -736,6 +736,29 @@ class TutorServiceTests(TestCase):
             "concept.arrays-strings",
         )
 
+    def test_practice_restore_keeps_canonical_interview_target_and_evidence(self) -> None:
+        slug = self._create_interview_course()
+        check = (
+            "**Lesson:**\nArray indices stop at len(values) - 1.\n\n"
+            "**Check:**\nExplain how indexed traversal finds an array boundary."
+        )
+        with mock.patch.object(cli, "call_openai_streaming", return_value=check):
+            submit_turn(slug, "Continue.", intent="navigation",
+                        submission_id=str(uuid4()), expected_revision=0)
+        before = copy.deepcopy(cli.load_state(slug))
+        with (
+            mock.patch.object(cli, "call_openai") as judge,
+            mock.patch.object(cli, "call_openai_streaming") as provider,
+        ):
+            result = submit_turn(slug, "Can you quiz me?", submission_id=str(uuid4()),
+                                 expected_revision=course_revision(slug))
+        self.assertEqual(result.status, "committed")
+        judge.assert_not_called()
+        provider.assert_not_called()
+        after = cli.load_state(slug)
+        self.assertEqual(after["pending_question"], before["pending_question"])
+        self.assertEqual(after["interview_curriculum"], before["interview_curriculum"])
+
     def test_interview_check_and_judgment_keep_exact_stable_skill_identity(self) -> None:
         slug = self._create_interview_course()
 

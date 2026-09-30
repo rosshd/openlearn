@@ -98,6 +98,51 @@ def create_tool_course() -> str:
     return "tool-course"
 
 
+def test_practice_turn_restores_same_check_after_web_restart(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    slug = create_tool_course()
+    outline = "Units:\n1. Functions (2 slides)\nConcepts: return values"
+    cli.save_course_started(cli.read_topic(slug), "Accepted plan", outline)
+    check = "**Check:**\nWhat does return send?\nA) A result\nB) Nothing\n<!-- answer: A -->"
+    calls: list[str] = []
+
+    def generate(**_kwargs: object) -> str:
+        calls.append("generate")
+        return check
+
+    monkeypatch.setattr(cli, "call_openai_streaming", generate)
+    monkeypatch.setattr(cli, "call_openai", lambda **_kwargs: pytest.fail("practice was judged"))
+    monkeypatch.setattr(cli, "maybe_suggest_videos", lambda *_args: None)
+    token = csrf(client)
+    sid = str(uuid4())
+    payload = {"intent": "answer", "text": "Can you quiz me?",
+               "submission_id": sid, "expected_revision": 0}
+    first = client.post(f"/api/courses/{slug}/turns", headers={"x-csrf-token": token}, json=payload)
+    assert first.status_code == 202
+    assert wait_for_operation(client, slug, sid)["state"] == "committed"
+    pending = cli.load_state(slug)["pending_question"]
+    assert pending["answer_key"] == "A"
+    with TestClient(create_app(testing=True)) as restarted:
+        page = restarted.get(f"/courses/{slug}")
+        assert "What does return send?" in page.text
+        assert 'id="learner-response"' in page.text
+        restarted_token = page.cookies["openlearn_csrf"]
+        replay = restarted.post(f"/api/courses/{slug}/turns",
+                                headers={"x-csrf-token": restarted_token}, json=payload)
+        assert replay.status_code == 202
+        assert wait_for_operation(restarted, slug, sid)["state"] == "committed"
+        restored_sid = str(uuid4())
+        restored = restarted.post(f"/api/courses/{slug}/turns",
+            headers={"x-csrf-token": restarted_token},
+            json={"intent": "answer", "text": "please quiz me", "submission_id": restored_sid,
+                  "expected_revision": 1})
+        assert restored.status_code == 202
+        assert wait_for_operation(restarted, slug, restored_sid)["state"] == "committed"
+    assert calls == ["generate"]
+    assert cli.load_state(slug)["pending_question"] == pending
+
+
 def test_default_web_app_runs_setup_dashboard_course_and_tutor_flow(
     client: TestClient,
 ) -> None:
