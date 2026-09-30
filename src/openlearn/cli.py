@@ -19135,7 +19135,7 @@ def _mock_openai_response(model: str, system: str, user: str) -> str:
                 "4. Timed Practice (2 slides, difficulty 5/10) - Explain and test a complete solution.\n"
                 "Concepts: Edge cases; Complexity analysis"
             )
-        return "Scope: Mock scope\nExcludes: None\nAssumptions: Beginner\nUnits:\n1. Modes (2 slides) - Understand insert vs normal.\n2. Movement (2 slides) - h j k l.\n3. Editing (2 slides) - x dd p.\n4. Save and quit (1 slide) - :wq"
+        return "Scope: Mock scope\nExcludes: None\nAssumptions: Beginner\nUnits:\n1. Modes (2 slides) - Understand insert vs normal.\nConcepts: Vim modes\n2. Movement (2 slides) - h j k l.\n3. Editing (2 slides) - x dd p.\n4. Save and quit (1 slide) - :wq"
     # Default small tutor response
     return "**Lesson:** Mock reply. Ask a focused question to continue."
 
