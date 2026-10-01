@@ -19988,6 +19988,29 @@ class PlatformGuardTests(unittest.TestCase):
                 ):
                     self.assertEqual(cli.read_repl_message("> ", fake_input), expected)
 
+    def test_read_repl_message_preserves_mixed_terminal_delivery(self) -> None:
+        read_descriptor, write_descriptor = os.pipe()
+        fake_stdin = mock.Mock()
+        fake_stdin.fileno.return_value = read_descriptor
+        fake_stdin.encoding = "utf-8"
+        fake_stdin.isatty.return_value = True
+        fake_input = lambda prompt: "first"  # noqa: E731
+        # Translated CR boundaries plus one still-visible CRLF pair.
+        # Only that pair is normalized; the intentional blank remains.
+        payload = "\rSecond café\r\r\r\nCheck\r\r".encode()
+        try:
+            os.write(write_descriptor, payload)
+            os.close(write_descriptor)
+            with (
+                mock.patch.object(builtins, "input", fake_input),
+                mock.patch.object(sys, "stdin", fake_stdin),
+                mock.patch.object(sys, "platform", "linux"),
+            ):
+                result = cli.read_repl_message("> ", fake_input)
+            self.assertEqual(result, "first\n\nSecond café\n\n\nCheck\n")
+        finally:
+            os.close(read_descriptor)
+
 
 class KeylessProviderTests(unittest.TestCase):
     def setUp(self) -> None:

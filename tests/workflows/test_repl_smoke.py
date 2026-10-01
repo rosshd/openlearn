@@ -98,13 +98,22 @@ def test_repl_multiline_paste_is_one_learner_message(spawn_openlearn, terminator
         topic_path = Path(spawn_openlearn.env["OPENLEARN_HOME"]) / "learning-topics" / "workflow.md"
         topic_text = topic_path.read_text(encoding="utf-8")
         assert topic_text.count(" - chat") == 1
-        # These PTYs convert CRLF to doubled line breaks before the raw
-        # reader can distinguish them from intentional blank lines.
-        expected = message.replace("\n", "\n\n") if terminator == "\r\n" else message
         _metadata, body = cli.parse_topic(topic_text)
         _context, session_log = cli.split_session_log(body)
         chat_entries = [entry for entry in cli.session_entries(session_log) if entry["kind"] == "chat"]
-        assert [entry["prompt"] for entry in chat_entries] == [expected]
+        assert len(chat_entries) == 1
+        stored = chat_entries[0]["prompt"]
+        if terminator == "\r\n":
+            # Readline/PTY translation differs across platforms: CRLF may
+            # reach the reader as doubled boundaries or a visible pair.
+            # This blank has four LF boundaries on Mac and three on Linux.
+            # Exact byte preservation is checked by the raw-reader tests.
+            assert [line for line in stored.split("\n") if line] == [
+                line for line in message.split("\n") if line
+            ]
+            assert "café line.\n\n" in stored
+        else:
+            assert stored == message
         assert topic_text.count("Check: Second line?") == 1
     finally:
         proc.close()
