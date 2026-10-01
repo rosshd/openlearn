@@ -9648,7 +9648,7 @@ def ask_topic(
     )
     if source_snapshot is not None and source_snapshot.reference_error(generated_answer):
         raise OpenLearnError(
-            "Saved tutor response has unsupported source line references. "
+            "Saved tutor response has unsupported source references. "
             "The previous question and your answer were preserved for retry."
         )
     if interview_target is None and initializing:
@@ -9992,7 +9992,7 @@ def generate_validated_tutor_answer(
             if source_reference_error:
                 user += (
                     "\n" + source_reference_error
-                    + " Omit numeric source locators; the application adds the real excerpt ledger."
+                    + " Omit unsupported source references; the application adds the real excerpt ledger."
                 )
             sources.ensure_unchanged(topic, source_context, model)
             if len(system) + len(user) > sources.PROMPT_CHAR_LIMIT:
@@ -10024,7 +10024,7 @@ def generate_validated_tutor_answer(
             if source_reference_error:
                 if attempt == 1:
                     raise OpenLearnError(
-                        "Tutor returned unsupported source line references. "
+                        "Tutor returned unsupported source references. "
                         "The previous question and your answer were preserved for retry."
                     )
                 continue

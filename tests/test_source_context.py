@@ -210,11 +210,16 @@ def test_equation_coefficients_are_not_source_line_locators(course, equation):
     assert snapshot.reference_error('The supplied excerpt at lines 78–79 states a rule.')
 
 
+@pytest.mark.parametrize('bad', [
+    '**Lesson:**\nThe supplied excerpt at lines 78–79 states the LIFO rule.',
+    '**Lesson:**\nSource ID file:ffffffffffffffff at lines 1-2 states the LIFO rule.',
+    '**Lesson:**\nThe supplied notes on page 99 state the LIFO rule.',
+    '**Lesson:**\nThe supplied lecture on slide 99 states the LIFO rule.',
+])
 @pytest.mark.parametrize('repair_succeeds', [True, False])
-def test_source_locator_repair_is_buffered_and_failure_preserves_state(course, repair_succeeds):
+def test_source_locator_repair_is_buffered_and_failure_preserves_state(course, repair_succeeds, bad):
     topic, _ = course
     before = topic.path.read_bytes(), copy.deepcopy(cli.load_state(topic.slug))
-    bad = '**Lesson:**\nThe supplied excerpt at lines 78–79 states the LIFO rule.'
     good = '**Lesson:**\nThe supplied excerpt states the LIFO rule.'
     calls = []
     output = []
@@ -234,12 +239,12 @@ def test_source_locator_repair_is_buffered_and_failure_preserves_state(course, r
             assert good in answer and bad not in answer
             assert sources.LEDGER_MARKER in answer
         else:
-            with pytest.raises(cli.OpenLearnError, match='unsupported source line references'):
+            with pytest.raises(cli.OpenLearnError, match='unsupported source references'):
                 cli.ask_topic(topic.slug, 'Explain the stack rule', source_mode=True,
                               input_func=consent, output_func=output.append, turn_observer=observer)
             assert (topic.path.read_bytes(), cli.load_state(topic.slug)) == before
     assert len(calls) == 2
-    assert 'Omit numeric source locators' in calls[1]['user']
+    assert 'Omit unsupported source references' in calls[1]['user']
     assert bad not in '\n'.join(output)
     assert all(bad not in str(call.args) for call in observer.publish_preview.call_args_list)
 
@@ -248,11 +253,22 @@ def test_saved_source_response_cannot_bypass_reference_guard(course):
     topic, _ = course
     before = topic.path.read_bytes(), copy.deepcopy(cli.load_state(topic.slug))
     with mock.patch.object(cli, 'call_openai_streaming', side_effect=AssertionError('provider called')):
-        with pytest.raises(cli.OpenLearnError, match='unsupported source line references'):
+        with pytest.raises(cli.OpenLearnError, match='unsupported source references'):
             cli.ask_topic(topic.slug, 'Explain the stack rule', source_mode=True,
                           input_func=consent, output_func=lambda _: None,
                           generated_answer_override='**Lesson:**\nSee the notes at lines 78–79.')
     assert (topic.path.read_bytes(), cli.load_state(topic.slug)) == before
+
+
+def test_source_identity_and_original_page_numbers_are_not_invented(course):
+    topic, record = course
+    snapshot = sources.snapshot(topic, 'Explain the stack rule', sources.APPROVED_MODEL, opted_in=True)
+    assert snapshot.reference_error(f'Source ID `{record.source_id}`, lines 1-2 states LIFO.') is None
+    assert snapshot.reference_error('Source ID file:ffffffffffffffff, lines 1-2 states LIFO.')
+    assert snapshot.reference_error('See [file:ffffffffffffffff], lines 1-2.')
+    for reference in ('page 99', 'pages 99-100', 'slide 99', 'slide #99'):
+        assert snapshot.reference_error(f'The supplied lecture at {reference} states the rule.')
+    assert snapshot.reference_error('A notebook has 99 pages. Push 4 then 7. g(4)=3(4)-2=10.') is None
 
 
 def test_preview_filters_entire_payload_and_pending_key_is_preserved(course):

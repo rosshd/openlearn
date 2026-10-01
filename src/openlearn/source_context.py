@@ -92,8 +92,15 @@ class SourceContext:
     revision: str
 
     def reference_error(self, answer: str) -> str | None:
-        """Reject numeric locators absent from this request, not mathematical claims."""
+        """Reject unavailable source identities/locators, not mathematical claims."""
         text = without_ledger(answer)
+        identifiers = set(re.findall(r"\bsource ID ([^;\s]+)", self.ledger))
+        claims = re.findall(r"(?i)\bsource\s+ID\s*:?\s+([^\s;,]+)", text)
+        claims += re.findall(r"(?i)\b(?:file|url):[a-z0-9_-]+", text)
+        if any(value.strip("`*'\"()[]{}.,") not in identifiers for value in claims):
+            return "A source ID is absent from the selected excerpt ledger."
+        if re.search(r"(?i)\b(?:pages?|slides?)\s+(?:#\s*)?\d+(?!\w|\.\d)", text):
+            return "Only extracted-text line locators are available, not page or slide numbers."
         ranges = [(int(start), int(stop)) for start, stop in re.findall(
             r"extracted text lines (\d+)-(\d+)", self.ledger,
         )]

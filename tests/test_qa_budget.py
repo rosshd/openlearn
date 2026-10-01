@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from argparse import Namespace
 import json
 import multiprocessing
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
@@ -373,6 +374,48 @@ def test_stream_retry_refused_before_second_post(budget_env, monkeypatch):
     assert error.value.category == "qa_budget_stop"
     assert len(calls) == 1
     assert ledger(budget_env[1])["attempts"][0]["status"] == "reserved"
+
+
+def test_source_reference_repair_uses_the_same_transport_budget(budget_env, monkeypatch):
+    from openlearn import source_context
+
+    monkeypatch.setenv("OPENLEARN_MOCK", "1")
+    monkeypatch.setenv("OPENLEARN_MODEL", MODEL)
+    cli.clear_config_cache()
+    cli.cmd_new(Namespace(topic="Budget source fixture", goal="Synthetic stack rule"), output_func=lambda _: None)
+    topic = cli.read_topic("budget-source-fixture")
+    topic = cli.Topic(topic.slug, topic.path, {**topic.metadata, "current_turn_message_kind": "question"}, topic.body)
+    snapshot = source_context.SourceContext(
+        "Selected excerpt states LIFO.", "\n\nSource excerpts provided:\n- extracted text lines 1-2",
+        "Explain the rule", {}, "", "synthetic-revision",
+    )
+    monkeypatch.delenv("OPENLEARN_MOCK")
+    monkeypatch.setenv("OPENLEARN_QA_MAX_CALLS", "1")
+    monkeypatch.setattr(source_context, "ensure_unchanged", lambda *_a: None)
+    calls = []
+    output, previews = [], []
+    before = topic.path.read_bytes(), cli.load_state(topic.slug)
+
+    def opener(request, **_kwargs):
+        calls.append(json.loads(request.data))
+        events = [
+            {"choices": [{"delta": {"content": "**Lesson:**\nNotes on page 99 state LIFO."}}]},
+            {"choices": [], "usage": USAGE},
+        ]
+        body = "".join(f"data: {json.dumps(event)}\n\n" for event in events)
+        return BytesIO((body + "data: [DONE]\n\n").encode())
+
+    monkeypatch.setattr(cli, "urlopen", opener)
+    with pytest.raises(cli.ProviderRequestError) as error:
+        cli.generate_validated_tutor_answer(
+            topic, snapshot.user, MODEL, source_context=snapshot,
+            output_func=output.append, stream_sink=previews.append,
+        )
+    assert error.value.category == "qa_budget_stop"
+    assert len(calls) == len(ledger(budget_env[1])["attempts"]) == 1
+    assert "page 99" not in "".join(output + previews)
+    assert (topic.path.read_bytes(), cli.load_state(topic.slug)) == before
+    cli.clear_config_cache()
 
 
 def test_budget_stop_remains_distinct_from_learner_or_judge_failure():
