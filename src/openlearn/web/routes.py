@@ -115,10 +115,26 @@ def _json_error(message: str, status: int = 400, **extra: Any) -> JSONResponse:
 
 
 async def _provider_ready(request: Request) -> bool:
+    status = await _teaching_provider_status(request)
+    return bool(status.get("ready"))
+
+
+async def _teaching_provider_status(request: Request) -> dict[str, Any]:
     operation = getattr(request.app.state.services, "ensure_provider_ready", None)
     method = "ensure_provider_ready" if callable(operation) else "provider_status"
-    status = public_mapping(await _call(request, method))
-    return bool(status.get("ready"))
+    return public_mapping(await _call(request, method))
+
+
+def _creation_provider_error(request: Request, status: dict[str, Any]) -> JSONResponse:
+    if status.get("error_code") in {"provider_unavailable", "provider_rate_limited"}:
+        return _json_error(
+            str(status.get("reason") or "The provider is unavailable. Retry later."),
+            503, state="provider_error", error_code=status["error_code"],
+        )
+    return _setup_required(
+        request,
+        message=str(status.get("reason") or "Test the provider connection before teaching starts."),
+    )
 
 
 async def _form_payload(request: Request, model: type[Any]) -> Any:
@@ -171,12 +187,15 @@ def _safe_setup_destination(request: Request) -> str:
     return request.url_for("dashboard").path
 
 
-def _setup_required(request: Request, *, next_path: str | None = None) -> JSONResponse:
+def _setup_required(
+    request: Request, *, next_path: str | None = None,
+    message: str = "Validate a model provider before starting model-backed teaching.",
+) -> JSONResponse:
     setup_url = request.url_for("setup")
     if next_path:
         setup_url = setup_url.include_query_params(next=next_path)
     return _json_error(
-        "Validate a model provider before starting model-backed teaching.",
+        message,
         428,
         state="setup_required",
         setup_url=str(setup_url),
@@ -288,6 +307,7 @@ async def new_course(request: Request) -> Any:
             request,
             course_templates=templates,
             selected_template=selected_template,
+            provider=public_mapping(await _call(request, "provider_status")),
             page_title="Start a course",
         ),
     )
@@ -392,9 +412,10 @@ async def create_course(request: Request) -> JSONResponse:
         if callable(entry_mode_operation)
         else None
     )
-    provider_ready = await _provider_ready(request)
+    provider_status = await _teaching_provider_status(request)
+    provider_ready = bool(provider_status.get("ready"))
     if entry_mode != "interview_prep" and not provider_ready:
-        return _setup_required(request)
+        return _creation_provider_error(request, provider_status)
     result = public_mapping(await _call(request, "create_course", payload))
     if not result.get("ok", False):
         return _json_error(str(result.get("error") or "Course creation failed."), 422)
@@ -441,9 +462,24 @@ async def create_course_form(request: Request) -> Any:
             status_code=422,
         )
     entry_mode = await _call(request, "course_entry_mode", payload.template_id)
-    provider_ready = await _provider_ready(request)
+    provider_status = await _teaching_provider_status(request)
+    provider_ready = bool(provider_status.get("ready"))
     if entry_mode != "interview_prep" and not provider_ready:
-        return _setup_redirect(request)
+        blocked = _creation_provider_error(request, provider_status)
+        return _templates(request).TemplateResponse(
+            request, "course_create.html",
+            _context(
+                request, course_templates=templates, selected_template=None,
+                creation_input=payload.model_dump(), submission_id=payload.submission_id,
+                provider=public_mapping(await _call(request, "provider_status")),
+                create_error=provider_status.get("reason") or "Test the provider connection before teaching starts.",
+                provider_recovery_message=(
+                    provider_status.get("reason") or "Test the provider connection before teaching starts."
+                ) if blocked.status_code == 428 else "",
+                page_title="Start a course",
+            ),
+            status_code=blocked.status_code,
+        )
     result = public_mapping(await _call(request, "create_course", payload))
     if not result.get("ok"):
         return _templates(request).TemplateResponse(
@@ -454,6 +490,8 @@ async def create_course_form(request: Request) -> Any:
                 course_templates=templates,
                 selected_template=None,
                 create_error=str(result.get("error") or "Course creation failed."),
+                creation_input=payload.model_dump(), submission_id=payload.submission_id,
+                provider=public_mapping(await _call(request, "provider_status")),
                 page_title="Start a course",
             ),
             status_code=422,
@@ -764,8 +802,7 @@ async def follow_up_api(request: Request, slug: str) -> JSONResponse:
     name="course_initializing",
 )
 async def course_initializing(request: Request, slug: str, operation_id: str) -> Any:
-    if not await _provider_ready(request):
-        return _setup_redirect(request)
+    provider_status = await _teaching_provider_status(request)
     try:
         slug = canonical_slug(slug)
         operation_id = canonical_uuid(operation_id)
@@ -782,6 +819,13 @@ async def course_initializing(request: Request, slug: str, operation_id: str) ->
         _context(
             request,
             initialization=snapshot,
+            provider=public_mapping(await _call(request, "provider_status")),
+            provider_blocked=not provider_status.get("ready"),
+            provider_setup_required=(
+                not provider_status.get("ready")
+                and provider_status.get("error_code") not in {"provider_unavailable", "provider_rate_limited"}
+            ),
+            provider_error=provider_status.get("reason", ""),
             status_url=str(
                 request.url_for("operation_status", slug=slug, operation_id=operation_id)
             ),
@@ -808,8 +852,9 @@ async def course_initializing(request: Request, slug: str, operation_id: str) ->
 async def retry_course_initialization(
     request: Request, slug: str, operation_id: str
 ) -> JSONResponse:
-    if not await _provider_ready(request):
-        return _setup_required(request)
+    provider_status = await _teaching_provider_status(request)
+    if not provider_status.get("ready"):
+        return _creation_provider_error(request, provider_status)
     try:
         slug = canonical_slug(slug)
         operation_id = canonical_uuid(operation_id)
@@ -956,6 +1001,7 @@ async def quick_learn(request: Request) -> Any:
             request,
             course_templates=templates,
             quick_learn=True,
+            provider=public_mapping(await _call(request, "provider_status")),
             page_title="Quick Learn",
         ),
     )

@@ -5,6 +5,10 @@
   data-operation-id="{{ initialization.operation_id }}"
   data-operation-state="{{ initialization.state }}"
   data-operation-error="{{ initialization.error or '' }}"
+  data-operation-error-code="{{ initialization.error_code or '' }}"
+  data-provider-blocked="{{ 'true' if provider_blocked else 'false' }}"
+  data-provider-setup-required="{{ 'true' if provider_setup_required else 'false' }}"
+  data-provider-error="{{ provider_error or '' }}"
   data-status-url="{{ status_url }}"
   data-retry-url="{{ retry_url }}"
   data-focus-url="{{ focus_url }}">
@@ -19,4 +23,5 @@
     <p class="field-note"><a href="{{ url_for('dashboard') }}">Return to your workbench</a> or <a href="{{ url_for('setup') }}">review provider setup</a>.</p>
   </details>
 </section>
+{% include "provider_recovery.html" %}
 {% endblock %}

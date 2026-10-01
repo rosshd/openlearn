@@ -1,5 +1,7 @@
 [data-source-preview] { max-width: min(54rem, 92vw); max-height: 85vh; overflow: auto; }
 [data-source-preview-text] { white-space: pre-wrap; overflow-wrap: anywhere; }
+[data-provider-setup-dialog] { width: min(36rem, 92vw); max-height: 85vh; overflow: auto; color: var(--graphite); background: var(--surface); border: 1px solid var(--line); }
+[data-provider-setup-dialog]::backdrop { background: rgb(0 0 0 / 45%); }
 
 :root {
   color-scheme: light dark;

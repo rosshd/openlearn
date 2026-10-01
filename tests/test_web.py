@@ -2500,10 +2500,12 @@ def test_unverified_setup_stays_on_setup_and_blocks_teaching(
         },
     )
 
-    for response in (create, turn):
-        assert response.status_code == 428
-        assert response.json()["state"] == "setup_required"
-        assert response.json()["setup_url"].endswith("/setup")
+    assert create.status_code == 503
+    assert create.json()["state"] == "provider_error"
+    assert "setup_url" not in create.json()
+    assert turn.status_code == 428
+    assert turn.json()["state"] == "setup_required"
+    assert turn.json()["setup_url"].endswith("/setup")
     assert not (tmp_path / "learning-topics" / "must-not-be-created.md").exists()
 
 

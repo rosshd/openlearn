@@ -605,7 +605,20 @@ class OpenLearnWebServices:
                 credentials.model,
             )
         if validation.status is not providers.ValidationStatus.VALID:
-            return status
+            if validation.status is providers.ValidationStatus.REJECTED:
+                code = "provider_credentials"
+                reason = "That API key was rejected. Check the provider setup and test again."
+            elif validation.detail == "http_429":
+                code = "provider_rate_limited"
+                reason = "The provider is rate limited. Wait, then retry. Your saved key was not changed."
+            else:
+                code = "provider_unavailable"
+                reason = (
+                    "That model is not available from this provider. Review the model or retry later."
+                    if validation.detail == "model_unavailable"
+                    else "The provider is temporarily unavailable. Retry later. Your saved key was not changed."
+                )
+            return {**status, "error_code": code, "reason": reason}
         if status.get("managed"):
             self._validated_provider_fingerprint = fingerprint
             return {**status, "ready": True, "verified": True, "reason": ""}
@@ -1724,6 +1737,7 @@ class OpenLearnWebServices:
             "operation_id": operation_id,
             "state": result.status,
             "error": result.error_message or "",
+            "error_code": result.error_code or "",
         }
 
     def retry_course_initialization(

@@ -83,6 +83,49 @@ function initializeUuidFields(scope = document) {
 }
 initializeUuidFields();
 
+const createForm = document.querySelector(".create-form");
+const creationDraftKey = `openlearn-course-draft:${appRoot}:${window.location.pathname}`;
+const creationDraftFields = {title: 160, goal: 4000, experience: 4000, template_id: 160, submission_id: 36};
+function saveCreationDraft() {
+  if (!createForm) return;
+  const draft = {};
+  for (const [name, limit] of Object.entries(creationDraftFields)) {
+    draft[name] = createForm.elements[name].value.slice(0, limit);
+  }
+  try { sessionStorage.setItem(creationDraftKey, JSON.stringify(draft)); } catch (_error) { /* optional */ }
+}
+if (createForm) {
+  try {
+    const draft = JSON.parse(sessionStorage.getItem(creationDraftKey) || "null");
+    if (draft && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(draft.submission_id)) {
+      for (const [name, limit] of Object.entries(creationDraftFields)) {
+        if (typeof draft[name] === "string" && draft[name].length <= limit) createForm.elements[name].value = draft[name];
+      }
+    }
+  } catch (_error) { /* optional */ }
+  createForm.addEventListener("input", saveCreationDraft);
+}
+
+const providerDialog = document.querySelector("[data-provider-setup-dialog]");
+let pendingProviderResume = null;
+function openProviderSetup(message, resume) {
+  if (!providerDialog) return false;
+  pendingProviderResume = resume;
+  providerDialog.querySelector("[data-provider-recovery-reason]").textContent = message;
+  if (!providerDialog.open) providerDialog.showModal();
+  providerDialog.querySelector("#provider-recovery-title").focus();
+  return true;
+}
+providerDialog?.querySelector("[data-provider-setup-cancel]")?.addEventListener("click", () => providerDialog.close());
+providerDialog?.addEventListener("close", () => {
+  pendingProviderResume = null;
+  const key = providerDialog.querySelector('[name="api_key"]');
+  if (key) key.value = "";
+});
+if (createForm?.dataset.providerRecoveryMessage) {
+  openProviderSetup(createForm.dataset.providerRecoveryMessage, () => createForm.requestSubmit());
+}
+
 const starterResumeForm = document.querySelector("[data-starter-resume-form]");
 if (starterResumeForm) {
   window.requestAnimationFrame(() => starterResumeForm.requestSubmit());
@@ -158,6 +201,7 @@ for (const choice of document.querySelectorAll("[data-template-choice]")) {
     form.elements.template_id.value = choice.dataset.templateId;
     form.elements.title.value = choice.dataset.title;
     form.elements.goal.value = choice.dataset.goal;
+    saveCreationDraft();
     form.elements.experience.focus();
     announce(`${choice.dataset.title} selected.`);
   });
@@ -176,6 +220,9 @@ for (const strip of document.querySelectorAll("[data-starter-strip]")) {
 for (const form of document.querySelectorAll("[data-json-form]")) {
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
+    if (form.dataset.submitting === "true") return;
+    form.dataset.submitting = "true";
+    if (form === createForm) saveCreationDraft();
     const submit = form.querySelector('[type="submit"]');
     const errorBox = form.querySelector("[data-form-error]");
     const status = form.querySelector("[data-form-status]");
@@ -195,11 +242,27 @@ for (const form of document.querySelectorAll("[data-json-form]")) {
         if (status) status.textContent = message;
         return;
       }
+      if (form.hasAttribute("data-provider-recovery-form")) {
+        const resume = providerDialog.open ? pendingProviderResume : null;
+        pendingProviderResume = null;
+        providerDialog.close();
+        if (resume) resume();
+        return;
+      }
+      if (form === createForm) {
+        try { sessionStorage.removeItem(creationDraftKey); } catch (_error) { /* optional */ }
+      }
       announce("Saved successfully.");
       const destination = result.setup_url || result.placement_url || result.initialization_url || result.focus_url || result.redirect || form.dataset.successUrl;
       if (destination) window.location.assign(appUrl(destination));
     } catch (error) {
       if (form.elements.api_key && !error.payload?.retain_secret) form.elements.api_key.value = "";
+      if (form === createForm && error.payload?.state === "setup_required") {
+        if (openProviderSetup(error.message, () => createForm.requestSubmit())) {
+          if (status) status.textContent = "Lesson input saved. Test the tutor connection to continue.";
+          return;
+        }
+      }
       if (errorBox) {
         errorBox.textContent = error.message;
         errorBox.hidden = false;
@@ -207,6 +270,7 @@ for (const form of document.querySelectorAll("[data-json-form]")) {
       }
       if (status) status.textContent = "Nothing was lost. Correct the issue and try again.";
     } finally {
+      delete form.dataset.submitting;
       submit.disabled = false;
       submit.removeAttribute("aria-busy");
     }
@@ -985,6 +1049,9 @@ async function pollInitialization() {
       return;
     }
     if (state === "retryable_error" || state === "conflict") {
+      if (result.error_code === "provider_credentials") {
+        openProviderSetup(result.error || "The provider rejected the saved credentials. Test the connection.", retryInitialization);
+      }
       setInitializationState(
         result.error || "Your course is safe. Retry preparing the first lesson.",
         true,
@@ -995,37 +1062,45 @@ async function pollInitialization() {
   }
 }
 
+async function retryInitialization() {
+  const button = initializationShell.querySelector("[data-initialization-retry]");
+  if (button.disabled) return;
+  button.disabled = true;
+  setInitializationState("Retrying your saved first lesson…");
+  try {
+    const result = await requestJson(initializationShell.dataset.retryUrl, {
+      method: "POST",
+      body: "{}",
+    });
+    if (result.state === "committed") {
+      window.location.assign(initializationShell.dataset.focusUrl);
+      return;
+    }
+    await pollInitialization();
+  } catch (error) {
+    setInitializationState(error.message, true);
+    if (error.payload?.state === "setup_required") openProviderSetup(error.message, retryInitialization);
+  } finally {
+    button.disabled = false;
+  }
+}
+
 if (initializationShell) {
   const initialState = initializationShell.dataset.operationState;
-  if (initialState === "retryable_error" || initialState === "conflict") {
-    setInitializationState(
-      initializationShell.dataset.operationError
-        || "Your course is safe. Retry preparing the first lesson.",
-      true,
-    );
+  if (initializationShell.dataset.providerBlocked === "true") {
+    setInitializationState(initializationShell.dataset.providerError || "Test the provider connection before teaching starts.", true);
+    if (initializationShell.dataset.providerSetupRequired === "true") {
+      openProviderSetup(initializationShell.dataset.providerError, retryInitialization);
+    }
+  } else if (initialState === "retryable_error" || initialState === "conflict") {
+    setInitializationState(initializationShell.dataset.operationError || "Your course is safe. Retry preparing the first lesson.", true);
+    if (initializationShell.dataset.operationErrorCode === "provider_credentials") {
+      openProviderSetup(initializationShell.dataset.operationError, retryInitialization);
+    }
   } else {
     pollInitialization().catch((error) => setInitializationState(error.message, true));
   }
-  initializationShell.querySelector("[data-initialization-retry]")?.addEventListener("click", async (event) => {
-    const button = event.currentTarget;
-    button.disabled = true;
-    setInitializationState("Retrying your saved first lesson…");
-    try {
-      const result = await requestJson(initializationShell.dataset.retryUrl, {
-        method: "POST",
-        body: "{}",
-      });
-      if (result.state === "committed") {
-        window.location.assign(initializationShell.dataset.focusUrl);
-        return;
-      }
-      await pollInitialization();
-    } catch (error) {
-      setInitializationState(error.message, true);
-    } finally {
-      button.disabled = false;
-    }
-  });
+  initializationShell.querySelector("[data-initialization-retry]")?.addEventListener("click", retryInitialization);
 }
 
 function setOperationState(message, isError = false, result = null) {
