@@ -64,7 +64,8 @@ Before changing machines or deleting data, create a verified backup as described
 
 ## Optional code runner
 
-The code workbench remains available without a container runtime.
+The CLI coding workspace remains available without a container runtime.
+Code and Video panels are not part of the web lesson interface.
 Secure execution needs Docker or Podman.
 If execution is unavailable, install or start Docker or Podman and run:
 

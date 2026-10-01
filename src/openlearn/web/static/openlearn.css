@@ -417,33 +417,29 @@ h2 { font-size: clamp(1.35rem, 3vw, 2rem); line-height: 1.1; letter-spacing: -0.
   --surface-motion-duration: 720ms;
   position: relative;
   width: 100%;
-  display: flex;
-  align-items: flex-start;
+  display: grid;
+  grid-template-columns: 7rem minmax(0, 44rem);
+  gap: var(--focus-gap);
+  align-items: start;
   justify-content: center;
 }
+.focus-shell[data-tool-active] { grid-template-columns: 6.5rem minmax(0, 1.2fr) minmax(0, 1fr); }
 .tool-rail {
-  flex: 0 0 7rem;
-  margin-right: var(--focus-gap);
   align-self: start;
   position: sticky;
   top: 9rem;
   display: grid;
   gap: 0.5rem;
-  transition: flex-basis var(--surface-motion-duration) cubic-bezier(0.4, 0, 0.2, 1);
 }
-.focus-shell[data-tool-active] .tool-rail { flex-basis: 6.5rem; }
 .rail-button { min-height: 3.5rem; padding: 0.6rem; border: 1px solid var(--line); border-radius: var(--radius); background: transparent; display: grid; gap: 0.2rem; text-align: left; cursor: pointer; transition: border-color 180ms ease, background-color 180ms ease, transform 180ms ease; }
 .rail-button span { color: var(--orange); }
 .rail-button:hover { border-color: var(--line-strong); background: var(--surface-raised); transform: translateX(2px); }
 .rail-button[aria-expanded="true"] { border-color: var(--orange); background: color-mix(in srgb, var(--orange) 11%, var(--surface-raised)); box-shadow: inset 3px 0 var(--orange); }
 .focus-column {
   min-width: 0;
-  flex: 0 1 44rem;
   display: grid;
   gap: 1rem;
-  transition: flex-grow var(--surface-motion-duration) cubic-bezier(0.4, 0, 0.2, 1), flex-basis var(--surface-motion-duration) cubic-bezier(0.4, 0, 0.2, 1);
 }
-.focus-shell[data-tool-active] .focus-column { flex-grow: 0.92; flex-basis: 24rem; }
 .move-surface { min-height: min(48vh, 33rem); padding: clamp(1.4rem, 5vw, 3.2rem); border: 1px solid var(--line-strong); border-top: 7px solid var(--orange); background: var(--surface); box-shadow: var(--shadow); }
 .move-surface[data-streaming] { overflow: visible; }
 .move-surface h1 { max-width: 20ch; font-size: clamp(2rem, 5vw, 3.5rem); }
@@ -612,30 +608,15 @@ h2 { font-size: clamp(1.35rem, 3vw, 2rem); line-height: 1.1; letter-spacing: -0.
 .chat-source-label { margin: 0 0 0.45rem; font-size: 0.75rem; font-weight: 720; }
 .learning-tool {
   min-width: 0;
-  width: 0;
   min-height: min(34rem, calc(100vh - 10rem));
-  flex: 0 1 0rem;
-  margin-left: 0;
   align-self: start;
-  position: sticky;
-  top: 8.5rem;
   max-height: calc(100vh - 9.5rem);
-  padding: clamp(1.2rem, 2vw, 1.75rem) 0;
+  padding: clamp(1.2rem, 2vw, 1.75rem);
   border: 1px solid var(--line-strong);
   border-top: 7px solid var(--teal);
-  border-inline-width: 0;
   background: var(--surface-raised);
   box-shadow: var(--shadow);
   overflow-y: auto;
-  transition: flex-grow var(--surface-motion-duration) cubic-bezier(0.4, 0, 0.2, 1), flex-basis var(--surface-motion-duration) cubic-bezier(0.4, 0, 0.2, 1), margin-left var(--surface-motion-duration) cubic-bezier(0.4, 0, 0.2, 1), padding-inline var(--surface-motion-duration) cubic-bezier(0.4, 0, 0.2, 1), border-inline-width var(--surface-motion-duration) cubic-bezier(0.4, 0, 0.2, 1);
-}
-.focus-shell[data-tool-active] .learning-tool {
-  width: auto;
-  flex-grow: 1.08;
-  flex-basis: 28rem;
-  margin-left: var(--focus-gap);
-  padding-inline: clamp(1.2rem, 2vw, 1.75rem);
-  border-inline-width: 1px;
 }
 .learning-tool-header { display: flex; justify-content: space-between; gap: 1rem; align-items: start; }
 .learning-tool-header h2 { margin-bottom: 0.6rem; }
@@ -643,6 +624,7 @@ h2 { font-size: clamp(1.35rem, 3vw, 2rem); line-height: 1.1; letter-spacing: -0.
 .tool-panel > h3 { margin: 0; font-size: 1.15rem; }
 .tool-panel label, .tool-form label { font-weight: 700; }
 .tool-panel input, .tool-panel textarea { width: 100%; min-height: 3rem; padding: 0.75rem; border: 1px solid var(--line-strong); background: var(--surface); color: var(--graphite); }
+.tool-panel input[type="checkbox"] { width: auto; min-height: 0; }
 .chat-panel { align-content: start; }
 .chat-panel > div:first-child p { margin-bottom: 0; }
 .chat-conversation { max-height: min(52vh, 34rem); padding-right: 0.25rem; overflow-y: auto; }
@@ -697,9 +679,7 @@ h2 { font-size: clamp(1.35rem, 3vw, 2rem); line-height: 1.1; letter-spacing: -0.
 @media (max-width: 1100px) and (min-width: 761px) {
   .focus-main { padding-inline: 1.25rem; }
   .focus-shell { --focus-gap: 1rem; }
-  .focus-shell[data-tool-active] .tool-rail { flex-basis: 5.5rem; }
-  .focus-shell[data-tool-active] .focus-column { flex-grow: 0.9; flex-basis: 20rem; }
-  .focus-shell[data-tool-active] .learning-tool { flex-grow: 1.1; flex-basis: 23rem; }
+  .focus-shell[data-tool-active] { grid-template-columns: 5.5rem minmax(0, 1.2fr) minmax(0, 1fr); }
   .rail-button { padding-inline: 0.45rem; }
 }
 
@@ -712,10 +692,9 @@ h2 { font-size: clamp(1.35rem, 3vw, 2rem); line-height: 1.1; letter-spacing: -0.
 
 @media (max-width: 860px) and (min-width: 761px) {
   .focus-shell, .focus-shell[data-tool-active] { display: grid; grid-template-columns: 5.5rem minmax(0, 1fr); gap: 1rem; }
-  .tool-rail { margin-right: 0; }
-  .focus-shell[data-tool-active] .focus-column { display: none; }
-  .focus-shell[data-tool-active] .learning-tool { margin-left: 0; grid-column: 2; }
-  .focus-shell[data-tool-active="chat"] .focus-column { display: grid; grid-column: 2; }
+  .tool-rail { grid-row: 1 / span 2; }
+  .focus-column { grid-column: 2; }
+  .focus-shell[data-tool-active] .learning-tool { grid-column: 2; max-height: none; }
 }
 
 @media (max-width: 760px) {
@@ -744,9 +723,7 @@ h2 { font-size: clamp(1.35rem, 3vw, 2rem); line-height: 1.1; letter-spacing: -0.
   .focus-identity { order: -1; width: 100%; justify-content: space-between; }
   .focus-shell { display: grid; grid-template-columns: 1fr; gap: 1rem; }
   .focus-shell[data-tool-active] { width: 100%; grid-template-columns: 1fr; }
-  .focus-shell[data-tool-active] .focus-column { display: none; }
-  .focus-shell[data-tool-active="chat"] .focus-column { display: grid; }
-  .tool-rail { margin-right: 0; position: static; grid-template-columns: repeat(3, 1fr); }
+  .tool-rail { position: static; grid-template-columns: repeat(3, 1fr); }
   .rail-button { min-height: 2.75rem; display: flex; align-items: center; gap: 0.5rem; }
   .focus-shell[data-tool-active] .learning-tool { width: auto; min-height: 0; margin-left: 0; position: static; max-height: none; padding-inline: clamp(1.2rem, 2vw, 1.75rem); border-inline-width: 1px; }
   .composer-footer { align-items: stretch; flex-direction: column; }

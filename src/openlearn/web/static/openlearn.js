@@ -472,16 +472,11 @@ let latestAppliedCourseRevision = Number(focusShell?.dataset.revision || 0);
 let latestAppliedChatRevision = Number(focusShell?.dataset.chatRevision || 0);
 
 let activeToolOpener = null;
-let preparedVideo = null;
-let videoRequestGeneration = 0;
-let codeRevision = null;
-let codeDirty = false;
-let codeEditVersion = 0;
 let toolOpenVersion = 0;
 let surfaceMotionVersion = 0;
 const focusLayoutAnimations = new Map();
 
-const availableTools = new Set(["chat", "code", "video", "sources"]);
+const availableTools = new Set(["chat", "sources", "options"]);
 
 function chatDraftStorageKey() {
   return focusShell?.dataset.courseSlug
@@ -683,31 +678,6 @@ function setToolUrl(tool, {replace = false} = {}) {
   window.history[replace ? "replaceState" : "pushState"]({}, "", next);
 }
 
-function confirmDiscardCodeChanges() {
-  if (!codeDirty) return true;
-  return window.confirm("Discard unsaved changes to this Python draft?");
-}
-
-function clearPreparedVideo() {
-  preparedVideo = null;
-  const consent = toolSurface?.querySelector("[data-video-consent]");
-  if (consent) consent.hidden = true;
-  toolSurface?.querySelector("[data-video-frame]")?.replaceChildren();
-}
-
-function invalidatePreparedVideo() {
-  videoRequestGeneration += 1;
-  clearPreparedVideo();
-}
-
-function renderCodeResult(result) {
-  const region = toolSurface?.querySelector("[data-code-result]");
-  if (!region) return;
-  region.hidden = false;
-  region.querySelector("[data-code-result-kind]").textContent = result.kind || result.status || "saved";
-  const output = [result.stdout, result.stderr].filter((value) => value !== undefined && value !== null && value !== "").join("\n");
-  region.querySelector("[data-code-output]").textContent = output.length ? output : result.message || "No output.";
-}
 
 function renderSources(result) {
   const region = toolSurface?.querySelector("[data-source-results]");
@@ -743,16 +713,6 @@ function renderSources(result) {
 async function loadToolState(tool) {
   if (tool === "chat") {
     await refreshChat();
-  } else if (tool === "code") {
-    const result = await requestJson(toolEndpoint("code"));
-    const draft = toolSurface.querySelector("[data-code-draft]");
-    codeRevision = result.revision || null;
-    if (!codeDirty) {
-      draft.value = result.source || result.draft || "";
-      codeDirty = false;
-    }
-    if (result.result) renderCodeResult(result.result);
-    else toolSurface.querySelector("[data-code-result]").hidden = true;
   } else if (tool === "sources") {
     renderSources(await requestJson(toolEndpoint("sources")));
   }
@@ -770,8 +730,6 @@ async function openTool(tool, opener, {updateUrl = true} = {}) {
     toolSurface.querySelector("[data-tool-close]")?.focus();
     return true;
   }
-  if (currentTool === "code" && codeDirty && !confirmDiscardCodeChanges()) return false;
-  if (currentTool === "code" && codeDirty) codeDirty = false;
   const openVersion = ++toolOpenVersion;
   activeToolOpener = opener;
   for (const button of document.querySelectorAll("[data-tool-open]")) {
@@ -780,7 +738,7 @@ async function openTool(tool, opener, {updateUrl = true} = {}) {
   for (const panel of toolSurface.querySelectorAll("[data-tool-panel]")) {
     panel.hidden = panel.dataset.toolPanel !== tool;
   }
-  const titles = {chat: "Tutor chat", code: "Code workbench", video: "Video player", sources: "Course sources"};
+  const titles = {chat: "Tutor chat", sources: "Course sources", options: "Course options"};
   toolSurface.querySelector("[data-tool-title]").textContent = titles[tool] || "Learning tool";
   if (toolSurface.hidden || toolSurface.getAttribute("aria-hidden") === "true") {
     revealSurface(toolSurface, () => {
@@ -793,13 +751,13 @@ async function openTool(tool, opener, {updateUrl = true} = {}) {
   toolStatus(
     tool === "chat"
       ? "Your lesson stays open while you ask."
-      : tool === "video"
-        ? "Video stays private until you load it."
+      : tool === "options"
+        ? "Local course options."
         : "Loading local tool state…"
   );
   try {
     await loadToolState(tool);
-    if (openVersion === toolOpenVersion && tool !== "video") toolStatus("Ready.");
+    if (openVersion === toolOpenVersion) toolStatus("Ready.");
   } catch (error) {
     if (openVersion === toolOpenVersion) toolStatus(error.message, true);
   }
@@ -812,15 +770,12 @@ async function openTool(tool, opener, {updateUrl = true} = {}) {
 function closeTool({updateUrl = true} = {}) {
   if (!toolSurface || !focusShell) return false;
   const currentTool = focusShell.dataset.toolActive;
-  if (currentTool === "code" && codeDirty && !confirmDiscardCodeChanges()) return false;
-  if (currentTool === "code" && codeDirty) codeDirty = false;
   toolOpenVersion += 1;
   for (const button of document.querySelectorAll("[data-tool-open]")) button.setAttribute("aria-expanded", "false");
   if (updateUrl) setToolUrl(null, {replace: true});
   const opener = activeToolOpener;
   activeToolOpener = null;
   opener?.focus();
-  toolSurface.querySelector("[data-video-frame]")?.replaceChildren();
   if (compactFocusLayout()) {
     hideSurface(toolSurface, () => {
       if (focusShell.dataset.toolActive === currentTool) {
@@ -848,129 +803,6 @@ for (const button of document.querySelectorAll("[data-tool-open]")) {
 }
 toolSurface?.querySelector("[data-tool-close]")?.addEventListener("click", () => closeTool());
 
-toolSurface?.querySelector("[data-code-draft]")?.addEventListener("input", () => {
-  if (!codeDirty) toolStatus("Unsaved Python draft.");
-  codeDirty = true;
-  codeEditVersion += 1;
-});
-
-window.addEventListener("beforeunload", (event) => {
-  if (!codeDirty) return;
-  event.preventDefault();
-  event.returnValue = "";
-});
-
-toolSurface?.querySelector("[data-code-save]")?.addEventListener("click", async () => {
-  const draft = toolSurface.querySelector("[data-code-draft]");
-  const source = draft.value;
-  const editVersion = codeEditVersion;
-  try {
-    const result = await requestJson(toolEndpoint("code"), {
-      method: "POST",
-      body: JSON.stringify({
-        action: "save",
-        source,
-        expected_revision: codeRevision,
-      }),
-    });
-    codeRevision = result.revision || codeRevision;
-    codeDirty = editVersion !== codeEditVersion;
-    toolSurface.querySelector("[data-code-result]").hidden = true;
-    toolStatus(
-      codeDirty
-        ? "Saved the submitted draft. Newer edits remain unsaved."
-        : result.message || "Draft saved locally.",
-    );
-  } catch (error) { toolStatus(error.message, true); }
-});
-
-toolSurface?.querySelector("[data-code-run]")?.addEventListener("click", async (event) => {
-  const button = event.currentTarget;
-  const draft = toolSurface.querySelector("[data-code-draft]");
-  const source = draft.value;
-  const editVersion = codeEditVersion;
-  button.disabled = true;
-  toolStatus("Running in the bounded local workspace…");
-  try {
-    const result = await requestJson(toolEndpoint("code"), {
-      method: "POST",
-      body: JSON.stringify({
-        action: "run",
-        source,
-        expected_revision: codeRevision,
-      }),
-    });
-    codeRevision = result.revision || codeRevision;
-    codeDirty = editVersion !== codeEditVersion;
-    renderCodeResult(result.result || result);
-    toolStatus(
-      codeDirty
-        ? "Run complete for the submitted draft. Newer edits remain unsaved."
-        : result.message || "Run complete.",
-    );
-  } catch (error) { toolStatus(error.message, true); }
-  finally { button.disabled = false; }
-});
-
-toolSurface?.querySelector("[data-code-reset]")?.addEventListener("click", async () => {
-  if (!window.confirm("Reset this saved draft?")) return;
-  const editVersion = codeEditVersion;
-  try {
-    const result = await requestJson(toolEndpoint("code"), {
-      method: "POST",
-      body: JSON.stringify({action: "reset", source: "", expected_revision: codeRevision}),
-    });
-    codeRevision = result.revision || null;
-    codeDirty = editVersion !== codeEditVersion;
-    if (!codeDirty) {
-      toolSurface.querySelector("[data-code-draft]").value = result.source || result.draft || "";
-      toolSurface.querySelector("[data-code-result]").hidden = true;
-    }
-    toolStatus(
-      codeDirty
-        ? "Saved draft reset. Newer edits remain unsaved."
-        : "Draft reset.",
-    );
-  } catch (error) { toolStatus(error.message, true); }
-});
-
-toolSurface?.querySelector("[data-video-form]")?.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const form = event.currentTarget;
-  invalidatePreparedVideo();
-  const requestGeneration = videoRequestGeneration;
-  try {
-    const descriptor = await requestJson(toolEndpoint("video"), {
-      method: "POST",
-      body: JSON.stringify({url: form.elements.url.value}),
-    });
-    if (requestGeneration !== videoRequestGeneration) return;
-    preparedVideo = descriptor;
-    const consent = toolSurface.querySelector("[data-video-consent]");
-    consent.hidden = false;
-    consent.querySelector("[data-video-title]").textContent = preparedVideo.label || "Video ready to load.";
-    toolSurface.querySelector("[data-video-frame]").replaceChildren();
-    toolStatus("Validated locally. YouTube has not been contacted.");
-  } catch (error) {
-    if (requestGeneration === videoRequestGeneration) toolStatus(error.message, true);
-  }
-});
-
-toolSurface?.querySelector("#video-url")?.addEventListener("input", invalidatePreparedVideo);
-
-toolSurface?.querySelector("[data-video-load]")?.addEventListener("click", () => {
-  if (!preparedVideo?.embed_url) return;
-  const frame = document.createElement("iframe");
-  frame.src = preparedVideo.embed_url;
-  frame.title = preparedVideo.label || "YouTube lesson video";
-  frame.loading = "lazy";
-  frame.referrerPolicy = "no-referrer";
-  frame.allow = "accelerometer; encrypted-media; picture-in-picture";
-  frame.setAttribute("sandbox", "allow-scripts allow-same-origin allow-presentation");
-  frame.setAttribute("allowfullscreen", "");
-  toolSurface.querySelector("[data-video-frame]").replaceChildren(frame);
-  toolStatus("Video loaded from YouTube's privacy-enhanced player.");
-});
 
 if (focusShell) {
   const requestedTool = toolFromUrl();
@@ -984,6 +816,9 @@ if (focusShell) {
 
   window.addEventListener("popstate", async () => {
     const nextTool = toolFromUrl();
+    if (!nextTool && new URL(window.location.href).searchParams.has("tool")) {
+      setToolUrl(null, {replace: true});
+    }
     const currentTool = focusShell.dataset.toolActive || null;
     if (nextTool) {
       const opener = document.querySelector(`[data-tool-open="${nextTool}"]`);

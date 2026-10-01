@@ -332,93 +332,45 @@ def test_real_browser_course_polling_theme_conflict_and_keyboard_submit(
                 assert first.locator("html").get_attribute("data-theme") == "dark"
 
                 first.locator("#learner-response").fill("Keep this unsent draft while tools open.")
-                closed_lesson_x = first.locator(".focus-column").bounding_box()["x"]
-                first.get_by_role("button", name="Code").click()
-                assert "tool=code" in first.url
-                first.wait_for_timeout(40)
-                opening_lesson_x = first.locator(".focus-column").bounding_box()["x"]
-                assert abs(opening_lesson_x - closed_lesson_x) < 40
+                first.get_by_role("button", name="Options").click()
+                assert "tool=options" in first.url
                 first.wait_for_function(
                     "() => !document.querySelector('[data-tool-surface]').dataset.motion"
                 )
-                shell_box = first.locator("[data-focus-shell]").bounding_box()
-                lesson_box = first.locator(".focus-column").bounding_box()
-                tool_box = first.locator("[data-tool-surface]").bounding_box()
-                assert shell_box and shell_box["width"] >= 1180
-                assert lesson_box and lesson_box["width"] >= 480
-                assert tool_box and tool_box["width"] >= lesson_box["width"]
-                _assert_no_page_overflow(first)
-                first.set_viewport_size({"width": 1024, "height": 800})
-                shell_box = first.locator("[data-focus-shell]").bounding_box()
-                lesson_box = first.locator(".focus-column").bounding_box()
-                tool_box = first.locator("[data-tool-surface]").bounding_box()
-                assert shell_box and shell_box["width"] >= 950
-                assert lesson_box and lesson_box["width"] >= 380
-                assert tool_box and tool_box["width"] >= lesson_box["width"]
-                _assert_no_page_overflow(first)
-                first.set_viewport_size({"width": 800, "height": 800})
-                assert not first.locator(".focus-column").is_visible()
-                assert first.locator("[data-tool-surface]").bounding_box()["width"] >= 630
-                _assert_no_page_overflow(first)
+                for width in (1280, 1024, 800):
+                    first.set_viewport_size({"width": width, "height": 800})
+                    lesson_box = first.locator(".focus-column").bounding_box()
+                    tool_box = first.locator("[data-tool-surface]").bounding_box()
+                    assert lesson_box and tool_box
+                    assert tool_box["width"] <= lesson_box["width"] + 1
+                    assert first.locator(".focus-column").is_visible()
+                    _assert_no_page_overflow(first)
                 first.set_viewport_size({"width": 1280, "height": 800})
-                first.locator("[data-code-draft]").fill("print('browser workspace')\n")
-                with first.expect_response(
-                    lambda response: response.url.endswith("/tools/code")
-                    and response.request.method == "POST"
-                ) as code_saved:
-                    first.get_by_role("button", name="Save", exact=True).click()
-                assert code_saved.value.status == 200
-                first.locator("[data-code-draft]").fill("print('unsaved draft')\n")
-                first.once("dialog", lambda dialog: dialog.dismiss())
-                first.get_by_role("button", name="Video").click()
-                playwright.expect(first.locator('[data-tool-panel="code"]')).to_be_visible()
-                assert first.locator("[data-code-draft]").input_value() == (
-                    "print('unsaved draft')\n"
-                )
-                assert "tool=code" in first.url
-
-                first.once("dialog", lambda dialog: dialog.accept())
-                first.get_by_role("button", name="Video").click()
-                playwright.expect(first.locator('[data-tool-panel="video"]')).to_be_visible()
-                assert "tool=video" in first.url
+                playwright.expect(first.locator('[data-tool-panel="options"]')).to_be_visible()
+                assert not first.locator("[data-source-mode]").is_checked()
+                first.get_by_role("button", name="Sources").click()
+                playwright.expect(first.locator('[data-tool-panel="sources"]')).to_be_visible()
                 first.go_back()
-                playwright.expect(first.locator('[data-tool-panel="code"]')).to_be_visible()
-                playwright.expect(first.locator("[data-code-draft]")).to_have_value(
-                    "print('browser workspace')\n"
-                )
+                playwright.expect(first.locator('[data-tool-panel="options"]')).to_be_visible()
                 first.go_forward()
-                playwright.expect(first.locator('[data-tool-panel="video"]')).to_be_visible()
-                first.go_back()
-                playwright.expect(first.locator('[data-tool-panel="code"]')).to_be_visible()
-
-                first.locator("[data-code-draft]").fill("print('close guard')\n")
-                first.once("dialog", lambda dialog: dialog.dismiss())
+                playwright.expect(first.locator('[data-tool-panel="sources"]')).to_be_visible()
                 first.get_by_role("button", name="Close learning tool").click()
-                playwright.expect(first.locator('[data-tool-panel="code"]')).to_be_visible()
-                first.once("dialog", lambda dialog: dialog.accept())
-                open_lesson_x = first.locator(".focus-column").bounding_box()["x"]
-                first.get_by_role("button", name="Close learning tool").click()
-                first.wait_for_timeout(40)
-                closing_lesson_x = first.locator(".focus-column").bounding_box()["x"]
-                assert abs(closing_lesson_x - open_lesson_x) < 40
                 assert "tool=" not in first.url
                 assert first.locator("[data-tool-surface]").get_attribute("aria-hidden") == "true"
                 assert first.locator("[data-tool-surface]").get_attribute("inert") == ""
-                assert first.get_by_role("button", name="Code").evaluate(
+                assert first.get_by_role("button", name="Sources").evaluate(
                     "button => button === document.activeElement"
                 )
                 assert first.locator("#learner-response").input_value() == (
                     "Keep this unsent draft while tools open."
                 )
-
-                first.get_by_role("button", name="Code").click()
-                playwright.expect(first.locator('[data-tool-panel="code"]')).to_be_visible()
+                first.get_by_role("button", name="Options").click()
+                playwright.expect(first.locator('[data-tool-panel="options"]')).to_be_visible()
                 first.wait_for_function(
                     "() => !document.querySelector('[data-tool-surface]').dataset.motion"
                 )
                 assert first.locator("[data-tool-surface]").get_attribute("aria-hidden") is None
                 assert first.locator("[data-tool-surface]").get_attribute("inert") is None
-                assert first.locator("[data-tool-surface]").get_attribute("data-motion") is None
                 first.get_by_role("button", name="Close learning tool").click()
                 progress_button = first.get_by_role("button", name="Progress", exact=True)
                 progress_button.click()
@@ -426,41 +378,12 @@ def test_real_browser_course_polling_theme_conflict_and_keyboard_submit(
                 first.locator("body").press("Escape")
                 playwright.expect(first.locator("#progress-drawer")).to_be_hidden()
                 assert progress_button.get_attribute("aria-expanded") == "false"
-
                 first.emulate_media(reduced_motion="reduce")
-                first.get_by_role("button", name="Code").click()
+                first.get_by_role("button", name="Options").click()
                 assert first.locator("[data-tool-surface]").get_attribute("data-motion") is None
                 first.get_by_role("button", name="Close learning tool").click()
                 assert first.locator("[data-tool-surface]").is_hidden()
-                assert first.locator("[data-tool-surface]").get_attribute("data-motion") is None
                 first.emulate_media(reduced_motion="no-preference")
-
-                first.get_by_role("button", name="Video").click()
-                first.locator("#video-url").fill("https://youtu.be/dQw4w9WgXcQ")
-                first.get_by_role("button", name="Prepare video").click()
-                playwright.expect(first.locator("[data-video-consent]")).to_be_visible()
-                assert first.locator("[data-video-frame] iframe").count() == 0
-                first.locator("#video-url").fill("https://example.com/not-youtube")
-                playwright.expect(first.locator("[data-video-consent]")).to_be_hidden()
-                assert first.locator("[data-video-frame] iframe").count() == 0
-                first.get_by_role("button", name="Prepare video").click()
-                playwright.expect(first.locator("[data-tool-status]")).to_contain_text(
-                    "valid supported YouTube"
-                )
-                playwright.expect(first.locator("[data-video-consent]")).to_be_hidden()
-                first.locator("#video-url").fill("https://youtu.be/dQw4w9WgXcQ")
-                first.get_by_role("button", name="Prepare video").click()
-                playwright.expect(first.locator("[data-video-consent]")).to_be_visible()
-                context.route("https://www.youtube-nocookie.com/**", lambda route: route.abort())
-                first.get_by_role("button", name="Load video").click()
-                assert first.locator("[data-video-frame] iframe").count() == 1
-                first.locator("#video-url").fill("https://youtu.be/abcdefghijk")
-                playwright.expect(first.locator("[data-video-consent]")).to_be_hidden()
-                assert first.locator("[data-video-frame] iframe").count() == 0
-                first.get_by_role("button", name="Close learning tool").click()
-                assert first.get_by_role("button", name="Video").evaluate(
-                    "button => button === document.activeElement"
-                )
 
                 first.get_by_role("button", name="Sources").click()
                 assert "tool=sources" in first.url
@@ -483,7 +406,7 @@ def test_real_browser_course_polling_theme_conflict_and_keyboard_submit(
                 playwright.expect(navigation).to_be_visible()
                 playwright.expect(navigation.get_by_text("Tutor", exact=True)).to_be_visible()
                 playwright.expect(navigation.get_by_text("Data", exact=True)).to_be_visible()
-                assert not first.locator(".focus-column").is_visible()
+                assert first.locator(".focus-column").is_visible()
                 first.get_by_role("button", name="Close learning tool").click()
                 _assert_no_page_overflow(first)
                 progress_button = first.get_by_role("button", name="Progress", exact=True)
@@ -1493,6 +1416,7 @@ def test_real_browser_reads_cli_source_provenance_after_restart(
                 assert page.locator('input[name="source_mode"]').count() == 0
                 assert cli.topic_path("stack-notes").read_bytes() == before
                 page.goto(f"{app_url}/courses/stack-notes")
+                page.locator('[data-tool-open="options"]').click()
                 checkbox = page.locator("[data-source-mode]")
                 assert not checkbox.is_checked()
                 checkbox.check()
