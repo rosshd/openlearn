@@ -98,7 +98,7 @@ class SourceContext:
             r"extracted text lines (\d+)-(\d+)", self.ledger,
         )]
         for match in re.finditer(
-            r"(?i)\blines?\s+(\d+)(?:\s*(?:[-–—]|to)\s*(\d+))?", text,
+            r"(?i)\blines?\s+(\d+)(?!\w|\.\d)(?:\s*(?:[-–—]|to)\s*(\d+)(?!\w|\.\d))?", text,
         ):
             start = int(match.group(1))
             stop = int(match.group(2) or match.group(1))

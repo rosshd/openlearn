@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 from concurrent.futures import ThreadPoolExecutor
@@ -193,6 +194,20 @@ def test_source_line_references_must_fit_selected_excerpt(course, reference, val
     snapshot = sources.snapshot(topic, 'Explain the stack rule', sources.APPROVED_MODEL, opted_in=True)
     assert (snapshot.reference_error(f'The notes at {reference} state LIFO.') is None) == valid
     assert snapshot.reference_error('Push 4, push 7, then pop 7.') is None
+
+
+@pytest.mark.parametrize('equation', [
+    'The line 2x + y = 6 has slope -2.',
+    'The parallel lines 3x+y=7 and 3x+y=9 have slope -3.',
+    'The line 2.5x + y = 6 has slope -2.5.',
+    'The line 12x + y = 6 has slope -12.',
+])
+def test_equation_coefficients_are_not_source_line_locators(course, equation):
+    topic, _ = course
+    snapshot = sources.snapshot(topic, 'Explain the stack rule', sources.APPROVED_MODEL, opted_in=True)
+    snapshot = replace(snapshot, ledger='\n\nSource excerpts provided:\n- extracted text lines 5-6')
+    assert snapshot.reference_error(equation) is None
+    assert snapshot.reference_error('The supplied excerpt at lines 78–79 states a rule.')
 
 
 @pytest.mark.parametrize('repair_succeeds', [True, False])
