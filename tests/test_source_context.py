@@ -285,6 +285,70 @@ def test_numbered_memory_and_pagination_pages_are_not_source_citations(course, l
     assert snapshot.reference_error('**Lesson:**\n' + lesson) is None
 
 
+@pytest.mark.parametrize('lesson', [
+    'A cache line 64 bytes wide contains eight 8-byte values.',
+    'A memory line 64 bits wide holds eight bytes.',
+    'A cache line 64 holds eight values.',
+    'From source ID file:alpha, a cache line 64 bytes wide contains eight values.',
+])
+def test_numeric_domain_lines_are_not_source_locators(course, lesson):
+    topic, _ = course
+    snapshot = replace(sources.snapshot(topic, 'Explain the stack rule', sources.APPROVED_MODEL, opted_in=True),
+                       ledger='source ID file:alpha; extracted text lines 5-6')
+    assert snapshot.reference_error(lesson) is None
+    assert snapshot.reference_error('The supplied excerpt at line 64 states the rule.')
+
+
+@pytest.mark.parametrize('claim,valid', [
+    ('From source ID file:alpha, lines 5-6, the rule follows.', True),
+    ('From source ID file:alpha, lines 20-21, the rule follows.', False),
+    ('From source ID file:beta, lines 20-21, the rule follows.', True),
+    ('Lines 20-21 of source ID file:alpha state the rule.', False),
+    ('Source ID `file:alpha`\nLines 5-6 state the rule.', True),
+    ('Source ID file:alpha. Lines 20-21 state the rule.', False),
+    ('Source ID file:alpha.\n\nLines 20-21 state the rule.', False),
+    ('Source ID file:alpha and source ID file:beta, lines 5-6 state the rule.', False),
+    ('Source ID file:alpha, lines 5-6. Source ID file:beta, lines 20-21.', True),
+    ('Source ID file:alpha and source ID file:beta. Lines 20-21 state the rule.', False),
+])
+def test_line_ranges_belong_to_the_explicitly_cited_source(course, claim, valid):
+    topic, _ = course
+    snapshot = replace(sources.snapshot(topic, 'Explain the stack rule', sources.APPROVED_MODEL, opted_in=True),
+                       ledger='source ID file:alpha; extracted text lines 5-6\n'
+                              'source ID file:beta; extracted text lines 20-21')
+    assert (snapshot.reference_error(claim) is None) == valid
+
+
+def test_ledger_label_words_are_not_the_registered_identity_or_range(course):
+    topic, _ = course
+    snapshot = replace(sources.snapshot(topic, 'Explain the stack rule', sources.APPROVED_MODEL, opted_in=True),
+                       ledger='- Notes about source ID file:beta and extracted text lines 20-21.md; '
+                              'source ID file:alpha; original checksum 0123456789abcdef; extracted text lines 5-6')
+    assert snapshot.reference_error('Source ID file:alpha, lines 5-6 state the rule.') is None
+    assert snapshot.reference_error('Source ID file:alpha, lines 20-21 state the rule.')
+    assert snapshot.reference_error('Source ID file:beta, lines 5-6 state the rule.')
+
+
+def test_misattributed_known_range_is_not_streamed_or_saved(course):
+    topic, record = course
+    context = sources.snapshot(topic, 'Explain the stack rule', sources.APPROVED_MODEL, opted_in=True)
+    context = replace(context, ledger=context.ledger + '\n- source ID file:beta; extracted text lines 20-21')
+    bad = f'**Lesson:**\nFrom source ID {record.source_id}, lines 20-21, the rule follows.'
+    before = topic.path.read_bytes(), copy.deepcopy(cli.load_state(topic.slug))
+    output = []
+    observer = mock.Mock()
+    with mock.patch.object(sources, 'snapshot', return_value=context), \
+            mock.patch.object(cli, 'call_openai_streaming', return_value=bad) as provider:
+        with pytest.raises(cli.OpenLearnError, match='unsupported source references'):
+            cli.ask_topic(topic.slug, 'Explain the stack rule', source_mode=True,
+                          input_func=consent, output_func=output.append, turn_observer=observer)
+    assert provider.call_count == 2
+    assert all('stream_sink' not in call.kwargs for call in provider.call_args_list)
+    assert bad not in '\n'.join(output)
+    assert all(bad not in str(call.args) for call in observer.publish_preview.call_args_list)
+    assert (topic.path.read_bytes(), cli.load_state(topic.slug)) == before
+
+
 def test_preview_filters_entire_payload_and_pending_key_is_preserved(course):
     topic, _record = course
     cli.save_pending_question(topic, cli.sanitize_model_output(CHECK), "B")

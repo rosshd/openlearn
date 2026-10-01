@@ -94,10 +94,26 @@ class SourceContext:
     def reference_error(self, answer: str) -> str | None:
         """Reject unavailable source identities/locators, not mathematical claims."""
         text = without_ledger(answer)
-        identifiers = set(re.findall(r"\bsource ID ([^;\s]+)", self.ledger))
-        claims = re.findall(r"(?i)\bsource\s+ID\s*:?\s+([^\s;,]+)", text)
-        claims += re.findall(r"(?i)\b(?:file|url):[a-z0-9_-]+", text)
-        if any(value.strip("`*'\"()[]{}.,") not in identifiers for value in claims):
+        source_ranges: dict[str, list[tuple[int, int]]] = {}
+        ranges: list[tuple[int, int]] = []
+        for entry in self.ledger.splitlines():
+            selected = [(int(start), int(stop)) for start, stop in re.findall(
+                r"extracted text lines (\d+)-(\d+)", entry,
+            )[-1:]]
+            ranges.extend(selected)
+            identities = re.findall(r"(?:^|;\s*)source ID ([^;\s]+)", entry)
+            if identities:
+                source_ranges.setdefault(identities[-1], []).extend(selected)
+        identity_pattern = re.compile(
+            r"(?i)\bsource\s+ID\s*:?\s+([^\s;,]+)|\b(?:file|url):[a-z0-9_-]+",
+        )
+
+        def claimed_ids(fragment: str) -> set[str]:
+            return {(match.group(1) or match.group()).strip("`*'\"()[]{}.,")
+                    for match in identity_pattern.finditer(fragment)}
+
+        answer_ids = claimed_ids(text)
+        if answer_ids - source_ranges.keys():
             return "A source ID is absent from the selected excerpt ledger."
         # Page numbers are also ordinary CS vocabulary (memory and pagination).
         # Reject citation-shaped claims, not every use of a numbered page.
@@ -110,16 +126,35 @@ class SourceContext:
             rf"\(\s*{locator}\s*\))", text,
         ):
             return "Only extracted-text line locators are available, not page or slide numbers."
-        ranges = [(int(start), int(stop)) for start, stop in re.findall(
-            r"extracted text lines (\d+)-(\d+)", self.ledger,
-        )]
-        for match in re.finditer(
-            r"(?i)\blines?\s+(\d+)(?!\w|\.\d)(?:\s*(?:[-–—]|to)\s*(\d+)(?!\w|\.\d))?", text,
-        ):
-            start = int(match.group(1))
-            stop = int(match.group(2) or match.group(1))
-            if not any(low <= start <= stop <= high for low, high in ranges):
-                return "A numeric line reference is outside the selected source excerpts."
+        for paragraph in re.split(r"\n\s*\n", text):
+            paragraph_ids = claimed_ids(paragraph)
+            for clause in re.split(r"(?<=[.!?])\s+|\n", paragraph):
+                clause_ids = claimed_ids(clause)
+                for match in re.finditer(
+                    r"(?i)\blines?\s+(\d+)(?!\w|\.\d)(?:\s*(?:[-–—]|to)\s*(\d+)(?!\w|\.\d))?", clause,
+                ):
+                    prefix = clause[:match.start()]
+                    explicit = re.search(
+                        rf"(?i)(?:\b{source}\s+(?:(?:at|on|in|from)\s+)?|"
+                        r"\b(?:see|refer\s+to|extracted\s+text)\s+)$", prefix,
+                    ) or any(re.fullmatch(
+                        r"(?i)[\s,;:`*'\"()\[\]{}]*(?:(?:at|on|in|from)\s+)?", prefix[identity.end():],
+                    ) for identity in identity_pattern.finditer(prefix))
+                    domain = re.search(r"(?i)\b(?:cache|memory|address|data)\s+$", prefix) or re.match(
+                        r"(?i)\s+(?:bytes?|bits?|pixels?|characters?)\b", clause[match.end():],
+                    )
+                    if domain and not explicit:
+                        continue
+                    # Local explicit attribution wins. A single ID can also label
+                    # a wrapped citation; multiple plausible IDs fail closed.
+                    attributed = clause_ids or paragraph_ids or answer_ids
+                    if len(attributed) > 1:
+                        return "A numeric line reference has ambiguous source attribution."
+                    selected = source_ranges[next(iter(attributed))] if attributed else ranges
+                    start = int(match.group(1))
+                    stop = int(match.group(2) or match.group(1))
+                    if not any(low <= start <= stop <= high for low, high in selected):
+                        return "A numeric line reference is outside the selected source excerpts."
         return None
 
     def attach(self, answer: str) -> str:
