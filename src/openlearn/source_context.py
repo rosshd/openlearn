@@ -99,7 +99,16 @@ class SourceContext:
         claims += re.findall(r"(?i)\b(?:file|url):[a-z0-9_-]+", text)
         if any(value.strip("`*'\"()[]{}.,") not in identifiers for value in claims):
             return "A source ID is absent from the selected excerpt ledger."
-        if re.search(r"(?i)\b(?:pages?|slides?)\s+(?:#\s*)?\d+(?!\w|\.\d)", text):
+        # Page numbers are also ordinary CS vocabulary (memory and pagination).
+        # Reject citation-shaped claims, not every use of a numbered page.
+        locator = r"(?:pages?|slides?)\s+(?:#\s*)?\d+(?!\w|\.\d)(?:\s*[-–—]\s*\d+(?!\w|\.\d))?"
+        source = r"(?:notes?|lecture|source|excerpt|document|handout|textbook)"
+        if re.search(
+            rf"(?i)(?:\b{source}\s+(?:(?:at|on|in|from)\s+)?{locator}\b|"
+            rf"\b{locator}\s+(?:of|in|from)\s+(?:the\s+)?(?:(?:supplied|provided)\s+)?{source}\b|"
+            rf"\b(?:see|refer\s+to)\s+{locator}(?=\s+(?:for|of|in)\b|[.,;:)\]]|$)|"
+            rf"\(\s*{locator}\s*\))", text,
+        ):
             return "Only extracted-text line locators are available, not page or slide numbers."
         ranges = [(int(start), int(stop)) for start, stop in re.findall(
             r"extracted text lines (\d+)-(\d+)", self.ledger,

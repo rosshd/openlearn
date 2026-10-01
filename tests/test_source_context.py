@@ -268,7 +268,21 @@ def test_source_identity_and_original_page_numbers_are_not_invented(course):
     assert snapshot.reference_error('See [file:ffffffffffffffff], lines 1-2.')
     for reference in ('page 99', 'pages 99-100', 'slide 99', 'slide #99'):
         assert snapshot.reference_error(f'The supplied lecture at {reference} states the rule.')
+    for reference in ('See page 99.', '(slide 99)', 'page 99 of the supplied notes'):
+        assert snapshot.reference_error(reference)
     assert snapshot.reference_error('A notebook has 99 pages. Push 4 then 7. g(4)=3(4)-2=10.') is None
+
+
+@pytest.mark.parametrize('lesson', [
+    'A memory page 4096 bytes long contains 1024 four-byte integers.',
+    'The next page 2 response returns records 11 through 20.',
+    'The lecture teaches that a memory page 4096 bytes long contains 1024 integers.',
+    'See page 2 response handling in the pagination example.',
+])
+def test_numbered_memory_and_pagination_pages_are_not_source_citations(course, lesson):
+    topic, _ = course
+    snapshot = sources.snapshot(topic, 'Explain the stack rule', sources.APPROVED_MODEL, opted_in=True)
+    assert snapshot.reference_error('**Lesson:**\n' + lesson) is None
 
 
 def test_preview_filters_entire_payload_and_pending_key_is_preserved(course):
