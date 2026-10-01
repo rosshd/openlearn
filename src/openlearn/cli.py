@@ -42,7 +42,7 @@ from typing import Literal, Protocol
 
 from platformdirs import user_data_dir
 
-from openlearn import __version__, code_runner, lesson_policy
+from openlearn import __version__, code_runner, lesson_policy, qa_budget
 from openlearn.lesson_policy import (
     first_lesson_prompt as first_lesson_prompt,
     first_lesson_response_is_valid as first_lesson_response_is_valid,
@@ -5525,6 +5525,8 @@ def teach_first_lesson(
                 retry_status=output_func,
             )
         except OpenLearnError as error:
+            if getattr(error, "category", None) == "qa_budget_stop":
+                raise
             raise OpenLearnError(
                 f"{lesson_policy.FIRST_LESSON_RETRY_MESSAGE} Use openlearn resume {topic.slug}."
             ) from error
@@ -5889,7 +5891,9 @@ def placement_evaluation(
                 model, METADATA_EXTRACTOR_SYSTEM, prompt, retry_status=retry_status
             )
         )
-    except (OpenLearnError, ValueError, json.JSONDecodeError):
+    except (OpenLearnError, ValueError, json.JSONDecodeError) as exc:
+        if getattr(exc, "category", None) == "qa_budget_stop":
+            raise
         return {"correct": False, "concept": "unknown", "note": "Could not evaluate reliably."}
     return update
 
@@ -6250,7 +6254,9 @@ def infer_mastery_profile_from_goal(goal: str, model: str | None = None) -> str:
             raw = call_openai(model or configured_model(), METADATA_EXTRACTOR_SYSTEM, prompt)
             data = parse_metadata_update(raw)
             return normalize_mastery_profile(data.get("mastery_profile"))
-        except (OpenLearnError, ValueError, json.JSONDecodeError):
+        except (OpenLearnError, ValueError, json.JSONDecodeError) as exc:
+            if getattr(exc, "category", None) == "qa_budget_stop":
+                raise
             pass
     efficient_markers = (
         "exam",
@@ -14879,6 +14885,8 @@ def update_learning_metadata(
                 ) from exc
             return ""
         except OpenLearnError as exc:
+            if getattr(exc, "category", None) == "qa_budget_stop":
+                raise
             if isinstance(pending_at_answer, dict):
                 detail = str(exc).replace("OpenAI request failed", "Provider request failed")
                 raise OpenLearnError(
@@ -19349,6 +19357,41 @@ def _stream_error(event: dict[str, object]) -> ProviderRequestError | None:
     return ProviderRequestError(category, f"Provider stream failed{suffix}: {detail}")
 
 
+def _qa_budget_guard() -> qa_budget.QABudget | None:
+    try:
+        return qa_budget.from_environment(lock=file_lock, write=write_text_atomic)
+    except qa_budget.QABudgetStop as exc:
+        raise ProviderRequestError("qa_budget_stop", str(exc)) from exc
+
+
+def _qa_budget_reserve(
+    budget: qa_budget.QABudget | None, base_url: str, payload: dict
+) -> str | None:
+    if budget is None:
+        return None
+    try:
+        return budget.reserve(base_url, payload)
+    except (qa_budget.QABudgetStop, OSError) as exc:
+        message = str(exc) if isinstance(exc, qa_budget.QABudgetStop) else (
+            "Live QA budget stopped: reservation could not be saved."
+        )
+        raise ProviderRequestError("qa_budget_stop", message) from exc
+
+
+def _qa_budget_settle(
+    budget: qa_budget.QABudget | None, attempt_id: str | None, usage: object
+) -> None:
+    if budget is None or attempt_id is None:
+        return
+    try:
+        budget.settle(attempt_id, usage)
+    except (qa_budget.QABudgetStop, OSError) as exc:
+        message = str(exc) if isinstance(exc, qa_budget.QABudgetStop) else (
+            "Live QA budget stopped: accounting could not be saved."
+        )
+        raise ProviderRequestError("qa_budget_stop", message) from exc
+
+
 def call_openai(
     model: str,
     system: str,
@@ -19385,6 +19428,10 @@ def call_openai(
         ],
     }
     payload.update(_openrouter_request_options(base_url, json_response=json_response))
+    budget = _qa_budget_guard()
+    if budget is not None:
+        payload.update(budget.request_options())
+        max_attempts = 1
     headers = {
         "Content-Type": "application/json",
         "User-Agent": f"openLearn/{__version__}",
@@ -19398,9 +19445,11 @@ def call_openai(
         method="POST",
     )
     for attempt in range(1, max_attempts + 1):
+        reservation = _qa_budget_reserve(budget, base_url, payload)
         try:
             with urlopen(request, timeout=timeout_seconds) as response:
                 data = json.loads(response.read().decode("utf-8"))
+            _qa_budget_settle(budget, reservation, data.get("usage") if isinstance(data, dict) else None)
             break
         except (HTTPError, URLError, TimeoutError) as exc:
             if not is_transient_openai_error(exc) or attempt == max_attempts:
@@ -19527,6 +19576,10 @@ def call_openai_streaming(
         ],
     }
     payload.update(_openrouter_request_options(base_url))
+    budget = _qa_budget_guard()
+    if budget is not None:
+        payload.update(budget.request_options())
+        payload["stream_options"] = {"include_usage": True}
     headers = {
         "Content-Type": "application/json",
         "User-Agent": f"openLearn/{__version__}",
@@ -19549,8 +19602,12 @@ def call_openai_streaming(
     if spinner is not None:
         spinner.add_task("waiting", total=None)
     try:
-        for attempt in range(1, OPENAI_MAX_ATTEMPTS + 1):
+        max_attempts = 1 if budget is not None else OPENAI_MAX_ATTEMPTS
+        for attempt in range(1, max_attempts + 1):
             chunks: list[str] = []
+            usage = None
+            stream_done = False
+            reservation = _qa_budget_reserve(budget, base_url, payload)
             try:
                 with urlopen(request, timeout=60) as response:
                     for raw_line in response:
@@ -19559,6 +19616,7 @@ def call_openai_streaming(
                             continue
                         data = line.removeprefix("data:").strip()
                         if data == "[DONE]":
+                            stream_done = True
                             break
                         try:
                             event = json.loads(data)
@@ -19567,6 +19625,8 @@ def call_openai_streaming(
                         stream_error = _stream_error(event)
                         if stream_error:
                             raise stream_error
+                        if event.get("usage") is not None:
+                            usage = event["usage"]
                         text = extract_stream_delta(event)
                         if not text:
                             continue
@@ -19586,9 +19646,11 @@ def call_openai_streaming(
                                 published_preview = sanitize_stream_preview("".join(chunks))
                                 stream_sink(published_preview)
                                 last_preview_at = now
+                if stream_done:
+                    _qa_budget_settle(budget, reservation, usage)
                 break
             except (HTTPError, URLError, TimeoutError) as exc:
-                if not is_transient_openai_error(exc) or attempt == OPENAI_MAX_ATTEMPTS:
+                if not is_transient_openai_error(exc) or attempt == max_attempts:
                     if tutor_stream is not None:
                         tutor_stream.abort()
                     raise _provider_transport_error(exc, api_key=api_key) from exc

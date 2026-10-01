@@ -15,7 +15,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
-from openlearn import __version__, config
+from openlearn import __version__, config, qa_budget
 from openlearn.config import (
     ProviderCredentials,
     ProviderStatus,
@@ -94,6 +94,12 @@ class ValidationResult:
 
 class ProviderError(RuntimeError):
     """A provider failed without exposing credentials or response bodies."""
+
+
+class ProviderBudgetError(ProviderError):
+    """The explicit live QA batch cannot fund another inference attempt."""
+
+    category = "qa_budget_stop"
 
 
 class ProviderConfigurationError(ValueError):
@@ -413,7 +419,7 @@ def chat_completion(
         raise ProviderError("invalid_provider_credentials")
     if not credentials.api_key and not base_url_allows_keyless_requests(normalized_url):
         raise ProviderError("provider_api_key_required")
-    payload: Mapping[str, object] = {
+    payload: dict[str, object] = {
         "model": credentials.model,
         "max_tokens": max_tokens,
         "include_reasoning": False,
@@ -422,6 +428,17 @@ def chat_completion(
             {"role": "user", "content": user},
         ],
     }
+    budget = None
+    if os.environ.get("OPENLEARN_QA_BUDGET", "0") != "0":
+        from openlearn import cli
+
+        try:
+            budget = qa_budget.from_environment(lock=cli.file_lock, write=cli.write_text_atomic)
+        except qa_budget.QABudgetStop as exc:
+            raise ProviderBudgetError(str(exc)) from exc
+        if budget is not None:
+            payload.update(budget.request_options())
+            max_attempts = 1
     headers = {
         "Content-Type": "application/json",
         "User-Agent": f"openLearn/{__version__}",
@@ -439,10 +456,27 @@ def chat_completion(
         raise ProviderError("invalid_provider_request") from None
     data: object = None
     for attempt in range(1, max_attempts + 1):
+        reservation = None
+        if budget is not None:
+            try:
+                reservation = budget.reserve(normalized_url, payload)
+            except (qa_budget.QABudgetStop, OSError) as exc:
+                message = str(exc) if isinstance(exc, qa_budget.QABudgetStop) else (
+                    "Live QA budget stopped: reservation could not be saved."
+                )
+                raise ProviderBudgetError(message) from exc
         try:
             response = opener(request, timeout=timeout_seconds)
             with response:
                 data = json.loads(_read_provider_response(response).decode("utf-8"))
+            if budget is not None and reservation is not None:
+                try:
+                    budget.settle(reservation, data.get("usage") if isinstance(data, dict) else None)
+                except (qa_budget.QABudgetStop, OSError) as exc:
+                    message = str(exc) if isinstance(exc, qa_budget.QABudgetStop) else (
+                        "Live QA budget stopped: accounting could not be saved."
+                    )
+                    raise ProviderBudgetError(message) from exc
             break
         except (HTTPError, URLError, TimeoutError) as exc:
             if isinstance(exc, HTTPError):

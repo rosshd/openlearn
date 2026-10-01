@@ -693,7 +693,20 @@ def _generate_follow_up_record(record: dict[str, object], claim_token: str):
             ),
         )
         title, goal = _parse_follow_up_response(raw)
-    except (providers.ProviderError, config.ConfigError):
+    except (providers.ProviderError, config.ConfigError) as exc:
+        if getattr(exc, "category", None) == "qa_budget_stop":
+            return _finish_claimed_follow_up_record(
+                record,
+                claim_token,
+                {
+                    "state": "error",
+                    "error_code": "qa_budget_stop",
+                    "error_message": (
+                        "Live QA budget stopped. Review the batch ledger and limits "
+                        "before making another provider request."
+                    ),
+                },
+            )
         return _finish_claimed_follow_up_record(
             record,
             claim_token,
@@ -1042,6 +1055,15 @@ def _turn_failure(exc: Exception) -> tuple[str, str]:
     from openlearn import cli, lesson_policy
 
     current: BaseException | None = exc
+    while current is not None:
+        if getattr(current, "category", None) == "qa_budget_stop":
+            return (
+                "qa_budget_stop",
+                "Your response is saved. Live QA budget stopped. Review the batch "
+                "ledger and limits before making another provider request.",
+            )
+        current = current.__cause__ or current.__context__
+    current = exc
     while current is not None:
         if isinstance(current, lesson_policy.FirstLessonUnavailable):
             return "first_lesson_unavailable", lesson_policy.FIRST_LESSON_RETRY_MESSAGE
