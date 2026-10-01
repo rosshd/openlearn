@@ -377,6 +377,42 @@ def _plain_text(value: str) -> str:
     return text.strip()
 
 
+def _presentation_text(value: str) -> dict[str, object]:
+    """Protect explicit math from Markdown cleanup; never interpret code or dollars."""
+    if "\ue000" in value or "\ue001" in value:
+        return {"text": _plain_text(value)}
+    expressions: list[str] = []
+
+    def protect(match: re.Match[str]) -> str:
+        formula = match.group("math")
+        if formula is None or not formula.strip():
+            return match.group(0)
+        expressions.append(formula)
+        return f"\ue000{len(expressions) - 1}\ue001"
+
+    protected = re.sub(
+        r"(?<!`)(?P<ticks>`+)(?!`).*?(?<!`)(?P=ticks)(?!`)"
+        r"|(?<!\\)\\\((?P<math>.*?)\\\)",
+        protect, value, flags=re.DOTALL,
+    )
+    if not expressions:
+        return {"text": _plain_text(value)}
+    cleaned = _plain_text(protected)
+    parts: list[dict[str, str]] = []
+    position = 0
+    for match in re.finditer(r"\ue000(\d+)\ue001", cleaned):
+        if match.start() > position:
+            parts.append({"kind": "text", "text": cleaned[position:match.start()]})
+        parts.append({"kind": "math", "text": expressions[int(match.group(1))]})
+        position = match.end()
+    if position < len(cleaned):
+        parts.append({"kind": "text", "text": cleaned[position:]})
+    return {
+        "text": "".join(r"\(" + part["text"] + r"\)" if part["kind"] == "math" else part["text"] for part in parts),
+        "parts": parts,
+    }
+
+
 def _pending_prompt_text(value: str | None) -> str:
     if not value:
         return ""
@@ -431,19 +467,36 @@ def _present_response(value: str) -> tuple[str, list[dict[str, object]]]:
                 }
             )
             continue
+        display = re.fullmatch(r"\s*\\\[(.*?)\\\]\s*", line)
+        closing = None
+        if line.strip() == r"\[":
+            closing = next((end for end in range(index + 1, len(lines))
+                            if lines[end].strip() == r"\]"), None)
+        if display or closing is not None:
+            formula = display.group(1) if display else "\n".join(lines[index + 1:closing])
+            if formula.strip():
+                blocks.append({"kind": "math", "text": formula.strip()})
+                index = index + 1 if display else closing + 1
+                continue
         unordered = re.match(r"^\s*[-*+]\s+(.+)$", line)
         ordered = re.match(r"^\s*\d+[.)]\s+(.+)$", line)
         if unordered or ordered:
             kind = "unordered_list" if unordered else "ordered_list"
             pattern = r"^\s*[-*+]\s+(.+)$" if unordered else r"^\s*\d+[.)]\s+(.+)$"
             items: list[str] = []
+            item_parts: list[object] = []
             while index < len(lines):
                 item = re.match(pattern, lines[index])
                 if item is None:
                     break
-                items.append(_plain_text(item.group(1)))
+                presented = _presentation_text(item.group(1))
+                items.append(str(presented["text"]))
+                item_parts.append(presented.get("parts"))
                 index += 1
-            blocks.append({"kind": kind, "items": items})
+            block: dict[str, object] = {"kind": kind, "items": items}
+            if any(item_parts):
+                block["item_parts"] = item_parts
+            blocks.append(block)
             continue
         paragraph: list[str] = []
         while index < len(lines):
@@ -454,11 +507,13 @@ def _present_response(value: str) -> tuple[str, list[dict[str, object]]]:
                 re.match(r"^\s*```", current)
                 or re.match(r"^\s*[-*+]\s+", current)
                 or re.match(r"^\s*\d+[.)]\s+", current)
+                or current.strip() == r"\["
+                or re.fullmatch(r"\s*\\\[.*?\\\]\s*", current)
             ):
                 break
             paragraph.append(re.sub(r"^#{1,6}\s+", "", current.strip()))
             index += 1
-        blocks.append({"kind": "paragraph", "text": _plain_text("\n".join(paragraph))})
+        blocks.append({"kind": "paragraph", **_presentation_text("\n".join(paragraph))})
 
     first = blocks[0].get("text", "") if blocks and blocks[0]["kind"] == "paragraph" else ""
     label = "Lesson"
@@ -468,6 +523,9 @@ def _present_response(value: str) -> tuple[str, list[dict[str, object]]]:
         remainder = match.group(2).strip()
         if remainder:
             blocks[0]["text"] = remainder
+            parts = blocks[0].get("parts")
+            if isinstance(parts, list) and parts and parts[0]["kind"] == "text":
+                parts[0]["text"] = re.sub(r"^[A-Za-z][A-Za-z ]{1,30}:\s*", "", parts[0]["text"])
         else:
             blocks.pop(0)
     visible_text = " ".join(
@@ -2073,7 +2131,7 @@ class OpenLearnWebServices:
                     "blocks": blocks,
                     "content": "\n\n".join(
                         str(block.get("text", ""))
-                        if block["kind"] in {"paragraph", "code"}
+                        if block["kind"] in {"paragraph", "code", "math"}
                         else "\n".join(str(item) for item in block.get("items", []))
                         for block in blocks
                     ),

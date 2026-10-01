@@ -99,6 +99,20 @@ Every answer, question, or navigation request needs a fresh approval; cancellati
 The stored grading key is hidden in the learner preview but remains in the scoped judge request when needed.
 Changed requests or source material require a new preview.
 
+### Optional math presentation
+
+Web lessons, saved history, and tutor chat render explicitly marked simple algebra with a local KaTeX renderer.
+Use `\(x^2\)` for inline notation and standalone `\[` / `\]` lines for a display equation.
+Explain what each equation means in ordinary language beside it.
+Matrices, fractions, column vectors, roots, subscripts and ordinary equations are supported within bounded input limits.
+Code, currency text, streaming previews and unmarked arrays are never converted into math.
+Unsupported notation appears visibly as `Math (text)` rather than losing meaning or breaking the lesson.
+This first subset excludes custom macros, external resources, arbitrary styles, decorated/font-variant symbols and advanced alignment environments.
+CLI output and backups retain the original notation and explanatory prose; no saved topic is rewritten.
+MathML-only output preserves the existing CSP and does not require a CDN or font download.
+The bundled KaTeX 0.19.0 script comes from the official npm `katex` archive and retains its MIT license in `src/openlearn/web/static/vendor/katex/LICENSE`.
+Its SHA-256 is `103a53763cc033bba8d175bf3f0ba597c3505c9b6747dd3f2c7bc2a6bfcc8ae7`.
+
 ## Provider setup
 
 Provider setup is available in the web app or through `openlearn init`.

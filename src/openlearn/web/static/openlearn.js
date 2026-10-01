@@ -1498,6 +1498,27 @@ document.addEventListener("keydown", (event) => {
   submitTurn("next");
 });
 
+function appendMath(target, tex, display = false) {
+  target.classList.add("math-expression", "math-fallback");
+  target.dataset.mathDisplay = display ? "true" : "false";
+  if (window.OpenLearnMath) window.OpenLearnMath.render(target, tex, display);
+  else target.textContent = tex;
+}
+
+function appendPresentationText(container, text, parts) {
+  if (!parts) {
+    container.textContent = text || "";
+    return;
+  }
+  for (const part of parts) {
+    if (part.kind === "math") {
+      const span = document.createElement("span");
+      appendMath(span, part.text);
+      container.append(span);
+    } else container.append(document.createTextNode(part.text || ""));
+  }
+}
+
 function appendPresentationBlocks(container, blocks) {
   for (const block of blocks || []) {
     if (block.kind === "code") {
@@ -1506,11 +1527,15 @@ function appendPresentationBlocks(container, blocks) {
       code.textContent = block.text || "";
       pre.append(code);
       container.append(pre);
+    } else if (block.kind === "math") {
+      const formula = document.createElement("div");
+      appendMath(formula, block.text, true);
+      container.append(formula);
     } else if (block.kind === "unordered_list" || block.kind === "ordered_list") {
       const list = document.createElement(block.kind === "ordered_list" ? "ol" : "ul");
-      for (const value of block.items || []) {
+      for (const [index, value] of (block.items || []).entries()) {
         const itemNode = document.createElement("li");
-        itemNode.textContent = value;
+        appendPresentationText(itemNode, value, block.item_parts?.[index]);
         list.append(itemNode);
       }
       container.append(list);
@@ -1525,7 +1550,7 @@ function appendPresentationBlocks(container, blocks) {
       container.append(note);
     } else {
       const content = document.createElement("p");
-      content.textContent = block.text || "";
+      appendPresentationText(content, block.text, block.parts);
       container.append(content);
     }
   }

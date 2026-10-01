@@ -1,5 +1,10 @@
 [data-source-preview] { max-width: min(54rem, 92vw); max-height: 85vh; overflow: auto; }
 [data-source-preview-text] { white-space: pre-wrap; overflow-wrap: anywhere; }
+.math-expression { display: inline-block; max-width: 100%; overflow-x: auto; vertical-align: middle; }
+.math-expression math { font-size: 1.1em; }
+.math-display { display: block; padding-block: 0.5rem; }
+.math-fallback { white-space: pre-wrap; overflow-wrap: anywhere; }
+.math-fallback::before { content: "Math (text): "; font-size: 0.8em; }
 [data-provider-setup-dialog] { width: min(36rem, 92vw); max-height: 85vh; overflow: auto; color: var(--graphite); background: var(--surface); border: 1px solid var(--line); }
 [data-provider-setup-dialog]::backdrop { background: rgb(0 0 0 / 45%); }
 
@@ -440,7 +445,7 @@ h2 { font-size: clamp(1.35rem, 3vw, 2rem); line-height: 1.1; letter-spacing: -0.
   display: grid;
   gap: 1rem;
 }
-.move-surface { min-height: min(48vh, 33rem); padding: clamp(1.4rem, 5vw, 3.2rem); border: 1px solid var(--line-strong); border-top: 7px solid var(--orange); background: var(--surface); box-shadow: var(--shadow); }
+.move-surface { min-width: 0; min-height: min(48vh, 33rem); padding: clamp(1.4rem, 5vw, 3.2rem); border: 1px solid var(--line-strong); border-top: 7px solid var(--orange); background: var(--surface); box-shadow: var(--shadow); }
 .move-surface[data-streaming] { overflow: visible; }
 .move-surface h1 { max-width: 20ch; font-size: clamp(2rem, 5vw, 3.5rem); }
 .move-surface[data-move-type="feedback"], .move-surface[data-move-type="hint"] { border-top-color: var(--teal); }
@@ -629,7 +634,7 @@ h2 { font-size: clamp(1.35rem, 3vw, 2rem); line-height: 1.1; letter-spacing: -0.
 .chat-panel > div:first-child p { margin-bottom: 0; }
 .chat-conversation { max-height: min(52vh, 34rem); padding-right: 0.25rem; overflow-y: auto; }
 .chat-exchange { display: grid; gap: 0.7rem; padding: 1rem 0; border-top: 1px solid var(--line); }
-.chat-exchange span { color: var(--graphite-soft); font: 750 0.7rem/1 ui-monospace, monospace; text-transform: uppercase; }
+.chat-exchange span:not(.math-expression) { color: var(--graphite-soft); font: 750 0.7rem/1 ui-monospace, monospace; text-transform: uppercase; }
 .chat-exchange p, .chat-exchange ul, .chat-exchange ol { margin: 0.35rem 0 0; }
 .chat-learner { margin-left: clamp(1rem, 8%, 3rem); padding: 0.75rem; background: color-mix(in srgb, var(--orange) 10%, var(--surface)); }
 .chat-tutor { margin-right: clamp(1rem, 8%, 3rem); padding: 0.75rem; border-left: 4px solid var(--teal); background: var(--surface); }

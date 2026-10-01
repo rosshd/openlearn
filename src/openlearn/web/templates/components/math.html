@@ -1,0 +1,6 @@
+{% macro expression(text, display=false) -%}
+<{{ 'div' if display else 'span' }} class="math-expression math-fallback{% if display %} math-display{% endif %}" data-math-expression data-math-display="{{ 'true' if display else 'false' }}"><code>{{ text }}</code></{{ 'div' if display else 'span' }}>
+{%- endmacro %}
+{% macro text_parts(text, parts) -%}
+{% if parts %}{% for part in parts %}{% if part.kind == 'math' %}{{ expression(part.text) }}{% else %}{{ part.text }}{% endif %}{% endfor %}{% else %}{{ text }}{% endif %}
+{%- endmacro %}

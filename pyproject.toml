@@ -73,6 +73,8 @@ openlearn = [
     "web/static/*.css",
     "web/static/*.js",
     "web/static/*.svg",
+    "web/static/vendor/katex/*.js",
+    "web/static/vendor/katex/LICENSE",
 ]
 
 [tool.setuptools.packages.find]

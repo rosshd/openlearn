@@ -118,6 +118,7 @@ class ReleaseArtifactPolicyTests(unittest.TestCase):
             with ZipFile(wheel) as archive:
                 packaged = set(archive.namelist())
 
+        self.assertLessEqual(release_artifacts.REQUIRED_PACKAGE_FILES, packaged)
         self.assertIn(
             "openlearn/interview_curricula/technical-interview-v1.json",
             packaged,

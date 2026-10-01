@@ -1,4 +1,9 @@
 {% extends "base.html" %}
+{% from "components/math.html" import expression, text_parts %}
+{% block presentation_scripts %}
+<script src="{{ url_for('static', path='/vendor/katex/katex.min.js') }}" defer></script>
+<script src="{{ url_for('static', path='/math-renderer.js') }}" defer></script>
+{% endblock %}
 {% block main_class %}focus-main{% endblock %}
 {% block status %}
 <div class="focus-status" aria-label="Lesson status">
@@ -44,11 +49,12 @@
       <h1 id="move-title" tabindex="-1">{{ course.move.title or 'Ready when you are' }}</h1>
       <div class="move-content" data-move-content>
         {% for block in course.move.blocks or [] %}
-          {% if block.kind == 'paragraph' %}<p>{{ block.text }}</p>
+          {% if block.kind == 'paragraph' %}<p>{{ text_parts(block.text, block.parts) }}</p>
           {% elif block.kind == 'definition' %}<aside class="term-note"><strong>{{ block.term }}</strong><span>{{ block.text }}</span></aside>
-          {% elif block.kind == 'unordered_list' %}<ul>{% for item in block['items'] %}<li>{{ item }}</li>{% endfor %}</ul>
-          {% elif block.kind == 'ordered_list' %}<ol>{% for item in block['items'] %}<li>{{ item }}</li>{% endfor %}</ol>
+          {% elif block.kind == 'unordered_list' %}<ul>{% for item in block['items'] %}<li>{{ text_parts(item, block.item_parts[loop.index0] if block.item_parts else none) }}</li>{% endfor %}</ul>
+          {% elif block.kind == 'ordered_list' %}<ol>{% for item in block['items'] %}<li>{{ text_parts(item, block.item_parts[loop.index0] if block.item_parts else none) }}</li>{% endfor %}</ol>
           {% elif block.kind == 'code' %}<pre><code{% if block.language %} data-language="{{ block.language }}"{% endif %}>{{ block.text }}</code></pre>
+          {% elif block.kind == 'math' %}{{ expression(block.text, true) }}
           {% endif %}
         {% endfor %}
         {% if course.move.content %}<p>{{ course.move.content }}</p>{% endif %}
