@@ -1,3 +1,6 @@
+[data-source-preview] { max-width: min(54rem, 92vw); max-height: 85vh; overflow: auto; }
+[data-source-preview-text] { white-space: pre-wrap; overflow-wrap: anywhere; }
+
 :root {
   color-scheme: light dark;
   --canvas: #f3eddf;

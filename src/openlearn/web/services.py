@@ -17,6 +17,7 @@ from openlearn import (
     interview_prep,
     lesson_policy,
     providers,
+    source_context,
     source_imports,
     tutor_service,
     video_tools,
@@ -1864,7 +1865,41 @@ class OpenLearnWebServices:
             "saved_response": saved_response,
         }
 
+    @staticmethod
+    def _source_request_text(request: TutorSubmissionRequest) -> str:
+        return {
+            "skip": "Skip this for now and continue with a useful next move.",
+            "next": "Continue to the next useful concept.",
+            "practice": "Practice now using a covered curriculum concept.",
+        }.get(request.intent, request.text.strip())
+
+    def _preview_source_turn(self, slug: str, request: TutorSubmissionRequest) -> tuple[dict[str, object], str | None]:
+        if not request.source_mode:
+            return {"ok": False, "error": "Enable source mode for this request first."}, None
+        try:
+            context = source_context.snapshot(
+                cli.read_topic(slug), self._source_request_text(request),
+                config.configured_model(), opted_in=True,
+            )
+            preview = source_context.request_preview(context)
+        except cli.OpenLearnError as error:
+            return {"ok": False, "error": str(error)}, None
+        binding = repr((slug, request.intent, request.text, request.expected_revision,
+                        request.source_lesson_id, request.source_lesson_title,
+                        request.source_lesson_revision, context.revision, preview))
+        return {"ok": True, "disclosure": source_context.CONSENT_TEXT + " The stored grading key is sent when needed but hidden in this learner preview.",
+                "preview": source_context.learner_request_preview(context),
+                "approval": sha256(binding.encode()).hexdigest()}, preview
+
+    def preview_source_turn(self, slug: str, request: TutorSubmissionRequest) -> dict[str, object]:
+        return self._preview_source_turn(slug, request)[0]
+
     def submit_turn(self, slug: str, request: TutorSubmissionRequest) -> dict[str, object]:
+        source_preview = None
+        if request.source_mode:
+            result, source_preview = self._preview_source_turn(slug, request)
+            if not result.get("ok") or request.source_approval != result.get("approval"):
+                return {"state": "conflict", "error": "Review and approve a fresh screened request before sending."}
         intent = {
             "answer": "answer",
             "question": "question",
@@ -1923,6 +1958,7 @@ class OpenLearnWebServices:
                 source_lesson_id=source_fields[0],
                 source_lesson_title=source_fields[1],
                 source_lesson_revision=source_fields[2],
+                source_preview=source_preview,
             )
         except tutor_service.TutorConflictError as error:
             return {"state": "conflict", "error": str(error)}

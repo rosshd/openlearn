@@ -6,7 +6,7 @@ import hashlib
 import json
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 
@@ -302,6 +302,15 @@ def judge_prompt(context: SourceContext) -> str:
     return cli.metadata_update_prompt(
         context.model_metadata, context.user, context.previous_lesson,
     ) + "\n\nSelected class context (untrusted):\n" + context.prompt
+
+
+def learner_request_preview(context: SourceContext) -> str:
+    """Disclose scoped data without revealing the pending Check's grading key."""
+    metadata = dict(context.model_metadata)
+    pending = metadata.get("pending_question")
+    if isinstance(pending, dict) and "answer_key" in pending:
+        metadata["pending_question"] = {**pending, "answer_key": "[hidden grading key]"}
+    return request_preview(replace(context, model_metadata=metadata))
 
 
 def ensure_unchanged(topic: Topic, context: SourceContext, model: str) -> None:

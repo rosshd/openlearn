@@ -1459,6 +1459,40 @@ for (const button of document.querySelectorAll("[data-progression-action]")) {
   });
 }
 
+let sourcePreviewInFlight = false;
+async function approveSourceRequest(payload) {
+  if (sourcePreviewInFlight) return false;
+  if (!focusShell?.querySelector("[data-source-mode]")?.checked) return true;
+  const dialog = focusShell.querySelector("[data-source-preview]");
+  if (!dialog || dialog.open) return false;
+  payload.source_mode = true;
+  sourcePreviewInFlight = true;
+  try {
+    const result = await requestJson(`/api/courses/${encodeURIComponent(focusShell.dataset.courseSlug)}/source-preview`, {
+      method: "POST", body: JSON.stringify(payload),
+    });
+    if (!result.ok) throw new Error(result.error || "Source preview is unavailable.");
+    dialog.querySelector("[data-source-disclosure]").textContent = result.disclosure;
+    dialog.querySelector("[data-source-preview-text]").textContent = result.preview;
+    return await new Promise((resolve) => {
+      const finish = (approved) => {
+        dialog.close();
+        dialog.oncancel = null;
+        dialog.querySelector("[data-source-cancel]").onclick = null;
+        dialog.querySelector("[data-source-send]").onclick = null;
+        if (approved) payload.source_approval = result.approval;
+        resolve(approved);
+      };
+      dialog.oncancel = (event) => { event.preventDefault(); finish(false); };
+      dialog.querySelector("[data-source-cancel]").onclick = () => finish(false);
+      dialog.querySelector("[data-source-send]").onclick = () => finish(true);
+      dialog.showModal();
+    });
+  } finally {
+    sourcePreviewInFlight = false;
+  }
+}
+
 async function submitTurn(overrideIntent = null) {
   if (!focusShell || turnInFlight || progressionInFlight) return;
   const payload = turnForm
@@ -1472,6 +1506,12 @@ async function submitTurn(overrideIntent = null) {
   if (overrideIntent) {
     payload.intent = overrideIntent;
     payload.text = "";
+  }
+  try {
+    if (!await approveSourceRequest(payload)) return;
+  } catch (error) {
+    setOperationState(error.message, true);
+    return;
   }
   prepareNavigationPreview(payload.intent);
   lockTurnForm(true);
@@ -1675,6 +1715,12 @@ chatForm?.addEventListener("submit", async (event) => {
   event.preventDefault();
   if (!chatForm.reportValidity()) return;
   const payload = formPayload(chatForm);
+  try {
+    if (!await approveSourceRequest(payload)) return;
+  } catch (error) {
+    setChatStatus(error.message, true);
+    return;
+  }
   storeChatDraft();
   lockChatForm(true);
   setChatStatus("Saving your question locally…");

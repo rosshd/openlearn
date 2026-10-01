@@ -1492,6 +1492,22 @@ def test_real_browser_reads_cli_source_provenance_after_restart(
                 playwright.expect(page.locator(".history-list")).to_contain_text("extracted text lines")
                 assert page.locator('input[name="source_mode"]').count() == 0
                 assert cli.topic_path("stack-notes").read_bytes() == before
+                page.goto(f"{app_url}/courses/stack-notes")
+                checkbox = page.locator("[data-source-mode]")
+                assert not checkbox.is_checked()
+                checkbox.check()
+                page.locator('[data-tool-open="chat"]').first.click()
+                page.locator("#chat-question").fill("Explain the stack rule")
+                page.locator("[data-chat-submit]").click()
+                playwright.expect(page.locator("[data-source-preview]")).to_be_visible()
+                playwright.expect(page.locator("[data-source-preview-text]")).to_contain_text("last in, first out")
+                page.locator("[data-source-cancel]").click()
+                assert cli.topic_path("stack-notes").read_bytes() == before
+                page.locator("[data-chat-submit]").click()
+                playwright.expect(page.locator("[data-source-preview]")).to_be_visible()
+                page.locator("[data-source-send]").click()
+                playwright.expect(page.locator("[data-chat-status]")).to_contain_text("Answered.", timeout=10000)
+                playwright.expect(page.locator("[data-chat-conversation]")).to_contain_text("Source excerpts provided:")
                 browser.close()
         finally:
             process.terminate()

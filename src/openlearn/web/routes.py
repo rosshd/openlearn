@@ -1021,6 +1021,17 @@ async def manage_data(request: Request) -> JSONResponse:
     return JSONResponse(result, status_code=422 if not result.get("ok", False) else 200)
 
 
+@router.post("/api/courses/{slug}/source-preview", response_class=JSONResponse)
+async def preview_source_turn(request: Request, slug: str) -> JSONResponse:
+    try:
+        slug = canonical_slug(slug)
+        payload = TutorSubmissionRequest.model_validate(await request.json())
+    except (ValidationError, ValueError):
+        return _json_error("Check the source-mode request.")
+    result = public_mapping(await _call(request, "preview_source_turn", slug, payload))
+    return JSONResponse(result, status_code=200 if result.get("ok") else 422)
+
+
 @router.post("/api/courses/{slug}/turns", response_class=JSONResponse)
 async def submit_turn(request: Request, slug: str) -> JSONResponse:
     if not await _provider_ready(request):

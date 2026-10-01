@@ -23,6 +23,15 @@
   </aside>
 
   <section class="focus-column" aria-labelledby="move-title">
+    <label><input type="checkbox" data-source-mode> Use screened class sources for this turn</label>
+    <p class="field-note">Off by default. Review and approve each request before it is sent to OpenRouter.</p>
+    <dialog data-source-preview aria-labelledby="source-preview-title">
+      <h2 id="source-preview-title">Review screened tutor request</h2>
+      <p data-source-disclosure></p>
+      <pre data-source-preview-text></pre>
+      <button type="button" data-source-cancel>Cancel</button>
+      <button type="button" data-source-send>Send screened request</button>
+    </dialog>
     {% if course.feedback %}
     <aside class="feedback-strip {{ course.feedback.tone or '' }}" aria-label="Tutor feedback">
       <strong>{{ course.feedback.label or 'Tutor note' }}</strong>

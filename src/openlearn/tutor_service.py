@@ -1778,6 +1778,7 @@ def _execute_prepared_turn_inner(
     model: str | None,
     session_kind: TutorSessionKind,
     progression_intent: ProgressionIntent | None,
+    source_preview: str | None = None,
 ) -> TutorTurnResult:
     from openlearn import cli
 
@@ -2091,6 +2092,8 @@ def _execute_prepared_turn_inner(
             cli.ask_topic(
                 slug,
                 normalized,
+                source_mode=source_preview is not None,
+                approved_source_preview=source_preview,
                 model=model,
                 output_func=lambda _text="": None,
                 pending_learner_prompt=(
@@ -2202,6 +2205,7 @@ def _execute_prepared_turn(
     model: str | None,
     session_kind: TutorSessionKind,
     progression_intent: ProgressionIntent | None,
+    source_preview: str | None = None,
 ) -> TutorTurnResult:
     """Run a prepared turn with a durable failure boundary around all setup."""
     from openlearn import cli
@@ -2216,6 +2220,7 @@ def _execute_prepared_turn(
             model,
             session_kind,
             progression_intent,
+            source_preview,
         )
     except Exception as exc:
         _clear_live_turn((slug, sid))
@@ -2341,6 +2346,7 @@ def start_turn(
     source_lesson_id: str | None = None,
     source_lesson_title: str | None = None,
     source_lesson_revision: int | None = None,
+    source_preview: str | None = None,
 ) -> TutorTurnResult:
     """Persist a turn, then execute it in the bounded tutor worker pool."""
     sid, normalized = _validate_turn(text, submission_id)
@@ -2391,6 +2397,7 @@ def start_turn(
                 model,
                 session_kind,
                 progression_intent,
+                source_preview,
             )
         except RuntimeError as exc:
             failed = TutorTurnResult(

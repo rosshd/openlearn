@@ -123,6 +123,8 @@ class TutorSubmissionRequest(BaseModel):
     text: str = Field(default="", max_length=32000)
     submission_id: str = Field(min_length=1, max_length=64)
     expected_revision: int = Field(ge=0)
+    source_mode: bool = False
+    source_approval: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     source_lesson_id: str | None = Field(default=None, min_length=1, max_length=96)
     source_lesson_title: str | None = Field(default=None, min_length=1, max_length=160)
     source_lesson_revision: int | None = Field(default=None, ge=0)

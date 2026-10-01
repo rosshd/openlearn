@@ -94,7 +94,10 @@ This is not an app-wide privacy setting.
 The saved excerpt ledger records source IDs, checksums, and actual extracted-text line ranges, not original slide/page numbers or proof that a generated claim is correct.
 Missing, stale, unsafe, or over-budget material is withheld rather than silently replaced by summaries.
 Image-only formulas and direct PPTX ingestion are not supported; review a text/PDF export locally first.
-Activation is CLI-only; the web app can read saved provenance in history but does not enable source mode.
+In the web lesson, choose "Use screened class sources for this turn", review the local preview, then choose "Send screened request".
+Every answer, question, or navigation request needs a fresh approval; cancellation sends nothing.
+The stored grading key is hidden in the learner preview but remains in the scoped judge request when needed.
+Changed requests or source material require a new preview.
 
 ## Provider setup
 

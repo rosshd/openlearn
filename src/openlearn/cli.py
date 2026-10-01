@@ -9451,20 +9451,28 @@ def ask_topic(
     ) = None,
     interview_target: dict[str, object] | None = None,
     source_mode: bool = False,
+    approved_source_preview: str | None = None,
 ) -> str:
     topic = read_topic(
         resolve_topic_slug(topic_value) if topic_value is None else slugify(topic_value)
     )
     model = model or str(topic.metadata.get("model") or configured_model())
     source_snapshot = None
+    if approved_source_preview is not None and not source_mode:
+        raise OpenLearnError("A source approval cannot enable ordinary tutoring.")
     if source_mode:
         from openlearn import source_context
 
         source_snapshot = source_context.snapshot(topic, prompt, model, opted_in=True)
-        output_func(source_context.CONSENT_TEXT)
-        output_func(source_context.request_preview(source_snapshot))
-        if input_func("Type 'send source request' to approve, or Enter to cancel: ").strip() != "send source request":
-            raise OpenLearnError("Source request cancelled; no provider call was made.")
+        preview = source_context.request_preview(source_snapshot)
+        if approved_source_preview is not None:
+            if approved_source_preview != preview:
+                raise OpenLearnError("The source request changed after preview; review it again. No request was sent.")
+        else:
+            output_func(source_context.CONSENT_TEXT)
+            output_func(preview)
+            if input_func("Type 'send source request' to approve, or Enter to cancel: ").strip() != "send source request":
+                raise OpenLearnError("Source request cancelled; no provider call was made.")
         source_context.ensure_unchanged(topic, source_snapshot, model)
         prompt = source_snapshot.user
     set_active_topic(topic.slug)

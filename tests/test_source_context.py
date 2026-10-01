@@ -8,6 +8,8 @@ import subprocess
 import sys
 from pathlib import Path
 from unittest import mock
+from concurrent.futures import ThreadPoolExecutor
+from uuid import uuid4
 
 import pytest
 
@@ -56,6 +58,119 @@ def test_default_off_and_actual_cli_flag(course):
     with mock.patch.object(cli, "ask_topic") as ask:
         cli.cmd_chat(args)
     assert ask.call_args.kwargs["source_mode"] is True
+
+
+def web_request(topic, **overrides):
+    from openlearn.web.schemas import TutorSubmissionRequest
+    from openlearn import tutor_service
+    return TutorSubmissionRequest(**{
+        "intent": "answer", "text": "quiz me on the stack",
+        "submission_id": str(uuid4()), "expected_revision": tutor_service.course_revision(topic.slug),
+        "source_mode": True, **overrides,
+    })
+
+
+def test_web_source_preview_is_local_and_filtered(course):
+    from openlearn.web.services import OpenLearnWebServices
+    topic, _ = course
+    before = topic.path.read_bytes(), copy.deepcopy(cli.load_state(topic.slug))
+    with mock.patch.object(cli, "call_openai") as judge, mock.patch.object(cli, "call_openai_streaming") as tutor:
+        result = OpenLearnWebServices().preview_source_turn(topic.slug, web_request(topic))
+    assert result["ok"] and len(result["approval"]) == 64
+    assert sources.APPROVED_MODEL in result["disclosure"]
+    assert "last pushed item" in result["preview"]
+    assert "PRIVATE_GOAL" not in result["preview"]
+    judge.assert_not_called()
+    tutor.assert_not_called()
+    assert (topic.path.read_bytes(), cli.load_state(topic.slug)) == before
+
+
+@pytest.mark.parametrize("change", ["missing", "request", "source", "state"])
+def test_web_source_approval_is_bound_to_fresh_request(course, change):
+    from openlearn import tutor_service
+    from openlearn.web.services import OpenLearnWebServices
+    topic, record = course
+    service = OpenLearnWebServices()
+    request = web_request(topic)
+    request.source_approval = service.preview_source_turn(topic.slug, request)["approval"]
+    if change == "missing":
+        request.source_approval = None
+    elif change == "request":
+        request.text = "explain the stack instead"
+    elif change == "source":
+        (cli.topic_context_dir(topic.slug) / record.context_file).write_text("Different rule", encoding="utf-8")
+    else:
+        cli.update_state_atomic(topic.slug, lambda state: state.update({"current_focus": "other"}))
+    with mock.patch.object(tutor_service, "start_turn") as start:
+        assert service.submit_turn(topic.slug, request)["state"] == "conflict"
+    start.assert_not_called()
+
+
+def test_web_worker_uses_consented_scope_and_saves_check(course):
+    from openlearn import tutor_service
+    from openlearn.web.services import OpenLearnWebServices
+    topic, record = course
+    request = web_request(topic)
+    service = OpenLearnWebServices()
+    request.source_approval = service.preview_source_turn(topic.slug, request)["approval"]
+    calls = []
+    def tutor(**kwargs):
+        calls.append(kwargs)
+        kwargs["output_func"](cli.sanitize_model_output(CHECK))
+        return CHECK
+    with mock.patch.object(cli, "call_openai_streaming", side_effect=tutor), mock.patch.object(cli, "finish_turn_update") as finish, ThreadPoolExecutor(max_workers=1) as executor, mock.patch.object(tutor_service, "_EXECUTOR", executor):
+        result = service.submit_turn(topic.slug, request)
+        assert result["state"] == "saved"
+    operation = tutor_service.operation_status(topic.slug, request.submission_id)
+    assert operation.status == "committed", operation.error_message
+    assert len(calls) == 1
+    assert "PRIVATE_GOAL" not in str(calls)
+    assert record.source_id in cli.read_topic(topic.slug).body
+    assert cli.load_state(topic.slug)["pending_question"]["answer_key"] == "B"
+    finish.assert_not_called()
+
+
+def test_web_preview_hides_key_but_approved_judge_retains_it(course):
+    from openlearn import tutor_service
+    from openlearn.web.services import OpenLearnWebServices
+    topic, _ = course
+    cli.save_pending_question(topic, cli.sanitize_model_output(CHECK), "B")
+    request = web_request(topic, text="B")
+    service = OpenLearnWebServices()
+    preview = service.preview_source_turn(topic.slug, request)
+    assert '"answer_key": "B"' not in preview["preview"]
+    assert "[hidden grading key]" in preview["preview"]
+    request.source_approval = preview["approval"]
+    calls = []
+    def judge(model, system, user):
+        calls.append(user)
+        return json.dumps({"message_kind": "answer", "last_answer_status": "correct",
+                           "answer_score": 1, "answer_kind": "recognition", "is_transfer": False,
+                           "gameable": False, "known_add": [], "weak_spots_add": []})
+    with mock.patch.object(cli, "call_openai_judgment", side_effect=judge), mock.patch.object(cli, "call_openai_streaming", return_value="**Feedback:**\nB was the last pushed item."), ThreadPoolExecutor(max_workers=1) as executor, mock.patch.object(tutor_service, "_EXECUTOR", executor):
+        service.submit_turn(topic.slug, request)
+    operation = tutor_service.operation_status(topic.slug, request.submission_id)
+    assert operation.status == "committed", operation.error_message
+    assert calls and '"answer_key": "B"' in calls[0]
+
+
+def test_web_source_preview_http_and_default_off(course):
+    from fastapi.testclient import TestClient
+    from openlearn.web.app import create_app
+    topic, _ = course
+    with TestClient(create_app(testing=True)) as client:
+        page = client.get(f"/courses/{topic.slug}")
+        assert page.status_code == 200
+        assert 'data-source-mode>' in page.text
+        token = page.cookies["openlearn_csrf"]
+        request = web_request(topic)
+        response = client.post(f"/api/courses/{topic.slug}/source-preview",
+                               headers={"x-csrf-token": token}, json=request.model_dump())
+        assert response.status_code == 200 and response.json()["ok"]
+        request.source_mode = False
+        response = client.post(f"/api/courses/{topic.slug}/source-preview",
+                               headers={"x-csrf-token": token}, json=request.model_dump())
+        assert response.status_code == 422
 
 
 def test_cancel_does_not_call_any_provider_or_mutate_topic(course):
