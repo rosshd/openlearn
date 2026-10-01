@@ -1836,6 +1836,34 @@ class TutorServiceTests(TestCase):
         self.assertEqual(terminal.error_code, "provider_unavailable")
         self.assertIsNone(terminal.preview)
 
+    def test_provider_diagnostics_are_saved_privately_without_raw_errors(self) -> None:
+        from io import BytesIO
+        from urllib.error import HTTPError
+
+        submission_id = str(uuid4())
+        raw = HTTPError("https://example.test", 429, "SECRET", {"Retry-After": "12"},
+                        BytesIO(b'{"error":{"message":"SECRET","metadata":{"provider_name":"OpenInference"}}}'))
+        failure = cli._provider_transport_error(raw, api_key="SECRET")
+        failure.diagnostics["raw"] = "SECRET"
+        failure.diagnostics["limit_source"] = "SECRET"
+
+        def wrapped_failure(*_args: object, **_kwargs: object) -> str:
+            raise RuntimeError("SECRET wrapper") from failure
+
+        with mock.patch.object(cli, "ask_topic", side_effect=wrapped_failure):
+            with self.assertRaises(TutorOperationError):
+                submit_turn("web-tutor", "Synthetic answer", submission_id=submission_id,
+                            expected_revision=0)
+        internal = cli.load_state("web-tutor")["_openlearn_internal"]
+        receipt = internal["turn_results"][submission_id]
+        expected = {"http_status": 429, "retry_after_seconds": 12, "provider": "openinference"}
+        self.assertEqual(receipt["error_diagnostics"], expected)
+        self.assertEqual(internal["last_turn_error"]["diagnostics"], expected)
+        self.assertEqual(receipt["error_at"], internal["last_turn_error"]["updated_at"])
+        self.assertNotIn("SECRET", cli.topic_state_path("web-tutor").read_text())
+        self.assertEqual(operation_status("web-tutor", submission_id).error_code, "provider_rate_limited")
+        self.assertNotIn("error_diagnostics", tutor_service._receipt_dict(operation_status("web-tutor", submission_id)))
+
     def test_question_turn_is_saved_as_side_chat(self) -> None:
         result = submit_turn(
             "web-tutor",

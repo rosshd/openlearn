@@ -1088,6 +1088,19 @@ def _turn_failure(exc: Exception) -> tuple[str, str]:
     )
 
 
+def _turn_provider_diagnostics(exc: BaseException) -> dict[str, object]:
+    from openlearn import cli
+
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, cli.ProviderRequestError):
+            return cli._safe_provider_diagnostics(current.diagnostics)
+        current = current.__cause__ or current.__context__
+    return {}
+
+
 def _save_operation(
     slug: str,
     *,
@@ -1097,6 +1110,7 @@ def _save_operation(
     prompt: str,
     result: TutorTurnResult | None = None,
     error_code: str | None = None,
+    error_diagnostics: Mapping[str, object] | None = None,
     payload_hash: str | None = None,
     owner_pid: int | None = None,
     session_kind: TutorSessionKind = "chat",
@@ -1111,6 +1125,8 @@ def _save_operation(
 
     def update(state: dict[str, object]) -> None:
         internal = _internal_state(state)
+        error_at = _now() if error_code else None
+        diagnostics = cli._safe_provider_diagnostics(error_diagnostics)
         active_key = _active_operation_key(session_kind)
         previous_active = internal.get(active_key)
         previous_active = previous_active if isinstance(previous_active, dict) else {}
@@ -1175,7 +1191,12 @@ def _save_operation(
         if result is not None:
             results = internal.get("turn_results")
             results = dict(results) if isinstance(results, dict) else {}
-            results[submission_id] = _receipt_dict(result)
+            record = _receipt_dict(result)
+            if error_code:
+                record["error_at"] = error_at
+                if diagnostics:
+                    record["error_diagnostics"] = diagnostics
+            results[submission_id] = record
             while len(results) > 50:
                 results.pop(next(iter(results)))
             internal["turn_results"] = results
@@ -1183,8 +1204,10 @@ def _save_operation(
             internal["last_turn_error"] = {
                 "submission_id": submission_id,
                 "code": error_code,
-                "updated_at": _now(),
+                "updated_at": error_at,
             }
+            if diagnostics:
+                internal["last_turn_error"]["diagnostics"] = diagnostics
         state["_openlearn_internal"] = internal
 
     cli.update_state_atomic(slug, update)
@@ -2210,6 +2233,7 @@ def _execute_prepared_turn_inner(
                 prompt=normalized,
                 result=result,
                 error_code=error_code,
+                error_diagnostics=_turn_provider_diagnostics(exc),
                 payload_hash=payload_hash,
                 session_kind=session_kind,
             )
@@ -2291,6 +2315,7 @@ def _execute_prepared_turn(
                 prompt=normalized,
                 result=result,
                 error_code=error_code,
+                error_diagnostics=_turn_provider_diagnostics(exc),
                 payload_hash=payload_hash,
                 session_kind=session_kind,
             )

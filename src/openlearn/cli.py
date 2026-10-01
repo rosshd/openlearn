@@ -33,6 +33,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from enum import Enum, auto
+from email.utils import parsedate_to_datetime
 from pathlib import Path, PureWindowsPath
 from uuid import UUID, uuid4
 from urllib.parse import urlencode, urlparse
@@ -19319,23 +19320,108 @@ def is_transient_openai_error(exc: HTTPError | URLError | TimeoutError) -> bool:
     return True
 
 
+def _safe_provider_diagnostics(raw: object) -> dict[str, object]:
+    """Allow only bounded codes, normalized times, and known attribution values."""
+    if not isinstance(raw, Mapping):
+        return {}
+    safe: dict[str, object] = {}
+    for key, minimum, maximum in (
+        ("http_status", 100, 599), ("stream_error_code", 100, 599),
+        ("provider_code", 100, 599), ("retry_after_seconds", 0, 2147483647),
+        ("rate_limit_reset", 0, 253402300799),
+    ):
+        value = raw.get(key)
+        if isinstance(value, str) and re.fullmatch(r"[0-9]{1,12}", value):
+            value = int(value)
+        if type(value) is int and minimum <= value <= maximum:
+            safe[key] = value
+    retry_at = raw.get("retry_after_at")
+    if isinstance(retry_at, str) and len(retry_at) <= 40:
+        try:
+            parsed = datetime.fromisoformat(retry_at)
+            if parsed.tzinfo is not None:
+                safe["retry_after_at"] = parsed.astimezone(timezone.utc).isoformat()
+        except (ValueError, OverflowError):
+            pass
+    limit_source = raw.get("limit_source")
+    if isinstance(limit_source, str) and limit_source in {
+        "openrouter_in_flight_budget", "openrouter_key_limit", "openrouter_credits",
+    }:
+        safe["limit_source"] = limit_source
+    provider = raw.get("provider")
+    # Field-name filtering alone could retain arbitrary secret text as a name.
+    if isinstance(provider, str) and provider.casefold() in {
+        "openinference", "openai", "anthropic", "google", "deepseek",
+    }:
+        safe["provider"] = provider.casefold()
+    return safe
+
+
+def _provider_error_diagnostics(
+    error: object, *, http_status: int | None = None,
+    headers: Mapping[str, str] | None = None, stream_provider: object = None,
+    stream_error_code: object = None,
+) -> dict[str, object]:
+    error = error if isinstance(error, dict) else {}
+    metadata = error.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    raw = {
+        "http_status": http_status,
+        "stream_error_code": stream_error_code,
+        "limit_source": metadata.get("limit_source"),
+        "provider_code": metadata.get("provider_code"),
+        "provider": metadata.get("provider_name"),
+    }
+    if "provider" not in _safe_provider_diagnostics(raw):
+        raw["provider"] = stream_provider
+    if headers is not None and hasattr(headers, "items"):
+        # HTTPMessage and ordinary mocked mappings use different casing behavior.
+        selected = {key.lower(): value for key, value in headers.items()
+                    if isinstance(key, str) and key.lower() in {"retry-after", "x-ratelimit-reset"}}
+        retry = selected.get("retry-after")
+        raw["retry_after_seconds"] = retry
+        raw["rate_limit_reset"] = selected.get("x-ratelimit-reset")
+        if isinstance(retry, str) and re.fullmatch(
+            r"[A-Za-z]{3}, [0-9]{2} [A-Za-z]{3} [0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2} GMT",
+            retry,
+        ):
+            try:
+                raw["retry_after_at"] = parsedate_to_datetime(retry).isoformat()
+            except (ValueError, OverflowError):
+                pass
+    return _safe_provider_diagnostics(raw)
+
+
 def _provider_transport_error(
     exc: HTTPError | URLError | TimeoutError, *, api_key: str
 ) -> ProviderRequestError:
     if isinstance(exc, HTTPError):
+        diagnostics = _provider_error_diagnostics({}, http_status=exc.code, headers=exc.headers)
+        try:
+            # Extract structured metadata only. Never keep the body in the exception.
+            body = exc.read(65537)
+            data = json.loads(body) if len(body) <= 65536 else None
+            if isinstance(data, dict):
+                diagnostics = _provider_error_diagnostics(
+                    data.get("error"), http_status=exc.code, headers=exc.headers,
+                )
+        except (OSError, ValueError, UnicodeError):
+            pass
+        finally:
+            exc.close()
         if exc.code == 401 and not api_key:
             return ProviderRequestError(
                 "provider_credentials",
                 "This endpoint requires an API key. Run: openlearn config set-key",
+                diagnostics=diagnostics,
             )
-        detail = exc.read().decode("utf-8", errors="replace")
         category = (
             "provider_credentials"
             if exc.code in {401, 403}
             else "provider_rate_limited" if exc.code == 429 else "provider_unavailable"
         )
         return ProviderRequestError(
-            category, f"OpenAI request failed: HTTP {exc.code}: {detail}"
+            category, f"OpenAI request failed: HTTP {exc.code}", diagnostics=diagnostics,
         )
     reason = exc.reason if isinstance(exc, URLError) else str(exc)
     return ProviderRequestError(
@@ -19358,23 +19444,29 @@ def _openrouter_request_options(
     return options
 
 
-def _stream_error(event: dict[str, object]) -> ProviderRequestError | None:
+def _stream_error(
+    event: dict[str, object], *, http_status: int | None = None,
+    headers: Mapping[str, str] | None = None,
+) -> ProviderRequestError | None:
     """Extract a safe actionable message from an SSE error event."""
     error = event.get("error")
     if not isinstance(error, dict):
         return None
-    code = error.get("code")
-    message = error.get("message")
-    safe_message = str(message).strip() if isinstance(message, str) else ""
-    safe_code = str(code).strip() if isinstance(code, (str, int)) else ""
-    detail = safe_message[:240] or "The provider ended the response early."
+    diagnostics = _provider_error_diagnostics(
+        error, http_status=http_status, headers=headers,
+        stream_provider=event.get("provider"), stream_error_code=error.get("code"),
+    )
+    safe_code = str(diagnostics.get("stream_error_code", ""))
+    detail = "rate limited" if safe_code == "429" else "The provider ended the response early."
     suffix = f" ({safe_code})" if safe_code else ""
     category = (
         "provider_credentials"
         if safe_code in {"401", "403"}
         else "provider_rate_limited" if safe_code == "429" else "provider_unavailable"
     )
-    return ProviderRequestError(category, f"Provider stream failed{suffix}: {detail}")
+    return ProviderRequestError(
+        category, f"Provider stream failed{suffix}: {detail}", diagnostics=diagnostics,
+    )
 
 
 def _qa_budget_guard() -> qa_budget.QABudget | None:
@@ -19642,7 +19734,10 @@ def call_openai_streaming(
                             event = json.loads(data)
                         except json.JSONDecodeError:
                             continue
-                        stream_error = _stream_error(event)
+                        stream_error = _stream_error(
+                            event, http_status=getattr(response, "status", None),
+                            headers=getattr(response, "headers", None),
+                        )
                         if stream_error:
                             raise stream_error
                         if event.get("usage") is not None:
@@ -19889,9 +19984,12 @@ class OpenLearnError(Exception):
 
 
 class ProviderRequestError(OpenLearnError):
-    def __init__(self, category: str, message: str) -> None:
+    def __init__(
+        self, category: str, message: str, *, diagnostics: Mapping[str, object] | None = None,
+    ) -> None:
         super().__init__(message)
         self.category = category
+        self.diagnostics = _safe_provider_diagnostics(diagnostics)
 
 
 class JudgeOutputError(OpenLearnError):
