@@ -184,6 +184,62 @@ def test_cancel_does_not_call_any_provider_or_mutate_topic(course):
     assert (topic.path.read_bytes(), cli.load_state(topic.slug)) == before
 
 
+@pytest.mark.parametrize('reference,valid', [
+    ('lines 1-2', True), ('line 2', True), ('lines 1–2', True),
+    ('lines 78–79', False), ('lines 2 to 3', False), ('lines 2-1', False),
+])
+def test_source_line_references_must_fit_selected_excerpt(course, reference, valid):
+    topic, _ = course
+    snapshot = sources.snapshot(topic, 'Explain the stack rule', sources.APPROVED_MODEL, opted_in=True)
+    assert (snapshot.reference_error(f'The notes at {reference} state LIFO.') is None) == valid
+    assert snapshot.reference_error('Push 4, push 7, then pop 7.') is None
+
+
+@pytest.mark.parametrize('repair_succeeds', [True, False])
+def test_source_locator_repair_is_buffered_and_failure_preserves_state(course, repair_succeeds):
+    topic, _ = course
+    before = topic.path.read_bytes(), copy.deepcopy(cli.load_state(topic.slug))
+    bad = '**Lesson:**\nThe supplied excerpt at lines 78–79 states the LIFO rule.'
+    good = '**Lesson:**\nThe supplied excerpt states the LIFO rule.'
+    calls = []
+    output = []
+    observer = mock.Mock()
+
+    def tutor(**kwargs):
+        calls.append(kwargs)
+        assert 'stream_sink' not in kwargs
+        value = good if len(calls) == 2 and repair_succeeds else bad
+        kwargs['output_func'](value)
+        return value
+
+    with mock.patch.object(cli, 'call_openai_streaming', side_effect=tutor):
+        if repair_succeeds:
+            answer = cli.ask_topic(topic.slug, 'Explain the stack rule', source_mode=True,
+                                   input_func=consent, output_func=output.append, turn_observer=observer)
+            assert good in answer and bad not in answer
+            assert sources.LEDGER_MARKER in answer
+        else:
+            with pytest.raises(cli.OpenLearnError, match='unsupported source line references'):
+                cli.ask_topic(topic.slug, 'Explain the stack rule', source_mode=True,
+                              input_func=consent, output_func=output.append, turn_observer=observer)
+            assert (topic.path.read_bytes(), cli.load_state(topic.slug)) == before
+    assert len(calls) == 2
+    assert 'Omit numeric source locators' in calls[1]['user']
+    assert bad not in '\n'.join(output)
+    assert all(bad not in str(call.args) for call in observer.publish_preview.call_args_list)
+
+
+def test_saved_source_response_cannot_bypass_reference_guard(course):
+    topic, _ = course
+    before = topic.path.read_bytes(), copy.deepcopy(cli.load_state(topic.slug))
+    with mock.patch.object(cli, 'call_openai_streaming', side_effect=AssertionError('provider called')):
+        with pytest.raises(cli.OpenLearnError, match='unsupported source line references'):
+            cli.ask_topic(topic.slug, 'Explain the stack rule', source_mode=True,
+                          input_func=consent, output_func=lambda _: None,
+                          generated_answer_override='**Lesson:**\nSee the notes at lines 78–79.')
+    assert (topic.path.read_bytes(), cli.load_state(topic.slug)) == before
+
+
 def test_preview_filters_entire_payload_and_pending_key_is_preserved(course):
     topic, _record = course
     cli.save_pending_question(topic, cli.sanitize_model_output(CHECK), "B")

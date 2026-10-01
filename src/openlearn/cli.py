@@ -9646,6 +9646,11 @@ def ask_topic(
             source_context=source_snapshot,
         )
     )
+    if source_snapshot is not None and source_snapshot.reference_error(generated_answer):
+        raise OpenLearnError(
+            "Saved tutor response has unsupported source line references. "
+            "The previous question and your answer were preserved for retry."
+        )
     if interview_target is None and initializing:
         # Streaming removes hidden markers and carries coverage separately.
         policy_answer = generated_answer
@@ -9951,6 +9956,7 @@ def generate_validated_tutor_answer(
     if system_prompt_sink is not None:
         system_prompt_sink(system)
     candidate = ""
+    source_reference_error = None
     buffered_output: list[str] = []
     for attempt in range(2):
         buffered_output = []
@@ -9983,12 +9989,17 @@ def generate_validated_tutor_answer(
         if first_lesson_initializing:
             user = lesson_policy.initialization_generation_prompt(user)
         if source_context is not None:
+            if source_reference_error:
+                user += (
+                    "\n" + source_reference_error
+                    + " Omit numeric source locators; the application adds the real excerpt ledger."
+                )
             sources.ensure_unchanged(topic, source_context, model)
             if len(system) + len(user) > sources.PROMPT_CHAR_LIMIT:
                 raise OpenLearnError("Source request exceeds its budget; no request was sent.")
         stream_options = (
             {"stream_sink": stream_sink}
-            if stream_sink is not None and not first_lesson_initializing
+            if stream_sink is not None and not first_lesson_initializing and source_context is None
             else {}
         )
         stream_arguments = {
@@ -10008,6 +10019,15 @@ def generate_validated_tutor_answer(
             candidate = call_openai_streaming(**stream_arguments)
         else:
             candidate = call_openai_streaming(**metadata_arguments)
+        if source_context is not None:
+            source_reference_error = source_context.reference_error(candidate)
+            if source_reference_error:
+                if attempt == 1:
+                    raise OpenLearnError(
+                        "Tutor returned unsupported source line references. "
+                        "The previous question and your answer were preserved for retry."
+                    )
+                continue
         if candidate_metadata == TutorResponseMetadata():
             _visible_candidate, candidate_metadata = tutor_response_metadata(candidate)
         if first_lesson_initializing:

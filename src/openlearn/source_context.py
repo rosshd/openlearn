@@ -45,7 +45,8 @@ before giving a course-specific rule. Label general knowledge as such.
 Use only provided source IDs and extracted-text line locators; these are not
 original slide/page numbers. The application adds the excerpt ledger; do not
 invent references, URLs, support or verification claims. Excerpts and citations
-do not verify mathematical truth or prove support for generated claims."""
+do not verify mathematical truth or prove support for generated claims.
+Prefer leaving numeric source locators to the application-owned excerpt ledger."""
 _PERSONAL = re.compile(
     r"(?i)(?:[\w.+-]+@[\w.-]+\.[a-z]{2,}|"
     r"\b(?:\+?1[- .]?)?\(?\d{3}\)?[- .]\d{3}[- .]\d{4}\b|"
@@ -89,6 +90,21 @@ class SourceContext:
     model_metadata: dict[str, object]
     previous_lesson: str
     revision: str
+
+    def reference_error(self, answer: str) -> str | None:
+        """Reject numeric locators absent from this request, not mathematical claims."""
+        text = without_ledger(answer)
+        ranges = [(int(start), int(stop)) for start, stop in re.findall(
+            r"extracted text lines (\d+)-(\d+)", self.ledger,
+        )]
+        for match in re.finditer(
+            r"(?i)\blines?\s+(\d+)(?:\s*(?:[-–—]|to)\s*(\d+))?", text,
+        ):
+            start = int(match.group(1))
+            stop = int(match.group(2) or match.group(1))
+            if not any(low <= start <= stop <= high for low, high in ranges):
+                return "A numeric line reference is outside the selected source excerpts."
+        return None
 
     def attach(self, answer: str) -> str:
         return without_ledger(answer).rstrip() + self.ledger
