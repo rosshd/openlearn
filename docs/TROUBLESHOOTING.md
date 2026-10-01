@@ -37,6 +37,13 @@ Run `openlearn web --no-browser` and open the loopback URL it prints.
 Use `openlearn web --port 9000 --no-browser` if the default port is unavailable.
 Maker Bench runs on the local machine and shares the same home as the CLI.
 
+`--no-browser` only suppresses automatic opening; it does not make `127.0.0.1` on a headless host reachable from a different machine or separately managed cloud browser.
+A cloud browser reporting `net::ERR_BLOCKED_BY_CLIENT` while the application starts successfully may be restricted from loopback access; that observation alone is not an OpenLearn server defect.
+Use an allowed local browser on the same host, or continue with the offline/mock CLI checks in [development](DEVELOPMENT.md#headless-and-bounded-tutor-qa).
+Do not bypass browser protections, expose the server publicly, or transfer keys/config/learner files to unblock QA.
+For terminal-only provider setup, the owner can run `openlearn init` or `openlearn config set-key` without a key argument in a trusted interactive terminal with hidden input.
+Do not record the key-entry screen or treat saving a key as proof of a validated connection.
+
 ## Secure code execution is unavailable
 
 The workbench may still open, but secure execution needs Docker or Podman.
