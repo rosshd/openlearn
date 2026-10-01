@@ -19914,20 +19914,79 @@ class PlatformGuardTests(unittest.TestCase):
         fake_stdin.readline.assert_not_called()
 
     def test_unbuffered_repl_line_does_not_consume_next_pasted_line(self) -> None:
-        read_descriptor, write_descriptor = os.pipe()
-        fake_stdin = mock.Mock()
-        fake_stdin.fileno.return_value = read_descriptor
-        fake_stdin.encoding = "utf-8"
-        try:
-            os.write(write_descriptor, b"second line\nthird line\n")
-            with mock.patch.object(sys, "stdin", fake_stdin):
-                result = cli._read_stdin_line_unbuffered()
+        for terminator in (b"\n", b"\r", b"\r\n"):
+            with self.subTest(terminator=terminator):
+                read_descriptor, write_descriptor = os.pipe()
+                fake_stdin = mock.Mock()
+                fake_stdin.fileno.return_value = read_descriptor
+                fake_stdin.encoding = "utf-8"
+                payload = "second café".encode() + terminator + b"third line\n"
+                first_boundary = "second café".encode() + terminator[:1]
+                try:
+                    os.write(write_descriptor, payload)
+                    os.close(write_descriptor)
+                    with mock.patch.object(sys, "stdin", fake_stdin):
+                        result = cli._read_stdin_line_unbuffered()
 
-            self.assertEqual(result, "second line\n")
-            self.assertEqual(os.read(read_descriptor, 11), b"third line\n")
-        finally:
-            os.close(read_descriptor)
-            os.close(write_descriptor)
+                    self.assertEqual(result, first_boundary.decode())
+                    self.assertEqual(
+                        os.read(read_descriptor, len(payload)), payload[len(first_boundary) :]
+                    )
+                finally:
+                    os.close(read_descriptor)
+
+    def test_unbuffered_repl_line_preserves_blank_and_eof(self) -> None:
+        fake_stdin = mock.Mock()
+        fake_stdin.encoding = "utf-8"
+        for payload, expected in (
+            (b"\r", "\r"), (b"\n", "\n"), (b"", ""), ("café".encode(), "café")
+        ):
+            with self.subTest(payload=payload):
+                reads = [bytes([byte]) for byte in payload] + [b""]
+                with (
+                    mock.patch.object(sys, "stdin", fake_stdin),
+                    mock.patch.object(cli.os, "read", side_effect=reads),
+                ):
+                    self.assertEqual(cli._read_stdin_line_unbuffered(), expected)
+
+    def test_unbuffered_repl_line_propagates_interrupt(self) -> None:
+        with (
+            mock.patch.object(sys, "stdin", mock.Mock()),
+            mock.patch.object(cli.os, "read", side_effect=KeyboardInterrupt),
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                cli._read_stdin_line_unbuffered()
+
+    def test_read_repl_message_preserves_observable_terminators_and_blanks(self) -> None:
+        cases = (
+            (["second\n", "third\n"], "first\nsecond\nthird"),
+            (["second\r", "third\r"], "first\nsecond\nthird"),
+            (["second\r", "\n", "third\r", "\n"], "first\nsecond\nthird"),
+            (
+                ["\n", "second\n", "\n", "third\n", "\n"],
+                "first\n\nsecond\n\nthird\n",
+            ),
+            (["second\r", "\r", "third\r"], "first\nsecond\n\nthird"),
+            (["second café\n", ""], "first\nsecond café"),
+            ([], "first"),
+        )
+        fake_stdin = mock.Mock()
+        fake_stdin.isatty.return_value = True
+        fake_input = lambda prompt: "first"  # noqa: E731
+        for continuation, expected in cases:
+            with self.subTest(continuation=continuation):
+                with (
+                    mock.patch.object(builtins, "input", fake_input),
+                    mock.patch.object(sys, "stdin", fake_stdin),
+                    mock.patch.object(sys, "platform", "linux"),
+                    mock.patch.object(
+                        cli, "stdin_has_line", side_effect=[True] * len(continuation) + [False]
+                    ),
+                    mock.patch.object(
+                        cli, "_read_stdin_line_unbuffered", side_effect=continuation
+                    ),
+                ):
+                    self.assertEqual(cli.read_repl_message("> ", fake_input), expected)
 
 
 class KeylessProviderTests(unittest.TestCase):

@@ -2136,11 +2136,19 @@ def read_repl_message(prompt: str, input_func=input) -> str:
         return first_line
 
     lines = [first_line]
+    previous_carriage_return = False
     wait_seconds = REPL_PASTE_INITIAL_WAIT_SECONDS
     while stdin_has_line(wait_seconds):
         line = _read_stdin_line_unbuffered()
         if line == "":
             break
+        # Only pair terminators still visible in the stream. Readline or
+        # the terminal may already have converted CRLF to two line breaks;
+        # those are indistinguishable from intentional blank lines.
+        paired_line_feed = previous_carriage_return and line == "\n"
+        previous_carriage_return = line.endswith("\r")
+        if paired_line_feed:
+            continue
         lines.append(line.rstrip("\r\n"))
         wait_seconds = REPL_PASTE_CONTINUATION_WAIT_SECONDS
     return "\n".join(lines)
@@ -2154,7 +2162,7 @@ def _read_stdin_line_unbuffered() -> str:
         if not chunk:
             break
         data.extend(chunk)
-        if chunk == b"\n":
+        if chunk in (b"\r", b"\n"):
             break
     return data.decode(sys.stdin.encoding or "utf-8", errors="replace")
 
