@@ -82,7 +82,7 @@ For a selected course with imported class notes, the opt-in CLI source mode prev
 openlearn chat my-course "quiz me on the current lesson" --source-mode
 ```
 
-Source mode is off by default and requires the configured OpenRouter endpoint with `qwen/qwen3.5-flash-02-23`.
+Source mode is off by default and requires the configured OpenRouter endpoint with `deepseek/deepseek-v4.1-flash`.
 Each request requires typing `send source request` after reviewing the preview.
 It sends bounded, screened selected-course excerpts, the current lesson answer or question, the pending Check, and at most two relevant lesson exchanges.
 It excludes unrelated profiles, goals, preferences, placement, and private notes, and skips optional metadata extraction, videos, and coding-drill actions.

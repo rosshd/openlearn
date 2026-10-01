@@ -214,7 +214,7 @@ def test_untrusted_conflicting_and_missing_material_is_explicit(course):
 
 def test_wrong_model_and_interview_profile_fail_before_reading_sources(course):
     topic, _record = course
-    with pytest.raises(cli.OpenLearnError, match="Qwen"):
+    with pytest.raises(cli.OpenLearnError, match="DeepSeek"):
         sources.snapshot(topic, "stack", "unapproved-model", opted_in=True)
     cli.interview_profile_path(topic.slug).write_text("{}", encoding="utf-8")
     with pytest.raises(cli.OpenLearnError, match="interview profiles"):

@@ -14,7 +14,7 @@ from openlearn import cli, source_imports
 from openlearn.models import Topic
 
 APPROVED_BASE_URL = "https://openrouter.ai/api/v1"
-APPROVED_MODEL = "qwen/qwen3.5-flash-02-23"
+APPROVED_MODEL = "deepseek/deepseek-v4.1-flash"
 PROMPT_CHAR_LIMIT = 16000
 READ_BYTE_LIMIT = 512000
 TOTAL_READ_BYTE_LIMIT = 2000000
@@ -26,7 +26,7 @@ CONSENT_TEXT = (
     "Source mode sends the screened class excerpts, source IDs/checksums/text-line "
     "locators, your current lesson answer or question, the pending Check, and at most "
     "two relevant lesson exchanges to OpenRouter https://openrouter.ai/api/v1 using "
-    "qwen/qwen3.5-flash-02-23. Unrelated goals, profiles, preferences, placement and "
+    "deepseek/deepseek-v4.1-flash. Unrelated goals, profiles, preferences, placement and "
     "private notes are excluded. Personal-detail screening is limited; review the "
     "request below for names and sensitive details before approving this request. "
     "Responses and excerpt provenance are saved in local history; ordinary later "
@@ -117,7 +117,7 @@ def snapshot(topic: Topic, user: str, model: str, *, opted_in: bool = False) -> 
     if not opted_in:
         raise cli.OpenLearnError("Source mode requires explicit consent for this request.")
     if cli.configured_base_url().rstrip("/") != APPROVED_BASE_URL or model != APPROVED_MODEL:
-        raise cli.OpenLearnError("Source mode requires the named OpenRouter endpoint and Qwen model; no request was sent.")
+        raise cli.OpenLearnError("Source mode requires the named OpenRouter endpoint and selected DeepSeek model; no request was sent.")
     if cli.interview_profile_path(topic.slug).exists():
         raise cli.OpenLearnError("Source mode is unavailable for interview profiles; no request was sent.")
     clean_user = screened(user, 2000)
