@@ -85,12 +85,12 @@ initializeUuidFields();
 
 const createForm = document.querySelector(".create-form");
 const creationDraftKey = `openlearn-course-draft:${appRoot}:${window.location.pathname}`;
-const creationDraftFields = {title: 160, goal: 4000, experience: 4000, template_id: 160, submission_id: 36};
+const creationDraftFields = {title: 160, goal: 4000, experience: 4000, submission_id: 36, source_kind: 16, source_value: 2048};
 function saveCreationDraft() {
   if (!createForm) return;
   const draft = {};
   for (const [name, limit] of Object.entries(creationDraftFields)) {
-    draft[name] = createForm.elements[name].value.slice(0, limit);
+    if (createForm.elements[name]) draft[name] = createForm.elements[name].value.slice(0, limit);
   }
   try { sessionStorage.setItem(creationDraftKey, JSON.stringify(draft)); } catch (_error) { /* optional */ }
 }
@@ -99,11 +99,28 @@ if (createForm) {
     const draft = JSON.parse(sessionStorage.getItem(creationDraftKey) || "null");
     if (draft && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(draft.submission_id)) {
       for (const [name, limit] of Object.entries(creationDraftFields)) {
-        if (typeof draft[name] === "string" && draft[name].length <= limit) createForm.elements[name].value = draft[name];
+        if (createForm.elements[name] && typeof draft[name] === "string" && draft[name].length <= limit) createForm.elements[name].value = draft[name];
       }
     }
   } catch (_error) { /* optional */ }
   createForm.addEventListener("input", saveCreationDraft);
+  createForm.addEventListener("change", saveCreationDraft);
+  const kind = createForm.querySelector("[data-source-kind]");
+  if (kind) {
+    const updateSourceFields = () => {
+      const file = createForm.elements.source_file;
+      const value = createForm.elements.source_value;
+      file.disabled = kind.value !== "file";
+      value.disabled = kind.value === "file";
+      file.hidden = file.disabled;
+      value.hidden = value.disabled;
+      createForm.querySelector('[for="source-file"]').hidden = file.disabled;
+      createForm.querySelector('[for="source-value"]').hidden = value.disabled;
+      createForm.querySelector("[data-source-file-note]").hidden = file.disabled;
+    };
+    kind.addEventListener("change", updateSourceFields);
+    updateSourceFields();
+  }
 }
 
 const providerDialog = document.querySelector("[data-provider-setup-dialog]");
@@ -229,11 +246,11 @@ for (const form of document.querySelectorAll("[data-json-form]")) {
     if (errorBox) errorBox.hidden = true;
     submit.disabled = true;
     submit.setAttribute("aria-busy", "true");
-    if (status) status.textContent = form.dataset.endpoint === "/api/setup" ? "Testing connection…" : "Saving course and preparing the first lesson…";
+    if (status) status.textContent = form.hasAttribute("data-multipart") ? "Saving course and screening the source…" : form.dataset.endpoint === "/api/setup" ? "Testing connection…" : "Saving course and preparing the first lesson…";
     try {
       const result = await requestJson(form.dataset.endpoint, {
         method: "POST",
-        body: JSON.stringify(formPayload(form)),
+        body: form.hasAttribute("data-multipart") ? new FormData(form) : JSON.stringify(formPayload(form)),
       });
       if (form.elements.api_key) form.elements.api_key.value = "";
       if (form.dataset.endpoint === "/api/setup" && result.ready === false) {

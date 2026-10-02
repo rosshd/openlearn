@@ -42,6 +42,7 @@ from openlearn.courses import (
 from .schemas import (
     CodeToolRequest,
     CourseCreateRequest,
+    SourceCourseCreateRequest,
     CourseDeletionRequest,
     CourseGrowthRequest,
     CourseSettingsConfirmationRequest,
@@ -1185,7 +1186,48 @@ class OpenLearnWebServices:
             return {"ok": False, "missing": True, "error": "Course not found."}
         return _source_result(result)
 
+    def create_source_course(
+        self, request: SourceCourseCreateRequest,
+        source: source_imports.CourseSourceInput,
+    ) -> dict[str, object]:
+        result = self._create_course_record(request)
+        if not result.get("ok"):
+            return result
+        slug = str(result["slug"])
+        topic = cli.read_topic(slug)
+        # Source creation stops at the existing per-request consent boundary.
+        # Never start an ordinary, ungrounded lesson while importing a source.
+        if result["created"]:
+            metadata = dict(topic.metadata)
+            metadata["web_source_start"] = True
+            metadata["web_source_mode"] = request.mode
+            cli.write_topic(topic.path, metadata, topic.body)
+        elif topic.metadata.get("web_source_mode") != request.mode:
+            return {"ok": False, "error": "This saved creation belongs to another mode. Start a new course."}
+        imported = self._import_source(slug, source)
+        if not imported.get("ok") or not imported.get("sources"):
+            failures = imported.get("failed") or []
+            message = str(failures[0].get("message")) if failures else str(imported.get("error") or "No usable source was imported.")
+            return {"ok": False, "error": message, "slug": slug}
+        if request.mode == "quick":
+            sources = imported["sources"]
+            cli.save_quick_learn_metadata(slug, request.source_kind, str(sources[0]["label"]))
+        return {**result, "state": "source_ready"}
+
     def create_course(self, request: CourseCreateRequest) -> dict[str, object]:
+        result = self._create_course_record(request)
+        if not result.get("ok"):
+            return result
+        slug = str(result["slug"])
+        initialization_id = _course_initialization_id(request.submission_id)
+        if self.course_entry_mode(application.course(slug).card.template_id) == "interview_prep":
+            return {**result, "state": "placement_recommended"}
+        return self._start_course_initialization(
+            slug, initialization_id, created=bool(result["created"])
+        )
+
+    @staticmethod
+    def _create_course_record(request: CourseCreateRequest) -> dict[str, object]:
         calibration = CalibrationContext(
             goal=request.goal,
             experience=request.experience,
@@ -1204,18 +1246,7 @@ class OpenLearnWebServices:
             )
         except (cli.OpenLearnError, CourseTemplateError) as error:
             return {"ok": False, "error": str(error)}
-        slug = result.course.slug
-        initialization_id = _course_initialization_id(request.submission_id)
-        if self.course_entry_mode(result.course.card.template_id) == "interview_prep":
-            return {
-                "ok": True,
-                "slug": slug,
-                "created": result.created,
-                "state": "placement_recommended",
-            }
-        return self._start_course_initialization(
-            slug, initialization_id, created=result.created
-        )
+        return {"ok": True, "slug": result.course.slug, "created": result.created}
 
     def _start_course_initialization(
         self,
@@ -1224,6 +1255,8 @@ class OpenLearnWebServices:
         *,
         created: bool | None = None,
     ) -> dict[str, object]:
+        if cli.read_topic(slug).metadata.get("web_source_start"):
+            return {"ok": True, "slug": slug, "state": "source_ready"}
         initialization_id = initialization_id or _initialization_id_for_slug(slug)
         if initialization_id is None:
             return {"ok": False, "error": "Course initialization is unavailable."}
@@ -1878,7 +1911,7 @@ class OpenLearnWebServices:
         initialization_id = _initialization_id_for_slug(slug)
         revision = tutor_service.course_revision(slug)
         initialization: dict[str, object] | None = None
-        if initialization_id is not None and revision == 0:
+        if initialization_id is not None and revision == 0 and not topic.metadata.get("web_source_start"):
             initialization_result = tutor_service.operation_status(slug, initialization_id)
             if initialization_result is None or initialization_result.status != "committed":
                 initialization = {
@@ -1918,6 +1951,7 @@ class OpenLearnWebServices:
                     }
         return {
             "slug": slug,
+            "source_start": bool(topic.metadata.get("web_source_start")) and revision == 0,
             "title": snapshot.card.title,
             "current_unit": move_title,
             "revision": revision,

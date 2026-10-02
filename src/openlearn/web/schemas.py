@@ -56,6 +56,12 @@ class CourseCreateRequest(BaseModel):
         return canonical_uuid(value)
 
 
+class SourceCourseCreateRequest(CourseCreateRequest):
+    mode: Literal["course", "quick"] = "course"
+    source_kind: Literal["file", "folder", "github"]
+    source_value: str = Field(default="", max_length=2048)
+
+
 class CourseSettingsRequest(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     goal: str = Field(min_length=1, max_length=4000)

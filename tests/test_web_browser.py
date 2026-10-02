@@ -9,7 +9,7 @@ import subprocess
 import sys
 import time
 from unittest import mock
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 from uuid import uuid4
 
@@ -147,7 +147,12 @@ def test_real_browser_course_polling_theme_conflict_and_keyboard_submit(
                 first.goto(f"{app_url}/courses/new")
                 _assert_no_page_overflow(first)
 
-                first.locator('[data-template-id="technical-interview-prep"]').click()
+                # Preserve the internal built-in route as a compatibility fixture;
+                # the learner UI no longer offers its catalog or defaults.
+                assert first.locator("[data-template-choice]").count() == 0
+                first.locator("#course-title").fill("Technical Interview Prep")
+                first.locator("#goal").fill("Prepare for coding interviews")
+                first.locator('[name="template_id"]').evaluate("field => { field.value = 'technical-interview-prep'; }")
                 first.locator("#course-title").focus()
                 first.locator("#course-title").press("Enter")
                 assert first.locator("#goal").evaluate("field => field === document.activeElement")
@@ -1663,17 +1668,12 @@ def test_real_browser_unverified_provider_stays_in_setup(
                 playwright.expect(page.locator("[data-theme-toggle]")).to_be_visible()
                 assert page.locator(".local-status").count() == 0
                 _assert_no_page_overflow(page)
+                assert "Technical Interview Prep" not in empty_library.inner_text()
                 starter_tiles.first.click()
-                page.wait_for_url("**/setup?next=**")
-                assert "/courses/new" not in page.url
-                setup_url = urlsplit(page.url)
-                assert setup_url.path.endswith("/setup")
-                assert parse_qs(setup_url.query)["next"][0].endswith(
-                    "/courses/technical-interview-prep/placement"
-                )
-                assert (
-                    home / "learning-topics" / "technical-interview-prep.md"
-                ).exists()
+                page.wait_for_url("**/courses/new")
+                assert page.locator("[data-template-choice]").count() == 0
+                assert page.locator("#course-title").input_value() == ""
+                page.goto(f"{app_url}/setup")
                 page.set_viewport_size({"width": 320, "height": 720})
                 _assert_no_page_overflow(page)
                 playwright.expect(
@@ -1709,9 +1709,8 @@ def test_real_browser_unverified_provider_stays_in_setup(
 
                 page.goto(f"{app_url}/courses/new")
                 assert page.url.endswith("/courses/new")
-                playwright.expect(
-                    page.get_by_text("Technical Interview Prep", exact=True).first
-                ).to_be_visible()
+                assert page.get_by_text("Technical Interview Prep", exact=True).count() == 0
+                playwright.expect(page.get_by_label("Course name", exact=True)).to_be_visible()
                 _assert_no_page_overflow(page)
                 for path in ("/dashboard", "/progress", "/data"):
                     page.goto(f"{app_url}{path}")
@@ -1727,3 +1726,103 @@ def test_real_browser_unverified_provider_stays_in_setup(
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=5)
+
+
+def test_source_creation_user_entrypoints_navigation_drafts_and_consent(tmp_path: Path) -> None:
+    playwright = pytest.importorskip("playwright.sync_api")
+    port = _free_loopback_port()
+    base_url = f"http://127.0.0.1:{port}"
+    home = tmp_path / "source-creation-home"
+    environment = {**os.environ, "OPENLEARN_HOME": str(home), "OPENLEARN_MOCK": "1",
+                   "PYTHONPATH": str(SOURCE_ROOT),
+                   "OPENLEARN_BASE_URL": "https://openrouter.ai/api/v1",
+                   "OPENLEARN_MODEL": "deepseek/deepseek-v4.1-flash"}
+    for name in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENLEARN_API_KEY", "OPENROUTER_API_KEY"):
+        environment.pop(name, None)
+    command = f"from openlearn.web.launcher import run; run(port={port}, open_browser=False)"
+    with (tmp_path / "source-creation-web.log").open("wb") as log:
+        process = subprocess.Popen([sys.executable, "-c", command], cwd=tmp_path,
+                                   env=environment, stdout=log, stderr=subprocess.STDOUT)
+        try:
+            bootstrap, app_url = _wait_until_ready(base_url, process, home)
+            with playwright.sync_playwright() as runtime:
+                browser = runtime.chromium.launch()
+                page = browser.new_page()
+                errors = []
+                page.on("pageerror", lambda error: errors.append(str(error)))
+                page.goto(bootstrap)
+                page.goto(f"{app_url}/courses/new")
+                page.evaluate(r"""identity => {
+                  const root = document.querySelector('meta[name="openlearn-root"]').content.replace(/\/$/, '');
+                  sessionStorage.setItem(`openlearn-course-draft:${root}:${location.pathname}`, JSON.stringify({
+                    title: 'Kept own draft', goal: 'Learn stacks', experience: '', submission_id: identity,
+                    template_id: 'technical-interview-prep'
+                  }));
+                }""", str(uuid4()))
+                page.reload()
+                assert page.locator('[name="template_id"]').input_value() == ""
+                assert page.get_by_label("Course name", exact=True).input_value() == "Kept own draft"
+                page.get_by_role("link", name="Back to dashboard").click()
+                for link, route, heading in [("Source course", "courses/from-source", "Build a course from your sources."),
+                                             ("Quick Learn", "quick-learn", "Learn from one source now.")]:
+                    page.locator(".new-course-menu summary").click()
+                    page.locator(".new-course-menu").get_by_role("link", name=link).click()
+                    assert page.url == f"{app_url}/{route}"
+                    assert page.get_by_role("heading", name=heading).is_visible()
+                    page.get_by_label("Course name", exact=True).fill(f"Synthetic {link}")
+                    page.get_by_label("Your goal", exact=True).fill("Learn equal parts")
+                    page.get_by_label("Source type", exact=True).select_option("folder")
+                    page.get_by_label("Local folder path or public GitHub repository URL", exact=True).fill("/synthetic/missing-folder")
+                    page.get_by_role("link", name="Cancel", exact=True).click()
+                    page.go_back()
+                    assert page.get_by_label("Course name", exact=True).input_value() == f"Synthetic {link}"
+                    page.get_by_role("link", name="Back to dashboard").click()
+                    page.locator(".new-course-menu summary").click()
+                    page.locator(".new-course-menu").get_by_role("link", name=link).click()
+                    assert page.get_by_label("Your goal", exact=True).input_value() == "Learn equal parts"
+                    assert page.get_by_label("Source type", exact=True).input_value() == "folder"
+                    page.reload()
+                    assert page.get_by_label("Local folder path or public GitHub repository URL", exact=True).input_value() == "/synthetic/missing-folder"
+                    page.get_by_role("link", name="Back to dashboard").click()
+                # Direct navigation restores the Quick Learn draft independently of source-course input.
+                page.goto(f"{app_url}/quick-learn")
+                assert page.get_by_label("Course name", exact=True).input_value() == "Synthetic Quick Learn"
+                page.get_by_label("Source type", exact=True).select_option("file")
+                page.get_by_label("Source file", exact=True).set_input_files(
+                    {"name": "synthetic.txt", "mimeType": "text/plain", "buffer": b"OPENAI_API_KEY=sk-abcdefghijklmnopqrstuv"})
+                page.get_by_role("button", name="Create Quick Learn").click()
+                page.locator("[data-form-error]").wait_for(state="visible")
+                assert "credential" in page.locator("[data-form-error]").inner_text().lower()
+                assert page.get_by_label("Course name", exact=True).input_value() == "Synthetic Quick Learn"
+                assert page.locator('[name="source_file"]').evaluate("field => field.files[0].name") == "synthetic.txt"
+                page.get_by_label("Source file", exact=True).set_input_files(
+                    {"name": "fractions.md", "mimeType": "text/markdown", "buffer": b"One half is one of two equal parts of a whole."})
+                page.get_by_role("button", name="Create Quick Learn").click()
+                page.wait_for_url("**/courses/synthetic-quick-learn?tool=chat")
+                assert page.locator("[data-source-mode]").is_checked()
+                page.get_by_label("Your question", exact=True).fill("Teach me about equal parts.")
+                before_preview = (home / "learning-topics" / "synthetic-quick-learn.md").read_bytes()
+                page.get_by_role("button", name="Ask tutor", exact=True).click()
+                page.locator("[data-source-preview]").wait_for(state="visible")
+                assert "equal parts" in page.locator("[data-source-preview-text]").inner_text()
+                draft = page.get_by_label("Your question", exact=True).input_value()
+                page.locator("[data-source-cancel]").click()
+                assert page.get_by_label("Your question", exact=True).input_value() == draft
+                page.get_by_role("button", name="Ask tutor", exact=True).click()
+                page.locator("[data-source-preview]").wait_for(state="visible")
+                page.locator("[data-source-cancel]").click()
+                assert (home / "learning-topics" / "synthetic-quick-learn.md").read_bytes() == before_preview
+                assert page.locator(".chat-exchange").count() == 0
+                # Explicit approval now runs a mock source lesson, then survives resume.
+                page.get_by_role("button", name="Ask tutor", exact=True).click()
+                page.locator("[data-source-preview]").wait_for(state="visible")
+                page.locator("[data-source-send]").click()
+                playwright.expect(page.locator(".chat-exchange")).to_have_count(1)
+                assert "Source excerpts provided:" in page.locator(".chat-exchange").inner_text()
+                page.reload()
+                playwright.expect(page.locator(".chat-exchange")).to_have_count(1)
+                assert not errors
+                browser.close()
+        finally:
+            process.terminate()
+            process.wait(timeout=10)

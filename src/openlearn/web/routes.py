@@ -12,12 +12,15 @@ from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import ValidationError
 from starlette.concurrency import run_in_threadpool
+from starlette.datastructures import UploadFile as FormUploadFile
 
 from openlearn.constants import QUICK_LEARN_MAX_FILE_BYTES
+from openlearn import source_imports
 
 from .schemas import (
     CodeToolRequest,
     CourseCreateRequest,
+    SourceCourseCreateRequest,
     CourseDeletionRequest,
     CourseGrowthRequest,
     CourseSettingsConfirmationRequest,
@@ -292,21 +295,13 @@ async def _dashboard_response(request: Request) -> Any:
 
 @router.get("/courses/new", response_class=HTMLResponse, name="new_course")
 async def new_course(request: Request) -> Any:
-    templates = await _call(request, "course_templates")
-    selected_template = None
-    requested_template = request.query_params.get("template")
-    if requested_template:
-        selected_template = next(
-            (item for item in templates if item.get("id") == requested_template),
-            None,
-        )
     return _templates(request).TemplateResponse(
         request,
         "course_create.html",
         _context(
             request,
-            course_templates=templates,
-            selected_template=selected_template,
+            course_templates=[],
+            selected_template=None,
             provider=public_mapping(await _call(request, "provider_status")),
             page_title="Start a course",
         ),
@@ -501,6 +496,78 @@ async def create_course_form(request: Request) -> Any:
         result,
         provider_ready=provider_ready,
     )
+
+
+def _source_creation_page(request: Request, *, mode: str, values: dict[str, Any] | None = None,
+                          error: str = "", status: int = 200) -> Any:
+    return _templates(request).TemplateResponse(
+        request, "source_course_create.html",
+        _context(request, mode=mode, creation_input=values or {}, create_error=error,
+                 submission_id=(values or {}).get("submission_id") or str(uuid4()),
+                 page_title="Quick Learn" if mode == "quick" else "Source course"),
+        status_code=status,
+    )
+
+
+@router.get("/courses/from-source", response_class=HTMLResponse, name="source_course")
+async def source_course(request: Request) -> Any:
+    return _source_creation_page(request, mode="course")
+
+
+@router.get("/quick-learn", response_class=HTMLResponse, name="quick_learn")
+async def quick_learn(request: Request) -> Any:
+    return _source_creation_page(request, mode="quick")
+
+
+@router.post("/courses/from-source", name="create_source_course_form")
+async def create_source_course_form(request: Request) -> Any:
+    form = await request.form()
+    values = {key: value for key, value in form.items() if isinstance(value, str)}
+    json_response = "application/json" in request.headers.get("accept", "")
+    temporary: Path | None = None
+    upload = form.get("source_file")
+    try:
+        payload = SourceCourseCreateRequest.model_validate(values)
+        if payload.template_id:
+            raise ValueError("Source courses do not use a starter template.")
+        if payload.source_kind == "file":
+            if not isinstance(upload, FormUploadFile):
+                raise ValueError("Choose a source file.")
+            data = await upload.read(QUICK_LEARN_MAX_FILE_BYTES + 1)
+            if not data:
+                raise ValueError("Choose a non-empty source file.")
+            if len(data) > QUICK_LEARN_MAX_FILE_BYTES:
+                raise ValueError("Source file exceeds the bounded upload limit.")
+            filename = upload.filename or "source.txt"
+            with tempfile.NamedTemporaryFile(prefix="openlearn-upload-", suffix=Path(filename).suffix[:16], delete=False) as stream:
+                temporary = Path(stream.name)
+                stream.write(data)
+            source = source_imports.LocalFileSource(temporary, filename=filename)
+        elif payload.source_kind == "folder":
+            if not payload.source_value.strip():
+                raise ValueError("Enter a local folder path.")
+            source = source_imports.LocalFolderSource(Path(payload.source_value))
+        else:
+            if not payload.source_value.strip():
+                raise ValueError("Enter a public GitHub repository URL.")
+            source = source_imports.PublicGitHubSource(payload.source_value)
+        result = public_mapping(await _call(request, "create_source_course", payload, source))
+        if not result.get("ok"):
+            raise ValueError(str(result.get("error") or "Source creation failed."))
+    except (ValidationError, ValueError) as error:
+        if json_response:
+            return _json_error(str(error), 422)
+        return _source_creation_page(request, mode="quick" if values.get("mode") == "quick" else "course",
+                                     values=values, error=f"{error} Select your file again if uploading.", status=422)
+    finally:
+        if hasattr(upload, "close"):
+            await upload.close()
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    destination = request.url_for("focus", slug=result["slug"]).include_query_params(tool="chat")
+    if json_response:
+        return JSONResponse({**result, "focus_url": str(destination)})
+    return RedirectResponse(destination, status_code=303)
 
 
 @router.post("/courses/{slug}/activate", name="activate_course")
@@ -989,22 +1056,6 @@ async def update_placement(request: Request, slug: str) -> JSONResponse:
         )
         return JSONResponse(result, status_code=202)
     return JSONResponse(result)
-
-
-@router.get("/quick-learn", response_class=HTMLResponse, name="quick_learn")
-async def quick_learn(request: Request) -> Any:
-    templates = await _call(request, "course_templates")
-    return _templates(request).TemplateResponse(
-        request,
-        "course_create.html",
-        _context(
-            request,
-            course_templates=templates,
-            quick_learn=True,
-            provider=public_mapping(await _call(request, "provider_status")),
-            page_title="Quick Learn",
-        ),
-    )
 
 
 @router.get("/progress", response_class=HTMLResponse, name="progress")

@@ -148,11 +148,11 @@ def test_default_web_app_runs_setup_dashboard_course_and_tutor_flow(
 ) -> None:
     empty_dashboard = client.get("/").text
     assert "Choose your first course" in empty_dashboard
-    assert "Technical Interview Prep" in empty_dashboard
+    assert "Technical Interview Prep" not in empty_dashboard
     assert "New course" in empty_dashboard
 
     new_course = client.get("/courses/new")
-    assert "Technical Interview Prep" in new_course.text
+    assert "Technical Interview Prep" not in new_course.text
     token = new_course.cookies["openlearn_csrf"]
     create = client.post(
         "/api/courses",
@@ -1193,17 +1193,17 @@ def test_unknown_follow_up_status_uses_stable_not_found_envelope(
     }
 
 
-def test_empty_dashboard_embeds_varied_starters_and_creation_choices(
+def test_empty_dashboard_prioritizes_own_topic_and_sources(
     client: TestClient,
 ) -> None:
     response = client.get("/dashboard")
 
     assert response.status_code == 200
-    assert response.text.index("Technical Interview Prep") < response.text.index(
-        "Computer Networking"
-    )
-    assert "Starter course" in response.text
-    assert "Custom course" in response.text
+    assert "Technical Interview Prep" not in response.text
+    assert "Computer Networking" not in response.text
+    assert "Starter course" not in response.text
+    assert "Own topic" in response.text
+    assert "Source course" in response.text
     assert "Quick Learn" in response.text
     assert "Choose a starting point" not in response.text
     assert 'data-empty-course-library' in response.text
@@ -1214,7 +1214,7 @@ def test_empty_dashboard_embeds_varied_starters_and_creation_choices(
     assert 'class="utilities-menu"' not in response.text
 
 
-def test_dashboard_starter_starts_once_and_enters_placement(
+def test_internal_starter_start_remains_idempotent_while_hidden(
     client: TestClient,
 ) -> None:
     dashboard = client.get("/dashboard")
@@ -1223,8 +1223,7 @@ def test_dashboard_starter_starts_once_and_enters_placement(
     start_path = "/courses/starters/technical-interview-prep/start"
 
     assert dashboard.status_code == 200
-    assert f'{start_path}"' in dashboard.text
-    assert 'method="post"' in dashboard.text
+    assert f'{start_path}"' not in dashboard.text
     assert "/courses/new?template=technical-interview-prep" not in dashboard.text
 
     first = client.post(
@@ -1507,15 +1506,17 @@ def test_course_creation_has_a_no_javascript_form_fallback(client: TestClient) -
     assert "/placement" in created.headers["location"] or "/setup" in created.headers["location"]
 
 
-def test_starter_courses_prioritize_variety_and_use_bounded_horizontal_browsing(
+def test_creation_hides_catalog_and_ignores_old_template_links(
     client: TestClient,
 ) -> None:
     page = client.get("/courses/new")
 
-    assert page.text.index("Technical Interview Prep") < page.text.index("Computer Networking")
-    assert page.text.index("Computer Networking") < page.text.index(">Vim<")
-    assert 'data-starter-track tabindex="0"' in page.text
-    assert 'aria-label="More starter courses"' in page.text
+    assert "Technical Interview Prep" not in page.text
+    assert "Computer Networking" not in page.text
+    assert 'data-template-choice' not in page.text
+    old_link = client.get("/courses/new?template=technical-interview-prep")
+    assert 'name="template_id" value=""' in old_link.text
+    assert 'placeholder="A topic you want to understand" value=""' in old_link.text
 
 
 def test_data_page_is_read_only_and_data_mutations_require_csrf(client: TestClient) -> None:
@@ -2234,7 +2235,7 @@ def test_unverified_provider_allows_provider_free_course_browsing(
     assert browsing_client.get("/dashboard", follow_redirects=False).status_code == 200
     starters = browsing_client.get("/courses/new", follow_redirects=False)
     assert starters.status_code == 200
-    assert "Technical Interview Prep" in starters.text
+    assert "Technical Interview Prep" not in starters.text
 
 
 def test_provider_setup_preserves_safe_model_backed_destination(

@@ -158,7 +158,6 @@ def recovery_browser(isolated_provider, monkeypatch, request):
         page.route("**/*", route_request)
         page.goto(f"https://openlearn.test{start_path}")
         if mode == "create":
-            page.locator("[data-template-choice]").first.click()
             page.locator("#course-title").fill("Synthetic recovery")
             page.locator("#goal").fill("Learn stacks")
             page.locator("#experience").fill("Some Python")

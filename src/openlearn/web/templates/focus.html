@@ -28,6 +28,7 @@
   </aside>
 
   <section class="focus-column" aria-labelledby="move-title">
+    {% if course.source_start %}<p class="field-note">Your source is saved locally. Ask for your first source lesson in Chat, then review and approve the screened request. Source mode requires the selected DeepSeek model on OpenRouter.</p>{% endif %}
     <dialog data-source-preview aria-labelledby="source-preview-title">
       <h2 id="source-preview-title">Review screened tutor request</h2>
       <p data-source-disclosure></p>
@@ -154,7 +155,7 @@
         <input type="hidden" name="source_lesson_revision" value="{{ course.revision or 0 }}">
         {% endif %}
         <label for="chat-question">Your question</label>
-        <textarea id="chat-question" name="text" rows="4" maxlength="32000" autocomplete="off" required placeholder="What would you like clarified?"></textarea>
+        <textarea id="chat-question" name="text" rows="4" maxlength="32000" autocomplete="off" required placeholder="{{ 'Ask about a concept in your source.' if course.source_start else 'What would you like clarified?' }}"></textarea>
         <div class="tool-actions">
           <button class="primary-action compact" type="submit" data-chat-submit>Ask tutor</button>
         </div>
@@ -164,7 +165,7 @@
 
     <section class="tool-panel" data-tool-panel="options" hidden aria-labelledby="options-tool-title">
       <h3 id="options-tool-title">Course options</h3>
-      <label class="check-row"><input type="checkbox" data-source-mode> Use screened class sources for this turn</label>
+      <label class="check-row"><input type="checkbox" data-source-mode{% if course.source_start %} checked{% endif %}> Use screened class sources for this turn</label>
       <a class="quiet-link" href="{{ url_for('course_settings', slug=course.slug) }}">Course settings</a>
       <a class="quiet-link" href="{{ url_for('setup') }}">Tutor settings</a>
     </section>
