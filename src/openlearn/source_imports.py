@@ -5,6 +5,7 @@ import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, TypeAlias
+from urllib.parse import urlsplit
 
 from openlearn import cli
 from openlearn.constants import QUICK_LEARN_MAX_FILE_BYTES
@@ -196,13 +197,28 @@ def _import_github(
     course_slug: str, source: PublicGitHubSource, model: str | None
 ) -> CourseSourceImportResult:
     kind: SourceKind = "github"
-    parts = cli.github_repository_parts(source.url)
+    try:
+        parts = cli.github_repository_parts(source.url)
+    except ValueError:
+        parts = None
     if parts is None:
+        message = "Enter a public GitHub repository URL."
+        try:
+            host = urlsplit(source.url).hostname or ""
+        except ValueError:
+            host = ""
+        if host.endswith(".github.io"):
+            message = (
+                "This is a GitHub Pages webpage, not a repository URL. "
+                "Webpage imports are not supported here. Download the specific class "
+                "material and use Upload a file (.txt, .md, .pdf or .docx); "
+                "export PowerPoint slides to PDF first."
+            )
         return _failure(
             course_slug,
             kind,
             "Public GitHub repository",
-            "Enter a public GitHub repository URL.",
+            message,
         )
     label = f"{parts[0]}/{parts[1]}"
     canonical_url = f"https://github.com/{parts[0]}/{parts[1]}"

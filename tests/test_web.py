@@ -3892,6 +3892,47 @@ def test_source_tool_rejects_likely_secrets_without_echoing_or_persisting(
     assert list(cli.context_source_files(slug)) == []
 
 
+@pytest.mark.parametrize("url,is_pages", [
+    ("https://mwang808.github.io/MathDrive/m3260/math3260-fall2026.html", True),
+    ("https://MWANG808.GITHUB.IO/MathDrive/", True),
+    ("https://github.io/course", False),
+    ("https://mwang808.github.io.attacker.example/course", False),
+    ("https://github.com/owner", False),
+    ("not a URL", False),
+    ("https://[broken", False),
+])
+def test_source_tool_rejects_webpages_and_malformed_repository_urls(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    url: str, is_pages: bool,
+) -> None:
+    slug = create_tool_course()
+    token = csrf(client, f"/courses/{slug}")
+    before = {path.relative_to(tmp_path): path.read_bytes()
+              for path in tmp_path.rglob("*") if path.is_file()}
+    monkeypatch.setattr(cli, "quick_source_contexts",
+                        lambda *_args, **_kwargs: pytest.fail("unexpected source fetch"))
+    monkeypatch.setattr(cli, "call_openai",
+                        lambda **_kwargs: pytest.fail("unexpected provider call"))
+
+    response = client.post(
+        f"/api/courses/{slug}/tools/sources/github",
+        headers={"x-csrf-token": token}, json={"url": url},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["imported"] == []
+    message = response.json()["failed"][0]["message"]
+    if is_pages:
+        assert "GitHub Pages webpage, not a repository" in message
+        assert "Upload a file" in message
+        assert "export PowerPoint slides to PDF" in message
+    else:
+        assert message == "Enter a public GitHub repository URL."
+    after = {path.relative_to(tmp_path): path.read_bytes()
+             for path in tmp_path.rglob("*") if path.is_file()}
+    assert after == before
+
+
 def test_source_tool_public_github_route_is_shallow_and_inert(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

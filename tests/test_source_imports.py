@@ -366,6 +366,33 @@ class CourseSourceImportTests(unittest.TestCase):
         clone.assert_not_called()
         self.assertEqual(result.failed[0].message, "Enter a public GitHub repository URL.")
 
+    def test_github_pages_rejection_explains_file_route_without_changing_sources(self) -> None:
+        note = Path(self.home.name) / "existing.md"
+        note.write_text("Keep this course source.", encoding="utf-8")
+        self.import_source(source_imports.LocalFileSource(note))
+        before = {
+            path.relative_to(self.home.name): path.read_bytes()
+            for path in Path(self.home.name).rglob("*") if path.is_file()
+        }
+        with mock.patch.object(cli, "quick_source_contexts") as discover, \
+             mock.patch.object(cli, "call_openai") as provider:
+            result = self.import_source(source_imports.PublicGitHubSource(
+                "https://mwang808.github.io/MathDrive/m3260/math3260-fall2026.html"
+            ))
+
+        discover.assert_not_called()
+        provider.assert_not_called()
+        self.assertEqual(len(result.sources), 1)
+        message = result.failed[0].message
+        self.assertIn("GitHub Pages webpage, not a repository", message)
+        self.assertIn("Upload a file", message)
+        self.assertIn("export PowerPoint slides to PDF", message)
+        after = {
+            path.relative_to(self.home.name): path.read_bytes()
+            for path in Path(self.home.name).rglob("*") if path.is_file()
+        }
+        self.assertEqual(after, before)
+
     def test_public_github_clone_failure_is_sanitized(self) -> None:
         error = subprocess.CalledProcessError(
             128,
