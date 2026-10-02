@@ -1,5 +1,6 @@
 """Explicit, local math presentation leaves storage and ordinary text alone."""
 import os
+import hashlib
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -19,6 +20,27 @@ SOURCE = (
     r"The column vector \(x=\begin{pmatrix}1\\2\end{pmatrix}\) has two components." + "\n\n"
     r"The equation \(Ax=b\) relates the input vector to its output."
 )
+STATIC = Path(__file__).resolve().parents[1] / "src/openlearn/web/static"
+MATH_FONT = STATIC / "vendor/stix/STIXTwoMath-Regular.woff2"
+
+
+def test_bundled_math_font_and_license_match_pinned_upstream():
+    font = MATH_FONT.read_bytes()
+    assert font[:4] == b"wOF2"
+    assert hashlib.sha256(font).hexdigest() == "094191335def3f0452c81ec0713cfc2f29bb6af8cecbf79b60881fbf2db97562"
+    license_text = (STATIC / "vendor/stix/OFL.txt").read_bytes()
+    assert hashlib.sha256(license_text).hexdigest() == "0c8825913b60d858aacdb33c4ca6660a7d64b0d6464702efbb19313f5765861a"
+
+
+@pytest.mark.parametrize("display", [False, True])
+@pytest.mark.parametrize("tex", [r"n_1+n_2+\cdots+n_m", r"\sum_{i=1}^{m} n_i"])
+def test_indexed_sum_source_survives_presentation(display, tex):
+    source = "\\[\n" + tex + "\n\\]" if display else "Use \\(" + tex + "\\) here."
+    _, blocks = _present_response(source)
+    if display:
+        assert blocks == [{"kind": "math", "text": tex}]
+    else:
+        assert blocks[0]["parts"][1] == {"kind": "math", "text": tex}
 
 
 def test_explicit_math_blocks_preserve_tex_and_explanation():
@@ -96,11 +118,16 @@ class MathServices(PlaceholderServices):
 def test_server_math_is_escaped_and_assets_are_local():
     with TestClient(create_app(MathServices(), testing=True)) as client:
         response = client.get("/courses/synthetic-matrix")
+        font = client.get("/static/vendor/stix/STIXTwoMath-Regular.woff2")
     assert response.status_code == 200
     assert response.text.count("data-math-expression") == 4
     assert "/static/vendor/katex/katex.min.js" in response.text
     assert "cdn.jsdelivr" not in response.text
     assert "style-src 'self';" in response.headers["content-security-policy"]
+    assert "font-src 'self';" in response.headers["content-security-policy"]
+    assert font.status_code == 200
+    assert font.headers["content-type"] == "font/woff2"
+    assert font.content == MATH_FONT.read_bytes()
 
 
 @pytest.fixture
@@ -110,11 +137,13 @@ def math_browser():
     playwright = pytest.importorskip("playwright.sync_api")
     with TestClient(create_app(MathServices(), testing=True)) as client:
         response = client.get("/courses/synthetic-matrix")
-    static = Path(__file__).resolve().parents[1] / "src/openlearn/web/static"
+    static = STATIC
     _, blocks = _present_response(SOURCE)
     requests, errors = [], []
     with playwright.sync_playwright() as runtime:
-        browser = runtime.chromium.launch()
+        engine = os.environ.get("OPENLEARN_BROWSER_ENGINE", "chromium")
+        assert engine in {"chromium", "firefox", "webkit"}
+        browser = getattr(runtime, engine).launch()
         page = browser.new_page(viewport={"width": 1280, "height": 800})
         page.on("pageerror", lambda error: errors.append(str(error)))
         page.add_init_script("window.mathCsp=[];document.addEventListener('securitypolicyviolation',e=>mathCsp.push(e.violatedDirective));")
@@ -130,7 +159,8 @@ def math_browser():
             elif parsed.path.startswith("/static/"):
                 file = static / parsed.path.removeprefix("/static/")
                 if file.is_file():
-                    route.fulfill(path=str(file), content_type="text/javascript" if file.suffix == ".js" else "text/css" if file.suffix == ".css" else "image/svg+xml")
+                    mime = {".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".woff2": "font/woff2"}
+                    route.fulfill(path=str(file), content_type=mime.get(file.suffix, "application/octet-stream"))
                 else:
                     route.fulfill(status=404)
             elif parsed.path.endswith("/chat"):
@@ -149,11 +179,52 @@ def math_browser():
     assert all(urlsplit(url).hostname == "math.test" for url in requests)
 
 
+@pytest.mark.parametrize("environment", ["pmatrix", "bmatrix"])
+@pytest.mark.parametrize("entries, columns", [(r"4&-2\\-3&1", 2), (r"1\\2", 1)])
+@pytest.mark.parametrize("display", [False, True])
+def test_matrix_fences_span_rows(math_browser, environment, entries, columns, display):
+    page, expect = math_browser
+    tex = rf"\begin{{{environment}}}{entries}\end{{{environment}}}"
+    page.evaluate("""({tex, display}) => {
+        const node = document.createElement(display ? 'div' : 'span');
+        node.id = 'matrix-fence-check';
+        document.querySelector('[data-move-content]').append(node);
+        OpenLearnMath.render(node, tex, display);
+    }""", {"tex": tex, "display": display})
+    target = page.locator("#matrix-fence-check")
+    expect(target.locator("math mtable")).to_have_count(1)
+    expect(target.locator("mtr")).to_have_count(2)
+    for row in target.locator("mtr").all():
+        expect(row.locator("mtd")).to_have_count(columns)
+    geometry = target.evaluate("""node => {
+        const table = node.querySelector('mtable').getBoundingClientRect();
+        return {
+            table: {top: table.top, bottom: table.bottom, height: table.height},
+            fences: [...node.querySelectorAll('mo[fence="true"]')].map(fence => {
+                const box = fence.getBoundingClientRect();
+                return {top: box.top, bottom: box.bottom, height: box.height};
+            }),
+        };
+    }""")
+    assert len(geometry["fences"]) == 2
+    for fence in geometry["fences"]:
+        assert fence["height"] >= geometry["table"]["height"] * 0.9
+        assert fence["top"] <= geometry["table"]["top"] + 2
+        assert fence["bottom"] >= geometry["table"]["bottom"] - 2
+    assert page.evaluate("mathCsp") == []
+
+
 def test_browser_math_consistent_offline_and_responsive(math_browser):
     page, expect = math_browser
     expect(page.locator("[data-move-content] math")).to_have_count(4)
     assert page.locator("math mfrac").count() == 2
     assert page.locator("math mtr").count() == 4
+    inline_math = page.locator("[data-math-display='false']").first
+    assert inline_math.evaluate("node => getComputedStyle(node).verticalAlign") == "baseline"
+    assert inline_math.evaluate("node => getComputedStyle(node).overflowX") == "visible"
+    assert inline_math.evaluate("node => getComputedStyle(node).overflowY") == "visible"
+    display_math = page.locator("[data-math-display='true']").first
+    assert display_math.evaluate("node => getComputedStyle(node).overflowX") == "auto"
     page.get_by_role("button", name="Chat", exact=True).click()
     expect(page.locator("[data-chat-conversation] math")).to_have_count(4)
     assert page.locator(".chat-tutor .math-expression span").count() == 0
@@ -168,6 +239,104 @@ def test_browser_math_consistent_offline_and_responsive(math_browser):
     page.locator("[data-math-display='true']").first.focus()
     page.keyboard.press("ArrowRight")
     assert page.locator("[data-math-display='true']").first.evaluate("node=>node===document.activeElement")
+
+
+def test_math_uses_bundled_font_without_system_math_font(math_browser):
+    page, expect = math_browser
+    expect(page.locator("[data-move-content] math")).to_have_count(4)
+    assert page.evaluate('document.fonts.check(\'16px "OpenLearn Math"\')')
+    assert page.locator("math").first.evaluate("node => getComputedStyle(node).fontFamily") == '"OpenLearn Math", math'
+    if os.environ.get("OPENLEARN_BROWSER_ENGINE", "chromium") == "chromium":
+        session = page.context.new_cdp_session(page)
+        session.send("DOM.enable")
+        session.send("CSS.enable")
+        session.send("Page.setFontFamilies", {"fontFamilies": {"math": "Times"}})
+        page.locator("math").first.evaluate("node => node.getBoundingClientRect()")
+        document = session.send("DOM.getDocument")
+        node = session.send("DOM.querySelector", {"nodeId": document["root"]["nodeId"], "selector": "math mo[fence]"})
+        fonts = session.send("CSS.getPlatformFontsForNode", {"nodeId": node["nodeId"]})["fonts"]
+        assert fonts and all(font["isCustomFont"] for font in fonts)
+    assert "OpenLearn Math" not in page.locator("[data-move-content] p").first.evaluate("node => getComputedStyle(node).fontFamily")
+    assert page.evaluate("mathCsp") == []
+
+
+@pytest.mark.parametrize("failure", ["missing", "corrupt"])
+def test_failed_math_font_keeps_readable_source_in_all_surfaces(math_browser, failure):
+    page, expect = math_browser
+
+    def fail(route):
+        if failure == "missing":
+            route.fulfill(status=404)
+        else:
+            route.fulfill(body=b"not a font", content_type="font/woff2")
+
+    page.route("**/*.woff2", fail)
+    with page.expect_response("**/*.woff2"):
+        page.reload()
+    expect(page.locator("[data-move-content] math")).to_have_count(0)
+    expect(page.locator("[data-move-content] .math-fallback")).to_have_count(4)
+    assert page.locator("[data-math-display='true'] code").text_content() == INVERSE
+    for display in (False, True):
+        for tex in (r"n_1+n_2+\cdots+n_m", r"\sum_{i=1}^{m} n_i"):
+            page.evaluate("""({tex, display}) => {
+                const target = document.createElement(display ? 'div' : 'span');
+                target.className = 'failed-indexed-sum';
+                document.querySelector('[data-move-content]').append(target);
+                OpenLearnMath.render(target, tex, display);
+            }""", {"tex": tex, "display": display})
+            fallback = page.locator(".failed-indexed-sum").last
+            expect(fallback.locator("code")).to_have_text(tex)
+            expect(fallback.locator("math")).to_have_count(0)
+    page.get_by_role("button", name="Chat", exact=True).click()
+    expect(page.locator("[data-chat-conversation] .math-fallback")).to_have_count(4)
+    expect(page.locator("[data-chat-conversation] math")).to_have_count(0)
+    page.get_by_role("button", name="History", exact=True).click()
+    expect(page.locator("#history-drawer .math-fallback")).to_have_count(4)
+    expect(page.locator("#history-drawer math")).to_have_count(0)
+    assert page.evaluate("mathCsp") == []
+
+
+def test_delayed_font_keeps_source_then_renders_latest_content(math_browser):
+    page, expect = math_browser
+    pending = []
+    page.route("**/*.woff2", lambda route: pending.append(route))
+    with page.expect_request("**/*.woff2"):
+        page.reload(wait_until="domcontentloaded")
+    expect(page.locator("[data-move-content] .math-fallback")).to_have_count(4)
+    target = page.locator("[data-math-expression]").first
+    target.evaluate("node => OpenLearnMath.render(node, 'y+2', true)")
+    assert len(pending) == 1
+    pending[0].fulfill(path=str(MATH_FONT), content_type="font/woff2")
+    expect(target.locator("math")).to_have_count(1)
+    assert target.locator("annotation").text_content() == "y+2"
+    assert page.evaluate("mathCsp") == []
+
+
+@pytest.mark.parametrize("display", [False, True])
+@pytest.mark.parametrize("tex, script", [(r"n_1+n_2+\cdots+n_m", "msub"), (r"\sum_{i=1}^{m} n_i", "sum")])
+def test_indexed_sums_render_with_local_font(math_browser, display, tex, script):
+    page, expect = math_browser
+    page.evaluate("""({tex, display}) => {
+        const target = document.createElement(display ? 'div' : 'span');
+        target.id = 'indexed-sum';
+        document.querySelector('[data-move-content]').append(target);
+        OpenLearnMath.render(target, tex, display);
+    }""", {"tex": tex, "display": display})
+    target = page.locator("#indexed-sum")
+    expect(target.locator("math")).to_have_count(1)
+    assert target.locator("annotation").text_content() == tex
+    if script == "msub":
+        expect(target.locator("msub")).to_have_count(3)
+        assert "⋯" in target.locator("math mo").all_text_contents()
+        for subscript in target.locator("msub").all():
+            assert subscript.evaluate("node => node.children[1].getBoundingClientRect().bottom > node.children[0].getBoundingClientRect().bottom")
+    else:
+        limits = target.locator("munderover" if display else "msubsup").first
+        expect(limits).to_have_count(1)
+        assert limits.locator("mo").first.text_content() == "∑"
+        assert limits.evaluate("node => node.children[1].getBoundingClientRect().bottom > node.children[0].getBoundingClientRect().bottom")
+        assert limits.evaluate("node => node.children[2].getBoundingClientRect().top < node.children[0].getBoundingClientRect().top")
+    assert page.evaluate("mathCsp") == []
 
 
 def test_missing_vendor_and_wide_math_remain_readable(math_browser):
@@ -189,6 +358,31 @@ def test_missing_vendor_and_wide_math_remain_readable(math_browser):
     page.evaluate("() => { delete window.katex; const node=document.createElement('div');document.querySelector('[data-move-content]').append(node);OpenLearnMath.render(node,'x+1',true); }")
     expect(page.locator(".math-fallback").last).to_be_visible()
     assert page.locator(".math-fallback").last.locator("code").text_content() == "x+1"
+    assert page.evaluate("mathCsp") == []
+
+
+def test_wide_inline_math_scrolls_without_widening_page(math_browser):
+    page, expect = math_browser
+    tex = "+".join([r"\frac{x}{2}"] * 12)
+    page.evaluate("""tex => {
+        const paragraph = document.createElement('p');
+        const node = document.createElement('span');
+        node.id = 'wide-inline-check';
+        paragraph.append('Before ', node, ' after.');
+        document.querySelector('[data-move-content]').append(paragraph);
+        OpenLearnMath.render(node, tex, false);
+    }""", tex)
+    page.set_viewport_size({"width": 320, "height": 800})
+    target = page.locator("#wide-inline-check")
+    expect(target.locator("math")).to_have_count(1)
+    expect(target).to_have_class("math-expression math-inline-scroll")
+    assert page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth")
+    assert target.evaluate("node => node.scrollWidth > node.clientWidth")
+    target.evaluate("node => node.scrollLeft = node.scrollWidth")
+    assert target.evaluate("node => node.scrollLeft > 0")
+    page.set_viewport_size({"width": 1800, "height": 800})
+    expect(target).to_have_class("math-expression")
+    assert target.evaluate("node => getComputedStyle(node).overflowY") == "visible"
     assert page.evaluate("mathCsp") == []
 
 

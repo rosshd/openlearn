@@ -5,6 +5,7 @@ import json
 import re
 import subprocess
 import sys
+import tarfile
 import tempfile
 import tomllib
 import unittest
@@ -117,6 +118,9 @@ class ReleaseArtifactPolicyTests(unittest.TestCase):
             wheel = next(output.glob("*.whl"))
             with ZipFile(wheel) as archive:
                 packaged = set(archive.namelist())
+                for name in ("STIXTwoMath-Regular.woff2", "OFL.txt", "PROVENANCE.txt"):
+                    member = f"openlearn/web/static/vendor/stix/{name}"
+                    self.assertEqual(archive.read(member), (REPOSITORY / "src" / member).read_bytes())
 
         self.assertLessEqual(release_artifacts.REQUIRED_PACKAGE_FILES, packaged)
         self.assertIn(
@@ -131,6 +135,21 @@ class ReleaseArtifactPolicyTests(unittest.TestCase):
             "openlearn/interview_skill_graphs/technical-interview-supplement-v1.json",
             packaged,
         )
+
+    def test_built_sdist_contains_math_font_license_and_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            output = Path(raw)
+            subprocess.run(
+                [sys.executable, "-m", "build", "--sdist", "--no-isolation", "--outdir", str(output)],
+                cwd=REPOSITORY, check=True, capture_output=True, text=True,
+            )
+            with tarfile.open(next(output.glob("*.tar.gz"))) as archive:
+                members = {Path(name).parts[1:]: name for name in archive.getnames()}
+                for name in ("STIXTwoMath-Regular.woff2", "OFL.txt", "PROVENANCE.txt"):
+                    member = Path(f"src/openlearn/web/static/vendor/stix/{name}")
+                    stream = archive.extractfile(members[member.parts])
+                    assert stream is not None
+                    self.assertEqual(stream.read(), (REPOSITORY / member).read_bytes())
 
     def test_installed_web_smoke_bootstraps_session_before_namespaced_reads(self) -> None:
         class Response:

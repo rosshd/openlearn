@@ -98,7 +98,7 @@ jobs:
       - name: Run browser smoke
         env:
           OPENLEARN_BROWSER_TEST: "1"
-        run: python -m pytest tests/test_web_browser.py -v
+        run: python -m pytest tests/test_web_browser.py tests/test_web_math.py -v
 
   security-gate:
     runs-on: ubuntu-latest

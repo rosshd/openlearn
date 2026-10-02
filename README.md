@@ -109,7 +109,11 @@ Code, currency text, streaming previews and unmarked arrays are never converted 
 Unsupported notation appears visibly as `Math (text)` rather than losing meaning or breaking the lesson.
 This first subset excludes custom macros, external resources, arbitrary styles, decorated/font-variant symbols and advanced alignment environments.
 CLI output and backups retain the original notation and explanatory prose; no saved topic is rewritten.
-MathML-only output preserves the existing CSP and does not require a CDN or font download.
+MathML-only output preserves the existing CSP and uses a bundled math font from the local application.
+No CDN or installed system math font is required. While the font loads, or if it fails to load,
+the escaped notation remains readable as `Math (text)`. Prose and code keep their existing fonts.
+The unchanged STIX Two Math 2.13 b171 WOFF2 font is licensed under SIL OFL 1.1;
+its copyright, license, pinned upstream source and checksum ship in `web/static/vendor/stix/`.
 The bundled KaTeX 0.19.0 script comes from the official npm `katex` archive and retains its MIT license in `src/openlearn/web/static/vendor/katex/LICENSE`.
 Its SHA-256 is `103a53763cc033bba8d175bf3f0ba597c3505c9b6747dd3f2c7bc2a6bfcc8ae7`.
 

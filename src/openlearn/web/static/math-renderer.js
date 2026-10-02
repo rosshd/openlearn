@@ -7,7 +7,7 @@ window.OpenLearnMath = (() => {
     "frac", "dfrac", "tfrac", "sqrt", "cdot", "times", "div", "pm", "mp",
     "le", "leq", "ge", "geq", "ne", "neq", "approx", "equiv", "in", "notin",
     "alpha", "beta", "gamma", "delta", "theta", "lambda", "mu", "pi", "sigma",
-    "sum", "prod", "int", "infty", "partial", "nabla", "det", "log", "ln",
+    "sum", "prod", "int", "infty", "partial", "nabla", "det", "log", "ln", "cdots",
     "sin", "cos", "tan", "exp", "min", "max", "lim", "text", "mathrm",
     "begin", "end", "left", "right", "\\", "{", "}", "_", "%", "#", "&",
     " ", ",", ";", ":", "!",
@@ -24,6 +24,33 @@ window.OpenLearnMath = (() => {
     "maxsize", "width", "height", "depth", "columnalign", "rowalign",
     "columnspacing", "rowspacing", "accent", "accentunder",
   ]);
+  let fontReady;
+  const renders = new WeakMap();
+
+  function loadFont() {
+    if (!fontReady) {
+      fontReady = document.fonts
+        ? document.fonts.load('16px "OpenLearn Math"').then((faces) => faces.length > 0).catch(() => false)
+        : Promise.resolve(false);
+    }
+    return fontReady;
+  }
+
+  const inlineSizes = new ResizeObserver((entries) => {
+    for (const {target} of entries) {
+      if (!target.isConnected) {
+        inlineSizes.unobserve(target);
+        continue;
+      }
+      const math = target.querySelector("math");
+      const wide = Boolean(math)
+        && math.getBoundingClientRect().width > target.getBoundingClientRect().width + 1;
+      // Ordinary inline MathML keeps its natural baseline; only wide formulas scroll.
+      target.classList.toggle("math-inline-scroll", wide);
+      if (wide) target.tabIndex = 0;
+      else target.removeAttribute("tabindex");
+    }
+  });
 
   function supported(tex) {
     if (typeof tex !== "string" || tex.length > 2000) return false;
@@ -50,6 +77,10 @@ window.OpenLearnMath = (() => {
   }
 
   function render(target, tex, display = false) {
+    const revision = {};
+    renders.set(target, revision);
+    inlineSizes.unobserve(target);
+    target.classList.remove("math-inline-scroll");
     target.classList.add("math-expression", "math-fallback");
     if (display) {
       target.classList.add("math-display");
@@ -67,8 +98,13 @@ window.OpenLearnMath = (() => {
       });
       const math = temporary.querySelector("math");
       if (!math || !safeTree(math)) return;
-      target.replaceChildren(math);
-      target.classList.remove("math-fallback");
+      loadFont().then((loaded) => {
+        // Keep escaped source while loading or on failure; never show a system-font substitute.
+        if (!loaded || renders.get(target) !== revision) return;
+        target.replaceChildren(math);
+        target.classList.remove("math-fallback");
+        if (!display) inlineSizes.observe(target);
+      });
     } catch {
       // Retain escaped source. Never insert vendor error messages as HTML.
     }
