@@ -31,6 +31,7 @@ from openlearn.application import (
 )
 from openlearn.course_templates import CourseTemplateError
 from openlearn.courses import (
+    CALIBRATION_STATE_KEY,
     CREATION_SUBMISSION_METADATA_KEY,
     CREATION_SUBMISSION_STATE_KEY,
     CourseDeletionConflictError,
@@ -1194,24 +1195,55 @@ class OpenLearnWebServices:
         if not result.get("ok"):
             return result
         slug = str(result["slug"])
-        topic = cli.read_topic(slug)
-        # Source creation stops at the existing per-request consent boundary.
-        # Never start an ordinary, ungrounded lesson while importing a source.
-        if result["created"]:
+        # Keep rejected imports editable as one pending creation draft.
+        # Completed courses remain immutable on submission replay.
+        with cli.topic_store_locks(slug, include_journal=True):
+            topic = cli.read_topic(slug)
             metadata = dict(topic.metadata)
-            metadata["web_source_start"] = True
-            metadata["web_source_mode"] = request.mode
-            cli.write_topic(topic.path, metadata, topic.body)
-        elif topic.metadata.get("web_source_mode") != request.mode:
-            return {"ok": False, "error": "This saved creation belongs to another mode. Start a new course."}
+            if result["created"]:
+                metadata.update(web_source_start=True, web_source_mode=request.mode,
+                                web_source_pending=True)
+            elif metadata.get("web_source_mode") != request.mode:
+                return {"ok": False, "error": "This saved creation belongs to another mode. Start a new course."}
+            if not metadata.get("web_source_pending"):
+                return {**result, "state": "source_ready"}
+            if metadata.get("web_source_pending"):
+                if metadata.get("course_started") or tutor_service.course_revision(slug) > 0:
+                    return {"ok": False, "error": "This course has started. Change its details in Course settings."}
+                old_title = str(metadata.get("topic") or "")
+                old_goal = str(metadata.get("goal") or "")
+                metadata.update(topic=request.title, goal=request.goal.strip())
+                body = topic.body.replace(f"# {old_title}\n", f"# {request.title}\n", 1)
+                body = body.replace(f"## Current Goal\n\n{old_goal}\n\n## Notes",
+                                    f"## Current Goal\n\n{request.goal.strip()}\n\n## Notes", 1)
+                state = cli.load_state(slug)
+                state[CALIBRATION_STATE_KEY] = {
+                    "goal": request.goal.strip(), "experience": request.experience.strip(),
+                    "skipped": not bool(request.experience.strip()),
+                    "recorded_at": datetime.now(timezone.utc).isoformat(),
+                }
+                cli.save_state(slug, state)
+                cli.write_text_atomic(topic.path, cli.format_topic(cli.stable_metadata_for_topic(metadata), body))
+                creation_state = {key: state[key] for key in (CALIBRATION_STATE_KEY, CREATION_SUBMISSION_STATE_KEY)
+                                  if key in state}
+        # Importing stops at the existing per-request consent boundary;
+        # no ordinary, ungrounded lesson or provider request starts here.
         imported = self._import_source(slug, source)
+        # The importer owns dynamic source state; retain creation calibration.
+        cli.update_state_atomic(slug, lambda state: state.update(creation_state))
         if not imported.get("ok") or not imported.get("sources"):
             failures = imported.get("failed") or []
             message = str(failures[0].get("message")) if failures else str(imported.get("error") or "No usable source was imported.")
             return {"ok": False, "error": message, "slug": slug}
-        if request.mode == "quick":
-            sources = imported["sources"]
-            cli.save_quick_learn_metadata(slug, request.source_kind, str(sources[0]["label"]))
+        with cli.file_lock(cli.topic_path(slug)):
+            topic = cli.read_topic(slug)
+            metadata = dict(topic.metadata)
+            if request.mode == "quick":
+                sources = imported["sources"]
+                metadata.update(learning_mode="quick", quick_source_type=request.source_kind,
+                                quick_source_label=str(sources[0]["label"]), coverage_contract=True)
+            metadata["web_source_pending"] = False
+            cli.write_text_atomic(topic.path, cli.format_topic(cli.stable_metadata_for_topic(metadata), topic.body))
         return {**result, "state": "source_ready"}
 
     def create_course(self, request: CourseCreateRequest) -> dict[str, object]:

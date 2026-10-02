@@ -1795,11 +1795,14 @@ def test_source_creation_user_entrypoints_navigation_drafts_and_consent(tmp_path
                 assert "credential" in page.locator("[data-form-error]").inner_text().lower()
                 assert page.get_by_label("Course name", exact=True).input_value() == "Synthetic Quick Learn"
                 assert page.locator('[name="source_file"]').evaluate("field => field.files[0].name") == "synthetic.txt"
+                page.get_by_label("Course name", exact=True).fill("Corrected Quick Learn")
+                page.get_by_label("Your goal", exact=True).fill("Corrected equal parts goal")
                 page.get_by_label("Source file", exact=True).set_input_files(
                     {"name": "fractions.md", "mimeType": "text/markdown", "buffer": b"One half is one of two equal parts of a whole."})
                 page.get_by_role("button", name="Create Quick Learn").click()
                 page.wait_for_url("**/courses/synthetic-quick-learn?tool=chat")
                 assert page.locator("[data-source-mode]").is_checked()
+                assert "Corrected Quick Learn" in page.locator(".focus-identity").inner_text()
                 page.get_by_label("Your question", exact=True).fill("Teach me about equal parts.")
                 before_preview = (home / "learning-topics" / "synthetic-quick-learn.md").read_bytes()
                 page.get_by_role("button", name="Ask tutor", exact=True).click()

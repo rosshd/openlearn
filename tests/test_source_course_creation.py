@@ -7,6 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from openlearn import cli, source_imports, tutor_service
+from openlearn.courses import CALIBRATION_STATE_KEY
 from openlearn.web.app import create_app
 
 
@@ -83,9 +84,24 @@ def test_bad_upload_retains_form_input_and_can_be_corrected_without_duplicate_co
     bad = post(client, data, {"source_file": ("keys.txt", b"OPENAI_API_KEY=sk-abcdefghijklmnopqrstuv", "text/plain")})
     assert bad.status_code == 422
     assert "credential" in bad.json()["error"].lower()
+    data.update(title="Corrected fractions", goal="Corrected goal", experience="Corrected experience")
     corrected = post(client, data, {"source_file": ("fractions.md", b"Two equal parts make a whole.", "text/markdown")})
     assert corrected.status_code == 200
     assert corrected.json()["created"] is False
+    slug = corrected.json()["slug"]
+    topic = cli.read_topic(slug)
+    assert topic.metadata["topic"] == "Corrected fractions"
+    assert topic.metadata["goal"] == "Corrected goal"
+    assert "# Corrected fractions" in topic.body
+    assert "Corrected goal" in topic.body
+    assert cli.load_state(slug)[CALIBRATION_STATE_KEY]["experience"] == "Corrected experience"
+    assert topic.metadata["web_source_pending"] is False
+    # Successful replay must not mutate a completed creation or its calibration.
+    replay = post(client, {**data, "title": "Must not rename", "goal": "Must not replace goal"},
+                  {"source_file": ("fractions.md", b"Two equal parts make a whole.", "text/markdown")})
+    assert replay.status_code == 200
+    assert cli.read_topic(slug).metadata["topic"] == "Corrected fractions"
+    assert cli.read_topic(slug).metadata["goal"] == "Corrected goal"
     assert len(list(cli.topics_dir().glob("*.md"))) == 1
     invalid = payload(source_kind="folder", source_value="", title="Kept title", goal="Kept goal")
     fallback = post(client, invalid, json=False)
