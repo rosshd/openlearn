@@ -20005,6 +20005,9 @@ class PlatformGuardTests(unittest.TestCase):
                 mock.patch.object(builtins, "input", fake_input),
                 mock.patch.object(sys, "stdin", fake_stdin),
                 mock.patch.object(sys, "platform", "linux"),
+                # Exercise the POSIX paste path and real byte reader on every
+                # host. Windows select cannot poll os.pipe descriptors.
+                mock.patch.object(cli.select, "select", return_value=([fake_stdin], [], [])),
             ):
                 result = cli.read_repl_message("> ", fake_input)
             self.assertEqual(result, "first\n\nSecond café\n\n\nCheck\n")

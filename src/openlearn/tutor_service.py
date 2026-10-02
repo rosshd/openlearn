@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 import threading
 from collections.abc import Mapping
 from contextlib import nullcontext
@@ -1278,6 +1279,45 @@ def _active_turn_age(active: dict[str, object]) -> timedelta | None:
     return datetime.now(timezone.utc) - updated_at.astimezone(timezone.utc)
 
 
+def _windows_process_is_alive(pid: int) -> bool:
+    """Query a process handle without sending Windows console control events."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    open_process = kernel.OpenProcess
+    open_process.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    open_process.restype = wintypes.HANDLE
+    wait = kernel.WaitForSingleObject
+    wait.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    wait.restype = wintypes.DWORD
+    close = kernel.CloseHandle
+    close.argtypes = [wintypes.HANDLE]
+    close.restype = wintypes.BOOL
+
+    # SYNCHRONIZE grants only the right to observe process termination.
+    handle = open_process(0x100000, False, pid)
+    if not handle:
+        # ERROR_INVALID_PARAMETER means the PID no longer exists. Keep the
+        # reservation on access denial or an unknown error to avoid adoption.
+        return ctypes.get_last_error() != 87
+    try:
+        # WAIT_OBJECT_0 means exited; timeout or a failed query retains ownership.
+        return wait(handle, 0) != 0
+    finally:
+        close(handle)
+
+
+def _process_is_alive(pid: int) -> bool:
+    if sys.platform == "win32":
+        return _windows_process_is_alive(pid)
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
 def _recover_active_turn(
     slug: str,
     active: dict[str, object],
@@ -1300,11 +1340,7 @@ def _recover_active_turn(
     if _future_active(slug, submission_id):
         return None
     if isinstance(owner_pid, int) and owner_pid > 0 and owner_pid != os.getpid():
-        try:
-            os.kill(owner_pid, 0)
-        except (OSError, ProcessLookupError):
-            pass
-        else:
+        if _process_is_alive(owner_pid):
             return None
     if age is None:
         code = "operation_interrupted"
@@ -2525,11 +2561,7 @@ def resume_interview_progression(
         raise TutorConflictError("This interview turn is still running.")
     owner_pid = active_turn.get("owner_pid") if isinstance(active_turn, dict) else None
     if isinstance(owner_pid, int) and owner_pid > 0 and owner_pid != os.getpid():
-        try:
-            os.kill(owner_pid, 0)
-        except (OSError, ProcessLookupError):
-            pass
-        else:
+        if _process_is_alive(owner_pid):
             raise TutorConflictError("This interview turn is still running in another process.")
     return submit_turn(
         slug,

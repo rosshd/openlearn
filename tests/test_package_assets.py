@@ -296,6 +296,12 @@ class ReleaseArtifactPolicyTests(unittest.TestCase):
         )
         metadata = project_config["project"]
 
+        self.assertLessEqual(
+            set(project_config["build-system"]["requires"]),
+            set(project_config["project"]["optional-dependencies"]["dev"]),
+            "Non-isolated package tests need the declared build backend in the dev environment",
+        )
+
         self.assertEqual(metadata["requires-python"], ">=3.11,<3.14")
         classifiers = set(metadata["classifiers"])
         for version in ("3.11", "3.12", "3.13"):

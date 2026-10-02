@@ -1295,6 +1295,10 @@ def test_real_browser_course_library_preview_history_responsive_and_no_js(
                 )
 
                 page.emulate_media(reduced_motion="reduce")
+                page.wait_for_function(
+                    "getComputedStyle(document.querySelector('.course-row')).transitionDuration "
+                    "=== '0s'"
+                )
                 assert page.locator(".course-row").first.evaluate(
                     "row => getComputedStyle(row).transitionDuration === '0s'"
                 )

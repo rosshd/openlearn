@@ -2457,11 +2457,11 @@ class TutorServiceTests(TestCase):
 
         with (
             mock.patch("openlearn.tutor_service._future_active", return_value=False),
-            mock.patch("os.kill") as process_alive,
+            mock.patch.object(tutor_service, "_process_is_alive", return_value=True) as process_alive,
         ):
             current = operation_status("web-tutor", submission_id)
 
-        process_alive.assert_called_once_with(4242, 0)
+        process_alive.assert_called_once_with(4242)
         self.assertIsNotNone(current)
         self.assertEqual(current.status, "reserved")
         self.assertIsNone(current.error_code)
@@ -2485,11 +2485,11 @@ class TutorServiceTests(TestCase):
             ),
         )
 
-        with mock.patch("os.kill") as process_alive:
+        with mock.patch.object(tutor_service, "_process_is_alive", return_value=True) as process_alive:
             with self.assertRaises(TutorConflictError, msg="still running"):
                 tutor_service.resume_interview_progression(slug)
 
-        process_alive.assert_called_once_with(4242, 0)
+        process_alive.assert_called_once_with(4242)
         active = cli.load_state(slug)["interview_curriculum"]["active_operation"]
         self.assertEqual(active["submission_id"], submission_id)
 
