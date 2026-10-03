@@ -258,14 +258,6 @@ async def _dashboard_response(request: Request) -> Any:
         except ValueError as error:
             raise HTTPException(status_code=404, detail="Course not found") from error
     snapshot = public_mapping(await _call_dashboard(request, selected_slug))
-    starters = snapshot.get("starters") if not snapshot.get("courses") else []
-    starters = starters if isinstance(starters, list) else []
-    starter_submission_ids = {
-        str(starter["id"]): str(uuid4())
-        for starter in starters
-        if isinstance(starter, dict)
-        and isinstance(starter.get("id"), str)
-    }
     proposal = None
     proposal_id = request.query_params.get("proposal")
     selected = snapshot.get("selected_course")
@@ -286,7 +278,6 @@ async def _dashboard_response(request: Request) -> Any:
         _context(
             request,
             dashboard=snapshot,
-            starter_submission_ids=starter_submission_ids,
             follow_up_proposal=proposal,
             page_title="Your courses",
         ),
@@ -380,19 +371,12 @@ async def resume_starter_course(request: Request, template_id: str) -> Any:
     if template is None:
         raise HTTPException(status_code=404, detail="Starter course not found")
     try:
-        submission_id = canonical_uuid(request.query_params.get("submission_id", ""))
+        canonical_uuid(request.query_params.get("submission_id", ""))
     except ValueError as error:
         raise HTTPException(status_code=422, detail="Invalid starter request") from error
-    return _templates(request).TemplateResponse(
-        request,
-        "starter_resume.html",
-        _context(
-            request,
-            starter=template,
-            starter_submission_id=submission_id,
-            page_title=f"Continue to {template['title']}",
-        ),
-    )
+    # Stale catalog links no longer offer or automatically create a preset.
+    # The internal POST and definitions remain for compatibility and rollback.
+    return RedirectResponse(request.url_for("new_course"), status_code=303)
 
 
 @router.post("/api/courses", response_class=JSONResponse)
@@ -602,6 +586,8 @@ async def activate_course(request: Request, slug: str) -> Any:
             )
         else:
             url = request.url_for("focus", slug=slug)
+            if initialized.get("state") == "source_ready":
+                url = url.include_query_params(tool="chat")
     else:
         url = request.url_for("focus", slug=slug)
     return RedirectResponse(url, status_code=303)

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from concurrent.futures import wait
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
 
-from openlearn import cli, source_imports, tutor_service
+from openlearn import application, cli, source_imports, tutor_service
 from openlearn.courses import CALIBRATION_STATE_KEY
 from openlearn.web.app import create_app
 
@@ -168,3 +169,19 @@ def test_source_creation_keeps_csrf_and_upload_bounds(client, monkeypatch):
     assert oversized.status_code == 422
     assert "limit" in oversized.json()["error"]
     assert not list(cli.topics_dir().glob("*.md"))
+
+
+def test_source_course_dashboard_resumes_chat_without_a_plan_blocker(client, monkeypatch):
+    created = post(client, payload(), {"source_file": ("fractions.md", b"Two halves make a whole.", "text/markdown")})
+    slug = created.json()["slug"]
+    dashboard = client.get(f"/dashboard?course={slug}")
+    assert "Build this course's learning path before the first lesson." not in dashboard.text
+    assert "Continue learning" in dashboard.text
+    monkeypatch.setattr(application, "provider_status", lambda: SimpleNamespace(ready=True))
+    before = cli.topic_path(slug).read_bytes()
+    token = dashboard.cookies["openlearn_csrf"]
+    resumed = client.post(f"/courses/{slug}/activate", headers={"x-csrf-token": token}, follow_redirects=False)
+    assert resumed.status_code == 303
+    assert resumed.headers["location"].endswith(f"/courses/{slug}?tool=chat")
+    assert cli.topic_path(slug).read_bytes() == before
+    assert source_imports.list_course_sources(slug)

@@ -147,7 +147,7 @@ def test_default_web_app_runs_setup_dashboard_course_and_tutor_flow(
     client: TestClient,
 ) -> None:
     empty_dashboard = client.get("/").text
-    assert "Choose your first course" in empty_dashboard
+    assert "What would you like to learn?" in empty_dashboard
     assert "Technical Interview Prep" not in empty_dashboard
     assert "New course" in empty_dashboard
 
@@ -1262,7 +1262,7 @@ def test_internal_starter_start_remains_idempotent_while_hidden(
     assert len(application.dashboard().courses) == 1
 
 
-def test_provider_setup_resumes_non_interview_starter_without_creation_form(
+def test_stale_preset_resume_returns_to_own_topic_without_creating_course(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1293,10 +1293,11 @@ def test_provider_setup_resumes_non_interview_starter_without_creation_form(
     resume = client.get(resume_path)
 
     assert resume.status_code == 200
-    assert f'{start_path}"' in resume.text
-    assert f'value="{submission_id}"' in resume.text
-    assert "Continue to Computer Networking" in resume.text
-    assert "data-starter-resume-form" in resume.text
+    assert resume.url.path.endswith("/courses/new")
+    assert "Computer Networking" not in resume.text
+    assert "data-starter-resume-form" not in resume.text
+    assert 'name="template_id" value=""' in resume.text
+    assert application.dashboard().courses == ()
 
     assert client.get(
         f"/courses/starters/not-a-template/resume?submission_id={submission_id}"

@@ -31,10 +31,14 @@
     {% if course.source_start %}<p class="field-note">Your source is saved locally. Ask for your first source lesson in Chat, then review and approve the screened request. Source mode requires the selected DeepSeek model on OpenRouter.</p>{% endif %}
     <dialog data-source-preview aria-labelledby="source-preview-title">
       <h2 id="source-preview-title">Review screened tutor request</h2>
-      <p data-source-disclosure></p>
-      <pre data-source-preview-text></pre>
-      <button type="button" data-source-cancel>Cancel</button>
-      <button type="button" data-source-send>Send screened request</button>
+      <div class="dialog-request" tabindex="0" role="region" aria-label="Screened request and disclosure">
+        <p data-source-disclosure></p>
+        <pre data-source-preview-text></pre>
+      </div>
+      <div class="dialog-actions">
+        <button class="secondary-action" type="button" data-source-cancel>Cancel</button>
+        <button class="primary-action compact" type="button" data-source-send>Send screened request</button>
+      </div>
     </dialog>
     <article class="move-surface" data-current-move data-move-type="{{ course.move.kind|lower }}">
       {% if course.feedback %}
@@ -164,14 +168,14 @@
     </section>
 
     <section class="tool-panel" data-tool-panel="options" hidden aria-labelledby="options-tool-title">
-      <h3 id="options-tool-title">Course options</h3>
+      <h3 class="sr-only" id="options-tool-title">Source use and settings</h3>
       <label class="check-row"><input type="checkbox" data-source-mode{% if course.source_start %} checked{% endif %}> Use screened class sources for this turn</label>
       <a class="quiet-link" href="{{ url_for('course_settings', slug=course.slug) }}">Course settings</a>
       <a class="quiet-link" href="{{ url_for('setup') }}">Tutor settings</a>
     </section>
 
     <section class="tool-panel" data-tool-panel="sources" hidden aria-labelledby="sources-tool-title">
-      <h3 id="sources-tool-title">Course sources</h3>
+      <h3 class="sr-only" id="sources-tool-title">Import sources</h3>
       <p class="quiet-copy">Imports are stored and processed locally, bounded, deduplicated, and never executed. When the tutor uses a source later, selected excerpts may be sent to your configured model provider.</p>
       <form class="tool-form" data-source-file-form>
         <label for="source-file">File</label>

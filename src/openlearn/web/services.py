@@ -805,7 +805,7 @@ class OpenLearnWebServices:
             "active_slug": snapshot.active_slug,
             "resume_course": courses_by_slug.get(snapshot.resume.slug) if snapshot.resume else None,
             "due_reviews": snapshot.reviews.due_today,
-            "starters": self.course_templates()[:3],
+            "starters": [],
         }
 
     def activate_course(self, slug: str) -> dict[str, object]:

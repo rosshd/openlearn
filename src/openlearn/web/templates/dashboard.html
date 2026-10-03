@@ -6,9 +6,9 @@
   <header class="course-library-intro">
     <div>
       <p class="eyebrow">Course library</p>
-      <h1 id="dashboard-title">{% if dashboard.courses %}Choose a course and see its path{% else %}Choose your first course{% endif %}</h1>
+      <h1 id="dashboard-title">{% if dashboard.courses %}Your learning, at your pace{% else %}What would you like to learn?{% endif %}</h1>
     </div>
-    <p>{% if dashboard.courses %}Preview the next topics before you enter a course. Your active course changes only when you continue learning.{% else %}Start with your own topic or a source you want to understand. Every course stays editable as you learn.{% endif %}</p>
+    <p>{% if dashboard.courses %}Pick up where you left off, or start with a new topic or source.{% else %}Start with your own topic or a source you want to understand. Every course stays editable as you learn.{% endif %}</p>
   </header>
 
   <section class="course-library-frame" data-course-workspace>
@@ -20,7 +20,7 @@
           <summary class="primary-action compact course-add-action">New course <span aria-hidden="true">+</span></summary>
           <div aria-label="New course choices">
             <a href="{{ url_for('new_course') }}#custom-course"><strong>Own topic</strong><small>Describe anything you want to learn.</small></a>
-            <a href="{{ url_for('source_course') }}">Source course <small>Start with a file, folder, or repository.</small></a>
+            <a href="{{ url_for('source_course') }}"><strong>Source course</strong><small>Start with a file, folder, or repository.</small></a>
           <a href="{{ url_for('quick_learn') }}"><strong>Quick Learn</strong><small>Learn from one bounded source.</small></a>
           </div>
         </details>
@@ -48,10 +48,10 @@
       {% else %}
         <div class="empty-course-library" data-empty-course-library>
           <p>Bring a topic or a source. Choose how you want to begin.</p>
-          <div class="starter-grid" aria-label="Course creation options">
-            <a class="starter-tile" href="{{ url_for('new_course') }}"><strong>Own topic</strong><small>Describe what you want to understand.</small></a>
-            <a class="starter-tile" href="{{ url_for('source_course') }}"><strong>Source course</strong><small>Build around a file, local folder, or public repository.</small></a>
-            <a class="starter-tile" href="{{ url_for('quick_learn') }}"><strong>Quick Learn</strong><small>Learn from one bounded source.</small></a>
+          <div class="creation-grid" aria-label="Course creation options">
+            <a class="creation-tile" href="{{ url_for('new_course') }}"><strong>Own topic</strong><small>Describe what you want to understand.</small></a>
+            <a class="creation-tile" href="{{ url_for('source_course') }}"><strong>Source course</strong><small>Build around a file, local folder, or public repository.</small></a>
+            <a class="creation-tile" href="{{ url_for('quick_learn') }}"><strong>Quick Learn</strong><small>Learn from one bounded source.</small></a>
           </div>
         </div>
       {% endif %}

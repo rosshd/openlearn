@@ -18,11 +18,12 @@
         <span class="wordmark-mark" aria-hidden="true">ol</span>
         <span>openlearn</span>
       </a>
+      {% set current_section = 'tutor' if request.url.path == url_for('setup').path else 'progress' if request.url.path == url_for('progress').path else 'data' if request.url.path == url_for('data').path else 'courses' %}
       <nav class="site-nav" aria-label="Openlearn navigation">
-        <a href="{{ url_for('dashboard') }}">Courses</a>
-        <a href="{{ url_for('setup') }}">Tutor</a>
-        <a href="{{ url_for('progress') }}">Progress</a>
-        <a href="{{ url_for('data') }}">Data</a>
+        <a href="{{ url_for('dashboard') }}"{% if current_section == 'courses' %} aria-current="page"{% endif %}>Courses</a>
+        <a href="{{ url_for('setup') }}"{% if current_section == 'tutor' %} aria-current="page"{% endif %}>Tutor</a>
+        <a href="{{ url_for('progress') }}"{% if current_section == 'progress' %} aria-current="page"{% endif %}>Progress</a>
+        <a href="{{ url_for('data') }}"{% if current_section == 'data' %} aria-current="page"{% endif %}>Data</a>
       </nav>
       <button class="theme-toggle" type="button" data-theme-toggle
         aria-label="Theme: System. Activate to use dark theme">

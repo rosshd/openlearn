@@ -110,6 +110,9 @@ if (createForm) {
     const updateSourceFields = () => {
       const file = createForm.elements.source_file;
       const value = createForm.elements.source_value;
+      const valueLabel = createForm.querySelector("[data-source-value-label]");
+      if (valueLabel) valueLabel.textContent = kind.value === "github" ? "Public GitHub repository URL" : "Local folder path";
+      value.placeholder = kind.value === "github" ? "https://github.com/owner/repository" : "/path/to/your/notes";
       file.disabled = kind.value !== "file";
       value.disabled = kind.value === "file";
       file.hidden = file.disabled;
@@ -207,31 +210,6 @@ if (providerSelect && providerModel && providerBaseUrl) {
     updateProviderPresentation();
   });
   updateProviderPresentation();
-}
-
-for (const choice of document.querySelectorAll("[data-template-choice]")) {
-  choice.addEventListener("click", () => {
-    for (const other of document.querySelectorAll("[data-template-choice]")) other.setAttribute("aria-pressed", "false");
-    choice.setAttribute("aria-pressed", "true");
-    const form = document.querySelector(".create-form");
-    if (!form) return;
-    form.elements.template_id.value = choice.dataset.templateId;
-    form.elements.title.value = choice.dataset.title;
-    form.elements.goal.value = choice.dataset.goal;
-    saveCreationDraft();
-    form.elements.experience.focus();
-    announce(`${choice.dataset.title} selected.`);
-  });
-}
-
-for (const strip of document.querySelectorAll("[data-starter-strip]")) {
-  const track = strip.querySelector("[data-starter-track]");
-  for (const button of strip.querySelectorAll("[data-starter-scroll]")) {
-    button.addEventListener("click", () => {
-      const direction = button.dataset.starterScroll === "previous" ? -1 : 1;
-      track?.scrollBy({left: direction * Math.max(260, track.clientWidth * 0.82), behavior: "smooth"});
-    });
-  }
 }
 
 for (const form of document.querySelectorAll("[data-json-form]")) {

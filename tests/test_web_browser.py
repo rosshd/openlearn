@@ -1284,6 +1284,12 @@ def test_real_browser_course_library_preview_history_responsive_and_no_js(
                     "data-active-course"
                 ) == active.slug
 
+                for width, height in ((390, 844), (768, 1024), (1100, 800), (1280, 800), (1600, 1000)):
+                    page.set_viewport_size({"width": width, "height": height})
+                    page.locator(".new-course-menu summary").click()
+                    _assert_no_page_overflow(page)
+                    assert page.locator(".new-course-menu > div").evaluate("e => {const r=e.getBoundingClientRect(); return r.left >= 0 && r.right <= innerWidth;}")
+                    page.locator(".new-course-menu summary").click()
                 page.set_viewport_size({"width": 760, "height": 900})
                 _assert_no_page_overflow(page)
                 page.locator("html").evaluate(
@@ -1653,23 +1659,23 @@ def test_real_browser_unverified_provider_stays_in_setup(
                 empty_library = page.locator("[data-empty-course-library]")
                 playwright.expect(empty_library).to_be_visible()
                 assert page.locator(".empty-preview").count() == 0
-                starter_tiles = empty_library.locator(".starter-tile")
-                assert starter_tiles.count() >= 3
-                assert starter_tiles.first.bounding_box()["width"] >= 220
+                creation_tiles = empty_library.locator(".creation-tile")
+                assert creation_tiles.count() >= 3
+                assert creation_tiles.first.bounding_box()["width"] >= 220
                 assert (
                     page.locator(".course-list .new-course-menu > summary").bounding_box()[
                         "width"
                     ]
                     < 260
                 )
-                assert starter_tiles.first.evaluate(
+                assert creation_tiles.first.evaluate(
                     "element => getComputedStyle(element).textDecorationLine"
                 ) == "none"
                 playwright.expect(page.locator("[data-theme-toggle]")).to_be_visible()
                 assert page.locator(".local-status").count() == 0
                 _assert_no_page_overflow(page)
                 assert "Technical Interview Prep" not in empty_library.inner_text()
-                starter_tiles.first.click()
+                creation_tiles.first.click()
                 page.wait_for_url("**/courses/new")
                 assert page.locator("[data-template-choice]").count() == 0
                 assert page.locator("#course-title").input_value() == ""
@@ -1762,6 +1768,21 @@ def test_source_creation_user_entrypoints_navigation_drafts_and_consent(tmp_path
                 page.reload()
                 assert page.locator('[name="template_id"]').input_value() == ""
                 assert page.get_by_label("Course name", exact=True).input_value() == "Kept own draft"
+                page.route("**/api/courses", lambda route: route.fulfill(
+                    status=428, content_type="application/json",
+                    body=json.dumps({"error": "Connect your tutor to begin.", "state": "setup_required"}),
+                ))
+                page.get_by_role("button", name="Build the first lesson").click()
+                page.locator("[data-provider-setup-dialog]").wait_for(state="visible")
+                for width, height in ((390, 844), (768, 1024), (1280, 800), (1600, 1000)):
+                    page.set_viewport_size({"width": width, "height": height})
+                    _assert_no_page_overflow(page)
+                    for control in ("#provider-recovery-title", "[data-provider-setup-cancel]"):
+                        assert page.locator(control).evaluate("e => {const r=e.getBoundingClientRect(); return r.top >= 0 && r.bottom <= innerHeight;}")
+                page.locator("[data-provider-setup-cancel]").click()
+                assert page.get_by_label("Course name", exact=True).input_value() == "Kept own draft"
+                assert page.get_by_label("Your goal", exact=True).input_value() == "Learn stacks"
+                page.unroute("**/api/courses")
                 page.get_by_role("link", name="Back to dashboard").click()
                 for link, route, heading in [("Source course", "courses/from-source", "Build a course from your sources."),
                                              ("Quick Learn", "quick-learn", "Learn from one source now.")]:
@@ -1771,8 +1792,11 @@ def test_source_creation_user_entrypoints_navigation_drafts_and_consent(tmp_path
                     assert page.get_by_role("heading", name=heading).is_visible()
                     page.get_by_label("Course name", exact=True).fill(f"Synthetic {link}")
                     page.get_by_label("Your goal", exact=True).fill("Learn equal parts")
+                    page.get_by_label("Source type", exact=True).select_option("github")
+                    assert page.get_by_label("Public GitHub repository URL", exact=True).is_visible()
+                    assert page.get_by_label("Source file", exact=True).is_hidden()
                     page.get_by_label("Source type", exact=True).select_option("folder")
-                    page.get_by_label("Local folder path or public GitHub repository URL", exact=True).fill("/synthetic/missing-folder")
+                    page.get_by_label("Local folder path", exact=True).fill("/synthetic/missing-folder")
                     page.get_by_role("link", name="Cancel", exact=True).click()
                     page.go_back()
                     assert page.get_by_label("Course name", exact=True).input_value() == f"Synthetic {link}"
@@ -1782,7 +1806,7 @@ def test_source_creation_user_entrypoints_navigation_drafts_and_consent(tmp_path
                     assert page.get_by_label("Your goal", exact=True).input_value() == "Learn equal parts"
                     assert page.get_by_label("Source type", exact=True).input_value() == "folder"
                     page.reload()
-                    assert page.get_by_label("Local folder path or public GitHub repository URL", exact=True).input_value() == "/synthetic/missing-folder"
+                    assert page.get_by_label("Local folder path", exact=True).input_value() == "/synthetic/missing-folder"
                     page.get_by_role("link", name="Back to dashboard").click()
                 # Direct navigation restores the Quick Learn draft independently of source-course input.
                 page.goto(f"{app_url}/quick-learn")
@@ -1808,6 +1832,16 @@ def test_source_creation_user_entrypoints_navigation_drafts_and_consent(tmp_path
                 page.get_by_role("button", name="Ask tutor", exact=True).click()
                 page.locator("[data-source-preview]").wait_for(state="visible")
                 assert "equal parts" in page.locator("[data-source-preview-text]").inner_text()
+                for theme in ("light", "dark"):
+                    page.evaluate("theme => setTheme(theme)", theme)
+                    for width, height in ((390, 844), (768, 1024), (1280, 800), (1600, 1000)):
+                        page.set_viewport_size({"width": width, "height": height})
+                        _assert_no_page_overflow(page)
+                        dialog = page.locator("[data-source-preview]")
+                        assert dialog.evaluate("e => e.scrollWidth <= e.clientWidth")
+                        for control in ("[data-source-cancel]", "[data-source-send]", "#source-preview-title"):
+                            assert page.locator(control).evaluate("e => { const r = e.getBoundingClientRect(); return r.top >= 0 && r.bottom <= innerHeight; }"), page.locator(control).evaluate("e => {const d=e.closest('dialog'),p=d.querySelector('pre');return JSON.stringify({control:e.outerHTML,rect:e.getBoundingClientRect().toJSON(),height:innerHeight,dialog:d.getBoundingClientRect().toJSON(),modal:d.matches(':modal'),position:getComputedStyle(d).position,preHeight:getComputedStyle(p).maxHeight,pre:p.getBoundingClientRect().toJSON()});}")
+                page.set_viewport_size({"width": 390, "height": 844})
                 draft = page.get_by_label("Your question", exact=True).input_value()
                 page.locator("[data-source-cancel]").click()
                 assert page.get_by_label("Your question", exact=True).input_value() == draft
