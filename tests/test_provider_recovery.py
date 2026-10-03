@@ -237,7 +237,7 @@ def test_browser_cancel_during_validation_does_not_resume(recovery_browser):
     responses["setup"] = (0, {})
     dialog.get_by_role("button", name="Test and save").click()
     page.wait_for_function("document.querySelector('[data-provider-recovery-form]').dataset.submitting === 'true'")
-    dialog.get_by_role("button", name="Cancel and return to lesson").click()
+    dialog.get_by_role("button", name="Cancel and return to course").click()
     responses["held"][0].fulfill(status=200, json={"ok": True, "ready": True})
     page.wait_for_function("document.querySelector('[data-provider-recovery-form]').dataset.submitting !== 'true'")
     expect(dialog).not_to_be_visible()
