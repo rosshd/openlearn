@@ -17,6 +17,7 @@ import pytest
 
 from openlearn import application, cli, interview_prep, tutor_service
 from openlearn.web.services import OpenLearnWebServices, _initialization_id_for_slug
+from openlearn.course_templates import available_course_templates
 
 
 SOURCE_ROOT = Path(__file__).resolve().parents[1] / "src"
@@ -1768,6 +1769,28 @@ def test_source_creation_user_entrypoints_navigation_drafts_and_consent(tmp_path
                 page.reload()
                 assert page.locator('[name="template_id"]').input_value() == ""
                 assert page.get_by_label("Course name", exact=True).input_value() == "Kept own draft"
+                for template in available_course_templates():
+                    for title, goal in ((template.name, template.goal),
+                                        ("Learner edited title", template.goal),
+                                        (template.name, "Learner edited goal")):
+                        identity = str(uuid4())
+                        page.evaluate(r"""draft => {
+                          const root = document.querySelector('meta[name="openlearn-root"]').content.replace(/\/$/, '');
+                          sessionStorage.setItem(`openlearn-course-draft:${root}:${location.pathname}`, JSON.stringify(draft));
+                        }""", {"title": title, "goal": goal, "template_id": template.slug,
+                               "experience": "Learner experience", "submission_id": identity})
+                        page.reload()
+                        assert page.get_by_label("Course name", exact=True).input_value() == (
+                            "" if title == template.name else title
+                        )
+                        assert page.get_by_label("Your goal", exact=True).input_value() == (
+                            "" if goal == template.goal else goal
+                        )
+                        assert page.locator('[name="submission_id"]').input_value() == identity
+                        assert page.get_by_label("What have you tried already?").input_value() == "Learner experience"
+                        assert page.locator('[name="template_id"]').input_value() == ""
+                page.get_by_label("Course name", exact=True).fill("Kept own draft")
+                page.get_by_label("Your goal", exact=True).fill("Learn stacks")
                 page.route("**/api/courses", lambda route: route.fulfill(
                     status=428, content_type="application/json",
                     body=json.dumps({"error": "Connect your tutor to begin.", "state": "setup_required"}),

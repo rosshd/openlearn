@@ -86,6 +86,19 @@ initializeUuidFields();
 const createForm = document.querySelector(".create-form");
 const creationDraftKey = `openlearn-course-draft:${appRoot}:${window.location.pathname}`;
 const creationDraftFields = {title: 160, goal: 4000, experience: 4000, submission_id: 36, source_kind: 16, source_value: 2048};
+// Historical defaults from the retired web picker, only for migrating old tab drafts.
+// Keep this snapshot independent of future backend template edits; learner edits survive.
+const retiredCreationDefaults = {
+  "algorithms": {"title": "Algorithms & Data Structures", "goal": "Understand and implement core CS algorithms and data structures"},
+  "git": {"title": "Git & GitHub", "goal": "Use Git confidently for daily development work"},
+  "http-apis": {"title": "HTTP & APIs", "goal": "Understand how the web works and build and consume REST APIs"},
+  "linux-cli": {"title": "Linux CLI", "goal": "Navigate and automate tasks in a Linux/Unix terminal"},
+  "networking": {"title": "Computer Networking", "goal": "Understand how computer networks function from physical to application layer"},
+  "python-basics": {"title": "Python Basics", "goal": "Write and understand fundamental Python programs"},
+  "sql": {"title": "SQL Fundamentals", "goal": "Query and manage relational databases with SQL"},
+  "technical-interview-prep": {"title": "Technical Interview Prep", "goal": "Prepare for LeetCode-style coding interviews with algorithms, data structures, and clear solution reasoning"},
+  "vim": {"title": "Vim", "goal": "Edit text efficiently using Vim for real daily work"},
+};
 function saveCreationDraft() {
   if (!createForm) return;
   const draft = {};
@@ -98,9 +111,13 @@ if (createForm) {
   try {
     const draft = JSON.parse(sessionStorage.getItem(creationDraftKey) || "null");
     if (draft && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(draft.submission_id)) {
+      const retired = Object.hasOwn(retiredCreationDefaults, draft.template_id) ? retiredCreationDefaults[draft.template_id] : null;
       for (const [name, limit] of Object.entries(creationDraftFields)) {
-        if (createForm.elements[name] && typeof draft[name] === "string" && draft[name].length <= limit) createForm.elements[name].value = draft[name];
+        if (createForm.elements[name] && typeof draft[name] === "string" && draft[name].length <= limit) {
+          createForm.elements[name].value = retired && draft[name] === retired[name] ? "" : draft[name];
+        }
       }
+      if (retired) saveCreationDraft();
     }
   } catch (_error) { /* optional */ }
   createForm.addEventListener("input", saveCreationDraft);
