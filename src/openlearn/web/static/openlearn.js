@@ -1415,6 +1415,46 @@ async function approveSourceRequest(payload) {
   }
 }
 
+const sourceStartButton = document.querySelector("[data-source-start]");
+sourceStartButton?.addEventListener("click", async () => {
+  if (!focusShell || turnInFlight || progressionInFlight || sourcePreviewInFlight) return;
+  const payload = {
+    intent: "question",
+    text: "Start my first lesson.",
+    submission_id: focusShell.dataset.sourceStartOperationId,
+    expected_revision: Number(focusShell.dataset.revision || 0),
+    source_mode: true,
+    source_start: true,
+  };
+  try {
+    if (!await approveSourceRequest(payload)) return;
+    lockTurnForm(true);
+    sourceStartButton.disabled = true;
+    setOperationState("Saving your approved request locally…");
+    const result = await requestJson(`/api/courses/${encodeURIComponent(focusShell.dataset.courseSlug)}/turns`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    const completed = result.operation_id
+      ? await waitForOperation(result.operation_id, setOperationState)
+      : result;
+    if (completed.state === "committed") {
+      window.location.reload();
+      return;
+    }
+    setOperationState(
+      completed.error || "Your approved request is saved. Retry when the provider is available.",
+      true,
+      completed,
+    );
+  } catch (error) {
+    setOperationState(error.message, true);
+  } finally {
+    lockTurnForm(false);
+    sourceStartButton.disabled = false;
+  }
+});
+
 async function submitTurn(overrideIntent = null) {
   if (!focusShell || turnInFlight || progressionInFlight) return;
   const payload = turnForm

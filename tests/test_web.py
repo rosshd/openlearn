@@ -3357,6 +3357,38 @@ def test_present_response_turns_lesson_prose_into_slide_regions() -> None:
     ]
 
 
+def test_present_response_chunks_legacy_lesson_without_inventing_semantic_regions() -> None:
+    original = (
+        "Noise is unwanted variation in a measurement or signal. It can hide the "
+        "pattern that matters. For example, repeated scale readings can wobble "
+        "around the true weight. Averaging several readings can reduce its effect."
+    )
+
+    kind, blocks = _present_response(f"**Lesson:** {original}")
+
+    assert kind == "Lesson"
+    assert [block["kind"] for block in blocks] == ["prose_chunk", "prose_chunk"]
+    assert " ".join(str(block["text"]) for block in blocks) == original
+    assert all(block["kind"] not in {"takeaway", "example"} for block in blocks)
+
+
+@pytest.mark.parametrize(
+    "prose",
+    [
+        "Dr. Rao records 3.14 volts in each trial. The value is stable. "
+        "A second instrument agrees with it.",
+        r"The score is \(x = 3.14\). It remains stable across runs. The rule is useful.",
+    ],
+)
+def test_present_response_keeps_ambiguous_or_math_prose_intact(prose: str) -> None:
+    kind, blocks = _present_response(f"**Lesson:** {prose}")
+
+    assert kind == "Lesson"
+    assert len(blocks) == 1
+    assert blocks[0]["kind"] == "takeaway"
+    assert blocks[0]["text"] == prose
+
+
 def test_plain_text_removes_inline_markdown_markers() -> None:
     assert _plain_text("Use *indices* and `left_pointer`.") == "Use indices and left_pointer."
 

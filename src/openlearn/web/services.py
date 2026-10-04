@@ -440,6 +440,21 @@ def _without_check_section(value: str) -> str:
     return _CHECK_SECTION.sub("", value).strip()
 
 
+_AMBIGUOUS_SENTENCE_MARKERS = re.compile(
+    r"(?i)(?:\b(?:e\.g|i\.e|mr|mrs|ms|dr|prof|vs|etc)\.|\d\.\d)"
+)
+
+
+def _readable_prose_chunks(value: str) -> list[str]:
+    """Split legacy prose only when its sentence boundaries are unambiguous."""
+    if len(value) < 180 or _AMBIGUOUS_SENTENCE_MARKERS.search(value):
+        return []
+    sentences = re.split(r"(?<=[.!?])\s+(?=[A-Z])", value)
+    if len(sentences) < 3 or " ".join(sentences) != value:
+        return []
+    return [" ".join(sentences[index:index + 2]) for index in range(0, len(sentences), 2)]
+
+
 def _present_response(value: str) -> tuple[str, list[dict[str, object]]]:
     """Parse a small safe Markdown subset into explicit presentation blocks."""
     text = cli.strip_tutor_enter_advance_cue(cli.sanitize_model_output(value))
@@ -530,6 +545,18 @@ def _present_response(value: str) -> tuple[str, list[dict[str, object]]]:
                 parts[0]["text"] = re.sub(r"^[A-Za-z][A-Za-z ]{1,30}:\s*", "", parts[0]["text"])
         else:
             blocks.pop(0)
+    lesson_paragraphs = [block for block in blocks if block.get("kind") == "paragraph"]
+    if (
+        label == "Lesson"
+        and len(lesson_paragraphs) == 1
+        and not lesson_paragraphs[0].get("parts")
+    ):
+        chunks = _readable_prose_chunks(str(lesson_paragraphs[0].get("text") or ""))
+        if chunks:
+            paragraph_index = blocks.index(lesson_paragraphs[0])
+            blocks[paragraph_index:paragraph_index + 1] = [
+                {"kind": "prose_chunk", "text": chunk} for chunk in chunks
+            ]
     if label == "Lesson":
         first_paragraph = True
         for block in blocks:
@@ -546,7 +573,7 @@ def _present_response(value: str) -> tuple[str, list[dict[str, object]]]:
     visible_text = " ".join(
         str(block.get("text") or "")
         for block in blocks
-        if block.get("kind") in {"paragraph", "takeaway", "example"}
+        if block.get("kind") in {"paragraph", "prose_chunk", "takeaway", "example"}
     )
     defines_invariant = re.search(
         r"(?is)\b(?:rule|condition)\b.{0,80}\b(?:stays?|remains?|must\s+(?:stay|"

@@ -236,6 +236,19 @@ def test_consented_source_start_commits_one_canonical_first_lesson(client, monke
     assert len(calls) == 1 and tutor_service.course_revision(slug) == 1
 
 
+def test_source_course_focus_offers_canonical_screened_start(client):
+    created = post(client, payload(), {"source_file": (
+        "fractions.md", b"A half is one of two equal parts.")}).json()
+
+    page = client.get(f"/courses/{created['slug']}")
+
+    assert page.status_code == 200
+    assert 'data-source-start' in page.text
+    assert 'data-source-start-operation-id=' in page.text
+    assert "Start first lesson" in page.text
+    assert "Ask for your first source lesson in Chat" not in page.text
+
+
 @pytest.mark.parametrize("change", ["request", "revision", "source"])
 def test_source_start_rejects_stale_consent_before_generation(client, monkeypatch, change):
     created = post(client, payload(), {"source_file": (

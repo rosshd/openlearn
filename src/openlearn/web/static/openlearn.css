@@ -471,6 +471,10 @@ h2 { font-size: var(--type-section); line-height: 1.25; letter-spacing: -0.025em
 .slide-example > span { color: var(--teal); }
 .slide-takeaway p { margin: 0; font-size: clamp(1.12rem, 2vw, 1.3rem); font-weight: 680; line-height: 1.45; }
 .slide-example p { margin: 0; color: var(--graphite-soft); line-height: 1.55; }
+.slide-prose-chunk { max-width: 52ch; font-size: clamp(1.04rem, 1.5vw, 1.16rem); line-height: 1.7; }
+.slide-prose-chunk + .slide-prose-chunk { padding-top: 0.2rem; border-top: 1px solid var(--line); }
+.source-start-card { padding: 1rem 1.1rem; border: 1px solid var(--line); border-left: 4px solid var(--orange); border-radius: var(--radius); background: var(--surface-raised); display: flex; gap: 1rem; align-items: center; justify-content: space-between; }
+.source-start-card p { max-width: 52ch; margin: 0; color: var(--graphite-soft); }
 .move-content ul, .move-content ol { padding: 0.8rem 0.9rem 0.8rem 2.2rem; border-left: 3px solid var(--line-strong); background: var(--surface-raised); }
 .term-note { margin: 0 0 1.2rem; padding: 0.8rem 0.9rem; border: 1px solid var(--line); border-left: 4px solid var(--orange); background: var(--surface-raised); display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 0.7rem; align-items: baseline; }
 .term-note strong { color: var(--orange-ink); font: 750 0.75rem/1.2 ui-monospace, monospace; letter-spacing: 0.06em; text-transform: uppercase; }
