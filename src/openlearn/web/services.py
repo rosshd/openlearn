@@ -530,10 +530,23 @@ def _present_response(value: str) -> tuple[str, list[dict[str, object]]]:
                 parts[0]["text"] = re.sub(r"^[A-Za-z][A-Za-z ]{1,30}:\s*", "", parts[0]["text"])
         else:
             blocks.pop(0)
+    if label == "Lesson":
+        first_paragraph = True
+        for block in blocks:
+            if block.get("kind") != "paragraph":
+                continue
+            block_text = str(block.get("text") or "")
+            if block_text.casefold().startswith("for example,"):
+                example_text = block_text[len("For example,") :].strip()
+                block["kind"] = "example"
+                block["text"] = example_text[:1].upper() + example_text[1:]
+            elif first_paragraph:
+                block["kind"] = "takeaway"
+                first_paragraph = False
     visible_text = " ".join(
         str(block.get("text") or "")
         for block in blocks
-        if block.get("kind") == "paragraph"
+        if block.get("kind") in {"paragraph", "takeaway", "example"}
     )
     defines_invariant = re.search(
         r"(?is)\b(?:rule|condition)\b.{0,80}\b(?:stays?|remains?|must\s+(?:stay|"
