@@ -258,3 +258,17 @@ def test_source_start_rejects_stale_consent_before_generation(client, monkeypatc
         lambda *_args, **_kwargs: pytest.fail("stale consent cannot generate"))
     assert service.submit_turn(slug, request)["state"] == "conflict"
     assert tutor_service.course_revision(slug) == 0
+
+
+def test_source_start_cannot_bypass_consent_through_initialization_retry(client, monkeypatch):
+    created = post(client, payload(), {"source_file": (
+        "fractions.md", b"Two halves make a whole.")}).json()
+    slug = created["slug"]
+    service = OpenLearnWebServices()
+    operation_id = service.focus(slug)["source_start_operation_id"]
+    monkeypatch.setattr(tutor_service, "start_turn",
+        lambda *_args, **_kwargs: pytest.fail("initialization retry cannot bypass source consent"))
+    result = service.retry_course_initialization(slug, operation_id)
+    assert result["state"] == "conflict"
+    assert "fresh screened source request" in result["error"]
+    assert tutor_service.course_revision(slug) == 0
