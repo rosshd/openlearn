@@ -3325,7 +3325,7 @@ def test_present_response_hides_reasoning_from_existing_lesson_history() -> None
     )
 
     assert kind == "Lesson"
-    assert blocks == [{"kind": "takeaway", "text": "Clarify constraints before coding."}]
+    assert blocks == [{"kind": "paragraph", "text": "Clarify constraints before coding."}]
 
 
 def test_present_response_leaves_terminal_advance_cue_to_web_controls() -> None:
@@ -3335,7 +3335,7 @@ def test_present_response_leaves_terminal_advance_cue_to_web_controls() -> None:
     )
 
     assert kind == "Lesson"
-    assert blocks == [{"kind": "takeaway", "text": "A sliding window reuses work."}]
+    assert blocks == [{"kind": "paragraph", "text": "A sliding window reuses work."}]
 
 
 def test_present_response_turns_lesson_prose_into_slide_regions() -> None:
@@ -3385,7 +3385,7 @@ def test_present_response_keeps_ambiguous_or_math_prose_intact(prose: str) -> No
 
     assert kind == "Lesson"
     assert len(blocks) == 1
-    assert blocks[0]["kind"] == "takeaway"
+    assert blocks[0]["kind"] == "paragraph"
     assert blocks[0]["text"] == prose
 
 

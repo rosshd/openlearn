@@ -557,7 +557,16 @@ def _present_response(value: str) -> tuple[str, list[dict[str, object]]]:
             blocks[paragraph_index:paragraph_index + 1] = [
                 {"kind": "prose_chunk", "text": chunk} for chunk in chunks
             ]
-    if label == "Lesson":
+    structured_paragraphs = [block for block in blocks if block.get("kind") == "paragraph"]
+    has_raw_math_delimiter = any(
+        re.search(r"\\[\[\]()]+", str(block.get("text") or ""))
+        for block in structured_paragraphs
+    )
+    if (
+        label == "Lesson"
+        and len(structured_paragraphs) >= 2
+        and not has_raw_math_delimiter
+    ):
         first_paragraph = True
         for block in blocks:
             if block.get("kind") != "paragraph":
