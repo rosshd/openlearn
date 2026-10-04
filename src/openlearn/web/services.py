@@ -1870,17 +1870,18 @@ class OpenLearnWebServices:
         if expected_id is None or operation_id != expected_id:
             return {"state": "missing", "error": "Course initialization was not found."}
         try:
-            if cli.read_topic(slug).metadata.get("web_source_start"):
-                return {
-                    "state": "conflict",
-                    "error": "Review and approve a fresh screened source request before retrying.",
-                }
-        except (cli.OpenLearnError, OSError):
-            return {"state": "missing", "error": "Course initialization was not found."}
-        try:
             projection = application.interview_learning(slug)
         except (cli.OpenLearnError, OSError, ValueError):
             projection = None
+        if projection is None:
+            try:
+                if cli.read_topic(slug).metadata.get("web_source_start"):
+                    return {
+                        "state": "conflict",
+                        "error": "Review and approve a fresh screened source request before retrying.",
+                    }
+            except (cli.OpenLearnError, OSError):
+                return {"state": "missing", "error": "Course initialization was not found."}
         try:
             if projection is not None:
                 operation = projection.operation
