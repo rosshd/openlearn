@@ -19,7 +19,7 @@ from tests.dogfood.codex_missions import (
     run_live_codex_missions,
     verify_single_matching_draft,
 )
-from tests.dogfood.explorer import ExplorerResult
+from tests.dogfood.explorer import ExplorerLimits, ExplorerResult
 from tests.dogfood.support import POSIX_PTY_ONLY, installed_openlearn
 
 
@@ -60,6 +60,16 @@ def _direct_decisions() -> list[CodexDecision]:
     ]
 
 
+def _fast_limits(variant: CodexMissionVariant) -> ExplorerLimits:
+    return ExplorerLimits(
+        max_turns=12 if variant is CodexMissionVariant.DIRECT else 14,
+        max_elapsed_seconds=30,
+        observation_chars=12_000,
+        quiet_interval=0.02,
+        observation_timeout=0.25,
+    )
+
+
 def _read_jsonl(path: Path) -> list[dict[str, object]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
@@ -84,10 +94,11 @@ def _topic_text(name: str, slug: str, goal: str) -> str:
     [
         (CodexMissionVariant.DIRECT, [], 7),
         (CodexMissionVariant.ERROR_PRONE, ["99"], 8),
+        (CodexMissionVariant.DIRECT, ["99"], 8),
     ],
 )
 @POSIX_PTY_ONLY
-def test_fake_source_composes_public_pty_mission_and_preserves_route(
+def test_fake_source_composes_public_pty_mission_across_route_variations(
     tmp_path: Path,
     variant: CodexMissionVariant,
     prefix: list[str],
@@ -103,6 +114,7 @@ def test_fake_source_composes_public_pty_mission_and_preserves_route(
         command=(installed_openlearn(), "menu"),
         decision_source=source,
         variant=variant,
+        limits=_fast_limits(variant),
     )
 
     manifest = json.loads(
@@ -126,44 +138,20 @@ def test_fake_source_composes_public_pty_mission_and_preserves_route(
     assert all("draft for later" in context.goal.lower() for context in source.contexts)
     assert all("without starting" in context.goal.lower() for context in source.contexts)
     assert all("99" not in context.persona for context in source.contexts)
+    for directory in (outcome.run_root, outcome.home, outcome.evidence):
+        assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+    for path in outcome.evidence.rglob("*"):
+        expected_mode = 0o700 if path.is_dir() else 0o600
+        assert stat.S_IMODE(path.stat().st_mode) == expected_mode
 
     output = "".join(
         str(event["text"]) for event in interactions if event["event"] == "output"
     )
-    if variant is CodexMissionVariant.ERROR_PRONE:
+    if prefix:
         assert "Choose a number, or q to quit." in output
         assert entered[0:2] == ["99", "2"]
     else:
         assert "Choose a number, or q to quit." not in output
-
-
-@pytest.mark.parametrize(
-    ("variant", "prefix"),
-    [
-        (CodexMissionVariant.DIRECT, ["99"]),
-        (CodexMissionVariant.ERROR_PRONE, []),
-    ],
-)
-@POSIX_PTY_ONLY
-def test_goal_completion_is_not_rejected_by_unexpected_route_variation(
-    tmp_path: Path,
-    variant: CodexMissionVariant,
-    prefix: list[str],
-) -> None:
-    source = FakeDecisionSource(
-        [CodexDecision("submit_text", text=value) for value in prefix]
-        + _direct_decisions()
-    )
-
-    outcome = run_codex_draft_course_mission(
-        tmp_path / variant.value,
-        command=(installed_openlearn(), "menu"),
-        decision_source=source,
-        variant=variant,
-    )
-
-    assert outcome.achieved is True
-    assert outcome.result.status == "achieved"
 
 
 def test_hidden_verifier_rejects_missing_duplicate_and_mismatched_drafts(
@@ -217,8 +205,7 @@ def test_hidden_verifier_rejects_each_mismatched_public_field(
     assert verify_single_matching_draft(tmp_path / "home") is False
 
 
-@POSIX_PTY_ONLY
-def test_mission_refuses_existing_root_and_uses_private_directories(tmp_path: Path) -> None:
+def test_mission_refuses_existing_root(tmp_path: Path) -> None:
     existing = tmp_path / "existing"
     existing.mkdir()
     with pytest.raises(FileExistsError):
@@ -235,17 +222,6 @@ def test_mission_refuses_existing_root_and_uses_private_directories(tmp_path: Pa
             codex_home=tmp_path / "codex-home",
         )
 
-    outcome = run_codex_draft_course_mission(
-        tmp_path / "private-run",
-        command=(installed_openlearn(), "menu"),
-        decision_source=FakeDecisionSource(_direct_decisions()),
-        variant=CodexMissionVariant.DIRECT,
-    )
-    for directory in (outcome.run_root, outcome.home, outcome.evidence):
-        assert stat.S_IMODE(directory.stat().st_mode) == 0o700
-    for path in outcome.evidence.rglob("*"):
-        expected = 0o700 if path.is_dir() else 0o600
-        assert stat.S_IMODE(path.stat().st_mode) == expected
 
 
 def test_live_wrapper_composes_both_isolated_variants_without_starting_codex(

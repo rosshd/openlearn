@@ -6,21 +6,31 @@ import inspect
 import tempfile
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import ValidationError
 from starlette.concurrency import run_in_threadpool
+from starlette.datastructures import UploadFile as FormUploadFile
 
 from openlearn.constants import QUICK_LEARN_MAX_FILE_BYTES
+from openlearn import source_imports
 
 from .schemas import (
     CodeToolRequest,
     CourseCreateRequest,
+    SourceCourseCreateRequest,
+    CourseDeletionRequest,
+    CourseGrowthRequest,
+    CourseSettingsConfirmationRequest,
+    CourseSettingsRequest,
     DataManagementRequest,
     FolderSourceRequest,
+    FollowUpProposalRequest,
     GitHubSourceRequest,
     PlacementRequest,
+    ProgressionActionRequest,
     ProviderSetupRequest,
     ReviewGradeRequest,
     TutorSubmissionRequest,
@@ -42,6 +52,50 @@ async def _call(request: Request, method: str, *args: Any, **kwargs: Any) -> Any
     return await run_in_threadpool(operation, *args, **kwargs)
 
 
+async def _call_skip_placement(
+    request: Request, slug: str, payload: PlacementRequest
+) -> Any:
+    """Call current and legacy adapters without swallowing service TypeErrors."""
+    operation = getattr(request.app.state.services, "skip_placement", None)
+    if operation is None:
+        raise HTTPException(
+            status_code=503, detail="This application operation is unavailable."
+        )
+    try:
+        inspect.signature(operation).bind(slug, payload)
+    except TypeError:
+        try:
+            inspect.signature(operation).bind(slug)
+        except TypeError:
+            raise HTTPException(
+                status_code=503,
+                detail="The placement operation has an incompatible interface.",
+            ) from None
+        return await _call(request, "skip_placement", slug)
+    return await _call(request, "skip_placement", slug, payload)
+
+
+async def _call_dashboard(request: Request, selected_slug: str | None) -> Any:
+    """Call selection-aware and legacy dashboards without masking service failures."""
+    operation = getattr(request.app.state.services, "dashboard", None)
+    if operation is None:
+        raise HTTPException(
+            status_code=503, detail="This application operation is unavailable."
+        )
+    try:
+        inspect.signature(operation).bind(selected_slug)
+    except TypeError:
+        try:
+            inspect.signature(operation).bind()
+        except TypeError:
+            raise HTTPException(
+                status_code=503,
+                detail="The dashboard operation has an incompatible interface.",
+            ) from None
+        return await _call(request, "dashboard")
+    return await _call(request, "dashboard", selected_slug)
+
+
 def _templates(request: Request) -> Any:
     return request.app.state.templates
 
@@ -51,6 +105,10 @@ def _context(request: Request, **values: Any) -> dict[str, Any]:
         "request": request,
         "csrf_token": request.app.state.security.csrf_token,
         "app_root": request.scope.get("root_path", ""),
+        "submission_id": str(uuid4()),
+        "secondary_submission_id": str(uuid4()),
+        "review_submission_id": str(uuid4()),
+        "follow_up_submission_id": str(uuid4()),
         **values,
     }
 
@@ -60,10 +118,31 @@ def _json_error(message: str, status: int = 400, **extra: Any) -> JSONResponse:
 
 
 async def _provider_ready(request: Request) -> bool:
+    status = await _teaching_provider_status(request)
+    return bool(status.get("ready"))
+
+
+async def _teaching_provider_status(request: Request) -> dict[str, Any]:
     operation = getattr(request.app.state.services, "ensure_provider_ready", None)
     method = "ensure_provider_ready" if callable(operation) else "provider_status"
-    status = public_mapping(await _call(request, method))
-    return bool(status.get("ready"))
+    return public_mapping(await _call(request, method))
+
+
+def _creation_provider_error(request: Request, status: dict[str, Any]) -> JSONResponse:
+    if status.get("error_code") in {"provider_unavailable", "provider_rate_limited"}:
+        return _json_error(
+            str(status.get("reason") or "The provider is unavailable. Retry later."),
+            503, state="provider_error", error_code=status["error_code"],
+        )
+    return _setup_required(
+        request,
+        message=str(status.get("reason") or "Test the provider connection before teaching starts."),
+    )
+
+
+async def _form_payload(request: Request, model: type[Any]) -> Any:
+    form = await request.form()
+    return model.model_validate(dict(form))
 
 
 def _setup_redirect(request: Request) -> RedirectResponse:
@@ -72,6 +151,31 @@ def _setup_redirect(request: Request) -> RedirectResponse:
         destination = f"{destination}?{request.url.query}"
     target = request.url_for("setup").include_query_params(next=destination)
     return RedirectResponse(target, status_code=303)
+
+
+def _course_creation_redirect(
+    request: Request,
+    result: dict[str, Any],
+    *,
+    provider_ready: bool,
+) -> RedirectResponse:
+    slug = str(result["slug"])
+    if result.get("state") == "placement_recommended":
+        destination = request.url_for("placement", slug=slug)
+        if not provider_ready:
+            destination = request.url_for("setup").include_query_params(
+                next=destination.path
+            )
+        return RedirectResponse(destination, status_code=303)
+    operation_id = result.get("operation_id")
+    destination = (
+        request.url_for(
+            "course_initializing", slug=slug, operation_id=operation_id
+        )
+        if operation_id
+        else request.url_for("focus", slug=slug)
+    )
+    return RedirectResponse(destination, status_code=303)
 
 
 def _safe_setup_destination(request: Request) -> str:
@@ -86,12 +190,15 @@ def _safe_setup_destination(request: Request) -> str:
     return request.url_for("dashboard").path
 
 
-def _setup_required(request: Request, *, next_path: str | None = None) -> JSONResponse:
+def _setup_required(
+    request: Request, *, next_path: str | None = None,
+    message: str = "Validate a model provider before starting model-backed teaching.",
+) -> JSONResponse:
     setup_url = request.url_for("setup")
     if next_path:
         setup_url = setup_url.include_query_params(next=next_path)
     return _json_error(
-        "Validate a model provider before starting model-backed teaching.",
+        message,
         428,
         state="setup_required",
         setup_url=str(setup_url),
@@ -144,22 +251,132 @@ async def dashboard(request: Request) -> Any:
 
 
 async def _dashboard_response(request: Request) -> Any:
-    snapshot = public_mapping(await _call(request, "dashboard"))
+    selected_slug = request.query_params.get("course")
+    if selected_slug is not None:
+        try:
+            selected_slug = canonical_slug(selected_slug)
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail="Course not found") from error
+    snapshot = public_mapping(await _call_dashboard(request, selected_slug))
+    proposal = None
+    proposal_id = request.query_params.get("proposal")
+    selected = snapshot.get("selected_course")
+    if proposal_id and isinstance(selected, dict):
+        try:
+            payload = FollowUpProposalRequest(
+                action="status",
+                submission_id=canonical_uuid(proposal_id),
+            )
+            proposal = public_mapping(
+                await _call(request, "follow_up_proposal", selected["slug"], payload)
+            )
+        except (ValidationError, ValueError, KeyError):
+            proposal = None
     return _templates(request).TemplateResponse(
         request,
         "dashboard.html",
-        _context(request, dashboard=snapshot, page_title="Your workbench"),
+        _context(
+            request,
+            dashboard=snapshot,
+            follow_up_proposal=proposal,
+            page_title="Your courses",
+        ),
     )
 
 
 @router.get("/courses/new", response_class=HTMLResponse, name="new_course")
 async def new_course(request: Request) -> Any:
-    templates = await _call(request, "course_templates")
     return _templates(request).TemplateResponse(
         request,
         "course_create.html",
-        _context(request, course_templates=templates, page_title="Start a course"),
+        _context(
+            request,
+            course_templates=[],
+            selected_template=None,
+            provider=public_mapping(await _call(request, "provider_status")),
+            page_title="Start a course",
+        ),
     )
+
+
+@router.post(
+    "/courses/starters/{template_id}/start",
+    name="start_starter_course",
+)
+async def start_starter_course(request: Request, template_id: str) -> Any:
+    templates = await _call(request, "course_templates")
+    template = next(
+        (item for item in templates if item.get("id") == template_id),
+        None,
+    )
+    if template is None:
+        raise HTTPException(status_code=404, detail="Starter course not found")
+    try:
+        form = await request.form()
+        payload = CourseCreateRequest(
+            title=str(template["title"]),
+            goal=str(template["description"]),
+            experience="",
+            template_id=template_id,
+            submission_id=str(form.get("submission_id", "")),
+        )
+    except (ValidationError, ValueError, KeyError) as error:
+        raise HTTPException(status_code=422, detail="Invalid starter request") from error
+
+    entry_mode = template.get("entry_mode")
+    provider_ready = await _provider_ready(request)
+    if entry_mode != "interview_prep" and not provider_ready:
+        next_page = request.url_for(
+            "resume_starter_course", template_id=template_id
+        ).include_query_params(
+            submission_id=payload.submission_id
+        )
+        setup_page = request.url_for("setup").include_query_params(
+            next=f"{next_page.path}?{next_page.query}"
+        )
+        return RedirectResponse(setup_page, status_code=303)
+
+    result = public_mapping(await _call(request, "create_course", payload))
+    if not result.get("ok"):
+        return _templates(request).TemplateResponse(
+            request,
+            "course_create.html",
+            _context(
+                request,
+                course_templates=templates,
+                selected_template=template,
+                create_error=str(result.get("error") or "Course creation failed."),
+                page_title="Start a course",
+            ),
+            status_code=422,
+        )
+    return _course_creation_redirect(
+        request,
+        result,
+        provider_ready=provider_ready,
+    )
+
+
+@router.get(
+    "/courses/starters/{template_id}/resume",
+    response_class=HTMLResponse,
+    name="resume_starter_course",
+)
+async def resume_starter_course(request: Request, template_id: str) -> Any:
+    templates = await _call(request, "course_templates")
+    template = next(
+        (item for item in templates if item.get("id") == template_id),
+        None,
+    )
+    if template is None:
+        raise HTTPException(status_code=404, detail="Starter course not found")
+    try:
+        canonical_uuid(request.query_params.get("submission_id", ""))
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail="Invalid starter request") from error
+    # Stale catalog links no longer offer or automatically create a preset.
+    # The internal POST and definitions remain for compatibility and rollback.
+    return RedirectResponse(request.url_for("new_course"), status_code=303)
 
 
 @router.post("/api/courses", response_class=JSONResponse)
@@ -174,20 +391,21 @@ async def create_course(request: Request) -> JSONResponse:
         if callable(entry_mode_operation)
         else None
     )
-    if entry_mode != "interview_prep" and not await _provider_ready(request):
-        return _setup_required(request)
+    provider_status = await _teaching_provider_status(request)
+    provider_ready = bool(provider_status.get("ready"))
+    if entry_mode != "interview_prep" and not provider_ready:
+        return _creation_provider_error(request, provider_status)
     result = public_mapping(await _call(request, "create_course", payload))
     if not result.get("ok", False):
         return _json_error(str(result.get("error") or "Course creation failed."), 422)
     if result.get("slug"):
         if result.get("state") == "placement_recommended":
-            result["placement_url"] = str(
-                request.url_for("placement", slug=result["slug"])
-            )
-            if not await _provider_ready(request):
+            placement_url = request.url_for("placement", slug=result["slug"])
+            result["placement_url"] = str(placement_url)
+            if not provider_ready:
                 result["setup_url"] = str(
                     request.url_for("setup").include_query_params(
-                        next=request.url_for("placement", slug=result["slug"]).path
+                        next=placement_url.path
                     )
                 )
             return JSONResponse(result)
@@ -204,14 +422,440 @@ async def create_course(request: Request) -> JSONResponse:
     return JSONResponse(result, status_code=202 if result.get("operation_id") else 200)
 
 
+@router.post("/courses/new", name="create_course_form")
+async def create_course_form(request: Request) -> Any:
+    templates = await _call(request, "course_templates")
+    try:
+        payload = await _form_payload(request, CourseCreateRequest)
+    except (ValidationError, ValueError) as error:
+        return _templates(request).TemplateResponse(
+            request,
+            "course_create.html",
+            _context(
+                request,
+                course_templates=templates,
+                selected_template=None,
+                create_error=str(error),
+                page_title="Start a course",
+            ),
+            status_code=422,
+        )
+    entry_mode = await _call(request, "course_entry_mode", payload.template_id)
+    provider_status = await _teaching_provider_status(request)
+    provider_ready = bool(provider_status.get("ready"))
+    if entry_mode != "interview_prep" and not provider_ready:
+        blocked = _creation_provider_error(request, provider_status)
+        return _templates(request).TemplateResponse(
+            request, "course_create.html",
+            _context(
+                request, course_templates=templates, selected_template=None,
+                creation_input=payload.model_dump(), submission_id=payload.submission_id,
+                provider=public_mapping(await _call(request, "provider_status")),
+                create_error=provider_status.get("reason") or "Test the provider connection before teaching starts.",
+                provider_recovery_message=(
+                    provider_status.get("reason") or "Test the provider connection before teaching starts."
+                ) if blocked.status_code == 428 else "",
+                page_title="Start a course",
+            ),
+            status_code=blocked.status_code,
+        )
+    result = public_mapping(await _call(request, "create_course", payload))
+    if not result.get("ok"):
+        return _templates(request).TemplateResponse(
+            request,
+            "course_create.html",
+            _context(
+                request,
+                course_templates=templates,
+                selected_template=None,
+                create_error=str(result.get("error") or "Course creation failed."),
+                creation_input=payload.model_dump(), submission_id=payload.submission_id,
+                provider=public_mapping(await _call(request, "provider_status")),
+                page_title="Start a course",
+            ),
+            status_code=422,
+        )
+    return _course_creation_redirect(
+        request,
+        result,
+        provider_ready=provider_ready,
+    )
+
+
+def _source_creation_page(request: Request, *, mode: str, values: dict[str, Any] | None = None,
+                          error: str = "", status: int = 200) -> Any:
+    return _templates(request).TemplateResponse(
+        request, "source_course_create.html",
+        _context(request, mode=mode, creation_input=values or {}, create_error=error,
+                 submission_id=(values or {}).get("submission_id") or str(uuid4()),
+                 page_title="Quick Learn" if mode == "quick" else "Source course"),
+        status_code=status,
+    )
+
+
+@router.get("/courses/from-source", response_class=HTMLResponse, name="source_course")
+async def source_course(request: Request) -> Any:
+    return _source_creation_page(request, mode="course")
+
+
+@router.get("/quick-learn", response_class=HTMLResponse, name="quick_learn")
+async def quick_learn(request: Request) -> Any:
+    return _source_creation_page(request, mode="quick")
+
+
+@router.post("/courses/from-source", name="create_source_course_form")
+async def create_source_course_form(request: Request) -> Any:
+    form = await request.form()
+    values = {key: value for key, value in form.items() if isinstance(value, str)}
+    json_response = "application/json" in request.headers.get("accept", "")
+    temporary: Path | None = None
+    upload = form.get("source_file")
+    try:
+        payload = SourceCourseCreateRequest.model_validate(values)
+        if payload.template_id:
+            raise ValueError("Source courses do not use a starter template.")
+        if payload.source_kind == "file":
+            if not isinstance(upload, FormUploadFile):
+                raise ValueError("Choose a source file.")
+            data = await upload.read(QUICK_LEARN_MAX_FILE_BYTES + 1)
+            if not data:
+                raise ValueError("Choose a non-empty source file.")
+            if len(data) > QUICK_LEARN_MAX_FILE_BYTES:
+                raise ValueError("Source file exceeds the bounded upload limit.")
+            filename = upload.filename or "source.txt"
+            with tempfile.NamedTemporaryFile(prefix="openlearn-upload-", suffix=Path(filename).suffix[:16], delete=False) as stream:
+                temporary = Path(stream.name)
+                stream.write(data)
+            source = source_imports.LocalFileSource(temporary, filename=filename)
+        elif payload.source_kind == "folder":
+            if not payload.source_value.strip():
+                raise ValueError("Enter a local folder path.")
+            source = source_imports.LocalFolderSource(Path(payload.source_value))
+        else:
+            if not payload.source_value.strip():
+                raise ValueError("Enter a public GitHub repository URL.")
+            source = source_imports.PublicGitHubSource(payload.source_value)
+        result = public_mapping(await _call(request, "create_source_course", payload, source))
+        if not result.get("ok"):
+            raise ValueError(str(result.get("error") or "Source creation failed."))
+    except (ValidationError, ValueError) as error:
+        if json_response:
+            return _json_error(str(error), 422)
+        return _source_creation_page(request, mode="quick" if values.get("mode") == "quick" else "course",
+                                     values=values, error=f"{error} Select your file again if uploading.", status=422)
+    finally:
+        if hasattr(upload, "close"):
+            await upload.close()
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    destination = request.url_for("focus", slug=result["slug"]).include_query_params(tool="chat")
+    if json_response:
+        return JSONResponse({**result, "focus_url": str(destination)})
+    return RedirectResponse(destination, status_code=303)
+
+
+@router.post("/courses/{slug}/activate", name="activate_course")
+async def activate_course(request: Request, slug: str) -> Any:
+    try:
+        slug = canonical_slug(slug)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail="Course not found") from error
+    result = public_mapping(await _call(request, "activate_course", slug))
+    if result.get("missing"):
+        raise HTTPException(status_code=404, detail="Course not found")
+    if not result.get("ok"):
+        return RedirectResponse(
+            request.url_for("dashboard").include_query_params(course=slug),
+            status_code=303,
+        )
+    destination = result.get("destination")
+    if destination == "setup":
+        target = request.url_for("focus", slug=slug).path
+        url = request.url_for("setup").include_query_params(next=target)
+    elif destination == "placement":
+        url = request.url_for("placement", slug=slug)
+    elif destination == "initialization":
+        initialized = public_mapping(
+            await _call(request, "start_course_initialization", slug)
+        )
+        if initialized.get("operation_id"):
+            url = request.url_for(
+                "course_initializing",
+                slug=slug,
+                operation_id=initialized["operation_id"],
+            )
+        else:
+            url = request.url_for("focus", slug=slug)
+            if initialized.get("state") == "source_ready":
+                url = url.include_query_params(tool="chat")
+    else:
+        url = request.url_for("focus", slug=slug)
+    return RedirectResponse(url, status_code=303)
+
+
+def _settings_context(
+    request: Request,
+    settings: dict[str, Any],
+    *,
+    preview: dict[str, Any] | None = None,
+    error: str = "",
+) -> dict[str, Any]:
+    return _context(
+        request,
+        settings=settings,
+        settings_preview=preview,
+        settings_error=error,
+        page_title=f"{settings.get('title', 'Course')} settings",
+    )
+
+
+@router.get(
+    "/courses/{slug}/settings",
+    response_class=HTMLResponse,
+    name="course_settings",
+)
+async def course_settings(request: Request, slug: str) -> Any:
+    try:
+        slug = canonical_slug(slug)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail="Course not found") from error
+    settings = public_mapping(await _call(request, "course_settings", slug))
+    if settings.get("missing"):
+        raise HTTPException(status_code=404, detail="Course not found")
+    return _templates(request).TemplateResponse(
+        request,
+        "course_settings.html",
+        _settings_context(request, settings),
+    )
+
+
+@router.post(
+    "/courses/{slug}/settings/preview",
+    response_class=HTMLResponse,
+    name="preview_course_settings",
+)
+async def preview_course_settings(request: Request, slug: str) -> Any:
+    try:
+        slug = canonical_slug(slug)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail="Course not found") from error
+    raw = dict(await request.form())
+    try:
+        payload = CourseSettingsRequest.model_validate(raw)
+    except (ValidationError, ValueError) as error:
+        settings = {
+            **public_mapping(await _call(request, "course_settings", slug)),
+            **raw,
+        }
+        return _templates(request).TemplateResponse(
+            request,
+            "course_settings.html",
+            _settings_context(request, settings, error=str(error)),
+            status_code=422,
+        )
+    result = public_mapping(
+        await _call(request, "preview_course_settings", slug, payload)
+    )
+    settings = public_mapping(await _call(request, "course_settings", slug))
+    submitted = {**settings, **payload.model_dump()}
+    if not result.get("ok"):
+        status = 409 if result.get("state") == "conflict" else 422
+        return _templates(request).TemplateResponse(
+            request,
+            "course_settings.html",
+            _settings_context(
+                request, submitted, error=str(result.get("error") or "Check these settings.")
+            ),
+            status_code=status,
+        )
+    return _templates(request).TemplateResponse(
+        request,
+        "course_settings.html",
+        _settings_context(request, submitted, preview=result),
+    )
+
+
+@router.post(
+    "/courses/{slug}/settings/confirm",
+    name="confirm_course_settings",
+)
+async def confirm_course_settings(request: Request, slug: str) -> Any:
+    try:
+        slug = canonical_slug(slug)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail="Course not found") from error
+    raw = dict(await request.form())
+    try:
+        payload = CourseSettingsConfirmationRequest.model_validate(raw)
+    except (ValidationError, ValueError) as error:
+        settings = {
+            **public_mapping(await _call(request, "course_settings", slug)),
+            **raw,
+        }
+        return _templates(request).TemplateResponse(
+            request,
+            "course_settings.html",
+            _settings_context(request, settings, error=str(error)),
+            status_code=422,
+        )
+    result = public_mapping(
+        await _call(request, "confirm_course_settings", slug, payload)
+    )
+    if not result.get("ok"):
+        settings = {**public_mapping(await _call(request, "course_settings", slug)), **payload.model_dump()}
+        status = 409 if result.get("state") == "conflict" else 422
+        return _templates(request).TemplateResponse(
+            request,
+            "course_settings.html",
+            _settings_context(
+                request, settings, error=str(result.get("error") or "Settings were not saved.")
+            ),
+            status_code=status,
+        )
+    return RedirectResponse(
+        request.url_for("dashboard").include_query_params(course=slug),
+        status_code=303,
+    )
+
+
+@router.get(
+    "/courses/{slug}/delete",
+    response_class=HTMLResponse,
+    name="course_deletion",
+)
+async def course_deletion(request: Request, slug: str) -> Any:
+    try:
+        slug = canonical_slug(slug)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail="Course not found") from error
+    deletion = public_mapping(await _call(request, "course_deletion", slug))
+    if deletion.get("missing"):
+        raise HTTPException(status_code=404, detail="Course not found")
+    return _templates(request).TemplateResponse(
+        request,
+        "course_delete.html",
+        _context(request, deletion=deletion, deletion_error="", page_title="Delete course"),
+    )
+
+
+@router.post("/courses/{slug}/delete", name="delete_course")
+async def delete_course(request: Request, slug: str) -> Any:
+    try:
+        slug = canonical_slug(slug)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail="Course not found") from error
+    try:
+        payload = await _form_payload(request, CourseDeletionRequest)
+    except (ValidationError, ValueError) as error:
+        deletion = public_mapping(await _call(request, "course_deletion", slug))
+        return _templates(request).TemplateResponse(
+            request,
+            "course_delete.html",
+            _context(
+                request,
+                deletion=deletion,
+                deletion_error=str(error),
+                page_title="Delete course",
+            ),
+            status_code=422,
+        )
+    result = public_mapping(await _call(request, "delete_course", slug, payload))
+    if not result.get("ok"):
+        deletion = public_mapping(await _call(request, "course_deletion", slug))
+        status = 409 if result.get("state") == "conflict" else 422
+        return _templates(request).TemplateResponse(
+            request,
+            "course_delete.html",
+            _context(
+                request,
+                deletion=deletion,
+                deletion_error=str(result.get("error") or "Course was not deleted."),
+                page_title="Delete course",
+            ),
+            status_code=status,
+        )
+    query = {"course": result["next_selected_slug"]} if result.get("next_selected_slug") else {}
+    return RedirectResponse(
+        request.url_for("dashboard").include_query_params(**query),
+        status_code=303,
+    )
+
+
+@router.post("/courses/{slug}/growth", name="course_growth")
+async def course_growth(request: Request, slug: str) -> Any:
+    try:
+        slug = canonical_slug(slug)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail="Course not found") from error
+    try:
+        payload = await _form_payload(request, CourseGrowthRequest)
+    except (ValidationError, ValueError) as error:
+        raise HTTPException(status_code=422, detail="Check the course action") from error
+    result = public_mapping(await _call(request, "course_growth", slug, payload))
+    destination = request.url_for("focus", slug=slug) if result.get("ok") else request.url_for(
+        "dashboard"
+    ).include_query_params(course=slug)
+    return RedirectResponse(destination, status_code=303)
+
+
+@router.post("/courses/{slug}/follow-up", name="course_follow_up")
+async def course_follow_up(request: Request, slug: str) -> Any:
+    try:
+        slug = canonical_slug(slug)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail="Course not found") from error
+    try:
+        payload = await _form_payload(request, FollowUpProposalRequest)
+    except (ValidationError, ValueError) as error:
+        raise HTTPException(status_code=422, detail="Check the follow-up request") from error
+    result = public_mapping(await _call(request, "follow_up_proposal", slug, payload))
+    if result.get("state") == "setup_required":
+        next_url = request.url_for("dashboard").include_query_params(course=slug)
+        return RedirectResponse(
+            request.url_for("setup").include_query_params(
+                next=f"{next_url.path}?{next_url.query}"
+            ),
+            status_code=303,
+        )
+    selected = result.get("course_slug") if result.get("course_slug") else slug
+    query: dict[str, object] = {"course": selected}
+    if payload.action != "confirm":
+        query["proposal"] = payload.submission_id
+    return RedirectResponse(
+        request.url_for("dashboard").include_query_params(**query), status_code=303
+    )
+
+
+@router.post("/api/courses/{slug}/follow-up", response_class=JSONResponse)
+async def follow_up_api(request: Request, slug: str) -> JSONResponse:
+    try:
+        slug = canonical_slug(slug)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail="Course not found") from error
+    try:
+        payload = FollowUpProposalRequest.model_validate(await request.json())
+    except (ValidationError, ValueError):
+        return _json_error("Check the follow-up request.")
+    result = public_mapping(await _call(request, "follow_up_proposal", slug, payload))
+    status = 200
+    if result.get("state") == "setup_required":
+        status = 428
+    elif result.get("state") == "conflict":
+        status = 409
+    elif result.get("state") == "missing":
+        status = 404
+    elif not result.get("ok"):
+        status = 422
+    return JSONResponse(result, status_code=status)
+
+
 @router.get(
     "/courses/{slug}/initializing/{operation_id}",
     response_class=HTMLResponse,
     name="course_initializing",
 )
 async def course_initializing(request: Request, slug: str, operation_id: str) -> Any:
-    if not await _provider_ready(request):
-        return _setup_redirect(request)
+    provider_status = await _teaching_provider_status(request)
     try:
         slug = canonical_slug(slug)
         operation_id = canonical_uuid(operation_id)
@@ -228,6 +872,13 @@ async def course_initializing(request: Request, slug: str, operation_id: str) ->
         _context(
             request,
             initialization=snapshot,
+            provider=public_mapping(await _call(request, "provider_status")),
+            provider_blocked=not provider_status.get("ready"),
+            provider_setup_required=(
+                not provider_status.get("ready")
+                and provider_status.get("error_code") not in {"provider_unavailable", "provider_rate_limited"}
+            ),
+            provider_error=provider_status.get("reason", ""),
             status_url=str(
                 request.url_for("operation_status", slug=slug, operation_id=operation_id)
             ),
@@ -254,8 +905,9 @@ async def course_initializing(request: Request, slug: str, operation_id: str) ->
 async def retry_course_initialization(
     request: Request, slug: str, operation_id: str
 ) -> JSONResponse:
-    if not await _provider_ready(request):
-        return _setup_required(request)
+    provider_status = await _teaching_provider_status(request)
+    if not provider_status.get("ready"):
+        return _creation_provider_error(request, provider_status)
     try:
         slug = canonical_slug(slug)
         operation_id = canonical_uuid(operation_id)
@@ -327,11 +979,18 @@ async def placement(request: Request, slug: str) -> Any:
         slug = canonical_slug(slug)
     except ValueError as error:
         raise HTTPException(status_code=404, detail="Course not found") from error
-    snapshot = public_mapping(await _call(request, "placement", slug))
-    if snapshot.get("missing"):
+    existence_operation = getattr(
+        request.app.state.services, "interview_placement_exists", None
+    )
+    if callable(existence_operation):
+        exists = bool(await _call(request, "interview_placement_exists", slug))
+    else:
+        exists = not public_mapping(await _call(request, "placement", slug)).get("missing")
+    if not exists:
         raise HTTPException(status_code=404, detail="Placement not found")
-    if snapshot.get("status") == "not_started" and not await _provider_ready(request):
+    if not await _provider_ready(request):
         return _setup_redirect(request)
+    snapshot = public_mapping(await _call(request, "placement", slug))
     response = _templates(request).TemplateResponse(
         request,
         "placement.html",
@@ -348,13 +1007,13 @@ async def update_placement(request: Request, slug: str) -> JSONResponse:
         payload = PlacementRequest.model_validate(await request.json())
     except (ValidationError, ValueError):
         return _json_error("Check the placement action and try again.")
-    if payload.action == "start" and not await _provider_ready(request):
+    if not await _provider_ready(request):
         return _setup_required(
             request,
             next_path=request.url_for("placement", slug=slug).path,
         )
     if payload.action == "skip":
-        result = public_mapping(await _call(request, "skip_placement", slug))
+        result = public_mapping(await _call_skip_placement(request, slug, payload))
     else:
         result = public_mapping(await _call(request, "update_placement", slug, payload))
     if result.get("state") == "conflict":
@@ -363,15 +1022,10 @@ async def update_placement(request: Request, slug: str) -> JSONResponse:
         raise HTTPException(status_code=404, detail="Placement not found")
     if result.get("invalid"):
         return _json_error(str(result.get("error")), 422)
+    if payload.action in {"preview_outline", "change_outline"}:
+        return JSONResponse(result)
     if result.get("status") == "provisional":
         if payload.action == "submit":
-            return JSONResponse(result)
-        if not await _provider_ready(request):
-            result["setup_url"] = str(
-                request.url_for("setup").include_query_params(
-                    next=request.url_for("focus", slug=slug).path
-                )
-            )
             return JSONResponse(result)
         initialized = public_mapping(await _call(request, "start_course_initialization", slug))
         result.update(
@@ -390,21 +1044,6 @@ async def update_placement(request: Request, slug: str) -> JSONResponse:
     return JSONResponse(result)
 
 
-@router.get("/quick-learn", response_class=HTMLResponse, name="quick_learn")
-async def quick_learn(request: Request) -> Any:
-    templates = await _call(request, "course_templates")
-    return _templates(request).TemplateResponse(
-        request,
-        "course_create.html",
-        _context(
-            request,
-            course_templates=templates,
-            quick_learn=True,
-            page_title="Quick Learn",
-        ),
-    )
-
-
 @router.get("/progress", response_class=HTMLResponse, name="progress")
 async def progress(request: Request) -> Any:
     snapshot = public_mapping(await _call(request, "progress"))
@@ -417,7 +1056,17 @@ async def progress(request: Request) -> Any:
 
 @router.get("/review", response_class=HTMLResponse, name="review")
 async def review(request: Request) -> Any:
-    snapshot = public_mapping(await _call(request, "due_reviews"))
+    slug = request.query_params.get("course")
+    if slug is not None:
+        try:
+            slug = canonical_slug(slug)
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail="Course not found") from error
+    snapshot = public_mapping(
+        await _call(request, "due_reviews", slug)
+        if slug is not None
+        else await _call(request, "due_reviews")
+    )
     return _templates(request).TemplateResponse(
         request,
         "review.html",
@@ -455,6 +1104,17 @@ async def manage_data(request: Request) -> JSONResponse:
     return JSONResponse(result, status_code=422 if not result.get("ok", False) else 200)
 
 
+@router.post("/api/courses/{slug}/source-preview", response_class=JSONResponse)
+async def preview_source_turn(request: Request, slug: str) -> JSONResponse:
+    try:
+        slug = canonical_slug(slug)
+        payload = TutorSubmissionRequest.model_validate(await request.json())
+    except (ValidationError, ValueError):
+        return _json_error("Check the source-mode request.")
+    result = public_mapping(await _call(request, "preview_source_turn", slug, payload))
+    return JSONResponse(result, status_code=200 if result.get("ok") else 422)
+
+
 @router.post("/api/courses/{slug}/turns", response_class=JSONResponse)
 async def submit_turn(request: Request, slug: str) -> JSONResponse:
     if not await _provider_ready(request):
@@ -467,6 +1127,34 @@ async def submit_turn(request: Request, slug: str) -> JSONResponse:
     result = public_mapping(await _call(request, "submit_turn", slug, payload))
     status = 409 if result.get("state") == "conflict" else 202
     return JSONResponse(result, status_code=status)
+
+
+@router.post("/api/courses/{slug}/progression", response_class=JSONResponse)
+async def progression_action(request: Request, slug: str) -> JSONResponse:
+    try:
+        slug = canonical_slug(slug)
+        payload = ProgressionActionRequest.model_validate(await request.json())
+    except (ValidationError, ValueError) as error:
+        return _json_error("Check the saved progression action.", errors=str(error))
+    if payload.action == "resume" and not await _provider_ready(request):
+        return _setup_required(request)
+    result = public_mapping(await _call(request, "progression_action", slug, payload))
+    status = 409 if result.get("state") in {"busy", "stale-conflict"} else 200
+    return JSONResponse(result, status_code=status)
+
+
+@router.get("/api/courses/{slug}/chat", response_class=JSONResponse)
+async def course_chat(request: Request, slug: str) -> JSONResponse:
+    try:
+        slug = canonical_slug(slug)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail="Course not found") from error
+    result = public_mapping(await _call(request, "chat", slug))
+    if result.get("missing"):
+        raise HTTPException(status_code=404, detail="Course not found")
+    response = JSONResponse(result)
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @router.post("/api/courses/{slug}/tools/video", response_class=JSONResponse)

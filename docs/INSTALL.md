@@ -42,6 +42,7 @@ You can use a hosted OpenAI-compatible provider with your own account and key, o
 openLearn does not supply, bill for, or share a provider account for Community users.
 Maker Bench is loopback-only and opens in the default browser.
 Use `openlearn web --no-browser` on a headless machine, or `openlearn web --port 9000` to select a loopback port explicitly.
+`--no-browser` does not enable remote browser access; use an allowed browser on the same host or the terminal workflow, as explained in [headless QA and loopback troubleshooting](TROUBLESHOOTING.md#maker-bench-does-not-open).
 
 ## Upgrade and uninstall
 
@@ -63,7 +64,8 @@ Before changing machines or deleting data, create a verified backup as described
 
 ## Optional code runner
 
-The code workbench remains available without a container runtime.
+The CLI coding workspace remains available without a container runtime.
+Code and Video panels are not part of the web lesson interface.
 Secure execution needs Docker or Podman.
 If execution is unavailable, install or start Docker or Podman and run:
 

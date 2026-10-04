@@ -1,0 +1,422 @@
+{
+  "schema_version": 1,
+  "graph_id": "technical-interview-supplement",
+  "graph_version": "1.0.0",
+  "mastery_policy_version": "interview-mastery-v1",
+  "evidence_policies": [
+    {
+      "id": "technical-v1",
+      "minimum": {
+        "recognition": 0,
+        "explanation": 1,
+        "production": 1,
+        "transfer": 1,
+        "delayed_retrieval": 1
+      },
+      "inferable_kinds": ["explanation", "production", "transfer", "delayed_retrieval"],
+      "explicit_check_kinds": ["recognition", "explanation", "production", "transfer", "delayed_retrieval"],
+      "transfer": {
+        "minimum_novel_contexts": 1,
+        "minimum_delay_days": 7,
+        "due_after_days": 45
+      }
+    }
+  ],
+  "skills": [
+    {
+      "id": "system.requirements-scope",
+      "name": "Requirements and scope",
+      "category": "system",
+      "description": "Separate functional requirements, quality attributes, exclusions, and success criteria.",
+      "prerequisites": [],
+      "evidence_policy": "technical-v1",
+      "curriculum_unit": "Requirements and interfaces",
+      "curriculum_order": 10
+    },
+    {
+      "id": "system.capacity-estimation",
+      "name": "Capacity estimation",
+      "category": "system",
+      "description": "Estimate traffic, storage, bandwidth, and peak load well enough to constrain a design.",
+      "prerequisites": [{"skill_id": "system.requirements-scope", "kind": "blocking"}],
+      "evidence_policy": "technical-v1",
+      "curriculum_unit": "Requirements and interfaces",
+      "curriculum_order": 20
+    },
+    {
+      "id": "system.api-contracts",
+      "name": "API contracts",
+      "category": "system",
+      "description": "Define bounded interfaces, request semantics, responses, and failure behavior.",
+      "prerequisites": [{"skill_id": "system.requirements-scope", "kind": "supporting"}],
+      "evidence_policy": "technical-v1",
+      "curriculum_unit": "Requirements and interfaces",
+      "curriculum_order": 30
+    },
+    {
+      "id": "system.access-patterns-data-modeling",
+      "name": "Access patterns and data modeling",
+      "category": "system",
+      "description": "Derive entities and data layout from the reads, writes, and consistency the product needs.",
+      "prerequisites": [{"skill_id": "system.requirements-scope", "kind": "blocking"}],
+      "evidence_policy": "technical-v1",
+      "curriculum_unit": "Data and storage",
+      "curriculum_order": 40
+    },
+    {
+      "id": "system.storage-indexing",
+      "name": "Storage and indexing",
+      "category": "system",
+      "description": "Choose storage and indexes from access patterns and explain the resulting tradeoffs.",
+      "prerequisites": [{"skill_id": "system.access-patterns-data-modeling", "kind": "blocking"}],
+      "evidence_policy": "technical-v1",
+      "curriculum_unit": "Data and storage",
+      "curriculum_order": 50
+    },
+    {
+      "id": "system.replication-partitioning",
+      "name": "Replication and partitioning",
+      "category": "system",
+      "description": "Distribute data while reasoning about ownership, consistency, skew, and failure recovery.",
+      "prerequisites": [{"skill_id": "system.storage-indexing", "kind": "blocking"}],
+      "evidence_policy": "technical-v1",
+      "curriculum_unit": "Data and storage",
+      "curriculum_order": 60
+    },
+    {
+      "id": "system.cache-invalidation",
+      "name": "Caching and invalidation",
+      "category": "system",
+      "description": "Place caches deliberately and define freshness, eviction, and invalidation behavior.",
+      "prerequisites": [{"skill_id": "system.storage-indexing", "kind": "blocking"}],
+      "evidence_policy": "technical-v1",
+      "curriculum_unit": "Delivery",
+      "curriculum_order": 70
+    },
+    {
+      "id": "system.content-delivery",
+      "name": "Content delivery",
+      "category": "system",
+      "description": "Use edge delivery and request routing to control latency, load, and hotspots.",
+      "prerequisites": [{"skill_id": "system.cache-invalidation", "kind": "supporting"}],
+      "evidence_policy": "technical-v1",
+      "curriculum_unit": "Delivery",
+      "curriculum_order": 80
+    },
+    {
+      "id": "system.messaging-delivery",
+      "name": "Messaging and delivery",
+      "category": "system",
+      "description": "Choose queue or stream semantics and reason about ordering, duplication, and consumers.",
+      "prerequisites": [{"skill_id": "system.api-contracts", "kind": "blocking"}],
+      "evidence_policy": "technical-v1",
+      "curriculum_unit": "Asynchronous workflows",
+      "curriculum_order": 90
+    },
+    {
+      "id": "system.idempotency-retries",
+      "name": "Idempotency and retries",
+      "category": "system",
+      "description": "Make repeated and partially failed operations converge without duplicate effects.",
+      "prerequisites": [{"skill_id": "system.messaging-delivery", "kind": "blocking"}],
+      "evidence_policy": "technical-v1",
+      "curriculum_unit": "Asynchronous workflows",
+      "curriculum_order": 100
+    },
+    {
+      "id": "system.reliability-backpressure",
+      "name": "Reliability and backpressure",
+      "category": "system",
+      "description": "Bound failure, overload, and degraded behavior across dependent components.",
+      "prerequisites": [{"skill_id": "system.messaging-delivery", "kind": "supporting"}],
+      "evidence_policy": "technical-v1",
+      "curriculum_unit": "Reliability",
+      "curriculum_order": 110
+    },
+    {
+      "id": "system.observability",
+      "name": "Observability",
+      "category": "system",
+      "description": "Choose signals that expose correctness, latency, saturation, and failure modes.",
+      "prerequisites": [{"skill_id": "system.reliability-backpressure", "kind": "supporting"}],
+      "evidence_policy": "technical-v1",
+      "curriculum_unit": "Reliability",
+      "curriculum_order": 120
+    },
+    {
+      "id": "communication.system-tradeoffs",
+      "name": "System tradeoff communication",
+      "category": "communication",
+      "description": "State a design choice, the rejected alternative, and the signal that would validate it.",
+      "prerequisites": [{"skill_id": "system.requirements-scope", "kind": "supporting"}],
+      "evidence_policy": "technical-v1",
+      "curriculum_unit": "Reliability",
+      "curriculum_order": 130
+    },
+    {
+      "id": "backend.api-boundaries",
+      "name": "Backend API boundaries",
+      "category": "backend",
+      "description": "Define service and API ownership with explicit contracts and failure semantics.",
+      "prerequisites": [],
+      "evidence_policy": "technical-v1",
+      "curriculum_unit": "Backend extension",
+      "curriculum_order": 140
+    },
+    {
+      "id": "backend.data-modeling",
+      "name": "Backend data modeling",
+      "category": "backend",
+      "description": "Model durable backend state around access patterns and transactional boundaries.",
+      "prerequisites": [{"skill_id": "backend.api-boundaries", "kind": "supporting"}],
+      "evidence_policy": "technical-v1",
+      "curriculum_unit": "Backend extension",
+      "curriculum_order": 150
+    },
+    {
+      "id": "backend.concurrency",
+      "name": "Backend concurrency",
+      "category": "backend",
+      "description": "Reason about races, atomicity, locking, and duplicate work in backend systems.",
+      "prerequisites": [{"skill_id": "backend.data-modeling", "kind": "supporting"}],
+      "evidence_policy": "technical-v1",
+      "curriculum_unit": "Backend extension",
+      "curriculum_order": 160
+    },
+    {
+      "id": "backend.service-tradeoffs",
+      "name": "Backend service tradeoffs",
+      "category": "backend",
+      "description": "Compare service boundaries, coordination costs, and operational failure modes.",
+      "prerequisites": [{"skill_id": "backend.api-boundaries", "kind": "supporting"}],
+      "evidence_policy": "technical-v1",
+      "curriculum_unit": "Backend extension",
+      "curriculum_order": 170
+    },
+    {
+      "id": "frontend.browser-runtime",
+      "name": "Browser runtime",
+      "category": "frontend",
+      "description": "Explain browser execution, networking, and rendering constraints that shape a frontend.",
+      "prerequisites": [],
+      "evidence_policy": "technical-v1",
+      "curriculum_unit": "Frontend extension",
+      "curriculum_order": 180
+    },
+    {
+      "id": "frontend.state-management",
+      "name": "Frontend state management",
+      "category": "frontend",
+      "description": "Place server, URL, shared, and local UI state with clear ownership.",
+      "prerequisites": [{"skill_id": "frontend.browser-runtime", "kind": "supporting"}],
+      "evidence_policy": "technical-v1",
+      "curriculum_unit": "Frontend extension",
+      "curriculum_order": 190
+    },
+    {
+      "id": "frontend.rendering",
+      "name": "Frontend rendering",
+      "category": "frontend",
+      "description": "Choose rendering and hydration strategies from latency, cacheability, and interaction needs.",
+      "prerequisites": [{"skill_id": "frontend.browser-runtime", "kind": "supporting"}],
+      "evidence_policy": "technical-v1",
+      "curriculum_unit": "Frontend extension",
+      "curriculum_order": 200
+    },
+    {
+      "id": "frontend.accessibility",
+      "name": "Frontend accessibility",
+      "category": "frontend",
+      "description": "Build semantic, keyboard-operable, perceivable interfaces with robust state feedback.",
+      "prerequisites": [{"skill_id": "frontend.rendering", "kind": "supporting"}],
+      "evidence_policy": "technical-v1",
+      "curriculum_unit": "Frontend extension",
+      "curriculum_order": 210
+    },
+    {
+      "id": "frontend.ui-architecture",
+      "name": "Frontend UI architecture",
+      "category": "frontend",
+      "description": "Create component and data-flow boundaries that stay testable and evolvable.",
+      "prerequisites": [{"skill_id": "frontend.state-management", "kind": "supporting"}],
+      "evidence_policy": "technical-v1",
+      "curriculum_unit": "Frontend extension",
+      "curriculum_order": 220
+    },
+    {
+      "id": "mobile.lifecycle",
+      "name": "Mobile lifecycle",
+      "category": "mobile",
+      "description": "Design for foreground, background, termination, and resource-constrained lifecycle events.",
+      "prerequisites": [],
+      "evidence_policy": "technical-v1",
+      "curriculum_unit": "Mobile extension",
+      "curriculum_order": 230
+    },
+    {
+      "id": "mobile.offline-data",
+      "name": "Mobile offline data",
+      "category": "mobile",
+      "description": "Synchronize local and remote state with explicit conflict and retry behavior.",
+      "prerequisites": [{"skill_id": "mobile.lifecycle", "kind": "supporting"}],
+      "evidence_policy": "technical-v1",
+      "curriculum_unit": "Mobile extension",
+      "curriculum_order": 240
+    },
+    {
+      "id": "mobile.platform-constraints",
+      "name": "Mobile platform constraints",
+      "category": "mobile",
+      "description": "Account for battery, memory, networking, permissions, and platform policy.",
+      "prerequisites": [{"skill_id": "mobile.lifecycle", "kind": "supporting"}],
+      "evidence_policy": "technical-v1",
+      "curriculum_unit": "Mobile extension",
+      "curriculum_order": 250
+    },
+    {
+      "id": "mobile.client-architecture",
+      "name": "Mobile client architecture",
+      "category": "mobile",
+      "description": "Separate UI, domain, storage, and networking responsibilities in a resilient client.",
+      "prerequisites": [{"skill_id": "mobile.offline-data", "kind": "supporting"}],
+      "evidence_policy": "technical-v1",
+      "curriculum_unit": "Mobile extension",
+      "curriculum_order": 260
+    },
+    {
+      "id": "data-ml.sql",
+      "name": "SQL reasoning",
+      "category": "data-ml",
+      "description": "Write and explain joins, aggregation, windowing, and query-performance choices.",
+      "prerequisites": [],
+      "evidence_policy": "technical-v1",
+      "curriculum_unit": "Data and ML extension",
+      "curriculum_order": 270
+    },
+    {
+      "id": "data-ml.pipelines",
+      "name": "Data pipelines",
+      "category": "data-ml",
+      "description": "Design batch or streaming transformations with lineage, retries, and quality controls.",
+      "prerequisites": [{"skill_id": "data-ml.sql", "kind": "supporting"}],
+      "evidence_policy": "technical-v1",
+      "curriculum_unit": "Data and ML extension",
+      "curriculum_order": 280
+    },
+    {
+      "id": "data-ml.model-evaluation",
+      "name": "Model evaluation",
+      "category": "data-ml",
+      "description": "Choose metrics, splits, and error analysis that match the product decision.",
+      "prerequisites": [],
+      "evidence_policy": "technical-v1",
+      "curriculum_unit": "Data and ML extension",
+      "curriculum_order": 290
+    },
+    {
+      "id": "data-ml.ml-system-tradeoffs",
+      "name": "ML system tradeoffs",
+      "category": "data-ml",
+      "description": "Reason about freshness, latency, reproducibility, monitoring, and training-serving skew.",
+      "prerequisites": [{"skill_id": "data-ml.model-evaluation", "kind": "supporting"}],
+      "evidence_policy": "technical-v1",
+      "curriculum_unit": "Data and ML extension",
+      "curriculum_order": 300
+    }
+  ],
+  "problems": [
+    {
+      "id": "problem.system-requirements",
+      "title": "Scope and estimate a scalable product",
+      "transfer_family": "requirements-and-interfaces",
+      "skills": [
+        {"skill_id": "system.requirements-scope", "role": "primary"},
+        {"skill_id": "system.capacity-estimation", "role": "primary"},
+        {"skill_id": "system.api-contracts", "role": "primary"}
+      ]
+    },
+    {
+      "id": "problem.system-storage",
+      "title": "Model and distribute durable data",
+      "transfer_family": "data-and-storage",
+      "skills": [
+        {"skill_id": "system.access-patterns-data-modeling", "role": "primary"},
+        {"skill_id": "system.storage-indexing", "role": "primary"},
+        {"skill_id": "system.replication-partitioning", "role": "primary"}
+      ]
+    },
+    {
+      "id": "problem.system-delivery",
+      "title": "Design cache and content delivery",
+      "transfer_family": "cache-and-delivery",
+      "skills": [
+        {"skill_id": "system.cache-invalidation", "role": "primary"},
+        {"skill_id": "system.content-delivery", "role": "primary"}
+      ]
+    },
+    {
+      "id": "problem.system-async",
+      "title": "Design a retry-safe asynchronous workflow",
+      "transfer_family": "asynchronous-workflows",
+      "skills": [
+        {"skill_id": "system.messaging-delivery", "role": "primary"},
+        {"skill_id": "system.idempotency-retries", "role": "primary"}
+      ]
+    },
+    {
+      "id": "problem.system-reliability",
+      "title": "Design for degradation and observability",
+      "transfer_family": "reliability-and-tradeoffs",
+      "skills": [
+        {"skill_id": "system.reliability-backpressure", "role": "primary"},
+        {"skill_id": "system.observability", "role": "primary"},
+        {"skill_id": "communication.system-tradeoffs", "role": "primary"}
+      ]
+    },
+    {
+      "id": "problem.backend-extension",
+      "title": "Design a backend service boundary",
+      "transfer_family": "backend-role",
+      "skills": [
+        {"skill_id": "backend.api-boundaries", "role": "primary"},
+        {"skill_id": "backend.data-modeling", "role": "primary"},
+        {"skill_id": "backend.concurrency", "role": "primary"},
+        {"skill_id": "backend.service-tradeoffs", "role": "primary"}
+      ]
+    },
+    {
+      "id": "problem.frontend-extension",
+      "title": "Design an accessible frontend application",
+      "transfer_family": "frontend-role",
+      "skills": [
+        {"skill_id": "frontend.browser-runtime", "role": "primary"},
+        {"skill_id": "frontend.state-management", "role": "primary"},
+        {"skill_id": "frontend.rendering", "role": "primary"},
+        {"skill_id": "frontend.accessibility", "role": "primary"},
+        {"skill_id": "frontend.ui-architecture", "role": "primary"}
+      ]
+    },
+    {
+      "id": "problem.mobile-extension",
+      "title": "Design an offline-capable mobile client",
+      "transfer_family": "mobile-role",
+      "skills": [
+        {"skill_id": "mobile.lifecycle", "role": "primary"},
+        {"skill_id": "mobile.offline-data", "role": "primary"},
+        {"skill_id": "mobile.platform-constraints", "role": "primary"},
+        {"skill_id": "mobile.client-architecture", "role": "primary"}
+      ]
+    },
+    {
+      "id": "problem.data-ml-extension",
+      "title": "Design and evaluate a data or ML workflow",
+      "transfer_family": "data-ml-role",
+      "skills": [
+        {"skill_id": "data-ml.sql", "role": "primary"},
+        {"skill_id": "data-ml.pipelines", "role": "primary"},
+        {"skill_id": "data-ml.model-evaluation", "role": "primary"},
+        {"skill_id": "data-ml.ml-system-tradeoffs", "role": "primary"}
+      ]
+    }
+  ]
+}

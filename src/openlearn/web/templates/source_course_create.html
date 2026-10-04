@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="create-shell" aria-labelledby="create-title">
+  <div class="section-heading">
+    <div><p class="eyebrow">{{ 'Quick Learn' if mode == 'quick' else 'Source course' }}</p><h1 id="create-title">{{ 'Learn from one source now.' if mode == 'quick' else 'Build a course from your sources.' }}</h1></div>
+    <a class="quiet-link" href="{{ url_for('dashboard') }}">Back to dashboard</a>
+  </div>
+  {% if create_error %}<div class="error-summary" role="alert" tabindex="-1">{{ create_error }}</div>{% endif %}
+  <form class="work-panel form-stack create-form" method="post" enctype="multipart/form-data" action="{{ url_for('create_source_course_form') }}" data-json-form data-multipart data-endpoint="/courses/from-source" novalidate>
+    <input type="hidden" name="submission_id" data-uuid value="{{ submission_id }}">
+    <input type="hidden" name="mode" value="{{ mode }}">
+    <div class="error-summary" role="alert" tabindex="-1" data-form-error hidden></div>
+    <fieldset class="source-choice">
+      <legend>Your source</legend>
+      <label for="source-kind">Source type</label>
+      <select id="source-kind" name="source_kind" data-source-kind>
+        {% for kind, label in [('file', 'File'), ('folder', 'Local folder'), ('github', 'Public GitHub repository')] %}
+        <option value="{{ kind }}"{% if creation_input.source_kind == kind %} selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+      <label for="source-file">Source file</label>
+      <input id="source-file" name="source_file" type="file">
+      <label for="source-value" data-source-value-label>Local folder path or public GitHub repository URL</label>
+      <input id="source-value" name="source_value" maxlength="2048" value="{{ creation_input.source_value or '' }}" placeholder="/path/to/course or https://github.com/owner/repository">
+      <p class="field-note" data-source-file-note>Files stay selected while correcting errors on this page. After leaving or reloading, choose the file again. Other input is kept in this tab.</p>
+    </fieldset>
+    <div class="form-field">
+      <label for="course-title">Course name</label>
+      <input id="course-title" name="title" maxlength="160" required value="{{ creation_input.title or '' }}">
+    </div>
+    <div class="form-field">
+      <label for="goal">Your goal</label>
+      <textarea id="goal" name="goal" rows="3" maxlength="4000" required>{{ creation_input.goal or '' }}</textarea>
+    </div>
+    <div class="form-field">
+      <label for="experience">What have you tried already? <span class="optional">Optional</span></label>
+      <textarea id="experience" name="experience" rows="2" maxlength="4000">{{ creation_input.experience or '' }}</textarea>
+    </div>
+    <div class="form-footer">
+      <p class="field-note" role="status" aria-live="polite" data-form-status>Import a bounded, screened source locally. Then review and approve a source lesson request in Chat. Imported code is never executed.</p>
+      <button class="primary-action" type="submit">{{ 'Create Quick Learn' if mode == 'quick' else 'Create source course' }} <span aria-hidden="true">→</span></button>
+    </div>
+    <a class="quiet-link" href="{{ url_for('dashboard') }}">Cancel</a>
+  </form>
+</section>
+{% endblock %}

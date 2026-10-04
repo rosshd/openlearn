@@ -7,8 +7,16 @@ from dataclasses import dataclass
 from importlib.resources.abc import Traversable
 
 TEMPLATE_ID_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
-TEMPLATE_FIELDS = frozenset({"name", "slug", "goal", "tags", "units"})
-OPTIONAL_TEMPLATE_FIELDS = frozenset({"entry_mode"})
+TEMPLATE_FIELDS = frozenset({"name", "slug", "goal", "tags"})
+OPTIONAL_TEMPLATE_FIELDS = frozenset(
+    {
+        "entry_mode",
+        "units",
+        "curriculum_bundle",
+        "specializes_template_ids",
+        "specializes_tags",
+    }
+)
 TEMPLATE_ENTRY_MODES = frozenset({"interview_prep"})
 
 
@@ -21,6 +29,12 @@ class CourseTemplateNotFoundError(CourseTemplateError):
 
 
 @dataclass(frozen=True)
+class CurriculumBundleReference:
+    bundle_id: str
+    bundle_version: str
+
+
+@dataclass(frozen=True)
 class CourseTemplate:
     name: str
     slug: str
@@ -28,6 +42,9 @@ class CourseTemplate:
     tags: tuple[str, ...]
     units: tuple[str, ...]
     entry_mode: str | None = None
+    curriculum_bundle: CurriculumBundleReference | None = None
+    specializes_template_ids: tuple[str, ...] = ()
+    specializes_tags: tuple[str, ...] = ()
 
 
 def validate_template_id(template_id: str) -> str:
@@ -60,7 +77,21 @@ def available_course_templates() -> list[CourseTemplate]:
         raise
     except OSError as exc:
         raise CourseTemplateError("could not access bundled course templates") from exc
-    return [_read_course_template(resource) for resource in resources]
+    templates = [_read_course_template(resource) for resource in resources]
+    known_ids = {template.slug for template in templates}
+    for template in templates:
+        missing = sorted(set(template.specializes_template_ids) - known_ids)
+        if missing:
+            raise CourseTemplateError(
+                f"invalid course template '{template.slug}.json': unknown specialized "
+                f"template IDs {', '.join(missing)}"
+            )
+        if template.slug in template.specializes_template_ids:
+            raise CourseTemplateError(
+                f"invalid course template '{template.slug}.json': a template cannot "
+                "specialize itself"
+            )
+    return templates
 
 
 def load_course_template(template_id: str) -> CourseTemplate:
@@ -71,9 +102,7 @@ def load_course_template(template_id: str) -> CourseTemplate:
     except CourseTemplateError:
         raise
     except OSError as exc:
-        raise CourseTemplateError(
-            f"could not access course template '{template_id}'"
-        ) from exc
+        raise CourseTemplateError(f"could not access course template '{template_id}'") from exc
     if not exists:
         raise CourseTemplateNotFoundError(f"template '{template_id}' not found")
     template = _read_course_template(resource)
@@ -88,9 +117,7 @@ def _read_course_template(resource: Traversable) -> CourseTemplate:
     try:
         text = resource.read_text(encoding="utf-8")
     except OSError as exc:
-        raise CourseTemplateError(
-            f"could not access course template '{resource.name}'"
-        ) from exc
+        raise CourseTemplateError(f"could not access course template '{resource.name}'") from exc
     except UnicodeError as exc:
         raise CourseTemplateError(
             f"invalid course template '{resource.name}': expected UTF-8 JSON"
@@ -131,15 +158,79 @@ def _read_course_template(resource: Traversable) -> CourseTemplate:
         )
     goal = _required_string(raw["goal"], resource.name, "goal")
     tags = _required_string_list(raw["tags"], resource.name, "tags")
-    units = _required_string_list(raw["units"], resource.name, "units")
+    bundle_value = raw.get("curriculum_bundle")
+    curriculum_bundle: CurriculumBundleReference | None = None
+    if bundle_value is not None:
+        if "units" in raw:
+            raise CourseTemplateError(
+                f"invalid course template '{resource.name}': curriculum_bundle "
+                "cannot be combined with independent units"
+            )
+        if not isinstance(bundle_value, dict) or set(bundle_value) != {
+            "bundle_id",
+            "bundle_version",
+        }:
+            raise CourseTemplateError(
+                f"invalid course template '{resource.name}': curriculum_bundle fields are invalid"
+            )
+        curriculum_bundle = CurriculumBundleReference(
+            bundle_id=_required_string(
+                bundle_value.get("bundle_id"), resource.name, "curriculum_bundle id"
+            ),
+            bundle_version=_required_string(
+                bundle_value.get("bundle_version"),
+                resource.name,
+                "curriculum_bundle version",
+            ),
+        )
+        from openlearn import interview_curriculum
+
+        try:
+            bundle = interview_curriculum.load_default_bundle()
+        except interview_curriculum.CurriculumBundleError as exc:
+            raise CourseTemplateError(
+                f"invalid course template '{resource.name}': curriculum bundle is invalid"
+            ) from exc
+        if (
+            bundle.bundle_id != curriculum_bundle.bundle_id
+            or bundle.bundle_version != curriculum_bundle.bundle_version
+        ):
+            raise CourseTemplateError(
+                f"invalid course template '{resource.name}': curriculum bundle is unavailable"
+            )
+        units = bundle.display_units("balanced")
+    elif "units" in raw:
+        units = _required_string_list(raw["units"], resource.name, "units")
+    else:
+        raise CourseTemplateError(
+            f"invalid course template '{resource.name}': missing units or curriculum_bundle"
+        )
     entry_mode = raw.get("entry_mode")
     if entry_mode is not None:
         entry_mode = _required_string(entry_mode, resource.name, "entry_mode")
         if entry_mode not in TEMPLATE_ENTRY_MODES:
             raise CourseTemplateError(
-                f"invalid course template '{resource.name}': unsupported entry_mode "
-                f"'{entry_mode}'"
+                f"invalid course template '{resource.name}': unsupported entry_mode '{entry_mode}'"
             )
+    specializes_template_ids = _optional_string_list(
+        raw.get("specializes_template_ids"),
+        resource.name,
+        "specializes_template_ids",
+    )
+    for template_id in specializes_template_ids:
+        if not TEMPLATE_ID_PATTERN.fullmatch(template_id):
+            raise CourseTemplateError(
+                f"invalid course template '{resource.name}': specializes_template_ids "
+                "must contain lowercase slugs"
+            )
+    specializes_tags = _optional_string_list(
+        raw.get("specializes_tags"), resource.name, "specializes_tags"
+    )
+    if any(not TEMPLATE_ID_PATTERN.fullmatch(tag) for tag in specializes_tags):
+        raise CourseTemplateError(
+            f"invalid course template '{resource.name}': specializes_tags must "
+            "contain unique lowercase slugs"
+        )
     return CourseTemplate(
         name=name,
         slug=slug,
@@ -147,6 +238,9 @@ def _read_course_template(resource: Traversable) -> CourseTemplate:
         tags=tags,
         units=units,
         entry_mode=entry_mode,
+        curriculum_bundle=curriculum_bundle,
+        specializes_template_ids=specializes_template_ids,
+        specializes_tags=specializes_tags,
     )
 
 
@@ -158,9 +252,7 @@ def _required_string(value: object, filename: str, field: str) -> str:
     return value
 
 
-def _required_string_list(
-    value: object, filename: str, field: str
-) -> tuple[str, ...]:
+def _required_string_list(value: object, filename: str, field: str) -> tuple[str, ...]:
     if not isinstance(value, list) or not value:
         raise CourseTemplateError(
             f"invalid course template '{filename}': {field} must be a non-empty string list"
@@ -171,3 +263,9 @@ def _required_string_list(
             f"invalid course template '{filename}': {field} must not contain duplicates"
         )
     return items
+
+
+def _optional_string_list(value: object, filename: str, field: str) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    return _required_string_list(value, filename, field)

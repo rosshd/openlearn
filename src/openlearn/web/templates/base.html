@@ -8,6 +8,7 @@
     <title>{{ page_title }} · openlearn</title>
     <link rel="icon" href="{{ url_for('static', path='/favicon.svg') }}" type="image/svg+xml">
     <link rel="stylesheet" href="{{ url_for('static', path='/openlearn.css') }}">
+    {% block presentation_scripts %}{% endblock %}
     <script src="{{ url_for('static', path='/openlearn.js') }}" defer></script>
   </head>
   <body>
@@ -17,31 +18,18 @@
         <span class="wordmark-mark" aria-hidden="true">ol</span>
         <span>openlearn</span>
       </a>
-      <nav class="site-nav" aria-label="Primary navigation">
-        <ul class="site-nav-groups">
-          <li data-nav-group>
-            <span>Learning</span>
-            <a href="{{ url_for('dashboard') }}">Courses</a>
-            <a href="{{ url_for('quick_learn') }}">Quick Learn</a>
-          </li>
-          <li data-nav-group>
-            <span>Practice</span>
-            <a href="{{ url_for('review') }}">Review</a>
-            <a href="{{ url_for('progress') }}">Progress</a>
-          </li>
-          <li data-nav-group>
-            <span>Settings</span>
-            <a href="{{ url_for('setup') }}">Provider</a>
-            <a href="{{ url_for('data') }}">Data</a>
-          </li>
-        </ul>
+      {% set current_section = 'tutor' if request.url.path == url_for('setup').path else 'progress' if request.url.path == url_for('progress').path else 'data' if request.url.path == url_for('data').path else 'courses' %}
+      <nav class="site-nav" aria-label="Openlearn navigation">
+        <a href="{{ url_for('dashboard') }}"{% if current_section == 'courses' %} aria-current="page"{% endif %}>Courses</a>
+        <a href="{{ url_for('setup') }}"{% if current_section == 'tutor' %} aria-current="page"{% endif %}>Tutor</a>
+        <a href="{{ url_for('progress') }}"{% if current_section == 'progress' %} aria-current="page"{% endif %}>Progress</a>
+        <a href="{{ url_for('data') }}"{% if current_section == 'data' %} aria-current="page"{% endif %}>Data</a>
       </nav>
-      <div class="header-tools">
-        <span class="local-status"><span aria-hidden="true"></span> Local</span>
-        <button class="tool-button" type="button" data-theme-toggle aria-label="Change color theme">
-          Theme: <span data-theme-label>System</span>
-        </button>
-      </div>
+      <button class="theme-toggle" type="button" data-theme-toggle
+        aria-label="Theme: System. Activate to use dark theme">
+        <span class="theme-icon" aria-hidden="true"></span>
+        <span><span data-theme-label>System</span> theme</span>
+      </button>
     </header>
     {% block status %}{% endblock %}
     <main id="main-content" tabindex="-1" class="{% block main_class %}{% endblock %}">

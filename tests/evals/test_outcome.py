@@ -19,6 +19,7 @@ from tests.evals.outcome import (
     validate_outcome_scenarios,
 )
 from tests.evals.tutor_behavior import EvaluationOutcome, load_scenarios
+from tests.evals.test_tutor_behavior_harness import mocked_providers  # noqa: F401
 
 
 def _event(
@@ -80,7 +81,10 @@ def test_outcome_fixtures_cover_required_result_patterns() -> None:
 
 
 def test_outcome_record_projects_time_gaps_without_sleeping() -> None:
-    fixture = load_scenarios(OUTCOME_SCENARIOS_DIR)[1]
+    fixture = next(
+        item for item in load_scenarios(OUTCOME_SCENARIOS_DIR)
+        if item["name"] == "immediate_success_delayed_failure"
+    )
     behavior_record = {
         "scenario": fixture["name"],
         "family": fixture["family"],
@@ -559,7 +563,10 @@ def test_premature_mastery_remains_false_after_independent_recovery() -> None:
 
 
 def test_partial_record_and_aggregate_metrics_remain_valid() -> None:
-    fixture = load_scenarios(OUTCOME_SCENARIOS_DIR)[0]
+    fixture = next(
+        item for item in load_scenarios(OUTCOME_SCENARIOS_DIR)
+        if item["name"] == "contingent_tutoring_novel_transfer"
+    )
     behavior_record = {
         "scenario": fixture["name"],
         "family": fixture["family"],
@@ -672,7 +679,7 @@ def test_run_writes_human_reviewable_nonblocking_schema(
     assert manifest["schema_version"] == OUTCOME_SCHEMA_VERSION
     assert manifest["contract_version"] == OUTCOME_CONTRACT_VERSION
     assert manifest["coverage"] == {
-        "available_scenarios": 2,
+        "available_scenarios": 4,
         "selected_scenarios": 1,
         "completed_scenarios": 1,
         "partial": True,
@@ -687,3 +694,78 @@ def test_run_writes_human_reviewable_nonblocking_schema(
     if os.name != "nt":
         assert (outcome.evidence_dir / "manifest.json").stat().st_mode & 0o777 == 0o600
         assert (outcome.evidence_dir / "scenarios.jsonl").stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize("name", ["bfs_queue_trace", "noncoding_percentage_base"])
+@pytest.mark.usefixtures("mocked_providers")
+def test_core_comparison_fixtures_replay_in_existing_harness(
+    name: str,
+    tmp_path: Path,
+) -> None:
+    fixture = next(
+        item for item in load_scenarios(OUTCOME_SCENARIOS_DIR)
+        if item["name"] == name
+    )
+    validate_outcome_scenarios([fixture])
+    context = fixture["context"]["lesson.summary.txt"]
+    assert "Prior knowledge:" in context
+    assert "Misconception:" in context
+    assert [item["probe"] for item in fixture["outcome_schedule"]] == [
+        "practice", "practice", "transfer", "retrieval",
+    ]
+    assert fixture["outcome_schedule"][-1]["gap_days_before"] == 3
+
+    result = run_outcome_evaluation(
+        tmp_path / "run",
+        tutor_model="tutor-model",
+        judge_model="judge-model",
+        scenario_ids=[name],
+    )
+    record = json.loads(
+        (result.evidence_dir / "scenarios.jsonl").read_text().splitlines()[0]
+    )
+    assert result.complete_count == 1
+    assert len(record["turns"]) == 4
+    assert record["turns"][-1]["outcome_schedule"]["simulated_at"] == (
+        "2026-01-04T12:00:00+00:00"
+    )
+    assert all(turn["prior_state_used"] for turn in record["turns"][1:])
+    seeded_context = list((result.run_root / "behavior" / "homes").rglob("lesson.summary.txt"))
+    assert len(seeded_context) == 1
+    assert seeded_context[0].read_text().strip() == context
+
+
+@pytest.mark.parametrize("name", ["bfs_queue_trace", "noncoding_percentage_base"])
+def test_core_comparison_metrics_keep_supported_and_independent_evidence_distinct(
+    name: str,
+) -> None:
+    fixture = next(
+        item for item in load_scenarios(OUTCOME_SCENARIOS_DIR)
+        if item["name"] == name
+    )
+    concept = fixture["state"]["pending_question"]["concept_id"]
+    turns = [
+        _turn(
+            index,
+            events=[_event(
+                "answer_judged", day=1, concept=concept,
+                status="needs_work" if index == 1 else "correct",
+                score=0.2 if index == 1 else 0.9,
+                answer_kind="production", source="review", is_transfer=index == 3,
+            )],
+            move="remediation_hint" if index == 1 else "transfer_check",
+            tutor_output="One targeted hint." if index == 1 else "One check.",
+        )
+        for index in range(1, 5)
+    ]
+    record = outcome_record({"scenario": name, "turns": turns}, fixture)
+    metrics = record["metrics"]
+    assert metrics["turns_to_criterion"] == 3
+    assert metrics["novel_transfer"] == {"attempts": 1, "passed": 1, "pass_rate": 1.0}
+    assert metrics["delayed_retrieval"]["attempts"] == 1
+    assert metrics["delayed_retrieval"]["passed"] == 1
+    assert metrics["hint_worked_example_dependency"] == {
+        "supported_correct_concepts": 1, "resolved_concepts": 1, "unresolved_concepts": 0,
+    }
+    assert metrics["tutor_words"]["total"] == 9
+    assert metrics["tutor_words"]["per_turn"] == 9 / 4

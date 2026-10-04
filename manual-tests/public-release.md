@@ -23,8 +23,8 @@ Assign the supplemental journeys before testing:
 
 | Tester | Required supplemental journey |
 | --- | --- |
-| A | Defer Technical Interview Prep placement, then begin the baseline lesson. |
-| B | Complete the short Technical Interview Prep reasoning placement. |
+| A | Skip Technical Interview Prep placement, then begin the baseline lesson. |
+| B | Complete the rapid Technical Interview Prep confidence placement. |
 | C | Create and begin a broad custom course outside the bundled templates. |
 | D | Complete Quick Learn from a small non-sensitive local file. |
 | E | Recover from an unavailable optional code runtime and continue with text-only learning. |
@@ -69,16 +69,32 @@ Documentation links are allowed because documentation discoverability is part of
 4. Start `openlearn web` and reach Maker Bench through the printed or opened loopback URL.
 5. Read the Community cost and privacy explanation.
 6. Configure a learner-owned hosted provider or a local keyless endpoint, or intentionally defer setup where the chosen offline flow allows it.
-7. Find Technical Interview Prep in starter courses and complete the assigned defer or reasoning-placement route.
+7. Find Technical Interview Prep in starter courses and complete the assigned skip or rapid confidence-placement route.
 8. Reach one useful teaching interaction and respond once.
 9. Leave the course, reopen Openlearn, and resume without losing the active objective.
-10. Find progress, identify the recommended next action, and locate provider settings.
-11. Locate the active learner-data home from the application and confirm it with `openlearn data inventory`.
-12. Create a credential-redacted verified backup outside the test home.
-13. Complete the assigned supplemental journey.
+10. Return to the course library, identify the active course, preview another course without activating it, and use Continue learning to switch deliberately.
+11. Open the selected course path, settings, and Utilities menu without encountering a duplicate Quick Learn, settings, data, or empty-review panel.
+12. Change one reversible course setting through preview and confirmation, then verify the course address and prior progress remain intact.
+13. Open permanent deletion, verify the exact course name and ID are required, follow the backup link, and leave without deleting the course.
+14. Locate the active learner-data home from the application and confirm it with `openlearn data inventory`.
+15. Create a credential-redacted verified backup outside the test home.
+16. Complete the assigned supplemental journey.
 
 Measure time from first Openlearn launch to the first teaching interaction.
 The target is under five minutes excluding external provider-account creation and local-model download time.
+
+## Course-library presentation probes
+
+Run these checks on the course-library dashboard after at least two courses exist.
+
+- At a normal desktop width, select the non-active course and verify its preview updates while the active marker stays on the original course.
+- Use browser Back, Forward, and Reload and verify the URL-selected preview is restored without changing the active course.
+- At approximately 760 pixels and 320 pixels wide, verify the library stacks before the preview and the View selected course preview link moves focus deliberately.
+- Increase browser text size to at least 150 percent and verify course names, status chips, path items, menus, and actions remain readable without horizontal page scrolling.
+- Enable reduced motion and verify selection and disclosure change immediately without sliding, resizing, or flashing movement.
+- Navigate the course rows, full-path disclosure, Utilities menu, Continue learning, settings, backup link, and deletion fields using only the keyboard.
+- Disable JavaScript for one pass and verify course selection, settings forms, backup navigation, and deletion confirmation still use ordinary links and forms.
+- If a generated follow-up is available, verify one click shows a pending state, duplicate submission is disabled, provider failure leaves retry available, and completion keeps the source-course preview visible until confirmation.
 
 ## Recovery probes
 
@@ -87,7 +103,7 @@ Use only the probes assigned in the roster and never sacrifice real learner data
 - Rejected key: enter an obvious non-secret placeholder, verify setup stays incomplete, then recover with the tester's own valid credential or switch providers.
 - Unreachable provider: stop the local endpoint or use an unused loopback port, verify the error offers retry, switch, or defer, then recover.
 - Optional runtime: open the code tool without Docker or Podman available, verify actionable setup guidance appears, then continue the text-only lesson.
-- Placement: verify the interface distinguishes saved draft text from submitted sections and offers skip, stop, resume, and completion without an editor.
+- Placement: verify rapid confidence answers advance one topic at a time, review is editable, skip creates a baseline route, and leaving then resuming preserves progress without an editor.
 
 ## Evidence template
 
@@ -139,7 +155,7 @@ Linux coverage: pass/pending
 Five fresh testers: pass/pending
 Custom course: pass/pending
 Quick Learn: pass/pending
-Placement defer: pass/pending
+Placement skip: pass/pending
 Placement completion: pass/pending
 Rejected or unreachable provider recovery: pass/pending
 Unavailable optional tool recovery: pass/pending

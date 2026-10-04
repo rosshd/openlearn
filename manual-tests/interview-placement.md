@@ -1,92 +1,117 @@
-# Interview-prep learner journey
+# Technical Interview Prep journey
 
-This workflow exercises the public CLI from the premade Technical Interview Prep course through the first lesson.
-Use an isolated home so the replay cannot read or modify personal learner state or provider configuration.
+This journey verifies rapid placement, course outline confirmation, the first technical lesson, optional checks, provider recovery, side chat, and CLI handoff.
+Use an isolated learner home so the test cannot read or modify real courses or credentials.
+
+## Start an isolated web app
 
 ```bash
 export OPENLEARN_HOME="$(mktemp -d)"
-unset OPENAI_API_KEY OPENLEARN_BASE_URL OPENLEARN_MOCK
-openlearn cli
-```
-
-Complete provider onboarding if it appears, or open the menu with an already configured provider.
-Press `s` for Starter courses and select `Technical Interview Prep`.
-The menu description must identify the LeetCode-style algorithms and data-structures course.
-The entry screen must explain that placement is a short offline reasoning conversation and must offer start, defer, or back before creating the course.
-
-Choose start.
-Course creation must use the premade goal and safe interview-profile defaults without asking for a course name, goal, target level, schedule, editor, language, or container runtime.
-Placement must say that it takes about five minutes and that there is no coding task or editor.
-
-At `clarification>`, enter one question per line:
-
-```text
-clarification> Can width exceed the text length?
-clarification> Should I return the zero-based start index?
-clarification> /show
-clarification> /done
-```
-
-Each answer line must be saved without advancing the stage.
-`/show` must display the complete saved draft.
-`/done` is the only normal command that submits the section and advances.
-A blank line must leave the learner at the same prompt.
-
-At `reasoning>`, dictate or paste the solution route across several lines:
-
-```text
-reasoning> I would use a sliding window and a set of seen characters.
-reasoning> I would test width one, repeated characters, and no valid window.
-reasoning> The scan is O(n) time and O(width) space.
-reasoning> /done
-```
-
-The response must stay in the reasoning section until `/done`.
-The completed result must show a course-start passport with a starting route, first activity, reasoning signals, practice priority, and later verification target.
-It must state that coding fluency was not observed and must not grant mastery or claim interview readiness.
-
-To verify recovery, repeat the flow and use `/stop` after saving at least one line in clarification.
-Exit openLearn, then run:
-
-```bash
-openlearn resume technical-interview-prep
-```
-
-The resumed placement must return to clarification, report the saved draft line count, and preserve `/show` output.
-Submit clarification, add at least one reasoning line, and use `/stop` again.
-The next process must return to reasoning with that draft intact and without duplicating the completed clarification evidence.
-EOF or an interrupted terminal should preserve the same state.
-
-Initial placement must never open an editor, create a drill workspace, execute code, or require Docker or Podman.
-Existing coding-placement v1 and v2 records remain readable.
-Resuming one must offer the recommended short reasoning placement, continued legacy placement, or a safe exit, and must confirm before abandoning an active legacy activity.
-
-To test the providerless boundary, temporarily remove provider configuration before submitting the final reasoning section.
-Placement must complete successfully, confirm that it is saved, and print `openlearn init` plus the exact resume command.
-Provider setup is required for course planning and teaching, not for placement.
-
-Restore the provider or enable deterministic mock teaching:
-
-```bash
 export OPENLEARN_MOCK=1
+openlearn web --no-browser
+```
+
+Open the printed loopback URL.
+Choose Technical Interview Prep from the starter courses.
+The setup must describe placement as a short confidence survey.
+It must offer Start placement, Skip placement, and a back action.
+It must not ask for an editor, container runtime, or executable coding sample.
+
+## Complete rapid placement
+
+Choose a role family, target level, and interview focus.
+Coding, balanced, and system-design focuses must show different relevant topics.
+
+Rate one visible topic at a time from 1 through 5.
+Selecting a value must advance immediately.
+Review all ratings at the end, change one answer, and submit.
+
+The proposed course path must start with a useful technical topic.
+Communication, edge cases, complexity, and testing should appear alongside technical lessons instead of forming a long behavior-first opening.
+
+Choose Change course outline.
+The editor must limit changes to the supported role, level, focus, schedule, confidence, pacing, and optional-topic controls.
+Preview the new path before confirming it.
+
+Repeat once with Skip placement.
+Skipping must create a conservative route without claiming mastery, readiness, or coding fluency.
+
+## Verify the first lesson
+
+Confirm the course path and wait for the first lesson.
+The lesson title must name the current technical idea.
+The first card must teach that idea before asking the learner to use it.
+
+When a check is present, verify these actions:
+
+- Send answer submits the learner's response.
+- I understand this - next concept advances without awarding mastery or marking the check as passed.
+- Review this later defers the concept and explains that it will return.
+- Ask a question opens side chat without replacing the lesson.
+
+Choose I understand this - next concept.
+The old check must leave the screen when generation starts.
+The next lesson must replace the old card automatically.
+The new check must appear only in its styled check box.
+There must not be two visible checks or a second Show next lesson step.
+
+Submit one answer on another lesson.
+The saved answer must remain visible until feedback loads.
+Feedback must replace the response area cleanly and keep the next response field usable.
+
+## Verify side chat
+
+Open Chat, ask about the visible lesson, and submit.
+The answer must appear in the side panel while the lesson stays visible.
+The question must remain tied to the lesson occurrence that was open when it was asked.
+
+Click Chat again.
+The side panel must close and the lesson must return to its normal width.
+Open it once more and confirm the conversation remains available.
+
+## Verify provider recovery
+
+Use only mock mode, a temporary local endpoint, or a non-secret test provider account.
+Never enter a maintainer credential.
+
+Start a lesson transition and make the endpoint unavailable.
+The committed lesson and saved target must remain available.
+The page must offer retry and provider-settings recovery without losing the course position.
+
+Restore the endpoint and retry.
+The saved target must commit once without skipping or duplication.
+
+## Verify CLI handoff
+
+Stop the web server and keep the isolated learner home.
+
+```bash
+openlearn status technical-interview-prep
 openlearn resume technical-interview-prep
 ```
 
-With a configured provider, placement completion or the saved resume action must go directly to `Course outline` without offering the ordinary optional placement quiz.
-Accept the outline and confirm that `First lesson` plus visible lesson content is rendered.
+The CLI must show the same current topic, coverage, readiness work, and revision.
+It must not ask the model to choose a separate course position.
 
-Finally, inspect the durable result:
+Restart the web app with the same learner home.
+The course must reopen at the same committed lesson without repeating a completed target.
+
+## Inspect durable state
 
 ```bash
 openlearn interview placement technical-interview-prep status
+openlearn status technical-interview-prep
+openlearn data inventory
 ```
 
-Expected status includes `Placement: provisional` and `evidence 2/2`.
-The adjacent profile must report the coding-fluency gap as `uncertain`, require a later unaided implementation and test in the passport verification target, and set `mastery_update_applied` to false.
+Placement must report confidence-placement v4 with `mastery_update_applied: false`.
+The topic state must keep one pinned curriculum bundle and stable skill references.
+The transcript and event log must remain parseable after restarts.
 
-Real coding belongs to later course practice.
-Use a course coding drill when the learner is ready to implement, test, and revise a solution in the configured editor.
-Secure `/check` execution still requires the locally available pinned runner image plus Docker or Podman, and a controlled-editor mock-interview mode remains a later interview experience rather than an onboarding dependency.
+Create an ordinary algorithms course as a compatibility check:
 
-As an isolation check, create the ordinary algorithms starter with `openlearn new ordinary-algorithms --template algorithms`.
-It must not create an adjacent interview profile or show reasoning-placement prompts.
+```bash
+openlearn new ordinary-algorithms --goal "Learn algorithms outside interview prep" --template algorithms
+```
+
+The ordinary course must not create an interview profile, confidence survey, or interview-only recovery controls.

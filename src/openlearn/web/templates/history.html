@@ -1,5 +1,5 @@
 <section class="history-list" aria-label="Earlier lesson moves">
-  {% for item in history.items %}
+  {% for item in history['items'] %}
   <article class="history-item">
     <p class="eyebrow">{{ item.kind or 'Lesson step' }}</p>
     {% if item.title %}<h3>{{ item.title }}</h3>{% endif %}

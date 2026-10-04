@@ -1,0 +1,10 @@
+{% if provider is defined %}
+<dialog data-provider-setup-dialog aria-labelledby="provider-recovery-title" aria-describedby="provider-recovery-reason">
+  <h2 id="provider-recovery-title" tabindex="-1">Connect your tutor</h2>
+  <p id="provider-recovery-reason" data-provider-recovery-reason>Your lesson input stays here while you test the connection.</p>
+  <div class="provider-dialog-form">
+    {% with provider_recovery=true %}{% include "provider_form.html" %}{% endwith %}
+  </div>
+  <button class="secondary-action" type="button" data-provider-setup-cancel>{{ provider_recovery_cancel_label or 'Cancel and return to lesson' }}</button>
+</dialog>
+{% endif %}

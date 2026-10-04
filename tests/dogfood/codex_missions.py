@@ -47,6 +47,7 @@ def run_codex_draft_course_mission(
     command: Sequence[str | Path],
     decision_source: DecisionSource,
     variant: CodexMissionVariant,
+    limits: ExplorerLimits | None = None,
 ) -> CodexMissionOutcome:
     """Drive one isolated draft mission with externally supplied decisions."""
     normalized_command = tuple(str(part) for part in command)
@@ -85,7 +86,8 @@ def run_codex_draft_course_mission(
             "Save this course draft for later?" in output
             and verify_single_matching_draft(home)
         ),
-        limits=ExplorerLimits(
+        limits=limits
+        or ExplorerLimits(
             max_turns=12 if variant is CodexMissionVariant.DIRECT else 14,
             max_elapsed_seconds=300,
             observation_chars=12_000,

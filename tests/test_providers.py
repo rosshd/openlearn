@@ -188,7 +188,7 @@ def test_provider_validation_rejects_multiline_key_without_exposing_it(caplog) -
 
 def test_presets_keep_openrouter_recommendation_and_local_keyless_behavior() -> None:
     openrouter = PROVIDER_PRESETS["openrouter"]
-    assert openrouter.default_model == "google/gemini-2.5-flash-lite"
+    assert openrouter.default_model == "google/gemini-3.1-flash-lite"
     assert openrouter.key_required is True
     assert preset_for_base_url("http://127.0.0.1:8000/v1").key_required is False
 

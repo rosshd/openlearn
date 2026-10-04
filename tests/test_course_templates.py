@@ -55,6 +55,41 @@ class CourseTemplateTests(unittest.TestCase):
 
         self.assertEqual(template.entry_mode, "interview_prep")
 
+    def test_loads_valid_specialization_metadata(self) -> None:
+        self.write_template(
+            specializes_template_ids=["git"],
+            specializes_tags=["data-structures", "graphs"],
+        )
+
+        template = course_templates.load_course_template("python-basics")
+
+        self.assertEqual(template.specializes_template_ids, ("git",))
+        self.assertEqual(template.specializes_tags, ("data-structures", "graphs"))
+
+    def test_rejects_non_normalized_specialization_tags(self) -> None:
+        for tags in (["Graphs"], ["graph search"], ["graphs", "graphs"]):
+            with self.subTest(tags=tags):
+                self.write_template(specializes_tags=tags)
+                with self.assertRaisesRegex(
+                    course_templates.CourseTemplateError,
+                    "specializes_tags must",
+                ):
+                    course_templates.load_course_template("python-basics")
+
+    def test_technical_interview_template_projects_its_versioned_bundle(self) -> None:
+        self.resource_patch.stop()
+        try:
+            template = course_templates.load_course_template("technical-interview-prep")
+        finally:
+            self.resource_patch.start()
+
+        self.assertIsNotNone(template.curriculum_bundle)
+        assert template.curriculum_bundle is not None
+        self.assertEqual(template.curriculum_bundle.bundle_id, "technical-interview")
+        self.assertEqual(template.curriculum_bundle.bundle_version, "1.0.0")
+        self.assertEqual(template.units[0], "Linear Foundations: Arrays and Hashing")
+        self.assertNotIn("Interview Problem Solving", template.units)
+
     def test_rejects_unknown_or_malformed_entry_mode(self) -> None:
         for entry_mode in ("quiz", " interview_prep", 1, ""):
             with self.subTest(entry_mode=entry_mode):

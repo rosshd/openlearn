@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -57,6 +58,80 @@ class CalibrationContext:
 
 
 @dataclass(frozen=True)
+class CoursePathItem:
+    identity: str
+    title: str
+    unit_title: str
+    status: Literal["covered", "current", "upcoming"]
+    requirement: Literal["required", "optional"] = "required"
+
+
+@dataclass(frozen=True)
+class FirstPassCoverage:
+    covered: int
+    total: int
+    percent: int
+    summary: str
+
+
+@dataclass(frozen=True)
+class ActionableReview:
+    due: int = 0
+    next_retrieval: str | None = None
+    kind: Literal["scheduled", "canonical"] | None = None
+
+    @property
+    def actionable(self) -> bool:
+        return self.due > 0
+
+
+@dataclass(frozen=True)
+class CourseReviewItem:
+    concept: str
+    due: str
+    difficulty: str
+
+
+@dataclass(frozen=True)
+class CourseReviewQueue:
+    slug: str
+    items: tuple[CourseReviewItem, ...]
+
+    @property
+    def actionable(self) -> bool:
+        return bool(self.items)
+
+
+@dataclass(frozen=True)
+class CourseContinuationBlocker:
+    code: Literal["placement", "course-plan"]
+    message: str
+    action: str
+
+
+@dataclass(frozen=True)
+class CourseRecommendation:
+    kind: Literal["curated", "generated-proposal"]
+    title: str
+    goal: str
+    template_id: str | None = None
+
+
+@dataclass(frozen=True)
+class CourseLibraryProjection:
+    path: tuple[CoursePathItem, ...]
+    current: CoursePathItem | None
+    upcoming: tuple[CoursePathItem, ...]
+    coverage: FirstPassCoverage
+    review: ActionableReview
+    weak_areas: tuple[str, ...]
+    first_pass_complete: bool
+    readiness_summary: str
+    recommendation: CourseRecommendation | None = None
+    blocker: CourseContinuationBlocker | None = None
+
+
+@dataclass(frozen=True)
 class CourseCard:
     slug: str
     title: str
@@ -66,7 +141,9 @@ class CourseCard:
     completed: bool
     updated_at: str
     progress: CourseProgress
+    library: CourseLibraryProjection
     template_id: str | None = None
+    interview: InterviewCardProjection | None = None
 
     @property
     def incomplete(self) -> bool:
@@ -90,9 +167,656 @@ class CourseSnapshot:
 class DashboardSnapshot:
     courses: tuple[CourseCard, ...]
     resume: CourseCard | None
+    selected: CourseCard | None
+    selected_slug: str | None
     active_slug: str | None
     reviews: ReviewProgress
     generated_at: str
+
+
+@dataclass(frozen=True)
+class InterviewCurriculumPosition:
+    unit_id: str
+    section_id: str
+    skill_id: str
+    emphasis: str
+    review_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class InterviewConceptProjection:
+    unit_id: str
+    unit_label: str
+    section_id: str
+    section_label: str
+    graph_id: str
+    graph_version: str
+    mastery_policy_version: str
+    skill_id: str
+    skill_label: str
+    emphasis: str
+    instruction_status: str
+    requirement: str
+
+    @property
+    def label(self) -> str:
+        return f"{self.unit_label} / {self.section_label} / {self.skill_label}"
+
+
+@dataclass(frozen=True)
+class InterviewCommittedLesson:
+    lesson_id: str
+    title: str
+    content: str
+
+
+@dataclass(frozen=True)
+class InterviewCoverageProjection:
+    covered: int
+    total: int
+    percent: int
+    summary: str
+
+
+@dataclass(frozen=True)
+class InterviewReadinessProjection:
+    due: int
+    deferred: int
+    verify: int
+    weak: int
+    total: int
+    summary: str
+    next_retrieval: str | None = None
+
+
+InterviewOperationAction = Literal[
+    "retry",
+    "cancel",
+    "provider-settings",
+    "refresh",
+    "adopt",
+    "practice",
+    "continue",
+    "skip",
+    "question",
+]
+
+
+@dataclass(frozen=True)
+class InterviewOperationProjection:
+    state: Literal[
+        "reserved",
+        "generating",
+        "generated",
+        "committed",
+        "provider-error",
+        "busy",
+        "stale-conflict",
+        "caught-up",
+    ]
+    submission_id: str | None
+    message: str
+    actions: tuple[InterviewOperationAction, ...]
+    error_code: str | None = None
+
+
+@dataclass(frozen=True)
+class InterviewLearningProjection:
+    slug: str
+    title: str
+    revision: int
+    position: InterviewConceptProjection
+    committed_lesson: InterviewCommittedLesson
+    next_target: InterviewConceptProjection | None
+    operation: InterviewOperationProjection
+    coverage: InterviewCoverageProjection
+    readiness: InterviewReadinessProjection
+    pending_prompt: str = ""
+    saved_response: str = ""
+    deferred_skill: InterviewConceptProjection | None = None
+    deferred_explanation: str | None = None
+
+
+@dataclass(frozen=True)
+class InterviewCardProjection:
+    """Lightweight canonical progress used by course-list cards."""
+
+    position: InterviewConceptProjection
+    coverage: InterviewCoverageProjection
+    readiness: InterviewReadinessProjection
+
+
+def _concept_projection(
+    canonical: Mapping[str, object], cursor_or_target: Mapping[str, object]
+) -> InterviewConceptProjection:
+    from openlearn import interview_curriculum
+
+    route = canonical.get("route")
+    skills = route.get("skills") if isinstance(route, Mapping) else None
+    ref = cursor_or_target.get("skill_ref")
+    skill_id = ref.get("skill_id") if isinstance(ref, Mapping) else None
+    if not isinstance(skills, list) or not isinstance(skill_id, str):
+        raise ValueError("interview curriculum position is malformed")
+    identity_keys = (
+        "graph_id",
+        "graph_version",
+        "mastery_policy_version",
+        "skill_id",
+    )
+
+    def matches_ref(value: object) -> bool:
+        if not isinstance(value, Mapping):
+            return False
+        value_ref = value.get("skill_ref")
+        return isinstance(value_ref, Mapping) and all(
+            value_ref.get(key) == ref.get(key) for key in identity_keys
+        )
+
+    item = next((value for value in skills if matches_ref(value)), None)
+    if not isinstance(item, Mapping) or not isinstance(ref, Mapping):
+        raise ValueError("interview curriculum position is absent from its route")
+    bundle = interview_curriculum.load_pinned_bundle(
+        str(canonical["bundle_id"]), str(canonical["bundle_version"])
+    )
+    graph = bundle.graph_registry.graph(
+        str(ref["graph_id"]),
+        str(ref["graph_version"]),
+        str(ref["mastery_policy_version"]),
+    )
+    skill = graph.skill(skill_id)
+    return InterviewConceptProjection(
+        unit_id=str(item["unit_id"]),
+        unit_label=str(item.get("unit_label") or item["unit_id"]),
+        section_id=str(item["section_id"]),
+        section_label=str(item.get("section_label") or item["section_id"]),
+        graph_id=str(ref["graph_id"]),
+        graph_version=str(ref["graph_version"]),
+        mastery_policy_version=str(ref["mastery_policy_version"]),
+        skill_id=skill_id,
+        skill_label=skill.name,
+        emphasis=str(
+            cursor_or_target.get("depth_mode") or item.get("depth_mode") or "learn"
+        ).title(),
+        instruction_status=str(
+            cursor_or_target.get("instruction_status")
+            or item.get("instruction_status")
+            or "uncovered"
+        ),
+        requirement=str(item.get("requirement") or "required"),
+    )
+
+
+def _learning_positions(
+    canonical: Mapping[str, object],
+) -> tuple[
+    InterviewConceptProjection,
+    InterviewConceptProjection | None,
+    Mapping[str, object] | None,
+]:
+    active_raw = canonical.get("active_operation")
+    active = active_raw if isinstance(active_raw, Mapping) else None
+    cursor = canonical.get("cursor")
+    if not isinstance(cursor, Mapping):
+        raise ValueError("interview curriculum cursor is malformed")
+    committed_target = canonical.get("committed_target")
+    committed_cursor = committed_target if isinstance(committed_target, Mapping) else cursor
+    if active is not None and not isinstance(committed_target, Mapping):
+        rollback = active.get("rollback")
+        rollback_cursor = rollback.get("cursor") if isinstance(rollback, Mapping) else None
+        rollback_value = (
+            rollback_cursor.get("value")
+            if isinstance(rollback_cursor, Mapping) and rollback_cursor.get("present") is True
+            else None
+        )
+        if isinstance(rollback_value, Mapping):
+            committed_cursor = rollback_value
+    position = _concept_projection(canonical, committed_cursor)
+    target = active.get("target") if active is not None else None
+    next_target = _concept_projection(canonical, target) if isinstance(target, Mapping) else None
+    return position, next_target, active
+
+
+def _committed_lesson(
+    body: str,
+    position: InterviewConceptProjection,
+    canonical: Mapping[str, object],
+) -> InterviewCommittedLesson:
+    from openlearn import cli
+    from openlearn import interview_curriculum
+
+    _context, session_log = cli.split_session_log(body)
+    latest = cli.last_tutor_lesson_entry_from_entries(cli.session_entries(session_log))
+    content = latest[1]["response"] if latest is not None else ""
+    committed_target = canonical.get("committed_target")
+    if isinstance(committed_target, Mapping):
+        target = dict(committed_target)
+        target.setdefault("skill_label", position.skill_label)
+        target.setdefault("unit_label", position.unit_label)
+        target.setdefault("section_label", position.section_label)
+        try:
+            response_error = interview_curriculum.target_response_error(content, target)
+        except interview_curriculum.CurriculumBundleError:
+            response_error = None
+        if response_error is not None:
+            content = interview_curriculum.deterministic_target_fallback(target)
+    lesson_id = (
+        cli.tutor_lesson_entry_id(latest[1])
+        if latest is not None
+        else f"lesson_{position.skill_id.replace('.', '_')}"
+    )
+    return InterviewCommittedLesson(
+        lesson_id=lesson_id,
+        title=position.skill_label,
+        content=content,
+    )
+
+
+def _evidence_set(evidence: Mapping[str, object], key: str) -> set[str]:
+    values = evidence.get(key)
+    return (
+        {value for value in values if isinstance(value, str)} if isinstance(values, list) else set()
+    )
+
+
+def _learning_progress(
+    canonical: Mapping[str, object], metadata: Mapping[str, object]
+) -> tuple[
+    InterviewCoverageProjection,
+    InterviewReadinessProjection,
+    list[Mapping[str, object]],
+    list[Mapping[str, object]],
+]:
+    route_skills, counted_ids = _accepted_route_skills(canonical)
+    evidence_raw = canonical.get("evidence")
+    evidence = evidence_raw if isinstance(evidence_raw, Mapping) else {}
+    exposed = _evidence_set(evidence, "exposed")
+    ready = _evidence_set(evidence, "ready")
+    due_ids = _evidence_set(evidence, "due_review") & counted_ids
+    weak_ids = _evidence_set(evidence, "weak") & counted_ids
+    covered = len((exposed | ready) & counted_ids)
+    total = len(counted_ids)
+    coverage = InterviewCoverageProjection(
+        covered=covered,
+        total=total,
+        percent=round(covered / total * 100) if total else 0,
+        summary=(
+            f"{covered} of {total} accepted route skills covered once."
+            if total
+            else "First-pass coverage starts with the first committed lesson."
+        ),
+    )
+    deferred_raw = canonical.get("deferred")
+    deferred_values = (
+        [value for value in deferred_raw if isinstance(value, Mapping)]
+        if isinstance(deferred_raw, list)
+        else []
+    )
+    deferred_ids = {
+        str(value["skill_id"])
+        for value in deferred_values
+        if isinstance(value.get("skill_id"), str) and value["skill_id"] in counted_ids
+    }
+    verify_ids = {
+        str(item["skill_ref"]["skill_id"])
+        for item in route_skills
+        if isinstance(item.get("skill_ref"), Mapping)
+        and item.get("depth_mode") == "verify"
+        and item["skill_ref"].get("skill_id") in counted_ids - ready
+    }
+    work_ids = due_ids | deferred_ids | verify_ids | weak_ids
+    due_labels = {
+        _concept_projection(canonical, item).skill_label.casefold()
+        for item in route_skills
+        if isinstance(item.get("skill_ref"), Mapping)
+        and item["skill_ref"].get("skill_id") in due_ids
+    }
+    review_due = metadata.get("review_due")
+    due_dates = (
+        sorted(
+            str(item["due"])
+            for item in review_due
+            if isinstance(item, Mapping)
+            and isinstance(item.get("due"), str)
+            and isinstance(item.get("concept"), str)
+            and (item["concept"] in due_ids or item["concept"].casefold() in due_labels)
+        )
+        if isinstance(review_due, list)
+        else []
+    )
+    readiness = InterviewReadinessProjection(
+        due=len(due_ids),
+        deferred=len(deferred_ids),
+        verify=len(verify_ids),
+        weak=len(weak_ids),
+        total=len(work_ids),
+        summary=(
+            f"{len(work_ids)} readiness item{'s' if len(work_ids) != 1 else ''}: "
+            f"{len(due_ids)} due, {len(deferred_ids)} deferred, "
+            f"{len(verify_ids)} to verify."
+        ),
+        next_retrieval=due_dates[0] if due_dates else None,
+    )
+    return coverage, readiness, route_skills, deferred_values
+
+
+def _accepted_route_skills(
+    canonical: Mapping[str, object],
+) -> tuple[list[Mapping[str, object]], set[str]]:
+    route = canonical.get("route")
+    route_skills_raw = route.get("skills") if isinstance(route, Mapping) else None
+    route_skills = (
+        [item for item in route_skills_raw if isinstance(item, Mapping)]
+        if isinstance(route_skills_raw, list)
+        else []
+    )
+    has_explicit_optional = isinstance(route, Mapping) and "optional_skill_ids" in route
+    explicit_optional = route.get("optional_skill_ids") if isinstance(route, Mapping) else None
+    accepted_optional = (
+        {value for value in explicit_optional if isinstance(value, str)}
+        if has_explicit_optional and isinstance(explicit_optional, list)
+        else {
+            str(item["skill_ref"]["skill_id"])
+            for item in route_skills
+            if item.get("requirement") == "optional" and isinstance(item.get("skill_ref"), Mapping)
+        }
+    )
+    counted_ids = {
+        str(item["skill_ref"]["skill_id"])
+        for item in route_skills
+        if isinstance(item.get("skill_ref"), Mapping)
+        and (
+            item.get("requirement") == "required"
+            or item["skill_ref"].get("skill_id") in accepted_optional
+        )
+    }
+    return route_skills, counted_ids
+
+
+def interview_course_path(
+    canonical: Mapping[str, object],
+) -> tuple[CoursePathItem, ...]:
+    """Project one accepted interview route without reading lesson history."""
+    route_skills, counted_ids = _accepted_route_skills(canonical)
+    evidence_raw = canonical.get("evidence")
+    evidence = evidence_raw if isinstance(evidence_raw, Mapping) else {}
+    covered_ids = (
+        _evidence_set(evidence, "exposed") | _evidence_set(evidence, "ready")
+    ) & counted_ids
+    cursor_raw = canonical.get("cursor")
+    cursor = cursor_raw if isinstance(cursor_raw, Mapping) else {}
+    cursor_ref = cursor.get("skill_ref")
+    current_id = (
+        str(cursor_ref.get("skill_id"))
+        if isinstance(cursor_ref, Mapping) and isinstance(cursor_ref.get("skill_id"), str)
+        else ""
+    )
+    items: list[CoursePathItem] = []
+    for item in route_skills:
+        ref = item.get("skill_ref")
+        skill_id = ref.get("skill_id") if isinstance(ref, Mapping) else None
+        if not isinstance(skill_id, str) or skill_id not in counted_ids:
+            continue
+        concept = _concept_projection(canonical, item)
+        status: Literal["covered", "current", "upcoming"]
+        if skill_id == current_id:
+            status = "current"
+        elif skill_id in covered_ids:
+            status = "covered"
+        else:
+            status = "upcoming"
+        items.append(
+            CoursePathItem(
+                identity=skill_id,
+                title=concept.skill_label,
+                unit_title=concept.unit_label,
+                status=status,
+                requirement=("optional" if item.get("requirement") == "optional" else "required"),
+            )
+        )
+    return tuple(items)
+
+
+def _learning_operation(
+    canonical: Mapping[str, object],
+    state: Mapping[str, object],
+    active: Mapping[str, object] | None,
+    readiness: InterviewReadinessProjection,
+) -> tuple[int, InterviewOperationProjection]:
+    from openlearn import interview_curriculum
+
+    internal_raw = state.get("_openlearn_internal")
+    internal = internal_raw if isinstance(internal_raw, Mapping) else {}
+    revision_raw = internal.get("course_revision")
+    revision = revision_raw if isinstance(revision_raw, int) and revision_raw >= 0 else 0
+    last_error_raw = internal.get("last_turn_error")
+    last_error = last_error_raw if isinstance(last_error_raw, Mapping) else None
+    active_internal_raw = internal.get("active_turn")
+    active_internal = active_internal_raw if isinstance(active_internal_raw, Mapping) else None
+    submission_id = (
+        str(active.get("submission_id"))
+        if active is not None and isinstance(active.get("submission_id"), str)
+        else None
+    )
+    operation_state: Literal[
+        "reserved",
+        "generating",
+        "generated",
+        "committed",
+        "provider-error",
+        "busy",
+        "stale-conflict",
+        "caught-up",
+    ]
+    if active is not None:
+        error_matches = last_error is not None and last_error.get("submission_id") == submission_id
+        if error_matches:
+            operation_state = "provider-error"
+            message = "The next target is saved. Retry without advancing again."
+            actions = ("retry", "cancel", "provider-settings")
+        elif (
+            active_internal is not None
+            and isinstance(active_internal.get("owner_pid"), int)
+            and active_internal.get("owner_pid") != os.getpid()
+        ):
+            operation_state = "busy"
+            message = "Another interface is finishing the saved next target."
+            actions = ("refresh", "adopt", "cancel")
+        else:
+            raw_status = str(
+                active_internal.get("status")
+                if active_internal is not None
+                else active.get("status") or "reserved"
+            )
+            operation_state = (
+                "generated"
+                if raw_status == "generated"
+                else "generating"
+                if raw_status in {"judging", "generating", "validating"}
+                else "reserved"
+            )
+            message = "Preparing the saved next curriculum target."
+            actions = ("cancel",)
+    elif last_error is not None and last_error.get("code") == "course_revision_changed":
+        operation_state = "stale-conflict"
+        message = "Progress changed elsewhere. Reload the canonical lesson position."
+        actions = ("refresh",)
+        submission_id = str(last_error.get("submission_id") or "") or None
+    else:
+        resolution = interview_curriculum.resolve_progression_target(canonical, intent="continue")
+        if resolution.caught_up:
+            operation_state = "caught-up"
+            message = (
+                f"You are caught up. Next retrieval: {readiness.next_retrieval}."
+                if readiness.next_retrieval
+                else "You are caught up. No retrieval is scheduled yet."
+            )
+            actions = ("practice",)
+        else:
+            operation_state = "committed"
+            message = "Current lesson committed locally."
+            actions = ("continue", "skip", "question")
+    return revision, InterviewOperationProjection(
+        state=operation_state,
+        submission_id=submission_id,
+        message=message,
+        actions=actions,
+        error_code=(
+            str(last_error.get("code"))
+            if last_error is not None and isinstance(last_error.get("code"), str)
+            else None
+        ),
+    )
+
+
+def _deferred_projection(
+    canonical: Mapping[str, object],
+    route_skills: list[Mapping[str, object]],
+    deferred_values: list[Mapping[str, object]],
+) -> tuple[InterviewConceptProjection | None, str | None]:
+    if not deferred_values:
+        return None, None
+    deferred_id = deferred_values[-1].get("skill_id")
+
+    def is_deferred_item(item: Mapping[str, object]) -> bool:
+        skill_ref = item.get("skill_ref")
+        return isinstance(skill_ref, Mapping) and skill_ref.get("skill_id") == deferred_id
+
+    deferred_item = next(
+        (item for item in route_skills if is_deferred_item(item)),
+        None,
+    )
+    if not isinstance(deferred_item, Mapping):
+        return None, None
+    return (
+        _concept_projection(
+            canonical,
+            {
+                "skill_ref": deferred_item["skill_ref"],
+                "instruction_status": "deferred",
+            },
+        ),
+        "Skipped for now without mastery credit. It returns after another "
+        "curriculum target or in a new study session.",
+    )
+
+
+def interview_learning(slug: str) -> InterviewLearningProjection | None:
+    """Return the one typed curriculum/lesson projection shared by CLI and web."""
+    from openlearn import cli
+    from openlearn.courses import interview_learning_source
+
+    source = interview_learning_source(slug)
+    if source is None:
+        return None
+    state = source["state"]
+    metadata = source["metadata"]
+    body = source["body"]
+    assert isinstance(state, dict) and isinstance(metadata, dict) and isinstance(body, str)
+    metadata = cli.merge_topic_state(cli.normalize_topic_metadata(metadata, slug), state)
+    canonical = state["interview_curriculum"]
+    assert isinstance(canonical, dict)
+    position, next_target, active = _learning_positions(canonical)
+    lesson = _committed_lesson(body, position, canonical)
+    stored_prompt = (
+        str(metadata["pending_question"].get("question") or "")
+        if isinstance(metadata.get("pending_question"), Mapping)
+        else ""
+    )
+    lesson_prompt = cli.extract_pending_question_text(lesson.content)
+    pending_prompt = lesson_prompt if stored_prompt and lesson_prompt else stored_prompt
+    coverage, readiness, route_skills, deferred_values = _learning_progress(canonical, metadata)
+    revision, operation = _learning_operation(canonical, state, active, readiness)
+    deferred_skill, deferred_explanation = _deferred_projection(
+        canonical, route_skills, deferred_values
+    )
+    return InterviewLearningProjection(
+        slug=slug,
+        title=str(metadata.get("topic") or slug.replace("-", " ").title()),
+        revision=revision,
+        position=position,
+        committed_lesson=lesson,
+        next_target=next_target,
+        operation=operation,
+        coverage=coverage,
+        readiness=readiness,
+        pending_prompt=pending_prompt,
+        saved_response=(
+            str(state.get("pending_learner_prompt") or "")
+            if isinstance(state.get("pending_learner_prompt"), str)
+            else ""
+        ),
+        deferred_skill=deferred_skill,
+        deferred_explanation=deferred_explanation,
+    )
+
+
+def interview_learning_card(slug: str) -> InterviewCardProjection | None:
+    """Return canonical card metrics without parsing the lesson transcript."""
+    from openlearn.courses import interview_learning_source
+
+    source = interview_learning_source(slug, include_body=False)
+    if source is None:
+        return None
+    return interview_learning_card_projection(source["state"], source["metadata"])
+
+
+def interview_learning_card_projection(
+    state_value: object, metadata_value: object
+) -> InterviewCardProjection:
+    """Project dashboard metrics from an already recovery-fenced course read."""
+    if not isinstance(state_value, dict) or not isinstance(metadata_value, dict):
+        raise ValueError("interview learning card source is malformed")
+    state = state_value
+    metadata = metadata_value
+    canonical = state["interview_curriculum"]
+    if not isinstance(canonical, dict):
+        raise ValueError("canonical interview curriculum is malformed")
+    position, _next_target, _active = _learning_positions(canonical)
+    coverage, readiness, _route_skills, _deferred_values = _learning_progress(canonical, metadata)
+    return InterviewCardProjection(
+        position=position,
+        coverage=coverage,
+        readiness=readiness,
+    )
+
+
+def advance_interview_curriculum(
+    slug: str,
+    text: str,
+    *,
+    intent: Literal["continue", "skip", "practice"] = "continue",
+    submission_id: str | None = None,
+    expected_revision: int | None = None,
+    model: str | None = None,
+):
+    """Run one shared deterministic interview-curriculum navigation turn."""
+    from openlearn import tutor_service
+
+    normalized = {
+        "skip": "Skip for now and continue to the next curriculum concept.",
+        "practice": "Practice now using a covered curriculum concept.",
+    }.get(intent, text)
+    return tutor_service.submit_turn(
+        slug,
+        normalized,
+        intent="navigation",
+        submission_id=submission_id,
+        expected_revision=expected_revision,
+        model=model,
+        progression_intent=intent,
+    )
+
+
+def resume_interview_progression(slug: str, *, model: str | None = None):
+    from openlearn import tutor_service
+
+    return tutor_service.resume_interview_progression(slug, model=model)
+
+
+def cancel_interview_progression(slug: str, submission_id: str) -> None:
+    from openlearn import tutor_service
+
+    tutor_service.cancel_interview_progression(slug, submission_id)
 
 
 @dataclass(frozen=True)
@@ -126,6 +850,100 @@ class CourseCreationRequest:
 class CourseCreationResult:
     course: CourseSnapshot
     created: bool
+
+
+@dataclass(frozen=True)
+class FollowUpProposal:
+    source_slug: str
+    submission_id: str
+    state: Literal["pending", "ready", "error", "confirmed"]
+    interests: str
+    weak_areas: tuple[str, ...]
+    title: str = ""
+    goal: str = ""
+    error_code: str | None = None
+    error_message: str | None = None
+    created_slug: str | None = None
+    replayed: bool = False
+
+
+@dataclass(frozen=True)
+class FollowUpCourseResult:
+    source_slug: str
+    submission_id: str
+    course_slug: str
+    created: bool
+
+
+CourseActivationDestination = Literal[
+    "setup", "placement", "initialization", "recovery", "focus"
+]
+
+
+@dataclass(frozen=True)
+class CourseActivationResult:
+    slug: str
+    destination: CourseActivationDestination
+
+
+@dataclass(frozen=True)
+class CourseSettingsChange:
+    """Learner-facing course settings; ``None`` preserves the saved value."""
+
+    title: str | None = None
+    goal: str | None = None
+    difficulty: Literal["efficient", "proficient", "deep"] | None = None
+    weekly_minutes: int | None = None
+    session_minutes: int | None = None
+    outline: str | None = None
+    interview_fields: Mapping[str, object] | None = None
+
+
+@dataclass(frozen=True)
+class CourseSettingsPreview:
+    slug: str
+    topic_generation: str
+    expected_revision: int
+    expected_profile_revision: int | None
+    title: str
+    goal: str
+    difficulty: Literal["efficient", "proficient", "deep"]
+    weekly_minutes: int
+    session_minutes: int
+    outline: str | None
+    interview_fields: tuple[tuple[str, object], ...]
+    payload_hash: str
+
+
+@dataclass(frozen=True)
+class CourseSettingsResult:
+    slug: str
+    revision: int
+    receipt_id: str
+    replayed: bool = False
+
+
+class CourseDeletionConfirmationError(ValueError):
+    """The learner did not repeat the exact course identity."""
+
+
+@dataclass(frozen=True)
+class CourseDeletionPreview:
+    slug: str
+    title: str
+    topic_generation: str
+    affected_data: tuple[str, ...]
+    backup_scope: Literal["whole-home"] = "whole-home"
+
+
+@dataclass(frozen=True)
+class CourseDeletionResult:
+    slug: str
+    title: str
+    topic_generation: str
+    deleted: bool
+    replayed: bool
+    next_selected_slug: str | None
 
 
 @dataclass(frozen=True)
@@ -177,9 +995,7 @@ def set_provider_api_key(
 ) -> ProviderSnapshot:
     from openlearn import providers
 
-    return _provider_snapshot(
-        providers.set_saved_api_key(api_key, home=home, environ=environ)
-    )
+    return _provider_snapshot(providers.set_saved_api_key(api_key, home=home, environ=environ))
 
 
 def set_provider_model(
@@ -198,9 +1014,7 @@ def set_provider_base_url(
 ) -> ProviderSnapshot:
     from openlearn import providers
 
-    return _provider_snapshot(
-        providers.set_saved_base_url(base_url, home=home, environ=environ)
-    )
+    return _provider_snapshot(providers.set_saved_base_url(base_url, home=home, environ=environ))
 
 
 def remove_provider_api_key(
@@ -211,11 +1025,13 @@ def remove_provider_api_key(
     return _provider_snapshot(providers.remove_saved_api_key(home=home, environ=environ))
 
 
-def dashboard(*, now: datetime | None = None) -> DashboardSnapshot:
+def dashboard(
+    *, now: datetime | None = None, selected_slug: str | None = None
+) -> DashboardSnapshot:
     """Return the side-effect-free dashboard query result."""
     from openlearn.courses import dashboard_snapshot
 
-    return dashboard_snapshot(now=now)
+    return dashboard_snapshot(now=now, selected_slug=selected_slug)
 
 
 def course(slug: str) -> CourseSnapshot:
@@ -237,6 +1053,218 @@ def create_course(request: CourseCreationRequest) -> CourseCreationResult:
     return create(request)
 
 
+def course_due_reviews(slug: str, *, today_value: str | None = None) -> CourseReviewQueue:
+    """Return only the gradeable scheduled review items owned by one course."""
+    from openlearn.courses import course_due_reviews as due_reviews
+
+    return due_reviews(slug, today_value=today_value)
+
+
+def advance_course_growth(
+    slug: str,
+    *,
+    action: Literal["practice", "deepen"],
+    submission_id: str,
+    expected_revision: int | None = None,
+    model: str | None = None,
+):
+    """Open practice or deeper study without treating navigation as mastery evidence."""
+    from openlearn import cli, tutor_service
+
+    if action not in {"practice", "deepen"}:
+        raise ValueError("course growth action must be practice or deepen")
+    state = cli.load_state(slug)
+    interview_course = isinstance(state.get("interview_curriculum"), dict)
+    prompt = (
+        "Go deeper on a weak course concept with a focused example and check."
+        if action == "deepen"
+        else "Practice a due or weak course concept without advancing the course path."
+    )
+    return tutor_service.submit_turn(
+        slug,
+        prompt,
+        intent="navigation",
+        submission_id=submission_id,
+        expected_revision=expected_revision,
+        model=model,
+        progression_intent=(action if interview_course else None),
+    )
+
+
+def request_follow_up_proposal(
+    slug: str, *, interests: str, submission_id: str
+) -> FollowUpProposal:
+    from openlearn import tutor_service
+
+    return tutor_service.request_follow_up_proposal(
+        slug, interests=interests, submission_id=submission_id
+    )
+
+
+def retry_follow_up_proposal(slug: str, submission_id: str) -> FollowUpProposal:
+    from openlearn import tutor_service
+
+    return tutor_service.retry_follow_up_proposal(slug, submission_id)
+
+
+def follow_up_proposal_status(slug: str, submission_id: str) -> FollowUpProposal | None:
+    from openlearn import tutor_service
+
+    return tutor_service.follow_up_proposal_status(slug, submission_id)
+
+
+def confirm_follow_up_proposal(
+    slug: str, submission_id: str
+) -> FollowUpCourseResult:
+    from openlearn import tutor_service
+
+    return tutor_service.confirm_follow_up_proposal(slug, submission_id)
+
+
+def activate_course(slug: str) -> CourseActivationResult:
+    """Activate a course without recording a study session or changing streaks."""
+    from openlearn.courses import activate_course as activate
+
+    return activate(slug)
+
+
+def preview_course_settings(
+    slug: str, changes: CourseSettingsChange
+) -> CourseSettingsPreview:
+    """Validate settings and return a side-effect-free, revision-fenced preview."""
+    from openlearn.courses import preview_course_settings as preview
+
+    return preview(slug, changes)
+
+
+def confirm_course_settings(
+    preview: CourseSettingsPreview, *, submission_id: str
+) -> CourseSettingsResult:
+    """Publish a previously previewed course-settings transaction."""
+    from openlearn.courses import confirm_course_settings as confirm
+
+    return confirm(preview, submission_id=submission_id)
+
+
+def replay_course_settings(
+    slug: str, *, submission_id: str, expected_payload_hash: str
+) -> CourseSettingsResult | None:
+    """Return an exact durable settings result without rebuilding a stale preview."""
+    from openlearn.courses import replay_course_settings as replay
+
+    return replay(
+        slug,
+        submission_id=submission_id,
+        expected_payload_hash=expected_payload_hash,
+    )
+
+
+def preview_course_deletion(slug: str) -> CourseDeletionPreview:
+    """Describe one permanent deletion without changing local learner data."""
+    from openlearn.courses import preview_course_deletion as preview
+
+    return preview(slug)
+
+
+def confirm_course_deletion(
+    preview: CourseDeletionPreview,
+    *,
+    confirmation_slug: str,
+    confirmation_title: str,
+) -> CourseDeletionResult:
+    """Delete exactly the previewed course after exact identity confirmation."""
+    from openlearn.courses import confirm_course_deletion as confirm
+
+    return confirm(
+        preview,
+        confirmation_slug=confirmation_slug,
+        confirmation_title=confirmation_title,
+    )
+
+
+def replay_course_deletion(
+    slug: str,
+    *,
+    confirmation_slug: str,
+    confirmation_title: str,
+    topic_generation: str,
+) -> CourseDeletionResult | None:
+    """Return an exact durable deletion result without requiring a live course."""
+    from openlearn.courses import replay_course_deletion as replay
+
+    return replay(
+        slug,
+        confirmation_slug=confirmation_slug,
+        confirmation_title=confirmation_title,
+        topic_generation=topic_generation,
+    )
+
+
+def prepare_interview_curriculum(
+    slug: str, *, boundary: Literal["preparation", "resume"] = "resume"
+) -> InterviewCurriculumPosition:
+    """Explicitly prepare or resume one canonical interview curriculum."""
+    from openlearn.courses import prepare_interview_curriculum as prepare
+
+    value = prepare(slug, boundary=boundary)
+    return InterviewCurriculumPosition(
+        unit_id=str(value["unit_id"]),
+        section_id=str(value["section_id"]),
+        skill_id=str(value["skill_id"]),
+        emphasis=str(value["emphasis"]),
+        review_reason=(
+            str(value["review_reason"]) if isinstance(value.get("review_reason"), str) else None
+        ),
+    )
+
+
+def preview_interview_curriculum_change(
+    slug: str, *, changes: Mapping[str, object] | None = None
+) -> dict[str, object]:
+    """Return a side-effect-free bounded course-outline preview."""
+    from datetime import date
+
+    from openlearn import cli, interview_curriculum, interview_prep
+
+    profile = interview_prep.load_profile(cli.interview_profile_path(slug))
+    canonical = cli.load_state(slug).get("interview_curriculum")
+    bundle = (
+        interview_curriculum.load_pinned_bundle(
+            str(canonical["bundle_id"]), str(canonical["bundle_version"])
+        )
+        if isinstance(canonical, dict)
+        else interview_curriculum.load_default_bundle()
+    )
+    return interview_prep.preview_curriculum_change(
+        profile,
+        changes=changes,
+        current_date=date.today(),
+        bundle=bundle,
+    )
+
+
+def accept_interview_curriculum(
+    slug: str,
+    *,
+    action: Literal["confirm", "skip", "change"],
+    changes: Mapping[str, object] | None = None,
+    outline: str = "",
+    submission_id: str | None = None,
+    expected_revision: int | None = None,
+) -> dict[str, object]:
+    """Persist an accepted route through the shared recoverable coordinator."""
+    from openlearn.courses import accept_interview_curriculum as accept
+
+    return accept(
+        slug,
+        action=action,
+        changes=dict(changes or {}),
+        outline=outline,
+        submission_id=submission_id,
+        expected_revision=expected_revision,
+    )
+
+
 def sync_interview_placement(slug: str) -> dict[str, object]:
     """Project durable placement evidence into the learner's local profile."""
     from openlearn import cli
@@ -245,17 +1273,12 @@ def sync_interview_placement(slug: str) -> dict[str, object]:
 
 
 def start_interview_placement(slug: str) -> dict[str, object]:
-    """Start a reasoning-placement activity and bind it to the local profile."""
+    """Start the current rapid confidence placement without presentation code."""
     from openlearn import cli, interview_prep
 
-    activity = cli._begin_interview_activity(
-        slug, lifecycle_version=interview_prep.PLACEMENT_V3
-    )
     with cli.interview_profile_write_lock(slug):
-        return interview_prep.start_placement(
+        return interview_prep.start_confidence_placement(
             cli.interview_profile_path(slug),
-            activity_id=str(activity["activity_id"]),
-            lifecycle_version=interview_prep.PLACEMENT_V3,
         )
 
 

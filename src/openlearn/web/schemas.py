@@ -8,7 +8,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from openlearn.interview_prep import DRAFT_MAX_LENGTH
+from openlearn.interview_prep import DRAFT_MAX_LENGTH, confidence_topics_for_focus
 from openlearn.data_management import (
     CREDENTIAL_CONFIRMATION,
     DELETE_CONFIRMATION,
@@ -56,16 +56,89 @@ class CourseCreateRequest(BaseModel):
         return canonical_uuid(value)
 
 
+class SourceCourseCreateRequest(CourseCreateRequest):
+    mode: Literal["course", "quick"] = "course"
+    source_kind: Literal["file", "folder", "github"]
+    source_value: str = Field(default="", max_length=2048)
+
+
+class CourseSettingsRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    goal: str = Field(min_length=1, max_length=4000)
+    difficulty: Literal["efficient", "proficient", "deep"]
+    weekly_minutes: int = Field(ge=15, le=10_080)
+    session_minutes: int = Field(ge=15, le=10_080)
+    outline: str = Field(default="", max_length=20_000)
+    role_family: str = Field(default="", max_length=64)
+    target_level: str = Field(default="", max_length=64)
+    interview_date: str = Field(default="", max_length=64)
+    interview_focus: str = Field(default="", max_length=64)
+
+    @model_validator(mode="after")
+    def valid_pace(self) -> CourseSettingsRequest:
+        if self.session_minutes > self.weekly_minutes:
+            raise ValueError("Session minutes cannot exceed weekly minutes")
+        return self
+
+
+class CourseSettingsConfirmationRequest(CourseSettingsRequest):
+    expected_payload_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    submission_id: str = Field(min_length=1, max_length=64)
+
+    @field_validator("submission_id")
+    @classmethod
+    def valid_submission_id(cls, value: str) -> str:
+        return canonical_uuid(value)
+
+
+class CourseDeletionRequest(BaseModel):
+    confirmation: Literal["delete"]
+    confirmation_slug: str = Field(min_length=1, max_length=64)
+    confirmation_title: str = Field(min_length=1, max_length=200)
+    topic_generation: str = Field(min_length=1, max_length=128)
+
+    @field_validator("confirmation_slug")
+    @classmethod
+    def valid_confirmation_slug(cls, value: str) -> str:
+        return canonical_slug(value)
+
+
+class CourseGrowthRequest(BaseModel):
+    action: Literal["practice", "deepen"]
+    submission_id: str = Field(min_length=1, max_length=64)
+
+    @field_validator("submission_id")
+    @classmethod
+    def valid_submission_id(cls, value: str) -> str:
+        return canonical_uuid(value)
+
+
+class FollowUpProposalRequest(BaseModel):
+    action: Literal["generate", "retry", "confirm", "status"] = "generate"
+    interests: str = Field(default="", max_length=2000)
+    submission_id: str = Field(min_length=1, max_length=64)
+
+    @field_validator("submission_id")
+    @classmethod
+    def valid_submission_id(cls, value: str) -> str:
+        return canonical_uuid(value)
+
+
 class TutorSubmissionRequest(BaseModel):
     intent: str
     text: str = Field(default="", max_length=32000)
     submission_id: str = Field(min_length=1, max_length=64)
     expected_revision: int = Field(ge=0)
+    source_mode: bool = False
+    source_approval: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    source_lesson_id: str | None = Field(default=None, min_length=1, max_length=96)
+    source_lesson_title: str | None = Field(default=None, min_length=1, max_length=160)
+    source_lesson_revision: int | None = Field(default=None, ge=0)
 
     @field_validator("intent")
     @classmethod
     def allowed_intent(cls, value: str) -> str:
-        if value not in {"answer", "question", "stuck", "skip", "next"}:
+        if value not in {"answer", "question", "stuck", "skip", "next", "practice"}:
             raise ValueError("Unsupported learner intent")
         return value
 
@@ -75,19 +148,64 @@ class TutorSubmissionRequest(BaseModel):
         return canonical_uuid(value)
 
 
+class ProgressionActionRequest(BaseModel):
+    action: Literal["resume", "cancel"]
+    operation_id: str
+
+    @field_validator("operation_id")
+    @classmethod
+    def valid_operation_id(cls, value: str) -> str:
+        return canonical_uuid(value)
+
+
 class PlacementRequest(BaseModel):
     action: Literal[
-        "start", "save_draft", "submit", "skip_stage", "skip", "defer", "restart"
+        "start",
+        "save_confidence",
+        "confirm_outline",
+        "preview_outline",
+        "change_outline",
+        "save_draft",
+        "submit",
+        "skip_stage",
+        "skip",
+        "restart",
     ]
     stage: str | None = Field(default=None, max_length=64)
     text: str = Field(default="", max_length=DRAFT_MAX_LENGTH)
     submission_id: str | None = Field(default=None, max_length=64)
     expected_updated_at: str | None = Field(default=None, max_length=64)
+    role_family: str = Field(default="", max_length=64)
+    target_level: str = Field(default="", max_length=64)
+    interview_focus: str = Field(default="", max_length=64)
+    ratings: dict[str, int] = Field(default_factory=dict)
+    outline: str = Field(default="", max_length=12_000)
+    expected_revision: int | None = Field(default=None, ge=0)
+    interview_date: str | None = Field(default=None, max_length=64)
+    weekly_minutes: int | None = Field(default=None, ge=1, le=10_080)
+    session_minutes: int | None = Field(default=None, ge=1, le=10_080)
+    pacing_posture_override: Literal["standard"] | None = None
+    optional_skill_ids: list[str] | None = Field(default=None, max_length=128)
 
     @field_validator("submission_id")
     @classmethod
     def valid_optional_submission_id(cls, value: str | None) -> str | None:
         return canonical_uuid(value) if value is not None else None
+
+    @model_validator(mode="after")
+    def valid_confidence_survey(self) -> PlacementRequest:
+        if self.action != "save_confidence":
+            return self
+        expected = {
+            topic_id
+            for topic_id, _label in confidence_topics_for_focus(self.interview_focus)
+        }
+        if set(self.ratings) != expected or any(
+            isinstance(rating, bool) or rating not in range(1, 6)
+            for rating in self.ratings.values()
+        ):
+            raise ValueError("Expected one 1-5 rating for every selected interview topic")
+        return self
 
 
 class ReviewGradeRequest(BaseModel):

@@ -50,7 +50,7 @@ Review it before sharing because the Markdown body and metadata can contain priv
 
 The adjacent files `<slug>.state.json` and `<slug>.events.jsonl` contain machine-managed learner state and learning history.
 They are not required to open the topic and should usually remain private.
-An opt-in `<slug>.interview.json` contains the learner's editable interview-prep profile, durable reasoning-placement draft, placement status, evidence references, and provisional course-start passport.
+An opt-in `<slug>.interview.json` contains the learner's editable interview-prep profile, rapid confidence-placement state, accepted route allocation, and any preserved legacy placement evidence.
 It is separate from the shareable Markdown topic and is never created for normal topics.
 Imported context under `learning-topics/<slug>/context/` and generated drills under `learning-topics/drills/<slug>/` are also separate from the shareable topic file.
 
@@ -70,4 +70,4 @@ The template supplies a default goal and suggested unit outline.
 An explicit `--goal` still takes precedence.
 The package template remains unchanged, and the new topic receives its own copy of the unit list.
 The bundled `technical-interview-prep` template declares interview-prep entry behavior and creates the adjacent profile with safe defaults.
-Other templates, including the ordinary `algorithms` template, do not create interview state or start reasoning placement.
+Other templates, including the ordinary `algorithms` template, do not create interview state or start confidence placement.

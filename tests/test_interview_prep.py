@@ -136,6 +136,432 @@ class InterviewPrepTests(unittest.TestCase):
         self.assertEqual(started["placement"]["next_stage"], "clarification")
         self.assertEqual(started["placement"]["rubric_version"], interview_prep.PLACEMENT_V3)
 
+    def test_confidence_placement_builds_role_aware_outline_without_awarding_mastery(
+        self,
+    ) -> None:
+        self.create()
+        started = interview_prep.start_confidence_placement(self.path, now=lambda: NOW)
+        self.assertEqual(started["placement"]["next_stage"], "confidence")
+        self.assertIsNone(started["placement"]["activity_id"])
+
+        ratings = {
+            topic_id: 3
+            for topic_id, _label in interview_prep.confidence_topics_for_focus("balanced")
+        }
+        ratings["sliding_window"] = 1
+        ratings["trees"] = 5
+        saved = interview_prep.save_confidence_survey(
+            self.path,
+            role_family="frontend",
+            target_level="senior",
+            interview_focus="balanced",
+            ratings=ratings,
+            now=lambda: NOW,
+        )
+
+        survey = saved["placement"]["survey"]
+        self.assertEqual(saved["placement"]["next_stage"], "outline")
+        preview = interview_prep.preview_curriculum_change(
+            saved,
+            current_date=NOW.date(),
+        )
+        self.assertEqual(survey["outline"], preview["outline"])
+        self.assertIn("Linear Foundations", survey["outline"])
+        self.assertIn("Sequence Patterns", survey["outline"])
+        self.assertIn("Requirements and Interfaces", survey["outline"])
+        self.assertIn("Frontend Role Extension", survey["outline"])
+        self.assertIn("Emphasis: Learn", survey["outline"])
+        self.assertIn("Locked prerequisite", survey["outline"])
+        self.assertNotIn("Interview Communication and Problem Framing", survey["outline"])
+        self.assertNotIn("Integrated Mock Interview Rounds", survey["outline"])
+        self.assertEqual(saved["profile_revision"], 2)
+        self.assertEqual(saved["placement"]["profile_revision"], 2)
+
+        completed = interview_prep.confirm_confidence_placement(
+            self.path,
+            outline=survey["outline"],
+            now=lambda: NOW,
+        )
+        result = completed["placement"]["result"]
+        self.assertEqual(completed["placement"]["status"], "provisional")
+        self.assertFalse(result["mastery_update_applied"])
+        self.assertEqual(result["patterns_marked_known"], [])
+        self.assertIn("do not establish mastery", result["uncertainty"][0])
+        allocation = completed["curriculum_allocation"]
+        self.assertEqual(allocation["boundary"], "confirmed-outline")
+        self.assertEqual(allocation["route"]["route_id"], "balanced")
+        self.assertEqual(
+            allocation["route"]["first_session"]["skill_ref"]["skill_id"],
+            "concept.arrays-strings",
+        )
+        self.assertNotIn("mastery", allocation)
+        self.assertNotIn("mastered_skills", allocation)
+        self.assertNotIn("evidence", allocation)
+        self.assertEqual(interview_prep.load_profile(self.path), completed)
+
+    def test_skip_placement_replaces_prior_confidence_with_fresh_broad_baseline(
+        self,
+    ) -> None:
+        self.create()
+        interview_prep.start_confidence_placement(self.path, now=lambda: NOW)
+        ratings = {
+            topic_id: 5
+            for topic_id, _label in interview_prep.confidence_topics_for_focus("coding")
+        }
+        saved = interview_prep.save_confidence_survey(
+            self.path,
+            role_family="backend",
+            target_level="senior",
+            interview_focus="coding",
+            ratings=ratings,
+            now=lambda: NOW,
+        )
+
+        skipped, route = interview_prep.accepted_curriculum_profile(
+            saved,
+            action="skip",
+            changes=None,
+            now=NOW,
+        )
+
+        survey = skipped["placement"]["survey"]
+        self.assertEqual(set(survey["ratings"].values()), {1})
+        self.assertTrue(all(item["depth_mode"] == "learn" for item in route["skills"][:25]))
+
+
+    def test_resume_allocation_is_idempotent_and_preserves_standard_override(
+        self,
+    ) -> None:
+        self.profile["interview_date"] = "2026-07-30"
+        self.create()
+        interview_prep.start_confidence_placement(self.path, now=lambda: NOW)
+        ratings = {pattern_id: 3 for pattern_id in interview_prep.CONFIDENCE_PATTERN_IDS}
+        saved = interview_prep.save_confidence_survey(
+            self.path,
+            role_family="backend",
+            target_level="entry",
+            interview_focus="coding",
+            ratings=ratings,
+            now=lambda: NOW,
+        )
+        confirmed = interview_prep.confirm_confidence_placement(
+            self.path,
+            outline=saved["placement"]["survey"]["outline"],
+            pacing_posture_override="standard",
+            now=lambda: NOW,
+        )
+        first = confirmed["curriculum_allocation"]
+        first_bytes = self.path.read_bytes()
+
+        resumed = interview_prep.materialize_curriculum_boundary(
+            self.path,
+            boundary="resume",
+            now=lambda: NOW,
+        )
+        second = resumed["curriculum_allocation"]
+
+        self.assertEqual(first, second)
+        self.assertEqual(first_bytes, self.path.read_bytes())
+        self.assertEqual(second["pacing_posture_override"], "standard")
+        self.assertEqual(second["route"]["pacing_posture"], "standard")
+        self.assertEqual(second["route"]["date_horizon"], "accelerated")
+
+    def test_resume_after_past_date_reallocates_same_route_for_long_term(self) -> None:
+        self.profile["interview_date"] = "2026-07-30"
+        self.create()
+
+        first = interview_prep.materialize_curriculum_boundary(
+            self.path,
+            boundary="preparation",
+            interview_focus="coding",
+            now=lambda: NOW,
+        )["curriculum_allocation"]
+        continued = interview_prep.materialize_curriculum_boundary(
+            self.path,
+            boundary="resume",
+            interview_focus="coding",
+            now=lambda: NOW + timedelta(days=4),
+        )["curriculum_allocation"]
+
+        self.assertEqual(
+            first["route"]["route_fingerprint"], continued["route"]["route_fingerprint"]
+        )
+        self.assertEqual(continued["route"]["date_horizon"], "long-term")
+        self.assertNotEqual(first["allocation_id"], continued["allocation_id"])
+
+    def test_repeated_explicit_boundary_appends_one_allocation_event(self) -> None:
+        self.create()
+
+        first = interview_prep.materialize_curriculum_boundary(
+            self.path,
+            boundary="preparation",
+            interview_focus="coding",
+            append_event=self.append,
+            now=lambda: NOW,
+        )
+        second = interview_prep.materialize_curriculum_boundary(
+            self.path,
+            boundary="resume",
+            interview_focus="coding",
+            append_event=self.append,
+            now=lambda: NOW,
+        )
+
+        self.assertEqual(first, second)
+        self.assertEqual(
+            [kind for kind, _data in self.events],
+            ["interview_curriculum_allocated"],
+        )
+
+    def test_curriculum_allocation_rejects_non_boundary_and_free_form_outline(self) -> None:
+        self.create()
+
+        with self.assertRaisesRegex(ValueError, "boundary"):
+            interview_prep.materialize_curriculum_boundary(
+                self.path,
+                boundary="dashboard-read",
+                now=lambda: NOW,
+            )
+        with self.assertRaisesRegex(ValueError, "outline"):
+            interview_prep.materialize_curriculum_boundary(
+                self.path,
+                boundary="confirmed-outline",
+                outline_change={"replacement_outline": "let the model decide"},
+                now=lambda: NOW,
+            )
+
+        interview_prep.start_confidence_placement(self.path, now=lambda: NOW)
+        ratings = {pattern_id: 3 for pattern_id in interview_prep.CONFIDENCE_PATTERN_IDS}
+        interview_prep.save_confidence_survey(
+            self.path,
+            role_family="backend",
+            target_level="entry",
+            interview_focus="coding",
+            ratings=ratings,
+            now=lambda: NOW,
+        )
+        with self.assertRaisesRegex(ValueError, "free-form"):
+            interview_prep.confirm_confidence_placement(
+                self.path,
+                outline="Replace the reviewed curriculum with whatever the model wants.",
+                now=lambda: NOW,
+            )
+
+    def test_system_design_focus_asks_and_plans_for_system_design_topics(self) -> None:
+        self.create()
+        interview_prep.start_confidence_placement(self.path, now=lambda: NOW)
+        ratings = {
+            topic_id: 3
+            for topic_id, _label in interview_prep.confidence_topics_for_focus("system_design")
+        }
+        ratings["capacity_estimation"] = 1
+        ratings["tradeoff_communication"] = 5
+
+        saved = interview_prep.save_confidence_survey(
+            self.path,
+            role_family="backend",
+            target_level="senior",
+            interview_focus="system_design",
+            ratings=ratings,
+            now=lambda: NOW,
+        )
+
+        outline = saved["placement"]["survey"]["outline"]
+        self.assertIn("Linear Foundations", outline)
+        self.assertIn("Requirements and Interfaces", outline)
+        self.assertIn("Emphasis: Learn", outline)
+        self.assertLess(
+            outline.index("Requirements and Interfaces"),
+            outline.index("Linear Foundations"),
+        )
+
+    def test_curriculum_preview_is_a_pure_projection_of_the_versioned_route(self) -> None:
+        value = self.create()
+        before = self.path.read_bytes()
+
+        coding = interview_prep.preview_curriculum_change(
+            value,
+            changes={"interview_focus": "coding"},
+            current_date=NOW.date(),
+        )
+        system = interview_prep.preview_curriculum_change(
+            value,
+            changes={"interview_focus": "system_design"},
+            current_date=NOW.date(),
+        )
+
+        self.assertEqual(before, self.path.read_bytes())
+        self.assertEqual(coding["first_cursor"]["skill_id"], "concept.arrays-strings")
+        self.assertEqual(system["first_cursor"]["skill_id"], "system.requirements-scope")
+        self.assertNotEqual(coding["route_fingerprint"], system["route_fingerprint"])
+        self.assertTrue(coding["locked_prerequisites"])
+        self.assertNotIn("Interview Communication and Problem Framing", coding["outline"])
+
+    def test_curriculum_preview_rejects_unversioned_optional_preferences(self) -> None:
+        value = self.create()
+
+        with self.assertRaisesRegex(ValueError, "optional"):
+            interview_prep.preview_curriculum_change(
+                value,
+                changes={"optional_skill_ids": ["let-the-model-decide"]},
+                current_date=NOW.date(),
+            )
+
+    def test_unrelated_route_change_retains_pacing_and_selected_optional_skills(self) -> None:
+        value = self.create()
+        optional_id = "backend.api-boundaries"
+        selected, route = interview_prep.curriculum_change_projection(
+            value,
+            changes={
+                "interview_focus": "coding",
+                "pacing_posture_override": "standard",
+                "optional_skill_ids": [optional_id],
+            },
+            current_date=NOW.date(),
+        )
+        selected["curriculum_allocation"] = {
+            "schema_version": 1,
+            "allocation_id": f"allocation_{route['allocation_fingerprint']}",
+            "allocation_date": NOW.date().isoformat(),
+            "boundary": "confirmed-outline",
+            "created_at": NOW.isoformat(),
+            "profile_revision": 1,
+            "pacing_posture_override": "standard",
+            "route": route,
+        }
+
+        _candidate, changed = interview_prep.curriculum_change_projection(
+            selected,
+            changes={"target_level": "mid"},
+            current_date=NOW.date(),
+        )
+
+        self.assertEqual(changed["pacing_posture"], "standard")
+        self.assertEqual(changed["optional_skill_ids"], [optional_id])
+        self.assertNotEqual(
+            changed["route_fingerprint"], route["route_fingerprint"]
+        )
+        route_ids = {item["skill_ref"]["skill_id"] for item in changed["skills"]}
+        self.assertIn(optional_id, route_ids)
+        self.assertNotIn("backend.concurrency", route_ids)
+
+    def test_optional_selection_preserves_route_order_and_explicit_empty(self) -> None:
+        value = self.create()
+        full = interview_prep.preview_curriculum_change(
+            value,
+            changes={"interview_focus": "coding"},
+            current_date=NOW.date(),
+        )
+        optional_ids = [
+            item["skill_id"] for item in full["optional_choices"]
+        ]
+        self.assertGreaterEqual(len(optional_ids), 2)
+        selected_id = optional_ids[-1]
+
+        selected = interview_prep.preview_curriculum_change(
+            value,
+            changes={
+                "interview_focus": "coding",
+                "optional_skill_ids": [selected_id],
+            },
+            current_date=NOW.date(),
+        )
+        empty = interview_prep.preview_curriculum_change(
+            value,
+            changes={"interview_focus": "coding", "optional_skill_ids": []},
+            current_date=NOW.date(),
+        )
+
+        full_skills = full["route"]["skills"]
+        expected_selected = [
+            item["skill_ref"]["skill_id"]
+            for item in full_skills
+            if item["requirement"] == "required"
+            or item["skill_ref"]["skill_id"] == selected_id
+        ]
+        self.assertEqual(
+            [item["skill_ref"]["skill_id"] for item in selected["route"]["skills"]],
+            expected_selected,
+        )
+        self.assertEqual(empty["route"]["optional_skill_ids"], [])
+        self.assertTrue(all(not item["selected"] for item in empty["optional_choices"]))
+        self.assertTrue(
+            all(item["requirement"] == "required" for item in empty["route"]["skills"])
+        )
+        self.assertNotEqual(empty["route_fingerprint"], full["route_fingerprint"])
+
+        empty_candidate, empty_route = interview_prep.curriculum_change_projection(
+            value,
+            changes={"interview_focus": "coding", "optional_skill_ids": []},
+            current_date=NOW.date(),
+        )
+        empty_candidate["curriculum_allocation"] = {
+            "schema_version": 1,
+            "allocation_id": f"allocation_{empty_route['allocation_fingerprint']}",
+            "allocation_date": NOW.date().isoformat(),
+            "boundary": "confirmed-outline",
+            "created_at": NOW.isoformat(),
+            "profile_revision": 1,
+            "pacing_posture_override": None,
+            "route": empty_route,
+        }
+        _retained_candidate, retained = interview_prep.curriculum_change_projection(
+            empty_candidate,
+            changes={"weekly_minutes": 240},
+            current_date=NOW.date(),
+        )
+        self.assertEqual(retained["optional_skill_ids"], [])
+        self.assertTrue(
+            all(item["requirement"] == "required" for item in retained["skills"])
+        )
+
+    def test_starting_active_confidence_placement_preserves_saved_survey(self) -> None:
+        self.create()
+        interview_prep.start_confidence_placement(self.path, now=lambda: NOW)
+        ratings = {pattern_id: 3 for pattern_id in interview_prep.CONFIDENCE_PATTERN_IDS}
+        saved = interview_prep.save_confidence_survey(
+            self.path,
+            role_family="backend",
+            target_level="entry",
+            interview_focus="coding",
+            ratings=ratings,
+            now=lambda: NOW,
+        )
+
+        restarted = interview_prep.start_confidence_placement(self.path, now=lambda: NOW)
+
+        self.assertEqual(restarted, saved)
+        self.assertEqual(restarted["placement"]["next_stage"], "outline")
+
+    def test_skipping_confidence_placement_uses_broad_unmastered_baseline(self) -> None:
+        self.create()
+
+        skipped = interview_prep.skip_confidence_placement(self.path, now=lambda: NOW)
+
+        result = skipped["placement"]["result"]
+        self.assertEqual(result["starting_level"], "learner-selected-baseline")
+        self.assertEqual(result["patterns_marked_known"], [])
+        self.assertFalse(result["mastery_update_applied"])
+        self.assertIsNone(skipped["placement"]["survey"])
+
+    def test_confidence_placement_requires_every_bounded_rating(self) -> None:
+        self.create()
+        interview_prep.start_confidence_placement(self.path, now=lambda: NOW)
+
+        with self.assertRaisesRegex(ValueError, "ratings"):
+            interview_prep.save_confidence_survey(
+                self.path,
+                role_family="backend",
+                target_level="entry",
+                interview_focus="coding",
+                ratings={"sliding_window": 5},
+                now=lambda: NOW,
+            )
+
+        placement = interview_prep.load_profile(self.path)["placement"]
+        self.assertEqual(placement["next_stage"], "confidence")
+        self.assertIsNone(placement["survey"])
+
     def test_v3_draft_is_durable_bounded_and_does_not_advance(self) -> None:
         self.create()
         started = interview_prep.start_placement(
@@ -791,9 +1217,7 @@ class InterviewPrepTests(unittest.TestCase):
             rubric_version=interview_prep.PLACEMENT_V3,
         )
 
-        self.assertNotIn(
-            "named_data_structure_or_strategy", false_positive["signals"]
-        )
+        self.assertNotIn("named_data_structure_or_strategy", false_positive["signals"])
         self.assertEqual(false_positive["status"], "not_observed")
         self.assertIn("named_data_structure_or_strategy", positive["signals"])
         self.assertEqual(positive["status"], "observed")

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+from hashlib import sha256
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import NAMESPACE_URL, uuid5
@@ -14,7 +15,9 @@ from openlearn import (
     code_workspace,
     config,
     interview_prep,
+    lesson_policy,
     providers,
+    source_context,
     source_imports,
     tutor_service,
     video_tools,
@@ -28,23 +31,39 @@ from openlearn.application import (
 )
 from openlearn.course_templates import CourseTemplateError
 from openlearn.courses import (
+    CALIBRATION_STATE_KEY,
     CREATION_SUBMISSION_METADATA_KEY,
     CREATION_SUBMISSION_STATE_KEY,
+    CourseDeletionConflictError,
+    CourseSettingsConflictError,
+    RouteAcceptanceConflictError,
+    course_conversation_source,
 )
 
 from .schemas import (
     CodeToolRequest,
     CourseCreateRequest,
+    SourceCourseCreateRequest,
+    CourseDeletionRequest,
+    CourseGrowthRequest,
+    CourseSettingsConfirmationRequest,
+    CourseSettingsRequest,
     DataManagementRequest,
+    FollowUpProposalRequest,
     ProviderSetupRequest,
     PlacementRequest,
+    ProgressionActionRequest,
     ReviewGradeRequest,
     TutorSubmissionRequest,
     VideoToolRequest,
 )
 
 
-COURSE_INITIALIZATION_PROMPT = "Start my first lesson."
+COURSE_INITIALIZATION_PROMPT = lesson_policy.COURSE_INITIALIZATION_PROMPT
+
+
+def _is_course_initialization_prompt(value: object) -> bool:
+    return lesson_policy.is_course_initialization_prompt(value)
 
 
 def _course_initialization_id(creation_submission_id: str) -> str:
@@ -70,15 +89,71 @@ def _initialization_id_for_slug(slug: str) -> str | None:
     return _course_initialization_id(creation_submission_id)
 
 
+def _course_initialization_prompt(slug: str) -> str:
+    """Build a real first-lesson prompt when an accepted course plan exists."""
+    try:
+        topic = cli.read_topic(slug)
+    except cli.OpenLearnError:
+        return COURSE_INITIALIZATION_PROMPT
+    if cli.interview_profile_path(slug).exists():
+        return COURSE_INITIALIZATION_PROMPT
+    if topic.metadata.get("course_started") is not True:
+        return COURSE_INITIALIZATION_PROMPT
+    _context, log = cli.split_session_log(topic.body)
+    plans = [entry for entry in cli.session_entries(log) if entry.get("kind") == "course_plan"]
+    if not plans:
+        return COURSE_INITIALIZATION_PROMPT
+    return cli.first_lesson_prompt(str(plans[-1]["response"]))
+
+
 def _card(card: CourseCard) -> dict[str, object]:
-    return {
+    library = card.library
+    current_topic = library.current.title if library.current is not None else (
+        card.current_focus or "Ready to learn"
+    )
+    path = [vars(item) for item in library.path]
+    recommendation = (
+        vars(library.recommendation) if library.recommendation is not None else None
+    )
+    blocker = vars(library.blocker) if library.blocker is not None else None
+    base = {
         "slug": card.slug,
         "title": card.title,
+        "goal": card.goal,
         "summary": card.goal,
-        "current_unit": card.current_focus or "Ready to learn",
-        "next_move": card.current_focus,
-        "progress": card.progress.percent,
+        "current_topic": current_topic,
+        "current_unit": current_topic,
+        "next_move": current_topic,
+        "progress": library.coverage.percent,
+        "coverage": vars(library.coverage),
+        "coverage_summary": library.coverage.summary,
+        "review": {
+            **vars(library.review),
+            "actionable": library.review.actionable,
+        },
+        "review_due": library.review.due,
+        "path": path,
+        "upcoming": [vars(item) for item in library.upcoming],
+        "weak_areas": list(library.weak_areas),
+        "first_pass_complete": library.first_pass_complete,
+        "readiness_summary": library.readiness_summary,
+        "recommendation": recommendation,
+        "blocker": blocker,
+        "completed": card.completed,
+        "started": card.started,
+        "template_id": card.template_id,
+        "is_interview": card.interview is not None,
     }
+    interview = card.interview
+    if interview is not None:
+        return {
+            **base,
+            "current_unit": interview.position.unit_label,
+            "next_move": interview.position.skill_label,
+            "interview_coverage": vars(interview.coverage),
+            "readiness": vars(interview.readiness),
+        }
+    return base
 
 
 def _focus_progress(progress: CourseProgress) -> dict[str, object]:
@@ -97,6 +172,105 @@ def _focus_progress(progress: CourseProgress) -> dict[str, object]:
         "summary": f"{known} of {total} tracked concepts are known.",
         "has_concepts": True,
     }
+
+
+def _interview_focus_projection(
+    projection: application.InterviewLearningProjection,
+) -> dict[str, object]:
+    prompt = _pending_prompt_text(projection.pending_prompt)
+    answer = projection.committed_lesson.content
+    presented = _without_check_section(answer) if prompt else answer
+    response_kind, blocks = _present_response(presented)
+    position = projection.position
+    operation = projection.operation
+    next_target = projection.next_target
+    return {
+        "slug": projection.slug,
+        "title": projection.title,
+        "current_unit": position.unit_label,
+        "revision": projection.revision,
+        "saved_state": "Saved locally",
+        "is_interview": True,
+        "lesson_id": projection.committed_lesson.lesson_id,
+        "curriculum": {
+            "position": vars(position),
+            "next_target": vars(next_target) if next_target is not None else None,
+            "deferred_skill": (
+                vars(projection.deferred_skill)
+                if projection.deferred_skill is not None
+                else None
+            ),
+            "deferred_explanation": projection.deferred_explanation or "",
+        },
+        "move": {
+            "kind": "Current lesson" if response_kind == "Lesson" else response_kind,
+            "title": position.skill_label,
+            "blocks": blocks,
+            "content": (
+                "Your first technical lesson is ready to begin."
+                if not answer
+                else ""
+            ),
+            "prompt": prompt,
+            "position": (
+                f"{position.unit_label} · {position.section_label} · "
+                f"{position.emphasis}"
+            ),
+        },
+        "progress": {
+            "percent": projection.coverage.percent,
+            "summary": projection.coverage.summary,
+            "has_concepts": projection.coverage.total > 0,
+            "coverage": vars(projection.coverage),
+            "readiness": vars(projection.readiness),
+        },
+        "feedback": None,
+        "requires_response": bool(prompt),
+        "operation": (
+            {
+                "id": operation.submission_id,
+                "state": operation.state,
+                "message": operation.message,
+                "actions": list(operation.actions),
+                "error": operation.message if operation.state == "provider-error" else "",
+                "error_code": operation.error_code or "",
+                "show_provider_recovery": "provider-settings" in operation.actions,
+            }
+            if operation.state != "committed"
+            else None
+        ),
+        "caught_up": operation.state == "caught-up",
+        "saved_response": projection.saved_response,
+        "initialization": None,
+    }
+
+
+def _lesson_focus_title(
+    topic: cli.Topic,
+    response: str,
+) -> str:
+    response_focus = cli.tutor_response_focus_title(response)
+    if response_focus:
+        return response_focus
+    saved_focus = topic.metadata.get("current_focus")
+    if isinstance(saved_focus, str) and saved_focus.strip():
+        return saved_focus.strip()
+    current_unit = topic.metadata.get("current_unit")
+    if isinstance(current_unit, int):
+        unit = cli.course_unit_at(topic.metadata, current_unit)
+        title = unit.get("title") if isinstance(unit, dict) else None
+        if isinstance(title, str) and title.strip():
+            return title.strip()
+    template_units = topic.metadata.get("template_units")
+    if isinstance(template_units, list):
+        first = next(
+            (item.strip() for item in template_units if isinstance(item, str) and item.strip()),
+            "",
+        )
+        match = re.match(r"(?i)^Unit\s+\d+\s*:\s*(.*?)(?:\s+-\s+.*)?$", first)
+        if match and match.group(1).strip():
+            return match.group(1).strip()
+    return str(topic.metadata.get("topic") or "Learning focus").strip()
 
 
 def _draft(snapshot: code_workspace.DraftSnapshot) -> dict[str, object]:
@@ -164,22 +338,111 @@ def _source_result(result: source_imports.CourseSourceImportResult) -> dict[str,
 def _move(move: tutor_service.TutorMove | None) -> dict[str, object]:
     if move is None:
         return {}
+    kind, blocks = _present_response(move.content)
     return {
-        "kind": move.kind.replace("_", " ").title(),
+        "kind": kind or move.kind.replace("_", " ").title(),
         "title": "Your next learning move",
         "content": move.content,
+        "blocks": blocks,
         "prompt": move.prompt,
         "position": f"Step {move.revision}",
     }
 
 
+def _operation_preview(value: str | None) -> str:
+    if not value:
+        return ""
+    text = cli.sanitize_stream_preview(value)
+    text = re.sub(
+        r"^\s*(?:\*\*)?(?:Lesson|Feedback|Example|Check|Hint|Next)\s*:(?:\*\*)?\s*",
+        "",
+        text,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    return _plain_text(text)
+
+
+def _show_provider_recovery(error_code: str | None) -> bool:
+    return error_code in {
+        "judge_invalid_output",
+        "provider_credentials",
+        "provider_rate_limited",
+        "provider_unavailable",
+    }
+
+
 def _plain_text(value: str) -> str:
-    return value.replace("**", "").replace("__", "").strip()
+    text = value.replace("**", "").replace("__", "")
+    text = re.sub(r"`([^`]+)`", r"\1", text)
+    text = re.sub(r"(?<!\w)([*_])([^\n]+?)\1(?!\w)", r"\2", text)
+    return text.strip()
+
+
+def _presentation_text(value: str) -> dict[str, object]:
+    """Protect explicit math from Markdown cleanup; never interpret code or dollars."""
+    if "\ue000" in value or "\ue001" in value:
+        return {"text": _plain_text(value)}
+    expressions: list[str] = []
+
+    def protect(match: re.Match[str]) -> str:
+        formula = match.group("math")
+        if formula is None or not formula.strip():
+            return match.group(0)
+        expressions.append(formula)
+        return f"\ue000{len(expressions) - 1}\ue001"
+
+    protected = re.sub(
+        r"(?<!`)(?P<ticks>`+)(?!`).*?(?<!`)(?P=ticks)(?!`)"
+        r"|(?<!\\)\\\((?P<math>.*?)\\\)",
+        protect, value, flags=re.DOTALL,
+    )
+    if not expressions:
+        return {"text": _plain_text(value)}
+    cleaned = _plain_text(protected)
+    parts: list[dict[str, str]] = []
+    position = 0
+    for match in re.finditer(r"\ue000(\d+)\ue001", cleaned):
+        if match.start() > position:
+            parts.append({"kind": "text", "text": cleaned[position:match.start()]})
+        parts.append({"kind": "math", "text": expressions[int(match.group(1))]})
+        position = match.end()
+    if position < len(cleaned):
+        parts.append({"kind": "text", "text": cleaned[position:]})
+    return {
+        "text": "".join(r"\(" + part["text"] + r"\)" if part["kind"] == "math" else part["text"] for part in parts),
+        "parts": parts,
+    }
+
+
+def _pending_prompt_text(value: str | None) -> str:
+    if not value:
+        return ""
+    without_label = re.sub(
+        r"^\s*(?:\*\*)?Check\s*:(?:\*\*)?\s*",
+        "",
+        value,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    return _plain_text(without_label)
+
+
+_CHECK_SECTION = re.compile(
+    r"^\s*(?:\*\*)?Check\s*:(?:\*\*)?\s*.*?"
+    r"(?=^\s*(?:\*\*)?(?:Lesson|Feedback|Example|Hint|Next)\s*:(?:\*\*)?|\Z)",
+    flags=re.IGNORECASE | re.MULTILINE | re.DOTALL,
+)
+
+
+def _without_check_section(value: str) -> str:
+    """Remove the response's Check section when the pending prompt owns it."""
+    return _CHECK_SECTION.sub("", value).strip()
 
 
 def _present_response(value: str) -> tuple[str, list[dict[str, object]]]:
     """Parse a small safe Markdown subset into explicit presentation blocks."""
-    text = cli.sanitize_model_output(value)
+    text = cli.strip_tutor_enter_advance_cue(cli.sanitize_model_output(value))
     text = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
     lines = text.splitlines()
     blocks: list[dict[str, object]] = []
@@ -206,19 +469,36 @@ def _present_response(value: str) -> tuple[str, list[dict[str, object]]]:
                 }
             )
             continue
+        display = re.fullmatch(r"\s*\\\[(.*?)\\\]\s*", line)
+        closing = None
+        if line.strip() == r"\[":
+            closing = next((end for end in range(index + 1, len(lines))
+                            if lines[end].strip() == r"\]"), None)
+        if display or closing is not None:
+            formula = display.group(1) if display else "\n".join(lines[index + 1:closing])
+            if formula.strip():
+                blocks.append({"kind": "math", "text": formula.strip()})
+                index = index + 1 if display else closing + 1
+                continue
         unordered = re.match(r"^\s*[-*+]\s+(.+)$", line)
         ordered = re.match(r"^\s*\d+[.)]\s+(.+)$", line)
         if unordered or ordered:
             kind = "unordered_list" if unordered else "ordered_list"
             pattern = r"^\s*[-*+]\s+(.+)$" if unordered else r"^\s*\d+[.)]\s+(.+)$"
             items: list[str] = []
+            item_parts: list[object] = []
             while index < len(lines):
                 item = re.match(pattern, lines[index])
                 if item is None:
                     break
-                items.append(_plain_text(item.group(1)))
+                presented = _presentation_text(item.group(1))
+                items.append(str(presented["text"]))
+                item_parts.append(presented.get("parts"))
                 index += 1
-            blocks.append({"kind": kind, "items": items})
+            block: dict[str, object] = {"kind": kind, "items": items}
+            if any(item_parts):
+                block["item_parts"] = item_parts
+            blocks.append(block)
             continue
         paragraph: list[str] = []
         while index < len(lines):
@@ -229,11 +509,13 @@ def _present_response(value: str) -> tuple[str, list[dict[str, object]]]:
                 re.match(r"^\s*```", current)
                 or re.match(r"^\s*[-*+]\s+", current)
                 or re.match(r"^\s*\d+[.)]\s+", current)
+                or current.strip() == r"\["
+                or re.fullmatch(r"\s*\\\[.*?\\\]\s*", current)
             ):
                 break
             paragraph.append(re.sub(r"^#{1,6}\s+", "", current.strip()))
             index += 1
-        blocks.append({"kind": "paragraph", "text": _plain_text("\n".join(paragraph))})
+        blocks.append({"kind": "paragraph", **_presentation_text("\n".join(paragraph))})
 
     first = blocks[0].get("text", "") if blocks and blocks[0]["kind"] == "paragraph" else ""
     label = "Lesson"
@@ -243,13 +525,62 @@ def _present_response(value: str) -> tuple[str, list[dict[str, object]]]:
         remainder = match.group(2).strip()
         if remainder:
             blocks[0]["text"] = remainder
+            parts = blocks[0].get("parts")
+            if isinstance(parts, list) and parts and parts[0]["kind"] == "text":
+                parts[0]["text"] = re.sub(r"^[A-Za-z][A-Za-z ]{1,30}:\s*", "", parts[0]["text"])
         else:
             blocks.pop(0)
+    visible_text = " ".join(
+        str(block.get("text") or "")
+        for block in blocks
+        if block.get("kind") == "paragraph"
+    )
+    defines_invariant = re.search(
+        r"(?is)\b(?:rule|condition)\b.{0,80}\b(?:stays?|remains?|must\s+(?:stay|"
+        r"remain|be))\b.{0,40}\btrue\b",
+        visible_text,
+    )
+    if re.search(r"(?i)\binvariants?\b", visible_text) and defines_invariant is None:
+        blocks.insert(
+            0,
+            {
+                "kind": "definition",
+                "term": "Invariant",
+                "text": "A rule or condition that stays true while an algorithm runs.",
+            },
+        )
     return label, blocks
+
+
+def _side_conversation(entries: list[dict[str, str]]) -> list[dict[str, object]]:
+    selected: list[dict[str, str]] = []
+    for entry in reversed(entries):
+        if entry.get("kind") != cli.SIDE_CHAT_SESSION_KIND:
+            continue
+        selected.append(entry)
+        if len(selected) == 20:
+            break
+    conversation: list[dict[str, object]] = []
+    for entry in reversed(selected):
+        _kind, blocks = _present_response(str(entry.get("response") or ""))
+        conversation.append(
+            {
+                "question": _plain_text(str(entry.get("prompt") or "")),
+                "blocks": blocks,
+                "source_lesson_id": str(entry.get("source_lesson_id") or ""),
+                "source_lesson_title": _plain_text(
+                    str(entry.get("source_lesson_title") or "Saved lesson")
+                ),
+            }
+        )
+    return conversation
 
 
 class OpenLearnWebServices:
     """Map interface-neutral openlearn services to browser view models."""
+
+    def __init__(self) -> None:
+        self._validated_provider_fingerprint = ""
 
     def provider_status(self) -> dict[str, object]:
         try:
@@ -315,6 +646,17 @@ class OpenLearnWebServices:
             credentials = config.effective_provider_credentials()
         except config.ConfigError:
             return status
+        fingerprint = sha256(
+            "\0".join(
+                (
+                    credentials.base_url,
+                    credentials.model,
+                    credentials.api_key or "",
+                )
+            ).encode("utf-8")
+        ).hexdigest()
+        if status.get("managed") and fingerprint == self._validated_provider_fingerprint:
+            return {**status, "ready": True, "verified": True, "reason": ""}
         validation = providers.validate_provider(credentials.base_url, credentials.api_key)
         if validation.status is providers.ValidationStatus.VALID:
             validation = providers.validate_provider_model(
@@ -323,8 +665,22 @@ class OpenLearnWebServices:
                 credentials.model,
             )
         if validation.status is not providers.ValidationStatus.VALID:
-            return status
+            if validation.status is providers.ValidationStatus.REJECTED:
+                code = "provider_credentials"
+                reason = "That API key was rejected. Check the provider setup and test again."
+            elif validation.detail == "http_429":
+                code = "provider_rate_limited"
+                reason = "The provider is rate limited. Wait, then retry. Your saved key was not changed."
+            else:
+                code = "provider_unavailable"
+                reason = (
+                    "That model is not available from this provider. Review the model or retry later."
+                    if validation.detail == "model_unavailable"
+                    else "The provider is temporarily unavailable. Retry later. Your saved key was not changed."
+                )
+            return {**status, "error_code": code, "reason": reason}
         if status.get("managed"):
+            self._validated_provider_fingerprint = fingerprint
             return {**status, "ready": True, "verified": True, "reason": ""}
         try:
             providers.persist_validation_result(
@@ -340,6 +696,13 @@ class OpenLearnWebServices:
 
     @staticmethod
     def _provider_options() -> list[dict[str, object]]:
+        explanations = {
+            "openrouter": "One key for many models. Recommended for an inexpensive, flexible start.",
+            "openai": "Use an OpenAI API account and direct OpenAI billing.",
+            "anthropic-compatible": "Use a gateway that exposes an Anthropic-compatible model through an OpenAI-style endpoint.",
+            "ollama": "Run a model locally. No API key is needed.",
+            "custom": "Connect another OpenAI-compatible endpoint.",
+        }
         return [
             {
                 "id": preset.slug,
@@ -347,11 +710,15 @@ class OpenLearnWebServices:
                 "base_url": preset.base_url,
                 "default_model": preset.default_model,
                 "recommended": preset.slug == "openrouter",
+                "key_required": preset.key_required,
+                "setup_url": preset.setup_url or "",
+                "explanation": explanations[preset.slug],
             }
             for preset in providers.PROVIDER_PRESETS.values()
         ]
 
     def configure_provider(self, request: ProviderSetupRequest) -> dict[str, object]:
+        self._validated_provider_fingerprint = ""
         preset = providers.PROVIDER_PRESETS.get(request.provider)
         if preset is None:
             return {"ok": False, "error": "Choose a supported model provider."}
@@ -421,16 +788,250 @@ class OpenLearnWebServices:
             }
         return {"ok": True, **status}
 
-    def dashboard(self) -> dict[str, object]:
-        snapshot = application.dashboard()
+    def dashboard(self, selected_slug: str | None = None) -> dict[str, object]:
+        snapshot = application.dashboard(selected_slug=selected_slug)
+        courses = [_card(card) for card in snapshot.courses]
+        courses_by_slug = {str(card["slug"]): card for card in courses}
+        for card in courses:
+            card["active"] = card["slug"] == snapshot.active_slug
+            card["selected"] = card["slug"] == snapshot.selected_slug
+        selected = courses_by_slug.get(snapshot.selected_slug or "")
+        active = courses_by_slug.get(snapshot.active_slug or "")
         return {
-            "courses": [_card(card) for card in snapshot.courses],
-            "active_course": _card(snapshot.resume) if snapshot.resume else None,
+            "courses": courses,
+            "selected_course": selected,
+            "selected_slug": snapshot.selected_slug,
+            "active_course": active,
+            "active_slug": snapshot.active_slug,
+            "resume_course": courses_by_slug.get(snapshot.resume.slug) if snapshot.resume else None,
             "due_reviews": snapshot.reviews.due_today,
+            "starters": [],
         }
 
+    def activate_course(self, slug: str) -> dict[str, object]:
+        try:
+            result = application.activate_course(slug)
+        except (cli.OpenLearnError, OSError) as error:
+            return {"ok": False, "missing": True, "error": str(error)}
+        return {"ok": True, **vars(result)}
+
+    @staticmethod
+    def _settings_change(
+        request: CourseSettingsRequest, *, is_interview: bool
+    ) -> application.CourseSettingsChange:
+        interview_fields = {
+            key: value
+            for key, value in {
+                "role_family": request.role_family.strip(),
+                "target_level": request.target_level.strip(),
+                "interview_focus": request.interview_focus.strip(),
+            }.items()
+            if value
+        }
+        if is_interview and "interview_date" in request.model_fields_set:
+            interview_fields["interview_date"] = request.interview_date.strip()
+        return application.CourseSettingsChange(
+            title=request.title,
+            goal=request.goal,
+            difficulty=request.difficulty,
+            weekly_minutes=request.weekly_minutes,
+            session_minutes=request.session_minutes,
+            outline=request.outline.strip() or None,
+            interview_fields=interview_fields or None,
+        )
+
+    def course_settings(self, slug: str) -> dict[str, object]:
+        try:
+            snapshot = application.course(slug)
+            current = application.preview_course_settings(
+                slug, application.CourseSettingsChange()
+            )
+        except (cli.OpenLearnError, OSError) as error:
+            return {"ok": False, "missing": True, "error": str(error)}
+        interview: dict[str, object] = {}
+        profile_path = cli.interview_profile_path(slug)
+        if profile_path.exists():
+            profile_data = interview_prep.load_profile(profile_path)
+            saved = profile_data.get("profile")
+            if isinstance(saved, dict):
+                interview = {
+                    key: saved.get(key, "")
+                    for key in ("role_family", "target_level", "interview_date")
+                }
+            placement = profile_data.get("placement")
+            if isinstance(placement, dict):
+                survey = placement.get("confidence_survey")
+                if isinstance(survey, dict):
+                    interview["interview_focus"] = survey.get("interview_focus", "")
+        return {
+            "ok": True,
+            "slug": slug,
+            "title": current.title,
+            "goal": current.goal,
+            "difficulty": current.difficulty,
+            "weekly_minutes": current.weekly_minutes,
+            "session_minutes": current.session_minutes,
+            "outline": "",
+            "path": [vars(item) for item in snapshot.card.library.path],
+            "is_interview": profile_path.exists(),
+            "interview": interview,
+            "role_options": [
+                {"value": value, "label": label}
+                for value, label in interview_prep.CONFIDENCE_ROLES
+            ],
+            "level_options": [
+                {"value": value, "label": label}
+                for value, label in interview_prep.CONFIDENCE_LEVELS
+            ],
+        }
+
+    def preview_course_settings(
+        self, slug: str, request: CourseSettingsRequest
+    ) -> dict[str, object]:
+        try:
+            preview = application.preview_course_settings(
+                slug,
+                self._settings_change(
+                    request, is_interview=cli.interview_profile_path(slug).exists()
+                ),
+            )
+        except CourseSettingsConflictError as error:
+            return {"ok": False, "state": "conflict", "error": str(error)}
+        except (cli.OpenLearnError, ValueError, OSError) as error:
+            return {"ok": False, "state": "invalid", "error": str(error)}
+        return {
+            "ok": True,
+            **vars(preview),
+            "interview_fields": dict(preview.interview_fields),
+        }
+
+    def confirm_course_settings(
+        self, slug: str, request: CourseSettingsConfirmationRequest
+    ) -> dict[str, object]:
+        try:
+            replay = application.replay_course_settings(
+                slug,
+                submission_id=request.submission_id,
+                expected_payload_hash=request.expected_payload_hash,
+            )
+            if replay is not None:
+                return {"ok": True, **vars(replay)}
+            preview = application.preview_course_settings(
+                slug,
+                self._settings_change(
+                    request, is_interview=cli.interview_profile_path(slug).exists()
+                ),
+            )
+            if preview.payload_hash != request.expected_payload_hash:
+                return {
+                    "ok": False,
+                    "state": "conflict",
+                    "error": "Course settings changed after this preview. Review them again.",
+                }
+            result = application.confirm_course_settings(
+                preview, submission_id=request.submission_id
+            )
+        except CourseSettingsConflictError as error:
+            return {"ok": False, "state": "conflict", "error": str(error)}
+        except (cli.OpenLearnError, ValueError, OSError) as error:
+            return {"ok": False, "state": "invalid", "error": str(error)}
+        return {"ok": True, **vars(result)}
+
+    def course_deletion(self, slug: str) -> dict[str, object]:
+        try:
+            preview = application.preview_course_deletion(slug)
+        except (cli.OpenLearnError, OSError) as error:
+            return {"ok": False, "missing": True, "error": str(error)}
+        return {"ok": True, **vars(preview)}
+
+    def delete_course(
+        self, slug: str, request: CourseDeletionRequest
+    ) -> dict[str, object]:
+        try:
+            replay = application.replay_course_deletion(
+                slug,
+                confirmation_slug=request.confirmation_slug,
+                confirmation_title=request.confirmation_title,
+                topic_generation=request.topic_generation,
+            )
+            if replay is not None:
+                return {"ok": True, **vars(replay)}
+            current = application.preview_course_deletion(slug)
+            if current.topic_generation != request.topic_generation:
+                return {
+                    "ok": False,
+                    "state": "conflict",
+                    "error": "This course changed after the deletion page opened.",
+                }
+            result = application.confirm_course_deletion(
+                current,
+                confirmation_slug=request.confirmation_slug,
+                confirmation_title=request.confirmation_title,
+            )
+        except application.CourseDeletionConfirmationError as error:
+            return {"ok": False, "state": "invalid", "error": str(error)}
+        except CourseDeletionConflictError as error:
+            return {"ok": False, "state": "conflict", "error": str(error)}
+        except (cli.OpenLearnError, ValueError, OSError) as error:
+            return {"ok": False, "state": "invalid", "error": str(error)}
+        return {"ok": True, **vars(result)}
+
+    def course_growth(
+        self, slug: str, request: CourseGrowthRequest
+    ) -> dict[str, object]:
+        try:
+            result = application.advance_course_growth(
+                slug,
+                action=request.action,
+                submission_id=request.submission_id,
+            )
+        except (cli.OpenLearnError, tutor_service.TutorOperationError, ValueError) as error:
+            return {"ok": False, "state": "error", "error": str(error)}
+        return {"ok": True, **vars(result)}
+
+    def follow_up_proposal(
+        self, slug: str, request: FollowUpProposalRequest
+    ) -> dict[str, object]:
+        try:
+            if request.action == "generate":
+                result = application.request_follow_up_proposal(
+                    slug,
+                    interests=request.interests,
+                    submission_id=request.submission_id,
+                )
+            elif request.action == "retry":
+                result = application.retry_follow_up_proposal(
+                    slug, request.submission_id
+                )
+            elif request.action == "confirm":
+                result = application.confirm_follow_up_proposal(
+                    slug, request.submission_id
+                )
+            else:
+                result = application.follow_up_proposal_status(
+                    slug, request.submission_id
+                )
+                if result is None:
+                    return {
+                        "ok": False,
+                        "missing": True,
+                        "state": "missing",
+                        "error": "Follow-up proposal not found.",
+                    }
+        except tutor_service.FollowUpProviderNotReadyError as error:
+            return {
+                "ok": False,
+                "state": "setup_required",
+                "error": str(error),
+            }
+        except tutor_service.FollowUpProposalConflictError as error:
+            return {"ok": False, "state": "conflict", "error": str(error)}
+        except (tutor_service.FollowUpProposalError, cli.OpenLearnError, ValueError) as error:
+            return {"ok": False, "state": "error", "error": str(error)}
+        return {"ok": True, **vars(result)}
+
     def course_templates(self) -> list[dict[str, object]]:
-        return [
+        templates = [
             {
                 "id": template.template_id,
                 "title": template.name,
@@ -440,6 +1041,18 @@ class OpenLearnWebServices:
             }
             for template in application.templates().templates
         ]
+        priority = {
+            "technical-interview-prep": 0,
+            "networking": 1,
+            "vim": 2,
+        }
+        return sorted(
+            templates,
+            key=lambda template: (
+                priority.get(str(template["id"]), len(priority)),
+                str(template["title"]).casefold(),
+            ),
+        )
 
     def course_entry_mode(self, template_id: str | None) -> str | None:
         if template_id is None:
@@ -574,7 +1187,79 @@ class OpenLearnWebServices:
             return {"ok": False, "missing": True, "error": "Course not found."}
         return _source_result(result)
 
+    def create_source_course(
+        self, request: SourceCourseCreateRequest,
+        source: source_imports.CourseSourceInput,
+    ) -> dict[str, object]:
+        result = self._create_course_record(request)
+        if not result.get("ok"):
+            return result
+        slug = str(result["slug"])
+        # Keep rejected imports editable as one pending creation draft.
+        # Completed courses remain immutable on submission replay.
+        with cli.topic_store_locks(slug, include_journal=True):
+            topic = cli.read_topic(slug)
+            metadata = dict(topic.metadata)
+            if result["created"]:
+                metadata.update(web_source_start=True, web_source_mode=request.mode,
+                                web_source_pending=True)
+            elif metadata.get("web_source_mode") != request.mode:
+                return {"ok": False, "error": "This saved creation belongs to another mode. Start a new course."}
+            if not metadata.get("web_source_pending"):
+                return {**result, "state": "source_ready"}
+            if metadata.get("web_source_pending"):
+                if metadata.get("course_started") or tutor_service.course_revision(slug) > 0:
+                    return {"ok": False, "error": "This course has started. Change its details in Course settings."}
+                old_title = str(metadata.get("topic") or "")
+                old_goal = str(metadata.get("goal") or "")
+                metadata.update(topic=request.title, goal=request.goal.strip())
+                body = topic.body.replace(f"# {old_title}\n", f"# {request.title}\n", 1)
+                body = body.replace(f"## Current Goal\n\n{old_goal}\n\n## Notes",
+                                    f"## Current Goal\n\n{request.goal.strip()}\n\n## Notes", 1)
+                state = cli.load_state(slug)
+                state[CALIBRATION_STATE_KEY] = {
+                    "goal": request.goal.strip(), "experience": request.experience.strip(),
+                    "skipped": not bool(request.experience.strip()),
+                    "recorded_at": datetime.now(timezone.utc).isoformat(),
+                }
+                cli.save_state(slug, state)
+                cli.write_text_atomic(topic.path, cli.format_topic(cli.stable_metadata_for_topic(metadata), body))
+                creation_state = {key: state[key] for key in (CALIBRATION_STATE_KEY, CREATION_SUBMISSION_STATE_KEY)
+                                  if key in state}
+        # Importing stops at the existing per-request consent boundary;
+        # no ordinary, ungrounded lesson or provider request starts here.
+        imported = self._import_source(slug, source)
+        # The importer owns dynamic source state; retain creation calibration.
+        cli.update_state_atomic(slug, lambda state: state.update(creation_state))
+        if not imported.get("ok") or not imported.get("sources"):
+            failures = imported.get("failed") or []
+            message = str(failures[0].get("message")) if failures else str(imported.get("error") or "No usable source was imported.")
+            return {"ok": False, "error": message, "slug": slug}
+        with cli.file_lock(cli.topic_path(slug)):
+            topic = cli.read_topic(slug)
+            metadata = dict(topic.metadata)
+            if request.mode == "quick":
+                sources = imported["sources"]
+                metadata.update(learning_mode="quick", quick_source_type=request.source_kind,
+                                quick_source_label=str(sources[0]["label"]), coverage_contract=True)
+            metadata["web_source_pending"] = False
+            cli.write_text_atomic(topic.path, cli.format_topic(cli.stable_metadata_for_topic(metadata), topic.body))
+        return {**result, "state": "source_ready"}
+
     def create_course(self, request: CourseCreateRequest) -> dict[str, object]:
+        result = self._create_course_record(request)
+        if not result.get("ok"):
+            return result
+        slug = str(result["slug"])
+        initialization_id = _course_initialization_id(request.submission_id)
+        if self.course_entry_mode(application.course(slug).card.template_id) == "interview_prep":
+            return {**result, "state": "placement_recommended"}
+        return self._start_course_initialization(
+            slug, initialization_id, created=bool(result["created"])
+        )
+
+    @staticmethod
+    def _create_course_record(request: CourseCreateRequest) -> dict[str, object]:
         calibration = CalibrationContext(
             goal=request.goal,
             experience=request.experience,
@@ -593,18 +1278,7 @@ class OpenLearnWebServices:
             )
         except (cli.OpenLearnError, CourseTemplateError) as error:
             return {"ok": False, "error": str(error)}
-        slug = result.course.slug
-        initialization_id = _course_initialization_id(request.submission_id)
-        if self.course_entry_mode(result.course.card.template_id) == "interview_prep":
-            return {
-                "ok": True,
-                "slug": slug,
-                "created": result.created,
-                "state": "placement_recommended",
-            }
-        return self._start_course_initialization(
-            slug, initialization_id, created=result.created
-        )
+        return {"ok": True, "slug": result.course.slug, "created": result.created}
 
     def _start_course_initialization(
         self,
@@ -613,9 +1287,19 @@ class OpenLearnWebServices:
         *,
         created: bool | None = None,
     ) -> dict[str, object]:
+        if cli.read_topic(slug).metadata.get("web_source_start"):
+            return {"ok": True, "slug": slug, "state": "source_ready"}
         initialization_id = initialization_id or _initialization_id_for_slug(slug)
         if initialization_id is None:
             return {"ok": False, "error": "Course initialization is unavailable."}
+        interview_course = cli.interview_profile_path(slug).exists()
+        if interview_course:
+            try:
+                application.prepare_interview_curriculum(
+                    slug, boundary="preparation"
+                )
+            except (cli.OpenLearnError, ValueError) as error:
+                return {"ok": False, "error": str(error)}
         existing_operation = tutor_service.operation_status(slug, initialization_id)
         if existing_operation is not None:
             result: dict[str, object] = {
@@ -630,11 +1314,12 @@ class OpenLearnWebServices:
         try:
             operation = tutor_service.start_turn(
                 slug,
-                COURSE_INITIALIZATION_PROMPT,
-                intent="question",
+                _course_initialization_prompt(slug),
+                intent=("navigation" if interview_course else "question"),
                 submission_id=initialization_id,
-                expected_revision=0,
+                expected_revision=tutor_service.course_revision(slug),
                 model=config.configured_model(),
+                progression_intent=("continue" if interview_course else None),
             )
         except tutor_service.TutorOperationError:
             operation = tutor_service.operation_status(slug, initialization_id)
@@ -657,6 +1342,100 @@ class OpenLearnWebServices:
         placement = value["placement"]
         assert isinstance(placement, dict)
         draft = placement.get("draft")
+        lifecycle = placement.get("lifecycle_version")
+        if lifecycle == interview_prep.PLACEMENT_V4:
+            survey = placement.get("survey")
+            survey_value = survey if isinstance(survey, dict) else None
+            route_preview = (
+                interview_prep.preview_curriculum_change(
+                    value,
+                    current_date=datetime.now(timezone.utc).date(),
+                )
+                if survey_value is not None
+                else None
+            )
+            return {
+                "slug": slug,
+                "status": placement.get("status"),
+                "lifecycle_version": lifecycle,
+                "next_stage": placement.get("next_stage"),
+                "updated_at": placement.get("updated_at"),
+                "attempt_id": placement.get("attempt_id"),
+                "survey": survey_value,
+                "topics": [
+                    {
+                        "id": topic_id,
+                        "label": label,
+                        "track": "coding",
+                        "rating": int(survey_value.get("ratings", {}).get(topic_id, 1))
+                        if isinstance(survey_value, dict)
+                        and isinstance(survey_value.get("ratings"), dict)
+                        else 1,
+                    }
+                    for topic_id, label in interview_prep.CONFIDENCE_PATTERNS
+                ]
+                + [
+                    {
+                        "id": topic_id,
+                        "label": label,
+                        "track": "system_design",
+                        "rating": int(survey_value.get("ratings", {}).get(topic_id, 1))
+                        if isinstance(survey_value, dict)
+                        and isinstance(survey_value.get("ratings"), dict)
+                        else 1,
+                    }
+                    for topic_id, label in interview_prep.SYSTEM_DESIGN_TOPICS
+                ],
+                "scale": [
+                    {"value": value, "label": label}
+                    for value, label in interview_prep.CONFIDENCE_SCALE
+                ],
+                "roles": [
+                    {"value": value, "label": label}
+                    for value, label in interview_prep.CONFIDENCE_ROLES
+                ],
+                "levels": [
+                    {"value": value, "label": label}
+                    for value, label in interview_prep.CONFIDENCE_LEVELS
+                ],
+                "focuses": [
+                    {"value": value, "label": label}
+                    for value, label in interview_prep.CONFIDENCE_FOCUSES
+                ],
+                "outline": (
+                    str(route_preview.get("outline") or "")
+                    if route_preview is not None
+                    else ""
+                ),
+                "outline_items": (
+                    route_preview["outline_items"]
+                    if route_preview is not None
+                    else []
+                ),
+                "locked_prerequisites": (
+                    route_preview["locked_prerequisites"]
+                    if route_preview is not None
+                    else []
+                ),
+                "confidence_topics": (
+                    route_preview["confidence_topics"]
+                    if route_preview is not None
+                    else []
+                ),
+                "optional_choices": (
+                    route_preview["optional_choices"]
+                    if route_preview is not None
+                    else []
+                ),
+                "profile": value.get("profile") if isinstance(value.get("profile"), dict) else {},
+                "pacing_posture_override": (
+                    value.get("curriculum_allocation", {}).get("pacing_posture_override")
+                    if isinstance(value.get("curriculum_allocation"), dict)
+                    else None
+                ),
+                "feedback": None,
+                "course_revision": tutor_service.course_revision(slug),
+            }
         problem = interview_prep.PLACEMENT_PROBLEM
         examples = problem["examples"]
         assert isinstance(examples, list)
@@ -694,10 +1473,21 @@ class OpenLearnWebServices:
         if snapshot is None:
             return {"slug": slug, "missing": True}
         try:
-            value = application.sync_interview_placement(slug)
+            saved = interview_prep.load_profile(cli.interview_profile_path(slug))
+            saved_placement = saved.get("placement")
+            if (
+                isinstance(saved_placement, dict)
+                and saved_placement.get("lifecycle_version") == interview_prep.PLACEMENT_V4
+            ):
+                value = saved
+            else:
+                value = application.sync_interview_placement(slug)
         except cli.OpenLearnError:
             value = interview_prep.load_profile(cli.interview_profile_path(slug))
         return {"title": snapshot.card.title, **self._placement_view(slug, value)}
+
+    def interview_placement_exists(self, slug: str) -> bool:
+        return self._interview_course(slug) is not None
 
     def update_placement(self, slug: str, request: PlacementRequest) -> dict[str, object]:
         if self._interview_course(slug) is None:
@@ -707,22 +1497,127 @@ class OpenLearnWebServices:
         placement = value["placement"]
         assert isinstance(placement, dict)
         if request.action == "start":
-            value = self._start_reasoning_placement(slug, path)
-        elif request.action == "restart":
-            if placement.get("status") == "in_progress":
+            if (
+                placement.get("status") == "in_progress"
+                and placement.get("lifecycle_version") != interview_prep.PLACEMENT_V4
+            ):
                 application.discard_interview_placement(slug)
-            value = self._start_reasoning_placement(slug, path)
-        elif request.action == "defer":
-            if placement.get("status") in {"in_progress", "deferred"}:
-                return self._placement_view(slug, value)
-            queued: list[tuple[str, dict[str, object]]] = []
             with cli.interview_profile_write_lock(slug):
-                value = interview_prep.defer_placement(
-                    path, lambda event_type, data: queued.append((event_type, data))
+                value = interview_prep.start_confidence_placement(path)
+            cli.log_event(slug, "interview_confidence_placement_started", {})
+        elif request.action == "restart":
+            if (
+                placement.get("status") == "in_progress"
+                and placement.get("lifecycle_version") != interview_prep.PLACEMENT_V4
+            ):
+                application.discard_interview_placement(slug)
+            with cli.interview_profile_write_lock(slug):
+                value = interview_prep.start_confidence_placement(path, restart=True)
+            cli.log_event(slug, "interview_confidence_placement_restarted", {})
+        elif request.action == "save_confidence":
+            try:
+                with cli.interview_profile_write_lock(slug):
+                    value = interview_prep.save_confidence_survey(
+                        path,
+                        role_family=request.role_family,
+                        target_level=request.target_level,
+                        interview_focus=request.interview_focus,
+                        ratings=request.ratings,
+                    )
+            except ValueError as error:
+                return {"invalid": True, "error": str(error)}
+            cli.log_event(
+                slug,
+                "interview_confidence_profile_saved",
+                {
+                    "role_family": request.role_family,
+                    "target_level": request.target_level,
+                    "interview_focus": request.interview_focus,
+                },
+            )
+        elif request.action in {"preview_outline", "change_outline"}:
+            changes: dict[str, object] = {}
+            for field in ("role_family", "target_level", "interview_focus"):
+                field_value = getattr(request, field)
+                if field_value:
+                    changes[field] = field_value
+            if request.interview_date is not None:
+                changes["interview_date"] = request.interview_date
+            if request.weekly_minutes is not None:
+                changes["weekly_minutes"] = request.weekly_minutes
+            if request.session_minutes is not None:
+                changes["session_minutes"] = request.session_minutes
+            if request.ratings:
+                changes["confidence_ratings"] = request.ratings
+            if "pacing_posture_override" in request.model_fields_set:
+                changes["pacing_posture_override"] = request.pacing_posture_override
+            if request.optional_skill_ids is not None:
+                changes["optional_skill_ids"] = request.optional_skill_ids
+            try:
+                if request.action == "preview_outline":
+                    return {
+                        "state": "preview",
+                        **application.preview_interview_curriculum_change(
+                            slug, changes=changes
+                        ),
+                    }
+                accepted = application.accept_interview_curriculum(
+                    slug,
+                    action="change",
+                    changes=changes,
+                    submission_id=request.submission_id,
+                    expected_revision=request.expected_revision,
                 )
-            for event_type, data in queued:
-                cli.log_event(slug, event_type, data)
+                return {
+                    "state": "changed",
+                    "receipt": accepted["receipt"],
+                    **self._placement_view(slug, accepted["profile"]),
+                }
+            except RouteAcceptanceConflictError as error:
+                return {"state": "conflict", "error": str(error)}
+            except (ValueError, cli.OpenLearnError) as error:
+                return {"invalid": True, "error": str(error)}
+        elif request.action == "confirm_outline":
+            outline = request.outline.strip()
+            try:
+                changes: dict[str, object] = {}
+                if request.role_family:
+                    changes["role_family"] = request.role_family
+                if request.target_level:
+                    changes["target_level"] = request.target_level
+                if request.interview_focus:
+                    changes["interview_focus"] = request.interview_focus
+                if request.interview_date is not None:
+                    changes["interview_date"] = request.interview_date
+                if request.weekly_minutes is not None:
+                    changes["weekly_minutes"] = request.weekly_minutes
+                if request.session_minutes is not None:
+                    changes["session_minutes"] = request.session_minutes
+                if request.ratings:
+                    changes["confidence_ratings"] = request.ratings
+                if "pacing_posture_override" in request.model_fields_set:
+                    changes["pacing_posture_override"] = request.pacing_posture_override
+                if request.optional_skill_ids is not None:
+                    changes["optional_skill_ids"] = request.optional_skill_ids
+                accepted = application.accept_interview_curriculum(
+                    slug,
+                    action="confirm",
+                    changes=changes,
+                    outline=outline,
+                    submission_id=request.submission_id,
+                    expected_revision=request.expected_revision,
+                )
+                value = accepted["profile"]
+            except RouteAcceptanceConflictError as error:
+                return {"state": "conflict", "error": str(error)}
+            except (ValueError, cli.OpenLearnError) as error:
+                return {"invalid": True, "error": str(error)}
         else:
+            if placement.get("lifecycle_version") != interview_prep.PLACEMENT_V3:
+                return {
+                    "invalid": True,
+                    "error": "This placement uses the quick confidence format.",
+                }
             stage = request.stage
             if request.action == "submit" and isinstance(stage, str):
                 try:
@@ -774,41 +1669,77 @@ class OpenLearnWebServices:
                 value = application.sync_interview_placement(slug)
         return self._placement_view(slug, value)
 
-    @staticmethod
-    def _start_reasoning_placement(slug: str, path: Path) -> dict[str, object]:
-        del path
-        return application.start_interview_placement(slug)
-
-    def skip_placement(self, slug: str) -> dict[str, object]:
-        current = self.placement(slug)
-        if current.get("status") == "provisional":
-            return current
-        if current.get("status") != "in_progress":
-            current = self.update_placement(slug, PlacementRequest(action="start"))
-        while current.get("status") == "in_progress":
-            stage = str(current["next_stage"])
-            current = self.update_placement(
-                slug, PlacementRequest(action="skip_stage", stage=stage)
+    def skip_placement(
+        self, slug: str, request: PlacementRequest | None = None
+    ) -> dict[str, object]:
+        if self._interview_course(slug) is None:
+            return {"slug": slug, "missing": True}
+        path = cli.interview_profile_path(slug)
+        current = interview_prep.load_profile(path)
+        placement = current["placement"]
+        assert isinstance(placement, dict)
+        result = placement.get("result")
+        already_skipped = (
+            placement.get("lifecycle_version") == interview_prep.PLACEMENT_V4
+            and placement.get("status") == "provisional"
+            and isinstance(result, dict)
+            and result.get("starting_level") == "learner-selected-baseline"
+        )
+        if not already_skipped:
+            if (
+                placement.get("status") == "in_progress"
+                and placement.get("lifecycle_version") != interview_prep.PLACEMENT_V4
+            ):
+                application.discard_interview_placement(slug)
+        try:
+            accepted = application.accept_interview_curriculum(
+                slug,
+                action="skip",
+                submission_id=request.submission_id if request is not None else None,
+                expected_revision=request.expected_revision if request is not None else None,
             )
-        return current
+            value = accepted["profile"]
+        except RouteAcceptanceConflictError as error:
+            return {"state": "conflict", "error": str(error)}
+        except (ValueError, cli.OpenLearnError) as error:
+            return {"invalid": True, "error": str(error)}
+        return self._placement_view(slug, value)
 
     def progress(self) -> dict[str, object]:
-        return {
-            "courses": [
-                {
-                    **_card(card),
-                    "known": card.progress.known,
-                    "total": card.progress.total,
-                    "units": [vars(unit) for unit in card.progress.units],
-                    "due_reviews": card.progress.reviews.due_today,
-                }
-                for card in application.dashboard().courses
-            ]
-        }
-
-    def due_reviews(self) -> dict[str, object]:
-        items: list[dict[str, object]] = []
+        courses: list[dict[str, object]] = []
         for card in application.dashboard().courses:
+            projected = _card(card)
+            if projected.get("is_interview"):
+                coverage = projected["coverage"]
+                readiness = projected["readiness"]
+                assert isinstance(coverage, dict) and isinstance(readiness, dict)
+                courses.append(
+                    {
+                        **projected,
+                        "known": coverage["covered"],
+                        "total": coverage["total"],
+                        "units": [],
+                        "due_reviews": readiness["due"],
+                    }
+                )
+            else:
+                courses.append(
+                    {
+                        **projected,
+                        "known": card.progress.known,
+                        "total": card.progress.total,
+                        "units": [vars(unit) for unit in card.progress.units],
+                        "due_reviews": card.progress.reviews.due_today,
+                    }
+                )
+        return {"courses": courses}
+
+    def due_reviews(self, slug: str | None = None) -> dict[str, object]:
+        items: list[dict[str, object]] = []
+        cards = application.dashboard(selected_slug=slug).courses
+        if slug is not None:
+            cards = tuple(card for card in cards if card.slug == slug)
+        for card in cards:
             topic = cli.read_topic_stats(card.slug)
             items.extend({"slug": card.slug, "course": card.title, **item} for item in cli.due_review_items(topic.metadata))
         return {"items": items, "count": len(items)}
@@ -929,6 +1860,7 @@ class OpenLearnWebServices:
             "operation_id": operation_id,
             "state": result.status,
             "error": result.error_message or "",
+            "error_code": result.error_code or "",
         }
 
     def retry_course_initialization(
@@ -938,14 +1870,29 @@ class OpenLearnWebServices:
         if expected_id is None or operation_id != expected_id:
             return {"state": "missing", "error": "Course initialization was not found."}
         try:
-            result = tutor_service.start_turn(
-                slug,
-                COURSE_INITIALIZATION_PROMPT,
-                intent="question",
-                submission_id=operation_id,
-                expected_revision=0,
-                model=config.configured_model(),
-            )
+            projection = application.interview_learning(slug)
+        except (cli.OpenLearnError, OSError, ValueError):
+            projection = None
+        try:
+            if projection is not None:
+                operation = projection.operation
+                if operation.submission_id != operation_id:
+                    return {
+                        "state": "conflict",
+                        "error": "The saved curriculum target changed. Reload the course.",
+                    }
+                result = application.resume_interview_progression(
+                    slug, model=config.configured_model()
+                )
+            else:
+                result = tutor_service.start_turn(
+                    slug,
+                    _course_initialization_prompt(slug),
+                    intent="question",
+                    submission_id=operation_id,
+                    expected_revision=0,
+                    model=config.configured_model(),
+                )
         except tutor_service.TutorConflictError as error:
             return {"state": "conflict", "error": str(error)}
         except tutor_service.TutorOperationError:
@@ -964,26 +1911,39 @@ class OpenLearnWebServices:
 
     def focus(self, slug: str) -> dict[str, object]:
         try:
+            interview_projection = application.interview_learning(slug)
+        except (cli.OpenLearnError, OSError, ValueError):
+            interview_projection = None
+        if interview_projection is not None:
+            return _interview_focus_projection(interview_projection)
+        try:
             snapshot = application.course(slug)
             topic = cli.read_topic(slug)
         except (cli.OpenLearnError, OSError):
             return {"slug": slug, "missing": True}
         _context, log = cli.split_session_log(topic.body)
         entries = cli.session_entries(log)
-        latest = entries[-1] if entries else None
+        latest_lesson = cli.last_tutor_lesson_entry_from_entries(entries)
+        latest = latest_lesson[1] if latest_lesson else None
         answer = latest["response"] if latest else "Your course is ready. Ask the tutor to begin."
-        response_kind, blocks = _present_response(answer)
+        move_title = _lesson_focus_title(topic, answer)
         pending = topic.metadata.get("pending_question")
         prompt = ""
         if isinstance(pending, dict) and isinstance(pending.get("question"), str):
-            prompt = str(pending["question"])
+            prompt = _pending_prompt_text(str(pending["question"]))
+        requires_response = bool(prompt)
+        presented_answer = _without_check_section(answer) if prompt else answer
+        response_kind, blocks = _present_response(presented_answer)
+        if prompt and not blocks:
+            response_kind = "Check"
+        move_kind = "Current lesson" if response_kind == "Lesson" else response_kind
         state = cli.load_state(slug)
         saved_response = state.get("pending_learner_prompt")
         saved_response = saved_response if isinstance(saved_response, str) else ""
         initialization_id = _initialization_id_for_slug(slug)
         revision = tutor_service.course_revision(slug)
         initialization: dict[str, object] | None = None
-        if initialization_id is not None and revision == 0:
+        if initialization_id is not None and revision == 0 and not topic.metadata.get("web_source_start"):
             initialization_result = tutor_service.operation_status(slug, initialization_id)
             if initialization_result is None or initialization_result.status != "committed":
                 initialization = {
@@ -994,7 +1954,7 @@ class OpenLearnWebServices:
                         else "retryable_error"
                     ),
                 }
-        if saved_response == COURSE_INITIALIZATION_PROMPT:
+        if _is_course_initialization_prompt(saved_response):
             saved_response = ""
         operation: dict[str, object] | None = None
         internal = state.get("_openlearn_internal")
@@ -1015,40 +1975,110 @@ class OpenLearnWebServices:
                         "id": operation_id,
                         "state": result.status,
                         "error": result.error_message or "",
+                        "error_code": result.error_code or "",
+                        "show_provider_recovery": _show_provider_recovery(
+                            result.error_code
+                        ),
+                        "preview_text": _operation_preview(result.preview),
                     }
         return {
             "slug": slug,
+            "source_start": bool(topic.metadata.get("web_source_start")) and revision == 0,
             "title": snapshot.card.title,
-            "current_unit": snapshot.card.current_focus or "Current lesson",
+            "current_unit": move_title,
             "revision": revision,
             "saved_state": "Saved locally",
             "move": {
-                "kind": response_kind,
-                "title": "Your next learning move",
+                "kind": move_kind,
+                "title": move_title,
                 "blocks": blocks,
                 "prompt": prompt,
                 "position": f"Step {max(1, revision)}",
             },
             "progress": _focus_progress(snapshot.card.progress),
             "feedback": None,
+            "requires_response": requires_response,
             "operation": operation,
             "initialization": initialization,
             "saved_response": saved_response,
         }
 
+    @staticmethod
+    def _source_request_text(request: TutorSubmissionRequest) -> str:
+        return {
+            "skip": "Skip this for now and continue with a useful next move.",
+            "next": "Continue to the next useful concept.",
+            "practice": "Practice now using a covered curriculum concept.",
+        }.get(request.intent, request.text.strip())
+
+    def _preview_source_turn(self, slug: str, request: TutorSubmissionRequest) -> tuple[dict[str, object], str | None]:
+        if not request.source_mode:
+            return {"ok": False, "error": "Enable source mode for this request first."}, None
+        try:
+            context = source_context.snapshot(
+                cli.read_topic(slug), self._source_request_text(request),
+                config.configured_model(), opted_in=True,
+            )
+            preview = source_context.request_preview(context)
+        except cli.OpenLearnError as error:
+            return {"ok": False, "error": str(error)}, None
+        binding = repr((slug, request.intent, request.text, request.expected_revision,
+                        request.source_lesson_id, request.source_lesson_title,
+                        request.source_lesson_revision, context.revision, preview))
+        return {"ok": True, "disclosure": source_context.CONSENT_TEXT + " The stored grading key is sent when needed but hidden in this learner preview.",
+                "preview": source_context.learner_request_preview(context),
+                "approval": sha256(binding.encode()).hexdigest()}, preview
+
+    def preview_source_turn(self, slug: str, request: TutorSubmissionRequest) -> dict[str, object]:
+        return self._preview_source_turn(slug, request)[0]
+
     def submit_turn(self, slug: str, request: TutorSubmissionRequest) -> dict[str, object]:
+        source_preview = None
+        if request.source_mode:
+            result, source_preview = self._preview_source_turn(slug, request)
+            if not result.get("ok") or request.source_approval != result.get("approval"):
+                return {"state": "conflict", "error": "Review and approve a fresh screened request before sending."}
         intent = {
             "answer": "answer",
             "question": "question",
             "stuck": "confusion",
             "skip": "navigation",
             "next": "navigation",
+            "practice": "navigation",
         }[request.intent]
         text = request.text.strip()
         if request.intent == "skip":
             text = "Skip this for now and continue with a useful next move."
         elif request.intent == "next":
             text = "Continue to the next useful concept."
+        elif request.intent == "practice":
+            text = "Practice now using a covered curriculum concept."
+        source_fields = (
+            request.source_lesson_id,
+            request.source_lesson_title,
+            request.source_lesson_revision,
+        )
+        if request.intent in {"question", "stuck"}:
+            projection = application.interview_learning(slug)
+            supplied_source_fields = tuple(value is not None for value in source_fields)
+            if projection is not None and any(supplied_source_fields) and not all(
+                supplied_source_fields
+            ):
+                return {
+                    "state": "conflict",
+                    "error": (
+                        "The visible lesson reference is incomplete. Refresh before asking."
+                    ),
+                }
+            if projection is None:
+                source_fields = (None, None, None)
+        else:
+            source_fields = (None, None, None)
+        progression_intent: tutor_service.ProgressionIntent | None = None
+        if request.intent in {"skip", "practice"}:
+            progression_intent = request.intent
+        elif request.intent == "next":
+            progression_intent = "continue"
         try:
             result = tutor_service.start_turn(
                 slug,
@@ -1057,6 +2087,16 @@ class OpenLearnWebServices:
                 submission_id=request.submission_id,
                 expected_revision=request.expected_revision,
                 model=config.configured_model(),
+                session_kind=(
+                    cli.SIDE_CHAT_SESSION_KIND
+                    if request.intent in {"question", "stuck"}
+                    else "chat"
+                ),
+                progression_intent=progression_intent,
+                source_lesson_id=source_fields[0],
+                source_lesson_title=source_fields[1],
+                source_lesson_revision=source_fields[2],
+                source_preview=source_preview,
             )
         except tutor_service.TutorConflictError as error:
             return {"state": "conflict", "error": str(error)}
@@ -1066,7 +2106,25 @@ class OpenLearnWebServices:
             "state": result.status,
             "submission_id": result.submission_id,
             "operation_id": result.submission_id,
+            "message_kind": result.message_kind,
             "move": _move(result.move),
+        }
+
+    def chat(self, slug: str) -> dict[str, object]:
+        try:
+            source = course_conversation_source(slug)
+        except (cli.OpenLearnError, OSError):
+            return {"slug": slug, "missing": True}
+        body = source["body"]
+        assert isinstance(body, str)
+        _context, log = cli.split_session_log(body)
+        course_revision = int(source["course_revision"])
+        return {
+            "conversation": _side_conversation(cli.session_entries(log)),
+            # ``revision`` remains the course namespace for older clients.
+            "revision": course_revision,
+            "course_revision": course_revision,
+            "chat_revision": int(source["side_chat_revision"]),
         }
 
     def operation_status(self, slug: str, operation_id: str) -> dict[str, object]:
@@ -1075,7 +2133,41 @@ class OpenLearnWebServices:
             return {"state": "retryable_error", "error": "This operation is no longer available."}
         return {
             "state": result.status,
+            "message_kind": result.message_kind,
             "error": result.error_message or "",
+            "error_code": result.error_code or "",
+            "show_provider_recovery": _show_provider_recovery(result.error_code),
+            "preview_text": _operation_preview(
+                result.preview or (result.move.content if result.move is not None else None)
+            ),
+        }
+
+    def progression_action(
+        self, slug: str, request: ProgressionActionRequest
+    ) -> dict[str, object]:
+        projection = application.interview_learning(slug)
+        if projection is None:
+            return {"state": "missing", "error": "Interview curriculum is not prepared."}
+        active_id = projection.operation.submission_id
+        if active_id != request.operation_id:
+            return {
+                "state": "stale-conflict",
+                "error": "The saved curriculum operation changed. Refresh the lesson.",
+            }
+        try:
+            if request.action == "cancel":
+                application.cancel_interview_progression(slug, request.operation_id)
+                return {"state": "cancelled"}
+            result = application.resume_interview_progression(
+                slug, model=config.configured_model()
+            )
+        except tutor_service.TutorConflictError as error:
+            return {"state": "busy", "error": str(error)}
+        except tutor_service.TutorOperationError as error:
+            return {"state": "provider-error", "error": str(error)}
+        return {
+            "state": result.status,
+            "operation_id": result.submission_id,
             "move": _move(result.move),
         }
 
@@ -1085,7 +2177,11 @@ class OpenLearnWebServices:
         except (cli.OpenLearnError, OSError):
             return {"items": [], "page": page, "has_more": False}
         _context, log = cli.split_session_log(topic.body)
-        entries = list(reversed(cli.session_entries(log)))
+        entries = [
+            entry
+            for entry in reversed(cli.session_entries(log))
+            if entry.get("kind") != cli.SIDE_CHAT_SESSION_KIND
+        ]
         page_size = 10
         start = (page - 1) * page_size
         selected = entries[start : start + page_size]
@@ -1093,7 +2189,7 @@ class OpenLearnWebServices:
         for entry in selected:
             kind, blocks = _present_response(str(entry["response"]))
             prompt = str(entry["prompt"])
-            title = "First lesson" if prompt == COURSE_INITIALIZATION_PROMPT else prompt[:100]
+            title = "First lesson" if _is_course_initialization_prompt(prompt) else prompt[:100]
             items.append(
                 {
                     "kind": kind,
@@ -1101,7 +2197,7 @@ class OpenLearnWebServices:
                     "blocks": blocks,
                     "content": "\n\n".join(
                         str(block.get("text", ""))
-                        if block["kind"] in {"paragraph", "code"}
+                        if block["kind"] in {"paragraph", "code", "math"}
                         else "\n".join(str(item) for item in block.get("items", []))
                         for block in blocks
                     ),

@@ -1,0 +1,52 @@
+{
+  "name": "bfs_queue_trace",
+  "family": "core_learning_comparison",
+  "persona": "A learner who knows FIFO queues and adjacency lists but confuses discovery with dequeueing.",
+  "description": "Repair marking on dequeue, trace a converging BFS graph, then transfer independently and retrieve after a projected delay.",
+  "topic": "BFS queue trace",
+  "goal": "Trace BFS queues and mark vertices when enqueued",
+  "mastery_profile": "proficient",
+  "context": {
+    "lesson.summary.txt": "Prior knowledge: FIFO queues, graph vertices and adjacency lists. Misconception: mark visited only on dequeue. For this lesson, mark a vertex visited when enqueued, enqueue each vertex at most once, and inspect neighbors in their listed order. Training graph: A:[B,C], B:[D], C:[D], D:[]. Transfer graph: P:[Q,R], Q:[S], R:[S,T], S:[], T:[]. Delayed graph: L:[M,N], M:[N], N:[]."
+  },
+  "state": {
+    "review_session_active": true,
+    "pending_question": {
+      "kind": "free_response",
+      "question": "With A:[B,C], B:[D], C:[D], D:[], when should a vertex be marked visited?",
+      "created": "2026-01-01",
+      "focus": "BFS queue trace",
+      "concept_id": "bfs-queue-trace"
+    },
+    "review_due": [{"concept": "BFS queue trace", "due": "2026-01-01", "difficulty": "hard"}]
+  },
+  "turns": [
+    {"role": "assistant", "content": "For A:[B,C], B:[D], C:[D], D:[], when should BFS mark a vertex visited?"},
+    {"role": "user", "content": "I know the queue is FIFO. I mark visited only when removing a vertex; C can add D even if B already queued it."},
+    {"role": "assistant", "content": null},
+    {"role": "user", "content": "Mark on enqueue. Starting with [A], after expanding A the queue is [B,C], after B [C,D], after C [D], then []. C does not queue D again because D is already discovered."},
+    {"role": "assistant", "content": null},
+    {"role": "user", "content": "Independently, for P:[Q,R], Q:[S], R:[S,T], S:[], T:[], the queue goes [P], [Q,R], [R,S], [S,T], [T], []. R skips the already enqueued S. Removal order is P,Q,R,S,T."},
+    {"role": "assistant", "content": null},
+    {"role": "user", "content": "Without notes, for L:[M,N], M:[N], N:[], I mark L when queued; queues are [L], [M,N], [N], []. M skips N because it was marked when L queued it."},
+    {"role": "assistant", "content": null}
+  ],
+  "rubric": [
+    "correct the discovery misconception with bounded support and respect explicit navigation",
+    "judge queue contents and duplicate prevention, not vocabulary recognition",
+    "keep supported practice, independent unfamiliar transfer and simulated retrieval distinct"
+  ],
+  "turn_rubrics": [
+    ["elicit or scaffold discovery timing without dumping a full trace"],
+    ["acknowledge the correct supported trace and fade assistance before transfer"],
+    ["judge the unfamiliar graph as transfer only if independent and production-grade; do not claim retention"],
+    ["judge the no-notes trace as scheduled retrieval without claiming real elapsed human study"]
+  ],
+  "outcome_schedule": [
+    {"gap_days_before": 0, "probe": "practice"},
+    {"gap_days_before": 0, "probe": "practice"},
+    {"gap_days_before": 0, "probe": "transfer"},
+    {"gap_days_before": 3, "probe": "retrieval"}
+  ],
+  "maximum_probes": 4
+}

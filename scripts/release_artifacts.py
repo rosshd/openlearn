@@ -15,6 +15,7 @@ import tarfile
 import tempfile
 import time
 import venv
+from html.parser import HTMLParser
 from http.cookiejar import CookieJar
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlencode
@@ -33,9 +34,16 @@ REQUIRED_PACKAGE_FILES = frozenset(
         "openlearn/web/static/favicon.svg",
         "openlearn/web/static/openlearn.css",
         "openlearn/web/static/openlearn.js",
+        "openlearn/web/static/math-renderer.js",
+        "openlearn/web/static/vendor/katex/katex.min.js",
+        "openlearn/web/static/vendor/katex/LICENSE",
+        "openlearn/web/static/vendor/stix/STIXTwoMath-Regular.woff2",
+        "openlearn/web/static/vendor/stix/OFL.txt",
+        "openlearn/web/static/vendor/stix/PROVENANCE.txt",
         "openlearn/web/templates/base.html",
         "openlearn/web/templates/data.html",
         "openlearn/web/templates/focus.html",
+        "openlearn/web/templates/components/math.html",
         "openlearn/web/templates/setup.html",
     }
 )
@@ -310,6 +318,90 @@ def _remove_released_lifecycle_lock(home: Path) -> None:
             time.sleep(0.05)
 
 
+class _TeachingSurface(HTMLParser):
+    """Inspect the installed lesson's content and enabled response/navigation controls."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.stack: list[tuple[str, dict[str, str | None]]] = []
+        self.title = False
+        self.content = False
+        self.navigation = False
+        self.response = False
+        self.submit = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attributes = dict(attrs)
+        if tag not in {
+            "area",
+            "base",
+            "br",
+            "col",
+            "embed",
+            "hr",
+            "img",
+            "input",
+            "link",
+            "meta",
+            "param",
+            "source",
+            "track",
+            "wbr",
+        }:
+            self.stack.append((tag, attributes))
+        if not self._visible_focus() or any("disabled" in item for _, item in self.stack):
+            return
+        if tag == "button" and "disabled" not in attributes:
+            if (
+                attributes.get("type") == "button"
+                and attributes.get("data-navigation-intent") == "next"
+            ):
+                self.navigation = True
+            if attributes.get("type", "submit") == "submit" and self._in_turn_form():
+                self.submit = True
+        if tag == "textarea" and self._in_turn_form():
+            if attributes.get("name") == "text" and "readonly" not in attributes:
+                self.response = True
+
+    def handle_endtag(self, tag: str) -> None:
+        for index in range(len(self.stack) - 1, -1, -1):
+            if self.stack[index][0] == tag:
+                del self.stack[index:]
+                break
+
+    def handle_data(self, data: str) -> None:
+        if not data.strip() or not self._visible_focus():
+            return
+        if not any("data-current-move" in attrs for _, attrs in self.stack):
+            return
+        if any(tag == "h1" and attrs.get("id") == "move-title" for tag, attrs in self.stack):
+            self.title = True
+        if any("data-move-content" in attrs for _, attrs in self.stack):
+            self.content = True
+
+    def _visible_focus(self) -> bool:
+        return any("data-focus-shell" in attrs for _, attrs in self.stack) and not any(
+            "hidden" in attrs
+            or attrs.get("aria-hidden") == "true"
+            or tag in {"script", "style", "template"}
+            for tag, attrs in self.stack
+        )
+
+    def _in_turn_form(self) -> bool:
+        return any(tag == "form" and "data-turn-form" in attrs for tag, attrs in self.stack)
+
+
+def _assert_teaching_surface(focus: str) -> None:
+    surface = _TeachingSurface()
+    surface.feed(focus)
+    if not (
+        surface.title
+        and surface.content
+        and (surface.navigation or (surface.response and surface.submit))
+    ):
+        raise ReleaseArtifactError("Maker Bench installed smoke did not reach interactive teaching")
+
+
 def _smoke_web(command: Path, home: Path) -> None:
     port = _free_loopback_port()
     environment = {
@@ -430,8 +522,7 @@ def _smoke_web(command: Path, home: Path) -> None:
             )
         with opener.open(f"{base_url}/courses/{slug}", timeout=5) as response:
             focus = response.read().decode("utf-8")
-        if "data-focus-shell" not in focus or "data-turn-form" not in focus:
-            raise ReleaseArtifactError("Maker Bench installed smoke did not reach teaching")
+        _assert_teaching_surface(focus)
     finally:
         if process.poll() is None:
             process.terminate()

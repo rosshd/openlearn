@@ -3,6 +3,9 @@ from __future__ import annotations
 import importlib.util
 import json
 import re
+import subprocess
+import sys
+import tarfile
 import tempfile
 import tomllib
 import unittest
@@ -12,6 +15,22 @@ from zipfile import ZipFile
 
 
 REPOSITORY = Path(__file__).resolve().parents[1]
+TEACHING_LESSON = """
+<div data-focus-shell data-revision="1">
+  <article data-current-move>
+    <h1 id="move-title">Arrays and strings</h1>
+    <div data-move-content><p>Walk through the input before choosing an approach.</p></div>
+  </article>
+  <button type="button" data-navigation-intent="next">Continue</button>
+</div>
+"""
+ANSWER_COMPOSER = """
+<form data-turn-form>
+  <textarea name="text" required></textarea>
+  <button type="submit">Send answer</button>
+</form>
+"""
+NEXT_BUTTON = '<button type="button" data-navigation-intent="next">Continue</button>'
 RELEASE_SCRIPT = REPOSITORY / "scripts" / "release_artifacts.py"
 SPEC = importlib.util.spec_from_file_location("release_artifacts", RELEASE_SCRIPT)
 assert SPEC is not None and SPEC.loader is not None
@@ -32,6 +51,106 @@ def _wheel(path: Path, *, extra: tuple[str, bytes] | None = None) -> None:
 
 
 class ReleaseArtifactPolicyTests(unittest.TestCase):
+    def test_installed_teaching_surface_accepts_navigation_or_answer_composer(self) -> None:
+        for lesson in (TEACHING_LESSON, TEACHING_LESSON.replace(NEXT_BUTTON, ANSWER_COMPOSER)):
+            with self.subTest(lesson=lesson):
+                release_artifacts._assert_teaching_surface(lesson)
+
+    def test_installed_teaching_surface_rejects_missing_or_unusable_lesson(self) -> None:
+        invalid = {
+            "missing shell": TEACHING_LESSON.replace("data-focus-shell", "data-other"),
+            "missing move": TEACHING_LESSON.replace("data-current-move", "data-other"),
+            "empty title": TEACHING_LESSON.replace("Arrays and strings", ""),
+            "missing content": TEACHING_LESSON.replace("data-move-content", "data-other"),
+            "empty content": TEACHING_LESSON.replace(
+                "Walk through the input before choosing an approach.", " "
+            ),
+            "missing controls": TEACHING_LESSON.replace(NEXT_BUTTON, ""),
+            "disabled navigation": TEACHING_LESSON.replace(
+                'type="button"', 'type="button" disabled'
+            ),
+            "hidden navigation": TEACHING_LESSON.replace('type="button"', 'type="button" hidden'),
+            "hidden lesson": TEACHING_LESSON.replace("data-focus-shell", "data-focus-shell hidden"),
+            "unrelated chat control": TEACHING_LESSON.replace(
+                'data-navigation-intent="next"', 'data-tool-open="chat"'
+            ),
+            "marker text only": "data-focus-shell data-turn-form data-move-content",
+            "unusable composer": TEACHING_LESSON.replace(
+                NEXT_BUTTON, ANSWER_COMPOSER.replace("<textarea", "<textarea disabled")
+            ),
+            "missing answer submit": TEACHING_LESSON.replace(
+                NEXT_BUTTON, '<form data-turn-form><textarea name="text"></textarea></form>'
+            ),
+            "disabled answer submit": TEACHING_LESSON.replace(
+                NEXT_BUTTON, ANSWER_COMPOSER.replace('type="submit"', 'type="submit" disabled')
+            ),
+            "readonly answer": TEACHING_LESSON.replace(
+                NEXT_BUTTON, ANSWER_COMPOSER.replace("<textarea", "<textarea readonly")
+            ),
+        }
+        for case, lesson in invalid.items():
+            with self.subTest(case=case):
+                with self.assertRaisesRegex(
+                    release_artifacts.ReleaseArtifactError, "interactive teaching"
+                ):
+                    release_artifacts._assert_teaching_surface(lesson)
+
+    def test_built_wheel_contains_every_versioned_interview_asset(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            output = Path(raw)
+            subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pip",
+                    "wheel",
+                    ".",
+                    "--no-deps",
+                    "--no-build-isolation",
+                    "--wheel-dir",
+                    str(output),
+                ],
+                cwd=REPOSITORY,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            wheel = next(output.glob("*.whl"))
+            with ZipFile(wheel) as archive:
+                packaged = set(archive.namelist())
+                for name in ("STIXTwoMath-Regular.woff2", "OFL.txt", "PROVENANCE.txt"):
+                    member = f"openlearn/web/static/vendor/stix/{name}"
+                    self.assertEqual(archive.read(member), (REPOSITORY / "src" / member).read_bytes())
+
+        self.assertLessEqual(release_artifacts.REQUIRED_PACKAGE_FILES, packaged)
+        self.assertIn(
+            "openlearn/interview_curricula/technical-interview-v1.json",
+            packaged,
+        )
+        self.assertIn(
+            "openlearn/interview_skill_graphs/coding-interview-v1.json",
+            packaged,
+        )
+        self.assertIn(
+            "openlearn/interview_skill_graphs/technical-interview-supplement-v1.json",
+            packaged,
+        )
+
+    def test_built_sdist_contains_math_font_license_and_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            output = Path(raw)
+            subprocess.run(
+                [sys.executable, "-m", "build", "--sdist", "--no-isolation", "--outdir", str(output)],
+                cwd=REPOSITORY, check=True, capture_output=True, text=True,
+            )
+            with tarfile.open(next(output.glob("*.tar.gz"))) as archive:
+                members = {Path(name).parts[1:]: name for name in archive.getnames()}
+                for name in ("STIXTwoMath-Regular.woff2", "OFL.txt", "PROVENANCE.txt"):
+                    member = Path(f"src/openlearn/web/static/vendor/stix/{name}")
+                    stream = archive.extractfile(members[member.parts])
+                    assert stream is not None
+                    self.assertEqual(stream.read(), (REPOSITORY / member).read_bytes())
+
     def test_installed_web_smoke_bootstraps_session_before_namespaced_reads(self) -> None:
         class Response:
             status = 200
@@ -76,7 +195,7 @@ class ReleaseArtifactPolicyTests(unittest.TestCase):
                     (
                         "http://127.0.0.1:9123/_openlearn/test/courses/"
                         "technical-interview-prep"
-                    ): b"data-focus-shell data-turn-form",
+                    ): TEACHING_LESSON.encode("utf-8"),
                 }
                 if isinstance(request, release_artifacts.Request):
                     payload = json.loads(request.data or b"{}")
@@ -176,6 +295,12 @@ class ReleaseArtifactPolicyTests(unittest.TestCase):
             (REPOSITORY / "pyproject.toml").read_text(encoding="utf-8")
         )
         metadata = project_config["project"]
+
+        self.assertLessEqual(
+            set(project_config["build-system"]["requires"]),
+            set(project_config["project"]["optional-dependencies"]["dev"]),
+            "Non-isolated package tests need the declared build backend in the dev environment",
+        )
 
         self.assertEqual(metadata["requires-python"], ">=3.11,<3.14")
         classifiers = set(metadata["classifiers"])
@@ -283,56 +408,6 @@ def test_primary_action_colors_meet_wcag_aa() -> None:
     for background, foreground in pairs:
         light, dark = sorted((luminance(background), luminance(foreground)), reverse=True)
         assert (light + 0.05) / (dark + 0.05) >= 4.5
-
-
-def test_web_assets_keep_accessibility_release_guards() -> None:
-    repository = Path(__file__).resolve().parents[1]
-    css = (repository / "src/openlearn/web/static/openlearn.css").read_text(
-        encoding="utf-8"
-    )
-    javascript = (repository / "src/openlearn/web/static/openlearn.js").read_text(
-        encoding="utf-8"
-    )
-    base = (repository / "src/openlearn/web/templates/base.html").read_text(
-        encoding="utf-8"
-    )
-
-    assert '@media (max-width: 390px)' in css
-    assert '@media (prefers-reduced-motion: reduce)' in css
-    assert ".site-nav-groups" in css
-    assert "min-height: 2.75rem" in css
-    assert 'aria-label="Primary navigation"' in base
-    assert 'data-nav-group' in base
-    assert "restoreFocus" in javascript
-    assert 'setAttribute("aria-expanded"' in javascript
-    assert 'setAttribute("inert"' in javascript
-    assert "prefers-reduced-motion: reduce" in javascript
-
-
-def test_learning_tool_motion_opens_from_the_prompt_edge() -> None:
-    css = (
-        Path(__file__).resolve().parents[1]
-        / "src"
-        / "openlearn"
-        / "web"
-        / "static"
-        / "openlearn.css"
-    ).read_text(encoding="utf-8")
-
-    assert "transform-origin: left center" in css
-    assert "clip-path: inset(0 100% 0 0)" in css
-    assert "translateX(-2.5rem) scaleX(0.96)" in css
-    assert "translateX(-1.5rem) scaleX(0.98)" in css
-
-
-def test_learning_tool_coordinates_panel_and_lesson_layout_motion() -> None:
-    repository = Path(__file__).resolve().parents[1]
-    css = (repository / "src/openlearn/web/static/openlearn.css").read_text(
-        encoding="utf-8"
-    )
-
-    assert "--surface-motion-duration: 720ms" in css
-    assert "transition: flex-grow var(--surface-motion-duration)" in css
 
 
 if __name__ == "__main__":

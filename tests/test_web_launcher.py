@@ -6,7 +6,9 @@ import os
 import stat
 import threading
 from argparse import Namespace
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 
 import pytest
 
@@ -16,6 +18,28 @@ from openlearn.web import launcher
 LIVE_LEASE_ID = "a" * 32
 LIVE_ACCESS_TOKEN = "test-capability-token-value-1234567890"
 LIVE_URL_NAMESPACE = "/_openlearn/test-route-namespace-value-1234567890"
+
+
+class FakeListener:
+    def __init__(self, port: int) -> None:
+        self.port = port
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def fake_listener_factory(auto_port: int = launcher.DEFAULT_PORT):
+    @contextmanager
+    def reserve(requested_port: int | None) -> Iterator[tuple[FakeListener, int]]:
+        selected_port = auto_port if requested_port is None else requested_port
+        listener = FakeListener(selected_port)
+        try:
+            yield listener, selected_port
+        finally:
+            listener.close()
+
+    return reserve
 
 
 def write_live_record(home: Path, *, pid: int = 4242, url: str = "http://127.0.0.1:9191/") -> Path:
@@ -170,6 +194,7 @@ def test_run_reuses_healthy_recorded_server_without_starting_another(
         probe=lambda record: probed.append(record) or True,
         opener=lambda url: opened.append(url),
         server_runner=lambda *args, **kwargs: pytest.fail("started a second server"),
+        listener_factory=fake_listener_factory(),
     )
 
     assert probed == [
@@ -204,6 +229,7 @@ def test_run_waits_for_claimed_server_to_become_healthy(
         probe=probe,
         opener=lambda url: opened.append(url),
         server_runner=lambda *args, **kwargs: pytest.fail("started a second server"),
+        listener_factory=fake_listener_factory(),
     )
 
     assert probes == 2
@@ -224,25 +250,88 @@ def test_run_respects_no_browser_when_reusing_server(
         opener=lambda url: pytest.fail("opened a browser"),
         notifier=notices.append,
         server_runner=lambda *args, **kwargs: pytest.fail("started a second server"),
+        listener_factory=fake_listener_factory(),
     )
 
     assert notices == [f"Open openlearn: http://127.0.0.1:9191/?access_token={LIVE_ACCESS_TOKEN}"]
 
 
-def test_run_prints_bootstrap_url_when_new_server_has_no_browser(tmp_path: Path) -> None:
+def test_reserve_loopback_port_avoids_an_occupied_preferred_port(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    listeners: list[object] = []
+
+    class Listener:
+        def __init__(self, *_args: object) -> None:
+            self.closed = False
+            listeners.append(self)
+
+        def bind(self, address: tuple[str, int]) -> None:
+            if address[1] == launcher.DEFAULT_PORT:
+                raise OSError(launcher.errno.EADDRINUSE, "address already in use")
+
+        def listen(self) -> None:
+            pass
+
+        def close(self) -> None:
+            self.closed = True
+
+    monkeypatch.setattr(launcher.socket, "socket", Listener)
+
+    with launcher._reserve_loopback_port(None) as (listener, selected):
+        assert selected == launcher.DEFAULT_PORT + 1
+        assert listener is listeners[1]
+        assert listeners[0].closed is True
+        assert listeners[1].closed is False
+
+    assert listeners[1].closed is True
+
+
+def test_run_prints_selected_bootstrap_url_when_new_server_has_no_browser(
+    tmp_path: Path,
+) -> None:
     notices: list[str] = []
+
+    captured: dict[str, object] = {}
+
+    def run_server(_app: object, **kwargs: object) -> None:
+        captured.update(kwargs)
 
     launcher.run(
         home=tmp_path,
         open_browser=False,
         notifier=notices.append,
         opener=lambda url: pytest.fail("opened a browser"),
-        server_runner=lambda *_args, **_kwargs: None,
+        server_runner=run_server,
+        listener_factory=fake_listener_factory(9124),
     )
 
     assert len(notices) == 1
-    assert notices[0].startswith("Open openlearn: http://127.0.0.1:8765/?access_token=")
+    assert notices[0].startswith("Open openlearn: http://127.0.0.1:9124/?access_token=")
     assert len(notices[0].partition("access_token=")[2]) >= 32
+    assert captured["port"] == 9124
+
+
+def test_run_rejects_an_unavailable_explicit_port_before_starting(
+    tmp_path: Path,
+) -> None:
+    @contextmanager
+    def occupied(_requested_port: int | None) -> Iterator[tuple[FakeListener, int]]:
+        raise launcher.WebLaunchError(
+            "port 9123 is already in use; omit --port to choose one automatically"
+        )
+        yield FakeListener(9123), 9123
+
+    with pytest.raises(launcher.WebLaunchError, match="port 9123 is already in use"):
+        launcher.run(
+            port=9123,
+            home=tmp_path,
+            open_browser=False,
+            server_runner=lambda *_args, **_kwargs: pytest.fail("started a server"),
+            listener_factory=occupied,
+        )
+
+    assert not (tmp_path / ".web-server.json").exists()
 
 
 def test_run_refuses_to_start_when_live_server_fails_health_check(
@@ -262,6 +351,7 @@ def test_run_refuses_to_start_when_live_server_fails_health_check(
             probe=lambda url: False,
             opener=lambda url: pytest.fail("opened a browser"),
             server_runner=lambda *args, **kwargs: pytest.fail("started a second server"),
+            listener_factory=fake_listener_factory(),
         )
 
 
@@ -335,6 +425,9 @@ def test_run_starts_server_with_claimed_home(tmp_path: Path) -> None:
     browser_opened = threading.Event()
 
     def run_server(app: object, **kwargs: object) -> None:
+        listener = kwargs.pop("listener")
+        assert isinstance(listener, FakeListener)
+        assert listener.closed is False
         assert kwargs == {
             "host": "127.0.0.1",
             "port": 9234,
@@ -358,6 +451,7 @@ def test_run_starts_server_with_claimed_home(tmp_path: Path) -> None:
         probe=lambda _record: listening.is_set(),
         opener=open_browser,
         server_runner=run_server,
+        listener_factory=fake_listener_factory(),
     )
 
     saved_token = opened[0].partition("access_token=")[2]
@@ -380,6 +474,7 @@ def test_run_never_opens_browser_when_server_fails_before_ready(
             probe=lambda _record: False,
             opener=lambda url: opened.append(url),
             server_runner=fail_bind,
+            listener_factory=fake_listener_factory(),
         )
 
     assert opened == []

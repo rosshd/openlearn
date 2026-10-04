@@ -2,21 +2,23 @@
 
 from __future__ import annotations
 
+import errno
 import http.client
 import ipaddress
 import json
 import os
 import secrets
+import socket
 import sys
 import tempfile
 import threading
 import time
 import webbrowser
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import BinaryIO
+from typing import Any, BinaryIO
 from urllib.parse import urlencode, urlsplit
 from uuid import uuid4
 
@@ -45,6 +47,8 @@ OWNER_RECORD_TIMEOUT_SECONDS = 1.0
 OWNER_HEALTH_TIMEOUT_SECONDS = 3.0
 BROWSER_READY_TIMEOUT_SECONDS = 10.0
 LOCK_TOKEN_OFFSET = 1
+DEFAULT_PORT = 8765
+AUTO_PORT_ATTEMPTS = 100
 
 
 class ExistingWebServer(WebLaunchError):
@@ -225,7 +229,7 @@ def _wait_for_owner_record(
 def server_lease(
     home: Path | None = None,
     *,
-    url: str = "http://127.0.0.1:8765/",
+    url: str = f"http://127.0.0.1:{DEFAULT_PORT}/",
 ) -> Iterator[ServerRecord]:
     """Atomically claim one web-server process for an openlearn home."""
     normalized_url = _validated_loopback_url(url)
@@ -337,6 +341,56 @@ def _bootstrap_url(record: ServerRecord) -> str:
     return f"{record.url}?{urlencode({'access_token': record.access_token})}"
 
 
+@contextmanager
+def _reserve_loopback_port(
+    requested_port: int | None,
+) -> Iterator[tuple[socket.socket, int]]:
+    """Bind and retain the selected listener until the web server takes ownership."""
+    preferred = DEFAULT_PORT if requested_port is None else requested_port
+    upper_bound = min(preferred + AUTO_PORT_ATTEMPTS, 65536)
+    candidates = range(preferred, upper_bound) if requested_port is None else (preferred,)
+    for candidate_port in candidates:
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            listener.bind(("127.0.0.1", candidate_port))
+            listener.listen()
+        except OSError as exc:
+            listener.close()
+            occupied = exc.errno == errno.EADDRINUSE or getattr(exc, "winerror", None) == 10048
+            if occupied and requested_port is None:
+                continue
+            if occupied:
+                raise WebLaunchError(
+                    f"port {candidate_port} is already in use; "
+                    "omit --port to choose one automatically"
+                ) from exc
+            raise WebLaunchError(
+                f"could not reserve loopback port {candidate_port}: {exc}"
+            ) from exc
+        try:
+            yield listener, candidate_port
+        finally:
+            listener.close()
+        return
+    raise WebLaunchError(
+        f"no available loopback port found from {preferred} to {upper_bound - 1}"
+    )
+
+
+def _run_uvicorn(
+    app: Any,
+    *,
+    listener: socket.socket,
+    host: str,
+    port: int,
+    log_level: str,
+    access_log: bool,
+) -> None:
+    del host, port
+    config = uvicorn.Config(app, log_level=log_level, access_log=access_log)
+    uvicorn.Server(config).run(sockets=[listener])
+
+
 def _open_browser_when_ready(
     record: ServerRecord,
     probe: Callable[[ServerRecord], bool],
@@ -358,49 +412,54 @@ def _open_browser_when_ready(
 
 def run(
     *,
-    port: int = 8765,
+    port: int | None = None,
     open_browser: bool = True,
     home: Path | None = None,
     probe: Callable[[ServerRecord], bool] = _probe_server,
     opener: Callable[[str], object] = webbrowser.open,
     notifier: Callable[[str], object] = print,
-    server_runner: Callable[..., object] = uvicorn.run,
+    server_runner: Callable[..., object] = _run_uvicorn,
+    listener_factory: Callable[
+        [int | None], AbstractContextManager[tuple[socket.socket, int]]
+    ] = _reserve_loopback_port,
 ) -> None:
-    if not 1 <= port <= 65535:
+    if port is not None and not 1 <= port <= 65535:
         raise WebLaunchError("port must be between 1 and 65535")
-    address = f"http://127.0.0.1:{port}/"
     try:
-        with server_lease(home, url=address) as record:
-            app = create_app(
-                security=BrowserSecurity.local(
-                    access_token=record.access_token,
-                    url_namespace=record.url_namespace,
+        with listener_factory(port) as (listener, selected_port):
+            address = f"http://127.0.0.1:{selected_port}/"
+            with server_lease(home, url=address) as record:
+                app = create_app(
+                    security=BrowserSecurity.local(
+                        access_token=record.access_token,
+                        url_namespace=record.url_namespace,
+                    )
                 )
-            )
-            browser_cancelled = threading.Event()
-            browser_thread: threading.Thread | None = None
-            if open_browser:
-                browser_thread = threading.Thread(
-                    target=_open_browser_when_ready,
-                    args=(record, probe, opener, browser_cancelled),
-                    name="openlearn-browser-readiness",
-                    daemon=True,
-                )
-                browser_thread.start()
-            else:
-                notifier(f"Open openlearn: {_bootstrap_url(record)}")
-            try:
-                server_runner(
-                    app,
-                    host="127.0.0.1",
-                    port=port,
-                    log_level="info",
-                    access_log=False,
-                )
-            finally:
-                browser_cancelled.set()
-                if browser_thread is not None:
-                    browser_thread.join(timeout=0.25)
+                browser_cancelled = threading.Event()
+                browser_thread: threading.Thread | None = None
+                if open_browser:
+                    browser_thread = threading.Thread(
+                        target=_open_browser_when_ready,
+                        args=(record, probe, opener, browser_cancelled),
+                        name="openlearn-browser-readiness",
+                        daemon=True,
+                    )
+                    browser_thread.start()
+                else:
+                    notifier(f"Open openlearn: {_bootstrap_url(record)}")
+                try:
+                    server_runner(
+                        app,
+                        listener=listener,
+                        host="127.0.0.1",
+                        port=selected_port,
+                        log_level="info",
+                        access_log=False,
+                    )
+                finally:
+                    browser_cancelled.set()
+                    if browser_thread is not None:
+                        browser_thread.join(timeout=0.25)
     except ExistingWebServer as error:
         root = project_home() if home is None else home.resolve()
         existing = _wait_for_healthy_owner(root, error.record, probe)

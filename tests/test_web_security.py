@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import pytest
 
@@ -20,9 +21,26 @@ class WebStub:
     def configure_provider(self, request: Any) -> dict[str, Any]:
         return {"ok": True, "ready": True, "model": request.model}
 
-    def dashboard(self) -> dict[str, Any]:
+    def dashboard(self, selected_slug: str | None = None) -> dict[str, Any]:
         return {
             "active_course": None,
+            "active_slug": None,
+            "selected_slug": "safe-course",
+            "selected_course": {
+                "slug": "safe-course",
+                "title": '<img src=x onerror="alert(1)">',
+                "goal": "Safe goal",
+                "current_topic": "Foundations",
+                "coverage": {"covered": 1, "total": 10, "percent": 10, "summary": "1 of 10"},
+                "upcoming": [],
+                "path": [],
+                "review": {"due": 0, "actionable": False},
+                "weak_areas": [],
+                "first_pass_complete": False,
+                "readiness_summary": "In progress",
+                "blocker": None,
+                "recommendation": None,
+            },
             "due_reviews": 0,
             "courses": [
                 {
@@ -30,6 +48,10 @@ class WebStub:
                     "title": '<img src=x onerror="alert(1)">',
                     "current_unit": "Foundations",
                     "progress": 10,
+                    "coverage_summary": "1 of 10",
+                    "review_due": 0,
+                    "active": False,
+                    "selected": True,
                 }
             ],
         }
@@ -39,6 +61,16 @@ class WebStub:
 
     def create_course(self, request: Any) -> dict[str, Any]:
         return {"ok": True, "slug": "safe-course"}
+
+    def follow_up_proposal(self, slug: str, request: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "source_slug": slug,
+            "submission_id": request.submission_id,
+            "state": "pending",
+            "interests": request.interests,
+            "weak_areas": [],
+        }
 
     def focus(self, slug: str) -> dict[str, Any]:
         return {
@@ -67,6 +99,30 @@ class WebStub:
 @pytest.fixture
 def client() -> TestClient:
     return TestClient(create_app(WebStub(), testing=True))
+
+
+def test_dashboard_accepts_legacy_zero_argument_service_adapter() -> None:
+    class LegacyDashboardStub(WebStub):
+        def dashboard(self) -> dict[str, Any]:
+            return super().dashboard()
+
+    legacy = TestClient(create_app(LegacyDashboardStub(), testing=True))
+
+    response = legacy.get("/dashboard?course=safe-course")
+
+    assert response.status_code == 200
+    assert "Your courses" in response.text
+
+
+def test_dashboard_does_not_treat_service_type_error_as_legacy_signature() -> None:
+    class BrokenDashboardStub(WebStub):
+        def dashboard(self, selected_slug: str | None = None) -> dict[str, Any]:
+            raise TypeError("dashboard implementation failed")
+
+    broken = TestClient(create_app(BrokenDashboardStub(), testing=True))
+
+    with pytest.raises(TypeError, match="dashboard implementation failed"):
+        broken.get("/dashboard")
 
 
 def test_local_reads_require_launch_capability_and_bootstrap_to_http_only_cookie() -> None:
@@ -133,14 +189,14 @@ def test_every_normal_response_has_browser_security_headers(client: TestClient) 
         in response.headers["content-security-policy"]
     )
     assert response.headers["x-content-type-options"] == "nosniff"
-    assert response.headers["referrer-policy"] == "no-referrer"
+    assert response.headers["referrer-policy"] == "same-origin"
     assert response.headers["x-frame-options"] == "DENY"
     assert "openlearn_csrf=" in response.headers["set-cookie"]
     assert "HttpOnly" in response.headers["set-cookie"]
     assert "SameSite=Strict" in response.headers["set-cookie"]
 
 
-def test_video_embed_preserves_no_referrer_policy() -> None:
+def test_lesson_tools_cannot_launch_external_video_frames() -> None:
     script = (
         Path(__file__).parents[1]
         / "src"
@@ -150,11 +206,12 @@ def test_video_embed_preserves_no_referrer_policy() -> None:
         / "openlearn.js"
     ).read_text(encoding="utf-8")
 
-    assert 'frame.referrerPolicy = "no-referrer"' in script
-    assert "strict-origin-when-cross-origin" not in script
+    assert 'document.createElement("iframe")' not in script
+    assert "youtube-nocookie.com" not in script
+    assert "data-video-load" not in script
 
 
-def test_code_output_rendering_preserves_whitespace() -> None:
+def test_lesson_code_rendering_preserves_plain_text_and_whitespace() -> None:
     script = (
         Path(__file__).parents[1]
         / "src"
@@ -164,8 +221,14 @@ def test_code_output_rendering_preserves_whitespace() -> None:
         / "openlearn.js"
     ).read_text(encoding="utf-8")
 
-    assert '.join("\\n").trim()' not in script
-    assert "output.length ? output" in script
+    code_rendering = script[
+        script.index('if (block.kind === "code")'):
+        script.index('} else if (block.kind === "unordered_list"')
+    ]
+    assert 'document.createElement("pre")' in code_rendering
+    assert 'code.textContent = block.text || ""' in code_rendering
+    assert "innerHTML" not in code_rendering
+    assert ".trim(" not in code_rendering
 
 
 def test_rejects_unknown_host_with_security_headers(client: TestClient) -> None:
@@ -274,6 +337,37 @@ def test_request_body_limit_is_enforced(client: TestClient) -> None:
 
     assert response.status_code == 413
     assert response.json() == {"error": "request_too_large"}
+
+
+def test_course_management_mutations_require_csrf_and_same_origin(client: TestClient) -> None:
+    missing_csrf = client.post("/courses/safe-course/activate")
+    bad_origin = client.post(
+        "/courses/safe-course/activate",
+        headers={"origin": "https://attacker.example"},
+    )
+
+    assert missing_csrf.status_code == 403
+    assert missing_csrf.json() == {"error": "invalid_csrf_token"}
+    assert bad_origin.status_code == 403
+    assert bad_origin.json() == {"error": "invalid_origin"}
+
+
+def test_follow_up_api_exposes_validated_operation_state(client: TestClient) -> None:
+    token = client.get("/dashboard").cookies["openlearn_csrf"]
+
+    response = client.post(
+        "/api/courses/safe-course/follow-up",
+        headers={"x-csrf-token": token},
+        json={
+            "action": "generate",
+            "interests": "distributed systems",
+            "submission_id": str(uuid4()),
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["state"] == "pending"
+    assert response.json()["source_slug"] == "safe-course"
 
 
 def test_templates_escape_stored_course_and_tutor_content(client: TestClient) -> None:
