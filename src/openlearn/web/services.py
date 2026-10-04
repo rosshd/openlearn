@@ -1984,6 +1984,11 @@ class OpenLearnWebServices:
         return {
             "slug": slug,
             "source_start": bool(topic.metadata.get("web_source_start")) and revision == 0,
+            "source_start_operation_id": (
+                initialization_id
+                if topic.metadata.get("web_source_start") and revision == 0
+                else None
+            ),
             "title": snapshot.card.title,
             "current_unit": move_title,
             "revision": revision,
@@ -2005,6 +2010,8 @@ class OpenLearnWebServices:
 
     @staticmethod
     def _source_request_text(request: TutorSubmissionRequest) -> str:
+        if request.source_start:
+            return COURSE_INITIALIZATION_PROMPT
         return {
             "skip": "Skip this for now and continue with a useful next move.",
             "next": "Continue to the next useful concept.",
@@ -2014,6 +2021,14 @@ class OpenLearnWebServices:
     def _preview_source_turn(self, slug: str, request: TutorSubmissionRequest) -> tuple[dict[str, object], str | None]:
         if not request.source_mode:
             return {"ok": False, "error": "Enable source mode for this request first."}, None
+        if request.source_start:
+            topic = cli.read_topic(slug)
+            initialization_id = _initialization_id_for_slug(slug)
+            if (not topic.metadata.get("web_source_start")
+                    or tutor_service.course_revision(slug) != 0
+                    or initialization_id is None
+                    or request.submission_id != initialization_id):
+                return {"ok": False, "error": "The first-lesson request changed. Refresh and review it again."}, None
         try:
             context = source_context.snapshot(
                 cli.read_topic(slug), self._source_request_text(request),
@@ -2023,6 +2038,7 @@ class OpenLearnWebServices:
         except cli.OpenLearnError as error:
             return {"ok": False, "error": str(error)}, None
         binding = repr((slug, request.intent, request.text, request.expected_revision,
+                        request.source_start,
                         request.source_lesson_id, request.source_lesson_title,
                         request.source_lesson_revision, context.revision, preview))
         return {"ok": True, "disclosure": source_context.CONSENT_TEXT + " The stored grading key is sent when needed but hidden in this learner preview.",
@@ -2033,6 +2049,12 @@ class OpenLearnWebServices:
         return self._preview_source_turn(slug, request)[0]
 
     def submit_turn(self, slug: str, request: TutorSubmissionRequest) -> dict[str, object]:
+        if request.source_start:
+            existing = tutor_service.operation_status(slug, request.submission_id)
+            if existing is not None and existing.status == "committed":
+                return {"state": existing.status, "submission_id": existing.submission_id,
+                        "operation_id": existing.submission_id,
+                        "message_kind": existing.message_kind, "move": _move(existing.move)}
         source_preview = None
         if request.source_mode:
             result, source_preview = self._preview_source_turn(slug, request)
@@ -2046,7 +2068,7 @@ class OpenLearnWebServices:
             "next": "navigation",
             "practice": "navigation",
         }[request.intent]
-        text = request.text.strip()
+        text = COURSE_INITIALIZATION_PROMPT if request.source_start else request.text.strip()
         if request.intent == "skip":
             text = "Skip this for now and continue with a useful next move."
         elif request.intent == "next":
@@ -2089,7 +2111,7 @@ class OpenLearnWebServices:
                 model=config.configured_model(),
                 session_kind=(
                     cli.SIDE_CHAT_SESSION_KIND
-                    if request.intent in {"question", "stuck"}
+                    if request.intent in {"question", "stuck"} and not request.source_start
                     else "chat"
                 ),
                 progression_intent=progression_intent,

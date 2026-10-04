@@ -10,7 +10,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 
-from openlearn import cli, source_imports
+from openlearn import cli, lesson_policy, source_imports
 from openlearn.models import Topic
 
 APPROVED_BASE_URL = "https://openrouter.ai/api/v1"
@@ -203,6 +203,7 @@ def snapshot(topic: Topic, user: str, model: str, *, opted_in: bool = False) -> 
     metadata: dict[str, object] = {"pending_question": clean_pending} if clean_pending else {}
     metadata.update(_scoped_state(topic.metadata))
     terms = set(re.findall(r"[\w-]{3,}", (clean_user + " " + str(clean_pending.get("question", ""))).casefold())) - {"the", "and", "with", "for", "this", "that", "from", "lesson", "please"}
+    starting_lesson = lesson_policy.is_course_initialization_prompt(clean_user)
     if not terms & set(re.findall(r"[\w-]{3,}", previous.casefold())):
         previous = ""
     raw = topic.metadata.get(source_imports.COURSE_SOURCES_METADATA_KEY)
@@ -250,7 +251,7 @@ def snapshot(topic: Topic, user: str, model: str, *, opted_in: bool = False) -> 
         for index, line in enumerate(lines):
             matches = len(terms & set(re.findall(r"[\w-]{3,}", line.casefold())))
             rule = bool(re.search(r"(?i)\b(?:instructor|must|required|rule|equation|formula|update|objective)\b|[=∑Σμ]", line))
-            if matches or rule:
+            if matches or rule or (starting_lesson and line.strip()):
                 scored.append((matches * 5 + 2 * rule, index))
         used: set[int] = set()
         for score, index in sorted(scored, key=lambda item: (-item[0], item[1]))[:EXCERPT_LIMIT]:
