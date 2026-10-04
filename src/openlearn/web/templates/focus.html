@@ -39,6 +39,8 @@
       <div class="move-content" data-move-content>
         {% for block in course.move.blocks or [] %}
           {% if block.kind == 'paragraph' %}<p>{{ block.text }}</p>
+          {% elif block.kind == 'takeaway' %}<section class="slide-takeaway"><span>Key idea</span><p>{{ block.text }}</p></section>
+          {% elif block.kind == 'example' %}<section class="slide-example"><span>Example</span><p>{{ block.text }}</p></section>
           {% elif block.kind == 'definition' %}<aside class="term-note"><strong>{{ block.term }}</strong><span>{{ block.text }}</span></aside>
           {% elif block.kind == 'unordered_list' %}<ul>{% for item in block['items'] %}<li>{{ item }}</li>{% endfor %}</ul>
           {% elif block.kind == 'ordered_list' %}<ol>{% for item in block['items'] %}<li>{{ item }}</li>{% endfor %}</ol>

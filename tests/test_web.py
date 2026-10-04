@@ -179,6 +179,9 @@ def test_default_web_app_runs_setup_dashboard_course_and_tutor_flow(
     focus = client.get(f"/courses/{slug}")
     assert focus.status_code == 200
     assert "Current lesson" in focus.text
+    assert 'class="slide-takeaway"' in focus.text
+    assert 'class="slide-example"' in focus.text
+    assert "Key idea" in focus.text
     assert "Press Enter to continue" not in focus.text
     assert 'id="learner-response"' not in focus.text
     assert 'data-tool-open="chat"' in focus.text
@@ -2603,7 +2606,9 @@ def test_web_created_ordinary_course_guards_sentinel_without_an_accepted_plan(
     assert replayed.json()["created"] is False
     assert wait_for_operation(restarted, slug, operation_id)["state"] == "committed"
     assert len(calls) == expected_calls
-    assert "For example," in restarted.get(f"/courses/{slug}").text
+    replayed_page = restarted.get(f"/courses/{slug}").text
+    assert 'class="slide-example"' in replayed_page
+    assert ">Example<" in replayed_page
     history = restarted.get(f"/courses/{slug}/history", headers={"accept": "application/json"})
     assert len(history.json()["items"]) == 1
     assert history.json()["items"][0]["title"] == "First lesson"
@@ -2656,7 +2661,8 @@ def test_accepted_plan_initialization_shares_policy_and_survives_restart(
     assert replayed["state"] == "committed"
     assert len(calls) == (2 if invalid else 1)
     page = restarted.get(f"/courses/{slug}").text
-    assert "For example," in page
+    assert 'class="slide-example"' in page
+    assert ">Example<" in page
     assert "<!-- covered:" not in page
     history = restarted.get(f"/courses/{slug}/history", headers={"accept": "application/json"})
     assert history.json()["items"][0]["title"] == "First lesson"
@@ -3329,7 +3335,7 @@ def test_present_response_hides_reasoning_from_existing_lesson_history() -> None
     )
 
     assert kind == "Lesson"
-    assert blocks == [{"kind": "paragraph", "text": "Clarify constraints before coding."}]
+    assert blocks == [{"kind": "takeaway", "text": "Clarify constraints before coding."}]
 
 
 def test_present_response_leaves_terminal_advance_cue_to_web_controls() -> None:
@@ -3339,7 +3345,26 @@ def test_present_response_leaves_terminal_advance_cue_to_web_controls() -> None:
     )
 
     assert kind == "Lesson"
-    assert blocks == [{"kind": "paragraph", "text": "A sliding window reuses work."}]
+    assert blocks == [{"kind": "takeaway", "text": "A sliding window reuses work."}]
+
+
+def test_present_response_turns_lesson_prose_into_slide_regions() -> None:
+    kind, blocks = _present_response(
+        "**Lesson:**\nNoise is random measurement error that carries no signal.\n\n"
+        "For example, repeated scale readings can wobble around the true weight."
+    )
+
+    assert kind == "Lesson"
+    assert blocks == [
+        {
+            "kind": "takeaway",
+            "text": "Noise is random measurement error that carries no signal.",
+        },
+        {
+            "kind": "example",
+            "text": "Repeated scale readings can wobble around the true weight.",
+        },
+    ]
 
 
 def test_plain_text_removes_inline_markdown_markers() -> None:
