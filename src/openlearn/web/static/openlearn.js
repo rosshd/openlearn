@@ -1448,6 +1448,10 @@ sourceStartButton?.addEventListener("click", async () => {
       completed,
     );
   } catch (error) {
+    if (error.payload?.state === "setup_required"
+        && openProviderSetup(error.message, () => sourceStartButton.click())) {
+      return;
+    }
     setOperationState(error.message, true);
   } finally {
     lockTurnForm(false);

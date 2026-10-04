@@ -40,6 +40,7 @@
         <button class="primary-action compact" type="button" data-source-send>Send screened request</button>
       </div>
     </dialog>
+    {% include "provider_recovery.html" %}
     <article class="move-surface" data-current-move data-move-type="{{ course.move.kind|lower }}">
       {% if course.feedback %}
       <aside class="feedback-strip {{ course.feedback.tone or '' }}" aria-label="Tutor feedback">

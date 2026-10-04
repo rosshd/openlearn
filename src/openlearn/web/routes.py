@@ -969,7 +969,12 @@ async def focus(request: Request, slug: str) -> Any:
     return _templates(request).TemplateResponse(
         request,
         "focus.html",
-        _context(request, course=snapshot, page_title=snapshot.get("title", "Focus Bench")),
+        _context(
+            request,
+            course=snapshot,
+            provider=public_mapping(await _call(request, "provider_status")),
+            page_title=snapshot.get("title", "Focus Bench"),
+        ),
     )
 
 

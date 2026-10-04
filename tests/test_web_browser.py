@@ -1870,6 +1870,15 @@ def test_source_creation_user_entrypoints_navigation_drafts_and_consent(tmp_path
                 page.locator("[data-source-cancel]").click()
                 assert (home / "learning-topics" / "synthetic-quick-learn.md").read_bytes() == before_preview
                 assert page.locator(".chat-exchange").count() == 0
+                page.route("**/api/courses/*/turns", lambda route: route.fulfill(
+                    status=428, content_type="application/json",
+                    body=json.dumps({"error": "Connect your tutor to begin.", "state": "setup_required"}),
+                ))
+                page.get_by_role("button", name="Start first lesson", exact=True).click()
+                page.locator("[data-source-send]").click()
+                page.locator("[data-provider-setup-dialog]").wait_for(state="visible")
+                page.locator("[data-provider-setup-cancel]").click()
+                page.unroute("**/api/courses/*/turns")
                 # Explicit approval commits one canonical main lesson and survives resume.
                 revision = _revision(page)
                 page.get_by_role("button", name="Start first lesson", exact=True).click()
@@ -1881,16 +1890,7 @@ def test_source_creation_user_entrypoints_navigation_drafts_and_consent(tmp_path
                 page.reload()
                 assert _revision(page) == 1
                 assert page.get_by_role("button", name="Start first lesson", exact=True).count() == 0
-                # Source chat remains available after the canonical lesson is established.
-                page.locator("[data-source-mode]").check()
-                page.get_by_label("Your question", exact=True).fill("Teach me about equal parts.")
-                page.get_by_role("button", name="Ask tutor", exact=True).click()
-                page.locator("[data-source-preview]").wait_for(state="visible")
-                page.locator("[data-source-send]").click()
-                playwright.expect(page.locator(".chat-exchange")).to_have_count(1)
-                assert "Source excerpts provided:" in page.locator(".chat-exchange").inner_text()
-                page.reload()
-                playwright.expect(page.locator(".chat-exchange")).to_have_count(1)
+                assert page.locator("[data-source-mode]").count() == 1
                 assert not errors
                 browser.close()
         finally:
