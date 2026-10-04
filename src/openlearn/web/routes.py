@@ -1122,13 +1122,18 @@ async def preview_source_turn(request: Request, slug: str) -> JSONResponse:
 
 @router.post("/api/courses/{slug}/turns", response_class=JSONResponse)
 async def submit_turn(request: Request, slug: str) -> JSONResponse:
-    if not await _provider_ready(request):
-        return _setup_required(request)
     try:
         slug = canonical_slug(slug)
         payload = TutorSubmissionRequest.model_validate(await request.json())
     except (ValidationError, ValueError) as error:
         return _json_error("Check your response and try again.", errors=str(error))
+    replay = public_mapping(await _call(
+        request, "committed_source_start_replay", slug, payload
+    ))
+    if replay:
+        return JSONResponse(replay, status_code=202)
+    if not await _provider_ready(request):
+        return _setup_required(request)
     result = public_mapping(await _call(request, "submit_turn", slug, payload))
     status = 409 if result.get("state") == "conflict" else 202
     return JSONResponse(result, status_code=status)

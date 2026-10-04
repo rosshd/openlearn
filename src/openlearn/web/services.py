@@ -2106,13 +2106,26 @@ class OpenLearnWebServices:
     def preview_source_turn(self, slug: str, request: TutorSubmissionRequest) -> dict[str, object]:
         return self._preview_source_turn(slug, request)[0]
 
+    def committed_source_start_replay(
+        self, slug: str, request: TutorSubmissionRequest
+    ) -> dict[str, object] | None:
+        if not request.source_start:
+            return None
+        existing = tutor_service.operation_status(slug, request.submission_id)
+        if existing is None or existing.status != "committed":
+            return None
+        return {
+            "state": existing.status,
+            "submission_id": existing.submission_id,
+            "operation_id": existing.submission_id,
+            "message_kind": existing.message_kind,
+            "move": _move(existing.move),
+        }
+
     def submit_turn(self, slug: str, request: TutorSubmissionRequest) -> dict[str, object]:
-        if request.source_start:
-            existing = tutor_service.operation_status(slug, request.submission_id)
-            if existing is not None and existing.status == "committed":
-                return {"state": existing.status, "submission_id": existing.submission_id,
-                        "operation_id": existing.submission_id,
-                        "message_kind": existing.message_kind, "move": _move(existing.move)}
+        replay = self.committed_source_start_replay(slug, request)
+        if replay is not None:
+            return replay
         source_preview = None
         if request.source_mode:
             result, source_preview = self._preview_source_turn(slug, request)

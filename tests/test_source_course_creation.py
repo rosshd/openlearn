@@ -235,6 +235,20 @@ def test_consented_source_start_commits_one_canonical_first_lesson(client, monke
     assert replay["operation_id"] == operation_id
     assert len(calls) == 1 and tutor_service.course_revision(slug) == 1
 
+    def provider_forbidden():
+        pytest.fail("A committed source-start replay must not check provider readiness")
+
+    monkeypatch.setattr(client.app.state.services, "ensure_provider_ready", provider_forbidden)
+    token = client.get("/").cookies["openlearn_csrf"]
+    endpoint_replay = client.post(
+        f"/api/courses/{slug}/turns",
+        headers={"x-csrf-token": token},
+        json=request.model_dump(mode="json"),
+    )
+    assert endpoint_replay.status_code == 202
+    assert endpoint_replay.json()["operation_id"] == operation_id
+    assert len(calls) == 1 and tutor_service.course_revision(slug) == 1
+
 
 def test_source_course_focus_offers_canonical_screened_start(client):
     created = post(client, payload(), {"source_file": (
