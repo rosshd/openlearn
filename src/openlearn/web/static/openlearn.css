@@ -437,12 +437,12 @@ h2 { font-size: var(--type-section); line-height: 1.25; letter-spacing: -0.025em
   position: relative;
   width: 100%;
   display: grid;
-  grid-template-columns: 8rem minmax(0, 70rem);
+  grid-template-columns: 10rem minmax(0, 70rem);
   gap: var(--focus-gap);
   align-items: start;
   justify-content: center;
 }
-.focus-shell[data-tool-active] { grid-template-columns: 6.5rem minmax(0, 1.2fr) minmax(0, 1fr); }
+.focus-shell[data-tool-active] { grid-template-columns: 10rem minmax(0, 1.2fr) minmax(0, 1fr); }
 .tool-rail {
   align-self: start;
   position: sticky;
@@ -451,8 +451,9 @@ h2 { font-size: var(--type-section); line-height: 1.25; letter-spacing: -0.025em
   gap: 0.5rem;
 }
 .tool-rail::before { content: "Lesson tools"; margin: 0 0 0.35rem 0.65rem; color: var(--graphite-soft); font: 750 0.68rem/1 ui-monospace, monospace; letter-spacing: 0.08em; text-transform: uppercase; }
-.rail-button { min-height: 3.25rem; padding: 0.65rem; border: 1px solid transparent; border-radius: var(--radius); background: transparent; display: grid; gap: 0.2rem; color: var(--graphite-soft); text-align: left; cursor: pointer; transition: border-color 180ms ease, background-color 180ms ease, color 180ms ease, transform 180ms ease; }
-.rail-button span { color: var(--orange); }
+.rail-button { min-height: 3.25rem; padding: 0.65rem; border: 1px solid transparent; border-radius: var(--radius); background: transparent; display: flex; align-items: center; gap: 0.75rem; color: var(--graphite-soft); text-align: left; cursor: pointer; transition: border-color 180ms ease, background-color 180ms ease, color 180ms ease, transform 180ms ease; }
+.rail-button span { min-width: 1rem; color: var(--graphite-soft); text-align: center; }
+.rail-button[aria-expanded="true"] span { color: var(--orange); }
 .rail-button:hover { border-color: var(--line); background: color-mix(in srgb, var(--surface) 72%, transparent); color: var(--graphite); transform: translateX(2px); }
 .rail-button[aria-expanded="true"] { border-color: var(--line); background: color-mix(in srgb, var(--orange) 8%, transparent); color: var(--graphite); box-shadow: inset 3px 0 var(--orange); }
 .focus-column {
@@ -711,12 +712,13 @@ h2 { font-size: var(--type-section); line-height: 1.25; letter-spacing: -0.025em
 
 @media (min-width: 761px) {
   .course-library-grid:not(.is-empty) .new-course-menu > div { left: 0; right: auto; }
+  .move-surface { min-height: clamp(26rem, 42vh, 34rem); }
 }
 
 @media (max-width: 1100px) and (min-width: 761px) {
   .focus-main { padding-inline: 1.25rem; }
   .focus-shell { --focus-gap: 1rem; }
-  .focus-shell[data-tool-active] { grid-template-columns: 5.5rem minmax(0, 1.2fr) minmax(0, 1fr); }
+  .focus-shell[data-tool-active] { grid-template-columns: 8.5rem minmax(0, 1.2fr) minmax(0, 1fr); }
   .rail-button { padding-inline: 0.45rem; }
 }
 
@@ -728,7 +730,7 @@ h2 { font-size: var(--type-section); line-height: 1.25; letter-spacing: -0.025em
 }
 
 @media (max-width: 860px) and (min-width: 761px) {
-  .focus-shell, .focus-shell[data-tool-active] { display: grid; grid-template-columns: 5.5rem minmax(0, 1fr); gap: 1rem; }
+  .focus-shell, .focus-shell[data-tool-active] { display: grid; grid-template-columns: 8rem minmax(0, 1fr); gap: 1rem; }
   .tool-rail { grid-row: 1 / span 2; }
   .focus-column { grid-column: 2; }
   .focus-shell[data-tool-active] .learning-tool { grid-column: 2; max-height: none; }
