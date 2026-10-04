@@ -458,7 +458,9 @@ def test_real_browser_course_polling_theme_conflict_and_keyboard_submit(
                 ) as conflict:
                     stale.locator("#learner-response").press("Control+Enter")
                 assert conflict.value.status == 409
-                assert "course changed" in stale.locator("[data-operation-state]").inner_text()
+                playwright.expect(stale.locator("[data-operation-state]")).to_contain_text(
+                    "course changed"
+                )
 
                 retry_question = "What is the average lookup cost of a hash map?"
                 topic = cli.read_topic(slug)
