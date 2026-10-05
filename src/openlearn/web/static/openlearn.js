@@ -1017,12 +1017,13 @@ if (initializationShell) {
 }
 
 function setOperationState(message, isError = false, result = null) {
-  const state = document.querySelector("[data-operation-state]");
+  const state = document.querySelector("[data-operation-state]:not([data-focus-shell])");
   if (!state) return;
   state.hidden = false;
   const messageNode = state.querySelector("[data-operation-message]");
-  if (messageNode) messageNode.textContent = message;
-  else state.textContent = message;
+  if (messageNode) {
+    if (messageNode.textContent !== message) messageNode.textContent = message;
+  } else state.textContent = message;
   state.classList.toggle("error", isError);
   state.setAttribute("aria-live", isError ? "assertive" : "polite");
   const recovery = state.querySelector("[data-provider-recovery]");
@@ -1032,237 +1033,19 @@ function setOperationState(message, isError = false, result = null) {
   if (isError) state.focus();
 }
 
-let tutorPreviewTarget = "";
-let tutorPreviewVisible = "";
-let tutorPreviewFrame = null;
-let tutorPreviewLastAt = 0;
-let tutorPreviewCommitted = false;
-let tutorPreviewCommitRate = 2200;
-let tutorPreviewDrainResolve = null;
-let tutorPreviewTextNode = null;
-const tutorPreviewHeightCache = new Map();
 const navigationIntents = new Set(["next", "skip", "practice"]);
 
-function navigationPreview(preview, intent) {
-  if (!navigationIntents.has(intent)) return preview || "";
-  return (preview || "").replace(
-    /(?:^|\n)\s*(?:\*\*)?Check\s*:(?:\*\*)?[\s\S]*$/i,
-    "",
-  ).trimEnd();
+function turnProcessingMessage(intent) {
+  if (navigationIntents.has(intent)) return "Preparing…";
+  return intent === "answer" ? "Checking answer…" : "Processing…";
 }
 
-function prepareNavigationPreview(intent) {
-  if (!navigationIntents.has(intent)) return;
-  const surface = document.querySelector("[data-current-move]");
-  surface?.querySelector("[data-move-prompt]")?.setAttribute("hidden", "");
-  setTutorPreviewLabel(
-    intent === "practice" ? "Preparing practice" : "Preparing the next concept",
-  );
-}
-
-function setTutorPreviewLabel(text) {
-  const surface = document.querySelector("[data-current-move]");
-  const label = surface?.querySelector(".stream-label");
-  if (label) {
-    const pulse = label.querySelector(".stream-pulse");
-    label.replaceChildren();
-    if (pulse) label.append(pulse);
-    label.append(text);
-  }
-}
-
-function tutorPreviewNodes() {
-  const surface = document.querySelector("[data-current-move]");
-  const region = surface?.querySelector("[data-tutor-stream-preview]");
-  const text = region?.querySelector("[data-tutor-stream-text]");
-  return { surface, region, text };
-}
-
-function previewTextNode(text) {
-  if (!text) return null;
-  if (!tutorPreviewTextNode || tutorPreviewTextNode.parentNode !== text) {
-    text.replaceChildren();
-    tutorPreviewTextNode = document.createTextNode("");
-    text.append(tutorPreviewTextNode);
-  }
-  return tutorPreviewTextNode;
-}
-
-function setPreviewSlotHeight(region, height) {
-  if (!region || !Number.isFinite(height)) return;
-  region.dataset.streamOpen = "true";
-  region.style.height = `${Math.ceil(height)}px`;
-}
-
-function openTutorPreviewSlot(region) {
-  if (!region || !region.hidden) return;
-  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-  region.hidden = false;
-  region.setAttribute("aria-busy", "true");
-  if (reduceMotion) {
-    setPreviewSlotHeight(region, 176);
-    return;
-  }
-  region.style.height = "0px";
-  window.requestAnimationFrame(() => setPreviewSlotHeight(region, 176));
-}
-
-function measureTutorPreviewHeight(region, finalPreview) {
-  const width = Math.ceil(region.getBoundingClientRect().width);
-  const cacheKey = `${width}:${finalPreview}`;
-  const cached = tutorPreviewHeightCache.get(cacheKey);
-  if (cached !== undefined) return cached;
-  const clone = region.cloneNode(true);
-  const cloneText = clone.querySelector("[data-tutor-stream-text]");
-  clone.hidden = false;
-  clone.removeAttribute("data-stream-open");
-  clone.setAttribute("aria-hidden", "true");
-  clone.inert = true;
-  if (cloneText) cloneText.textContent = finalPreview || "Lesson ready.";
-  Object.assign(clone.style, {
-    animation: "none",
-    height: "auto",
-    left: "-10000px",
-    maxHeight: "none",
-    overflow: "visible",
-    pointerEvents: "none",
-    position: "fixed",
-    top: "0",
-    transition: "none",
-    visibility: "hidden",
-    width: `${width}px`,
-  });
-  document.body.append(clone);
-  const measured = Math.ceil(clone.getBoundingClientRect().height);
-  clone.remove();
-  const height = Math.max(144, Math.min(measured, Math.max(240, window.innerHeight * 0.45)));
-  tutorPreviewHeightCache.set(cacheKey, height);
-  if (tutorPreviewHeightCache.size > 8) {
-    tutorPreviewHeightCache.delete(tutorPreviewHeightCache.keys().next().value);
-  }
-  return height;
-}
-
-function paintTutorPreview(now) {
-  tutorPreviewFrame = null;
-  const { region, text } = tutorPreviewNodes();
-  if (!region || !text) return;
-  const node = previewTextNode(text);
-  if (!node) return;
-  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-  if (!reduceMotion && tutorPreviewLastAt && now - tutorPreviewLastAt < 32) {
-    tutorPreviewFrame = window.requestAnimationFrame(paintTutorPreview);
-    return;
-  }
-  const previousLength = tutorPreviewVisible.length;
-  if (reduceMotion) {
-    tutorPreviewVisible = tutorPreviewTarget;
-  } else if (tutorPreviewVisible.length < tutorPreviewTarget.length) {
-    const elapsed = tutorPreviewLastAt ? Math.min(now - tutorPreviewLastAt, 80) : 16;
-    const rate = tutorPreviewCommitted ? tutorPreviewCommitRate : 240;
-    const count = Math.max(8, Math.floor((elapsed * rate) / 1000));
-    tutorPreviewVisible = tutorPreviewTarget.slice(
-      0,
-      Math.min(tutorPreviewVisible.length + count, tutorPreviewTarget.length),
-    );
-  }
-  tutorPreviewLastAt = now;
-  if (tutorPreviewVisible) {
-    if (node.data === "Thinking through your answer…") node.data = "";
-    const suffix = tutorPreviewVisible.slice(previousLength);
-    if (suffix) node.appendData(suffix);
-  } else if (!node.data) {
-    node.data = "Thinking through your answer…";
-  }
-  text.classList.toggle("stream-placeholder", !tutorPreviewVisible);
-  if (tutorPreviewVisible.length < tutorPreviewTarget.length) {
-    tutorPreviewFrame = window.requestAnimationFrame(paintTutorPreview);
-  } else if (tutorPreviewDrainResolve) {
-    const resolve = tutorPreviewDrainResolve;
-    tutorPreviewDrainResolve = null;
-    resolve();
-  }
-}
-
-function scheduleTutorPreview() {
-  if (tutorPreviewFrame === null) {
-    tutorPreviewFrame = window.requestAnimationFrame(paintTutorPreview);
-  }
-}
-
-function renderTutorPreview(preview) {
-  const { surface, region, text } = tutorPreviewNodes();
-  if (!surface || !region || !text) return;
-  const visible = (preview || "").trimStart();
-  if (!surface.dataset.streaming) {
-    openTutorPreviewSlot(region);
-    surface.dataset.streaming = "true";
-    const node = previewTextNode(text);
-    if (node) node.data = "Thinking through your answer…";
-    text.classList.add("stream-placeholder");
-  }
-  if (visible === tutorPreviewTarget) return;
-  if (!visible.startsWith(tutorPreviewVisible)) {
-    let commonLength = 0;
-    while (
-      commonLength < visible.length
-      && commonLength < tutorPreviewVisible.length
-      && visible[commonLength] === tutorPreviewVisible[commonLength]
-    ) commonLength += 1;
-    tutorPreviewVisible = tutorPreviewVisible.slice(0, commonLength);
-    const node = previewTextNode(text);
-    if (node) node.data = tutorPreviewVisible;
-  }
-  tutorPreviewTarget = visible;
-  scheduleTutorPreview();
-}
-
-async function finishTutorPreview(finalPreview) {
-  renderTutorPreview(finalPreview);
-  tutorPreviewCommitted = true;
-  tutorPreviewCommitRate = Math.max(
-    2200,
-    Math.ceil((tutorPreviewTarget.length - tutorPreviewVisible.length) / 1.8),
-  );
-  scheduleTutorPreview();
-  if (tutorPreviewVisible.length < tutorPreviewTarget.length) {
-    await Promise.race([
-      new Promise((resolve) => { tutorPreviewDrainResolve = resolve; }),
-      new Promise((resolve) => window.setTimeout(resolve, 2200)),
-    ]);
-  }
-  if (tutorPreviewVisible !== tutorPreviewTarget) {
-    tutorPreviewVisible = tutorPreviewTarget;
-    const { region, text } = tutorPreviewNodes();
-    const node = previewTextNode(text);
-    if (node) node.data = tutorPreviewVisible;
-    if (region) region.setAttribute("aria-busy", "false");
-  }
-  const { region } = tutorPreviewNodes();
-  if (region) {
-    region.setAttribute("aria-busy", "false");
-    setPreviewSlotHeight(region, measureTutorPreviewHeight(region, tutorPreviewTarget));
-  }
-}
-
-function restoreTutorSurfaceAfterError() {
-  const { surface, region } = tutorPreviewNodes();
-  if (!surface || !region) return;
-  if (tutorPreviewFrame !== null) window.cancelAnimationFrame(tutorPreviewFrame);
-  tutorPreviewFrame = null;
-  tutorPreviewCommitted = false;
-  tutorPreviewCommitRate = 2200;
-  tutorPreviewTarget = "";
-  tutorPreviewVisible = "";
-  tutorPreviewTextNode = null;
-  region.hidden = true;
-  region.style.height = "";
-  region.removeAttribute("data-stream-open");
-  region.removeAttribute("aria-busy");
-  surface.querySelector("[data-move-content]")?.removeAttribute("hidden");
-  surface.querySelector("[data-move-prompt]")?.removeAttribute("hidden");
-  setTutorPreviewLabel("Tutor response");
-  delete surface.dataset.streaming;
+function setTurnProcessing(active) {
+  const state = document.querySelector("[data-operation-state]:not([data-focus-shell])");
+  const indicator = state?.querySelector("[data-operation-indicator]");
+  if (indicator) indicator.hidden = !active;
+  if (state) state.classList.toggle("processing", active);
+  document.querySelector("[data-current-move]")?.setAttribute("aria-busy", String(active));
 }
 
 function lockTurnForm(locked) {
@@ -1274,6 +1057,7 @@ function lockTurnForm(locked) {
     "[data-navigation-intent], [data-progression-action]",
   )) control.disabled = locked;
   turnInFlight = locked;
+  setTurnProcessing(locked);
 }
 
 function lockProgressionControls(locked) {
@@ -1283,7 +1067,7 @@ function lockProgressionControls(locked) {
   progressionInFlight = locked;
 }
 
-async function waitForOperation(operationId, setStatus, previewSink = null) {
+async function waitForOperation(operationId, setStatus) {
   const slug = focusShell.dataset.courseSlug;
   for (;;) {
     await new Promise((resolve) => window.setTimeout(resolve, 250));
@@ -1295,9 +1079,6 @@ async function waitForOperation(operationId, setStatus, previewSink = null) {
       generating: "Preparing the next useful move…",
       validating: "Checking the lesson before showing it…",
     };
-    if (previewSink && (state === "generating" || result.preview_text)) {
-      previewSink(result.preview_text || "");
-    }
     setStatus(labels[state] || result.message || "Working…", false, result);
     if (["committed", "conflict", "retryable_error"].includes(state)) return result;
   }
@@ -1311,7 +1092,8 @@ function syncNextLessonHandoff() {
 }
 
 function showNextLessonHandoff() {
-  const state = document.querySelector("[data-operation-state]");
+  setTurnProcessing(false);
+  const state = document.querySelector("[data-operation-state]:not([data-focus-shell])");
   if (!state) return;
   setOperationState(
     chatInFlight
@@ -1351,17 +1133,14 @@ function showNextLessonHandoff() {
 async function pollOperation(operationId, submittedIntent = "") {
   const result = await waitForOperation(
     operationId,
-    setOperationState,
-    (preview) => renderTutorPreview(navigationPreview(preview, submittedIntent)),
+    () => setOperationState(turnProcessingMessage(submittedIntent)),
   );
   if (result.state === "committed") {
-    await finishTutorPreview(navigationPreview(result.preview_text, submittedIntent));
-    if (result.message_kind === "answer" || submittedIntent === "answer") {
-      storeChatDraft();
-      window.location.reload();
-      return;
-    }
-    if (navigationIntents.has(submittedIntent) && !chatInFlight) {
+    if (
+      (result.message_kind === "answer" || submittedIntent === "answer"
+        || navigationIntents.has(submittedIntent))
+      && !chatInFlight
+    ) {
       storeChatDraft();
       window.location.reload();
       return;
@@ -1370,7 +1149,6 @@ async function pollOperation(operationId, submittedIntent = "") {
     showNextLessonHandoff();
     return;
   }
-  restoreTutorSurfaceAfterError();
   if (result.state === "conflict") {
     setOperationState("This course changed elsewhere. Refresh to continue from the newest move.", true);
   } else {
@@ -1399,7 +1177,7 @@ if (focusShell?.dataset.operationState) {
     );
   } else {
     lockTurnForm(true);
-    setOperationState("Resuming your saved tutor turn…");
+    setOperationState(turnProcessingMessage(""));
     pollOperation(focusShell.dataset.operationId).catch((error) => {
       setOperationState(error.message, true);
       lockTurnForm(false);
@@ -1461,9 +1239,8 @@ async function submitTurn(overrideIntent = null) {
     payload.intent = overrideIntent;
     payload.text = "";
   }
-  prepareNavigationPreview(payload.intent);
   lockTurnForm(true);
-  setOperationState("Saving your response locally…");
+  setOperationState(turnProcessingMessage(payload.intent));
   try {
     const result = await requestJson(`/api/courses/${encodeURIComponent(focusShell.dataset.courseSlug)}/turns`, {
       method: "POST",
@@ -1471,10 +1248,11 @@ async function submitTurn(overrideIntent = null) {
     });
     if (result.operation_id) await pollOperation(result.operation_id, payload.intent);
     else if (result.state === "committed") {
-      if (result.message_kind === "answer" || payload.intent === "answer") {
-        storeChatDraft();
-        window.location.reload();
-      } else if (navigationIntents.has(payload.intent) && !chatInFlight) {
+      if (
+        (result.message_kind === "answer" || payload.intent === "answer"
+          || navigationIntents.has(payload.intent))
+        && !chatInFlight
+      ) {
         storeChatDraft();
         window.location.reload();
       } else {
@@ -1483,16 +1261,13 @@ async function submitTurn(overrideIntent = null) {
       }
     }
     else if (result.state === "retryable_error") {
-      restoreTutorSurfaceAfterError();
       setOperationState(result.error || "Your response is saved. Retry when the provider is available.", true, result);
       lockTurnForm(false);
     } else {
-      restoreTutorSurfaceAfterError();
       setOperationState(result.message || "Your response is saved.");
       lockTurnForm(false);
     }
   } catch (error) {
-    restoreTutorSurfaceAfterError();
     setOperationState(error.message, true);
     lockTurnForm(false);
   }

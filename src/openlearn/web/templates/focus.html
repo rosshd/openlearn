@@ -60,10 +60,6 @@
         {% if course.move.content %}<p>{{ course.move.content }}</p>{% endif %}
       </div>
       {% if course.move.prompt %}<div class="prompt-block" data-move-prompt><span class="prompt-label">Your turn</span><p>{{ course.move.prompt }}</p></div>{% endif %}
-      <div class="tutor-stream-preview" data-tutor-stream-preview role="status" aria-live="polite" aria-atomic="false" hidden>
-        <p class="stream-label"><span class="stream-pulse" aria-hidden="true"></span>Tutor response</p>
-        <div data-tutor-stream-text></div><span class="stream-caret" aria-hidden="true"></span>
-      </div>
     </article>
 
     {% if course.curriculum and course.curriculum.next_target %}
@@ -113,17 +109,20 @@
       <button class="secondary-action" type="button" data-tool-open="chat" aria-expanded="false" aria-controls="learning-tool-surface">Ask a question</button>
     </div>
     {% endif %}
-    <div class="operation-state" data-operation-state role="status" aria-live="polite" aria-atomic="true" tabindex="-1" hidden>
-      <span data-operation-message></span>
-      <a href="{{ url_for('setup') }}" data-provider-recovery hidden>Review provider settings</a>
-      {% if course.operation %}
-      <div class="operation-actions" data-operation-actions>
-        {% if 'retry' in course.operation.actions %}<button type="button" data-progression-action="resume">Retry saved target</button>{% endif %}
-        {% if 'adopt' in course.operation.actions %}<button type="button" data-progression-action="resume">Resume saved target</button>{% endif %}
-        {% if 'cancel' in course.operation.actions %}<button type="button" data-progression-action="cancel">Cancel saved target</button>{% endif %}
-        {% if 'refresh' in course.operation.actions %}<button type="button" data-progression-action="refresh">Refresh position</button>{% endif %}
+    <div class="operation-slot">
+      <div class="operation-state" data-operation-state role="status" aria-live="polite" aria-atomic="true" tabindex="-1" hidden>
+        <span class="operation-indicator" data-operation-indicator aria-hidden="true" hidden></span>
+        <span data-operation-message></span>
+        <a href="{{ url_for('setup') }}" data-provider-recovery hidden>Review provider settings</a>
+        {% if course.operation %}
+        <div class="operation-actions" data-operation-actions>
+          {% if 'retry' in course.operation.actions %}<button type="button" data-progression-action="resume">Retry saved target</button>{% endif %}
+          {% if 'adopt' in course.operation.actions %}<button type="button" data-progression-action="resume">Resume saved target</button>{% endif %}
+          {% if 'cancel' in course.operation.actions %}<button type="button" data-progression-action="cancel">Cancel saved target</button>{% endif %}
+          {% if 'refresh' in course.operation.actions %}<button type="button" data-progression-action="refresh">Refresh position</button>{% endif %}
+        </div>
+        {% endif %}
       </div>
-      {% endif %}
     </div>
   </section>
 

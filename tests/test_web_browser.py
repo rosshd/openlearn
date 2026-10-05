@@ -1001,8 +1001,9 @@ def test_progression_action_locks_every_competing_control_until_handled() -> Non
         )
         concurrent.add_script_tag(path=str(javascript))
         playwright.expect(
-            concurrent.locator("[data-tutor-stream-text]")
-        ).to_contain_text("MAIN PREVIEW")
+            concurrent.get_by_role("button", name="Show next lesson")
+        ).to_be_visible()
+        assert concurrent.locator("[data-tutor-stream-preview]").is_hidden()
         concurrent.get_by_role("button", name="Ask tutor").click()
         playwright.expect(
             concurrent.get_by_role("button", name="Show next lesson")
@@ -1029,127 +1030,10 @@ def test_progression_action_locks_every_competing_control_until_handled() -> Non
         assert "SIDE ANSWER" not in concurrent.locator(
             "[data-tutor-stream-text]"
         ).inner_text()
-        assert "MAIN PREVIEW" in concurrent.locator(
-            "[data-tutor-stream-text]"
-        ).inner_text()
+        assert concurrent.locator("[data-tutor-stream-text]").inner_text() == ""
         browser.close()
 
 
-def test_stream_preview_is_separate_smooth_and_bounded() -> None:
-    playwright = pytest.importorskip("playwright.sync_api")
-    static_dir = (
-        Path(__file__).resolve().parents[1] / "src" / "openlearn" / "web" / "static"
-    )
-    javascript = static_dir / "openlearn.js"
-    stylesheet = static_dir / "openlearn.css"
-    long_preview = " ".join(f"token-{index}" for index in range(900))
-    with playwright.sync_playwright() as runtime:
-        browser = runtime.chromium.launch()
-        page = browser.new_page(viewport={"width": 1100, "height": 800})
-        page.set_content(
-            """
-            <meta name="csrf-token" content="test-token">
-            <main data-focus-shell data-course-slug="technical-interview-prep"
-                  data-operation-id="main-operation" data-operation-state="generating"
-                  data-revision="2">
-              <article class="move-surface" data-current-move>
-                <h1>Current lesson remains readable</h1>
-                <div class="move-content" data-move-content>
-                  <p>Keep this lesson visible while the next response is generated.</p>
-                </div>
-                <div class="tutor-stream-preview" data-tutor-stream-preview hidden>
-                  <p class="stream-label">Tutor response</p>
-                  <div data-tutor-stream-text></div>
-                </div>
-              </article>
-              <p data-operation-state hidden tabindex="-1">
-                <span data-operation-message></span>
-              </p>
-            </main>
-            """
-        )
-        page.add_style_tag(path=str(stylesheet))
-        page.evaluate(
-            """preview => {
-              window.previewMutations = 0;
-              new MutationObserver((records) => {
-                window.previewMutations += records.length;
-              }).observe(document.querySelector('[data-tutor-stream-text]'), {
-                childList: true,
-                characterData: true,
-                subtree: true,
-              });
-              window.previewPoll = 0;
-              window.fetch = async () => {
-                window.previewPoll += 1;
-                return new Response(JSON.stringify({
-                  state: window.previewPoll === 1 ? 'generating' : 'committed',
-                  preview_text: preview,
-                }), {status: 200, headers: {'Content-Type': 'application/json'}});
-              };
-            }""",
-            long_preview,
-        )
-        page.add_script_tag(path=str(javascript))
-
-        playwright.expect(page.get_by_text("Current lesson remains readable")).to_be_visible()
-        playwright.expect(page.locator("[data-tutor-stream-preview]")).to_be_visible()
-        playwright.expect(
-            page.get_by_role("button", name="Show next lesson")
-        ).to_be_visible(timeout=6_000)
-        preview_box = page.locator("[data-tutor-stream-preview]").bounding_box()
-        assert preview_box and 140 <= preview_box["height"] <= 370
-        assert page.locator("[data-current-move]").evaluate(
-            "surface => surface.style.height === ''"
-        )
-        assert page.evaluate("window.previewMutations") < 180
-
-        reduced = browser.new_page(viewport={"width": 1100, "height": 800})
-        reduced.emulate_media(reduced_motion="reduce")
-        reduced.set_content(
-            """
-            <meta name="csrf-token" content="test-token">
-            <main data-focus-shell data-course-slug="technical-interview-prep"
-                  data-operation-id="reduced-operation" data-operation-state="generating"
-                  data-revision="2">
-              <article class="move-surface" data-current-move>
-                <h1>Long current lesson</h1>
-                <div class="move-content" data-move-content>
-                  <p>Existing explanation.</p><p>Existing example.</p>
-                  <p>Existing tradeoffs.</p><p>Existing constraints.</p>
-                  <p>Existing walkthrough.</p><p>Existing summary.</p>
-                </div>
-                <div class="tutor-stream-preview" data-tutor-stream-preview hidden>
-                  <p class="stream-label">Tutor response</p>
-                  <div data-tutor-stream-text></div>
-                </div>
-              </article>
-              <p data-operation-state hidden tabindex="-1">
-                <span data-operation-message></span>
-              </p>
-            </main>
-            """
-        )
-        reduced.add_style_tag(path=str(stylesheet))
-        reduced.evaluate(
-            """
-            window.fetch = async () => new Response(JSON.stringify({
-              state: 'committed', preview_text: 'A short next lesson.',
-            }), {status: 200, headers: {'Content-Type': 'application/json'}});
-            """
-        )
-        reduced.add_script_tag(path=str(javascript))
-        playwright.expect(
-            reduced.get_by_role("button", name="Show next lesson")
-        ).to_be_visible()
-        region = reduced.locator("[data-tutor-stream-preview]")
-        assert region.evaluate("node => getComputedStyle(node).transitionDuration") == "0s"
-        first_height = reduced.locator("[data-current-move]").bounding_box()["height"]
-        reduced.wait_for_timeout(300)
-        second_height = reduced.locator("[data-current-move]").bounding_box()["height"]
-        assert abs(first_height - second_height) < 2
-        assert region.bounding_box()["height"] <= 180
-        browser.close()
 
 
 def test_answer_commit_keeps_text_until_feedback_reloads() -> None:
