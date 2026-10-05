@@ -6,6 +6,7 @@ import re
 from collections.abc import Mapping
 
 from openlearn.constants import FIRST_LESSON_WORD_LIMIT
+from openlearn.text import has_source_audit_metadata
 
 
 COURSE_INITIALIZATION_PROMPT = "Start my first lesson."
@@ -176,7 +177,7 @@ def enforce_first_lesson_response(metadata: Mapping[str, object], prompt: str, a
 def normalize_first_lesson_response(answer: str) -> str | None:
     """Salvage grounded lesson prose when the model adds forbidden framing."""
     visible = re.sub(r"<!--.*?-->", "", answer, flags=re.DOTALL).strip()
-    if _INTERNAL_FIRST_LESSON_FRAMING.search(visible):
+    if _INTERNAL_FIRST_LESSON_FRAMING.search(visible) or has_source_audit_metadata(visible):
         return None
     visible = re.split(
         r"(?im)^\s*(?:#+\s*)?(?:\*\*)?(?:Check|Question|Next|Action):(?:\*\*)?",
@@ -217,7 +218,7 @@ def first_lesson_response_is_valid(answer: str) -> bool:
     if re.search(r"<!--\s*openlearn-action\b", answer, flags=re.IGNORECASE):
         return False
     visible = re.sub(r"<!--.*?-->", "", answer, flags=re.DOTALL).strip()
-    if _INTERNAL_FIRST_LESSON_FRAMING.search(visible):
+    if _INTERNAL_FIRST_LESSON_FRAMING.search(visible) or has_source_audit_metadata(visible):
         return False
     if (
         "by building a clear mental model of" in visible.casefold()

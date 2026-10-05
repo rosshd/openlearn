@@ -49,6 +49,8 @@ def course(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     LESSON.replace("Noise is small random variation around a measurement.",
                    "I can't supply the graded response without an instructor answer key."),
     LESSON + AUDIT,
+    LESSON.replace("Noise is", "Noise in classwork.pdf "
+                   "(source_id=file:abc, checksum=abc, lines 1-12) is"),
     LESSON.replace("<!-- covered: Noise -->", "<!-- covered: Outliers -->"),
 ])
 def test_first_lesson_rejects_continuation_refusal_audits_and_wrong_target(course, bad):
@@ -109,6 +111,39 @@ def test_source_audit_filter_preserves_real_missing_source_facts_and_code():
 def test_source_audit_filter_does_not_truncate_inline_provenance_explanation():
     body = "Source provenance: the record of where a measurement came from."
     assert cli.sanitize_model_output(body) == body
+
+
+def test_source_provenance_heading_keeps_missing_fact_caveat_and_example():
+    body = (
+        "**Lesson:**\nSensor accuracy is the maximum expected measurement error.\n\n"
+        "Source provenance:\nThe supplied source does not state the sensor accuracy, "
+        "so an exact error bound is unknown.\n\n"
+        "For example, compare repeat measurements before claiming an exact error."
+    )
+    assert cli.sanitize_model_output(body) == body
+    _, blocks = _present_response(body)
+    assert "exact error bound is unknown" in str(blocks)
+    assert blocks[-1]["kind"] == "example"
+
+
+def test_source_audit_records_do_not_hide_later_lesson_prose():
+    body = LESSON + AUDIT + (
+        "\n\nThe supplied source does not state the sensor accuracy.\n\n"
+        "**Example:**\nCompare repeat measurements before claiming an exact error."
+    )
+    visible = cli.sanitize_model_output(body)
+    assert "source_id=" not in visible
+    assert "bounded extracted" not in visible
+    assert "does not state the sensor accuracy" in visible
+    assert "Compare repeat measurements" in visible
+
+
+def test_source_audit_recognizer_preserves_educational_code():
+    from openlearn.text import has_source_audit_metadata
+
+    assert not has_source_audit_metadata("Use `source_id=file:abc` to select a record.")
+    assert not has_source_audit_metadata("```text\nsource_id=file:abc\nchecksum=abc\n```")
+    assert not has_source_audit_metadata("A checksum detects accidental changes.")
 
 
 def test_generation_and_regular_tutor_prompts_separate_teaching_from_official_answers(course):

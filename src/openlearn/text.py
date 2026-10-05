@@ -100,9 +100,9 @@ def sanitize_model_output(text: str) -> str:
     return strip_source_audit_footer(normalize_multiple_choice_layout(text)).strip()
 
 
-def strip_source_audit_footer(text: str) -> str:
-    """Hide model-appended extraction bookkeeping, not source facts or code."""
-    lines: list[str] = []
+def has_source_audit_metadata(text: str) -> bool:
+    """Recognize extraction fields in prose, excluding educational code."""
+    prose: list[str] = []
     fence: str | None = None
     for line in text.splitlines():
         marker = re.match(r"^\s*(`{3,}|~{3,})", line)
@@ -111,12 +111,51 @@ def strip_source_audit_footer(text: str) -> str:
                 fence = marker.group(1)
             elif marker.group(1)[0] == fence[0] and len(marker.group(1)) >= len(fence):
                 fence = None
-        if fence is None and re.match(
+            continue
+        if fence is None:
+            prose.append(re.sub(r"`[^`]*`", "", line))
+    visible = "\n".join(prose)
+    return bool(
+        re.search(r"\bsource[_ -]?id\s*[:=]\s*\S+", visible, flags=re.IGNORECASE)
+        or re.search(r"\bchecksum\s*[:=]\s*\S+", visible, flags=re.IGNORECASE)
+        and re.search(r"\blines?\s+\d+\s*[-:]\s*\d+", visible, flags=re.IGNORECASE)
+    )
+
+
+def strip_source_audit_footer(text: str) -> str:
+    """Hide extraction records while preserving source facts and code."""
+    source_lines = text.splitlines()
+    lines: list[str] = []
+    fence: str | None = None
+    audit_section = False
+    for index, line in enumerate(source_lines):
+        marker = re.match(r"^\s*(`{3,}|~{3,})", line)
+        if marker:
+            if fence is None:
+                fence = marker.group(1)
+            elif marker.group(1)[0] == fence[0] and len(marker.group(1)) >= len(fence):
+                fence = None
+            lines.append(line)
+            continue
+        if fence is not None:
+            lines.append(line)
+            continue
+        if re.match(
             r"^\s*(?:#+\s*)?(?:\*\*)?Source (?:excerpts provided|audit|provenance):"
             r"\s*(?:\*\*)?\s*$",
             line, flags=re.IGNORECASE,
         ):
-            break
+            audit_section = has_source_audit_metadata("\n".join(source_lines[index + 1:]))
+            if audit_section:
+                continue
+        elif re.match(r"^\s*(?:#+\s*)?(?:\*\*)?(?:Lesson|Example|Check|Hint|Next|Feedback):",
+                      line, flags=re.IGNORECASE):
+            audit_section = False
+        if audit_section and (
+            re.match(r"^\s*[-*+]\s+", line) and has_source_audit_metadata(line)
+            or re.match(r"^\s*Only bounded extracted text\b", line, flags=re.IGNORECASE)
+        ):
+            continue
         lines.append(line)
     return "\n".join(lines)
 
