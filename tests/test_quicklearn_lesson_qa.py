@@ -204,7 +204,8 @@ def test_lesson_card_layout_at_desktop_and_mobile_widths(course):
                     return {width: bounds.width, left: body.left - bounds.left,
                             right: bounds.right - body.right};
                 }""")
-                assert geometry["width"] <= 704
+                # The reference uses a wider canvas; prose retains its reading measure.
+                assert geometry["width"] <= 864
                 assert abs(geometry["left"] - geometry["right"]) <= 1
                 assert page.locator(".slide-example").count() == 1
         browser.close()

@@ -181,7 +181,7 @@ def test_default_web_app_runs_setup_dashboard_course_and_tutor_flow(
     assert "Current lesson" in focus.text
     assert 'class="slide-takeaway"' in focus.text
     assert 'class="slide-example"' in focus.text
-    assert "Key idea" in focus.text
+    assert 'class="rail-caption">Lesson tools' in focus.text
     assert "Press Enter to continue" not in focus.text
     assert 'id="learner-response"' not in focus.text
     assert 'data-tool-open="chat"' in focus.text
@@ -3410,7 +3410,7 @@ def test_present_response_turns_lesson_prose_into_slide_regions() -> None:
         },
         {
             "kind": "example",
-            "text": "Repeated scale readings can wobble around the true weight.",
+            "text": "For example, repeated scale readings can wobble around the true weight.",
         },
     ]
 

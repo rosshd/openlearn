@@ -401,6 +401,35 @@ def _without_check_section(value: str) -> str:
     return _CHECK_SECTION.sub("", value).strip()
 
 
+def _prose_block(value: str) -> dict[str, object]:
+    """Retain optional authored emphasis as escaped text, never model HTML."""
+    source = value.strip()
+    text = _plain_text(source)
+    block: dict[str, object] = {"kind": "paragraph", "text": text}
+    segments: list[dict[str, object]] = []
+    offset = 0
+
+    def append(chunk: str, strong: bool = False) -> None:
+        if not chunk:
+            return
+        # Preserve boundary spaces when cleaning each inline fragment.
+        leading = chunk[:len(chunk) - len(chunk.lstrip())]
+        trailing = chunk[len(chunk.rstrip()):]
+        cleaned = leading + _plain_text(chunk) + trailing if chunk.strip() else chunk
+        segments.append({"text": cleaned, "strong": strong})
+
+    for match in re.finditer(r"`[^`\n]+`|(\*\*|__)(?=\S)(.+?)\1", source):
+        append(source[offset:match.start()])
+        append(match.group(2) if match.group(1) else match.group(), bool(match.group(1)))
+        offset = match.end()
+    append(source[offset:])
+    if any(segment["strong"] for segment in segments) and "".join(
+        str(segment["text"]) for segment in segments
+    ) == text:
+        block["inline"] = segments
+    return block
+
+
 def _present_response(value: str) -> tuple[str, list[dict[str, object]]]:
     """Parse a small safe Markdown subset into explicit presentation blocks."""
     text = cli.strip_tutor_enter_advance_cue(cli.sanitize_model_output(value))
@@ -457,18 +486,29 @@ def _present_response(value: str) -> tuple[str, list[dict[str, object]]]:
                 break
             paragraph.append(re.sub(r"^#{1,6}\s+", "", current.strip()))
             index += 1
-        blocks.append({"kind": "paragraph", "text": _plain_text("\n".join(paragraph))})
+        blocks.append({"kind": "paragraph", "text": "\n".join(paragraph)})
 
-    first = blocks[0].get("text", "") if blocks and blocks[0]["kind"] == "paragraph" else ""
+    first = (
+        _plain_text(str(blocks[0].get("text", "")))
+        if blocks and blocks[0]["kind"] == "paragraph" else ""
+    )
     label = "Lesson"
     match = re.match(r"^([A-Za-z][A-Za-z ]{1,30}):\s*(.*)$", str(first), flags=re.DOTALL)
     if match:
         label = match.group(1).strip().title()
         remainder = match.group(2).strip()
         if remainder:
-            blocks[0]["text"] = remainder
+            raw_remainder, count = re.subn(
+                r"^\s*(?:\*\*|__|\*|_)?[A-Za-z][A-Za-z ]{1,30}(?:\*\*|__|\*|_)?:"
+                r"(?:\*\*|__|\*|_)?\s*",
+                "", str(blocks[0]["text"]), count=1,
+            )
+            blocks[0]["text"] = raw_remainder if count else remainder
         else:
             blocks.pop(0)
+    for index, block in enumerate(blocks):
+        if block["kind"] == "paragraph":
+            blocks[index] = _prose_block(str(block["text"]))
     if label == "Lesson":
         first_paragraph = True
         for block in blocks:
@@ -476,11 +516,11 @@ def _present_response(value: str) -> tuple[str, list[dict[str, object]]]:
                 continue
             block_text = str(block.get("text") or "")
             if block_text.casefold().startswith("for example,"):
-                example_text = block_text[len("For example,") :].strip()
                 block["kind"] = "example"
-                block["text"] = example_text[:1].upper() + example_text[1:]
             elif first_paragraph:
-                block["kind"] = "takeaway"
+                # Style a concise authored lead; never split or summarize long prose.
+                if len(block_text) <= 180 and len(block_text.split()) <= 28:
+                    block["kind"] = "takeaway"
                 first_paragraph = False
     visible_text = " ".join(
         str(block.get("text") or "")

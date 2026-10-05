@@ -1613,7 +1613,15 @@ function appendPresentationBlocks(container, blocks) {
       container.append(note);
     } else {
       const content = document.createElement("p");
-      content.textContent = block.text || "";
+      if (block.inline?.length) {
+        for (const segment of block.inline) {
+          const fragment = document.createElement(segment.strong ? "strong" : "span");
+          fragment.textContent = segment.text || "";
+          content.append(fragment);
+        }
+      } else {
+        content.textContent = block.text || "";
+      }
       container.append(content);
     }
   }

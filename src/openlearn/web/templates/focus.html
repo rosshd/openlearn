@@ -1,4 +1,14 @@
 {% extends "base.html" %}
+{% macro prose(block) -%}
+  {%- if block.inline -%}
+    {%- for segment in block.inline -%}
+      {%- if segment.strong -%}<strong>{{ segment.text }}</strong>{%- else -%}{{ segment.text }}{%- endif -%}
+    {%- endfor -%}
+  {%- else -%}{{ block.text }}{%- endif -%}
+{%- endmacro %}
+{% macro tool_icon(path) -%}
+<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ path }}"/></svg>
+{%- endmacro %}
 {% block main_class %}focus-main{% endblock %}
 {% block status %}
 <div class="focus-status" aria-label="Lesson status">
@@ -14,12 +24,13 @@
 <div class="focus-shell" data-focus-shell data-course-slug="{{ course.slug }}" data-revision="{{ course.revision or 0 }}"
   {% if course.operation %}data-operation-id="{{ course.operation.id or '' }}" data-operation-state="{{ course.operation.state }}" data-operation-message="{{ course.operation.message }}" data-operation-error="{{ course.operation.error }}" data-operation-provider-recovery="{{ 'true' if course.operation.show_provider_recovery else 'false' }}"{% endif %}>
   <aside class="tool-rail" aria-label="Lesson tools">
-    <button type="button" class="rail-button" data-tool-open="chat" aria-expanded="false" aria-controls="learning-tool-surface"><span aria-hidden="true">?</span> Chat</button>
-    <button type="button" class="rail-button" data-tool-open="code" aria-expanded="false" aria-controls="learning-tool-surface"><span aria-hidden="true">{ }</span> Code</button>
-    <button type="button" class="rail-button" data-tool-open="video" aria-expanded="false" aria-controls="learning-tool-surface"><span aria-hidden="true">▶</span> Video</button>
-    <button type="button" class="rail-button" data-tool-open="sources" aria-expanded="false" aria-controls="learning-tool-surface"><span aria-hidden="true">＋</span> Sources</button>
-    <button type="button" class="rail-button" data-drawer-toggle="progress-drawer" aria-expanded="false" aria-controls="progress-drawer"><span aria-hidden="true">◫</span> Progress</button>
-    <button type="button" class="rail-button" data-drawer-toggle="history-drawer" aria-expanded="false" aria-controls="history-drawer"><span aria-hidden="true">↺</span> History</button>
+    <p class="rail-caption">Lesson tools</p>
+    <button type="button" class="rail-button" data-tool-open="chat" aria-expanded="false" aria-controls="learning-tool-surface">{{ tool_icon('M4 4h16v12H9l-5 4V4 M8 8h8 M8 12h5') }} Chat</button>
+    <button type="button" class="rail-button" data-tool-open="code" aria-expanded="false" aria-controls="learning-tool-surface">{{ tool_icon('m7 6-5 6 5 6 m10-12 5 6-5 6 M14 4l-4 16') }} Code</button>
+    <button type="button" class="rail-button" data-tool-open="video" aria-expanded="false" aria-controls="learning-tool-surface">{{ tool_icon('M3 5h18v14H3V5 m7 4 6 3-6 3V9') }} Video</button>
+    <button type="button" class="rail-button" data-tool-open="sources" aria-expanded="false" aria-controls="learning-tool-surface">{{ tool_icon('M5 2h9l5 5v15H5V2 M14 2v5h5 M9 12h6 M9 16h6') }} Sources</button>
+    <button type="button" class="rail-button" data-drawer-toggle="progress-drawer" aria-expanded="false" aria-controls="progress-drawer">{{ tool_icon('M5 20V11 M12 20V4 M19 20V8') }} Progress</button>
+    <button type="button" class="rail-button" data-drawer-toggle="history-drawer" aria-expanded="false" aria-controls="history-drawer">{{ tool_icon('M3 11a9 9 0 1 1 2 7 M3 4v7h7 M12 7v5l3 2') }} History</button>
   </aside>
 
   <section class="focus-column" aria-labelledby="move-title">
@@ -35,12 +46,12 @@
         <p class="eyebrow" data-move-kind>{{ course.move.kind or 'Current move' }}</p>
         <span class="move-number">{{ course.move.position or course.position or 'Now' }}</span>
       </div>
-      <h1 id="move-title" tabindex="-1">{{ course.move.title or 'Ready when you are' }}</h1>
+      <h1 id="move-title"{% if (course.move.blocks or [])|selectattr('kind', 'equalto', 'takeaway')|list %} class="lesson-title-with-lead"{% endif %} tabindex="-1">{{ course.move.title or 'Ready when you are' }}</h1>
       <div class="move-content" data-move-content>
         {% for block in course.move.blocks or [] %}
-          {% if block.kind == 'paragraph' %}<p>{{ block.text }}</p>
-          {% elif block.kind == 'takeaway' %}<section class="slide-takeaway"><span>Key idea</span><p>{{ block.text }}</p></section>
-          {% elif block.kind == 'example' %}<section class="slide-example"><span>Example</span><p>{{ block.text }}</p></section>
+          {% if block.kind == 'paragraph' %}<p>{{ prose(block) }}</p>
+          {% elif block.kind == 'takeaway' %}<p class="slide-takeaway">{{ prose(block) }}</p>
+          {% elif block.kind == 'example' %}<section class="slide-example"><span>Example</span><p>{{ prose(block) }}</p></section>
           {% elif block.kind == 'definition' %}<aside class="term-note"><strong>{{ block.term }}</strong><span>{{ block.text }}</span></aside>
           {% elif block.kind == 'unordered_list' %}<ul>{% for item in block['items'] %}<li>{{ item }}</li>{% endfor %}</ul>
           {% elif block.kind == 'ordered_list' %}<ol>{% for item in block['items'] %}<li>{{ item }}</li>{% endfor %}</ol>
