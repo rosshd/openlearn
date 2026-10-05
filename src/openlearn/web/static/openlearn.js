@@ -83,6 +83,44 @@ function initializeUuidFields(scope = document) {
 }
 initializeUuidFields();
 
+const quickLearnForm = document.querySelector("[data-quick-learn-form]");
+if (quickLearnForm) {
+  const fileInput = quickLearnForm.elements.file;
+  const fileName = quickLearnForm.querySelector("[data-file-name]");
+  fileInput.addEventListener("change", () => {
+    if (fileInput.files[0]) fileName.textContent = fileInput.files[0].name;
+  });
+  quickLearnForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const submit = quickLearnForm.querySelector('[type="submit"]');
+    const errorBox = quickLearnForm.querySelector("[data-form-error]");
+    const status = quickLearnForm.querySelector("[data-form-status]");
+    errorBox.hidden = true;
+    submit.disabled = true;
+    submit.setAttribute("aria-busy", "true");
+    status.textContent = "Reading the file and building your review…";
+    try {
+      const result = await requestJson("/api/quick-learn", {
+        method: "POST",
+        body: new FormData(quickLearnForm),
+      });
+      window.location.assign(appUrl(result.focus_url));
+    } catch (error) {
+      if (error.payload?.state === "setup_required" && error.payload.setup_url) {
+        window.location.assign(appUrl(error.payload.setup_url));
+        return;
+      }
+      errorBox.textContent = error.message;
+      errorBox.hidden = false;
+      errorBox.focus();
+      status.textContent = "Your file was not changed. Fix the issue and try again.";
+    } finally {
+      submit.disabled = false;
+      submit.removeAttribute("aria-busy");
+    }
+  });
+}
+
 const starterResumeForm = document.querySelector("[data-starter-resume-form]");
 if (starterResumeForm) {
   window.requestAnimationFrame(() => starterResumeForm.requestSubmit());

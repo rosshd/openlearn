@@ -69,6 +69,8 @@ class WebServices(Protocol):
 
     def import_github_source(self, slug: str, url: str) -> Any: ...
 
+    def create_quick_learn(self, path: Path, filename: str, description: str) -> Any: ...
+
     def create_course(self, request: Any) -> Any: ...
 
     def course_initialization(self, slug: str, operation_id: str) -> Any: ...
@@ -181,6 +183,11 @@ class PlaceholderServices:
 
     def import_github_source(self, slug: str, url: str) -> dict[str, Any]:
         return {"ok": False, "error": "Source imports are unavailable."}
+
+    def create_quick_learn(
+        self, path: Path, filename: str, description: str
+    ) -> dict[str, Any]:
+        return {"ok": False, "error": "Quick Learn is unavailable."}
 
     def create_course(self, request: Any) -> dict[str, Any]:
         return {"ok": False, "error": "Course services are not available yet.", "fields": request}

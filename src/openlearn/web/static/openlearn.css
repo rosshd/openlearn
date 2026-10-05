@@ -402,6 +402,21 @@ h2 { font-size: clamp(1.35rem, 3vw, 2rem); line-height: 1.1; letter-spacing: -0.
 .starter-controls { display: flex; gap: 0.4rem; }
 .starter-controls button { width: 2.75rem; min-height: 2.75rem; border: 1px solid var(--line); background: transparent; cursor: pointer; }
 .create-form { max-width: 48rem; }
+.quick-learn-shell { width: min(100%, 68rem); margin-inline: auto; display: grid; gap: clamp(1.25rem, 3vw, 2.5rem); }
+.quick-learn-intro { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(18rem, 0.75fr); gap: clamp(1.5rem, 5vw, 5rem); align-items: end; }
+.quick-learn-intro h1 { max-width: 15ch; margin: 0; font-size: clamp(2.8rem, 6vw, 5.4rem); line-height: 0.94; letter-spacing: -0.055em; }
+.quick-learn-intro > p { max-width: 42ch; margin: 0 0 0.4rem; color: var(--graphite-soft); font-size: 1.05rem; }
+.quick-learn-form { padding: clamp(1rem, 3vw, 2rem); border: 1px solid var(--line-strong); border-radius: var(--radius); background: color-mix(in srgb, var(--surface-raised) 88%, transparent); box-shadow: var(--shadow); display: grid; gap: 1rem; }
+.source-drop { min-height: 16rem; padding: 2rem; border: 2px dashed var(--line-strong); border-radius: var(--radius); background: var(--surface); display: grid; place-items: center; align-content: center; gap: 0.55rem; text-align: center; cursor: pointer; transition: border-color 180ms ease, background-color 180ms ease; }
+.source-drop:hover, .source-drop:focus-within { border-color: var(--orange); background: color-mix(in srgb, var(--orange-soft) 35%, var(--surface)); }
+.source-drop input { width: 1px; height: 1px; position: absolute; opacity: 0; }
+.source-drop-mark { width: 3.25rem; height: 3.25rem; border-radius: 50%; background: var(--orange); color: var(--chrome); display: grid; place-items: center; font-size: 1.6rem; font-weight: 800; }
+.source-drop strong { font-size: 1.2rem; }
+.source-drop span:last-of-type { color: var(--graphite-soft); }
+.quick-learn-form > label:not(.source-drop) { margin-top: 0.5rem; font-weight: 750; }
+.quick-learn-form textarea { width: 100%; padding: 0.85rem; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--surface); color: var(--graphite); resize: vertical; }
+.quick-learn-submit { display: flex; justify-content: space-between; align-items: center; gap: 1.5rem; }
+.quick-learn-submit .field-note { max-width: 36rem; margin: 0; }
 
 .focus-status { position: sticky; top: 4rem; z-index: 15; min-height: 3.5rem; background: var(--chrome); color: var(--chrome-ink); }
 .focus-identity { display: flex; gap: 0.8rem; align-items: baseline; }
@@ -729,6 +744,11 @@ h2 { font-size: clamp(1.35rem, 3vw, 2rem); line-height: 1.1; letter-spacing: -0.
   .setup-layout, .dashboard-grid { grid-template-columns: 1fr; }
   .course-library-intro { grid-template-columns: 1fr; gap: 0.6rem; }
   .course-library-intro > p { max-width: 56ch; }
+  .quick-learn-intro { grid-template-columns: 1fr; gap: 1rem; }
+  .quick-learn-intro h1 { font-size: clamp(2.7rem, 14vw, 4.5rem); }
+  .quick-learn-form { padding: 1rem; }
+  .source-drop { min-height: 12rem; padding: 1.25rem; }
+  .quick-learn-submit { align-items: stretch; flex-direction: column; }
   .course-library-grid { gap: 0; }
   .course-list, .course-preview, .course-controls-panel { padding: 1rem; }
   .course-list, .course-preview { border-right: 0; border-bottom: 1px solid var(--line); }

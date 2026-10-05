@@ -5499,6 +5499,8 @@ def teach_first_lesson(
                 lesson_prompt if attempt == 0 else lesson_policy.first_lesson_repair_prompt(lesson_prompt),
                 retry_status=output_func,
             )
+        except ProviderRequestError:
+            raise
         except OpenLearnError as error:
             raise OpenLearnError(
                 f"{lesson_policy.FIRST_LESSON_RETRY_MESSAGE} Use openlearn resume {topic.slug}."
@@ -9226,25 +9228,87 @@ def save_quick_learn_metadata(slug: str, source_kind: str, source_label: str) ->
     write_topic(topic.path, metadata, topic.body)
 
 
-def quick_learn_from_source(
+def quick_learn_identity(
+    contexts: list[PendingContext],
+    *,
+    source_label: str,
+    description: str | None,
+    model: str | None,
+) -> tuple[str, str]:
+    """Generate a concise course identity from bounded source excerpts."""
+    excerpt_budget = 12_000
+    excerpts: list[str] = []
+    remaining = excerpt_budget
+    for context in contexts:
+        if remaining <= 0:
+            break
+        excerpt = context.text[:remaining]
+        excerpts.append(f"FILE: {context.filename}\n{excerpt}")
+        remaining -= len(excerpt)
+    fallback_name = source_label.replace("-", " ").strip() or "Quick Learn"
+    fallback_goal = (
+        description.strip()
+        if description and description.strip()
+        else f"Review the important material in {source_label}."
+    )
+    prompt = (
+        "Create a name and study goal for a Quick Learn course from the source excerpts below.\n"
+        "Return JSON only with string fields title and goal.\n"
+        "The title must be specific, plain, and no longer than 80 characters.\n"
+        "The goal must be one sentence grounded only in the source.\n"
+        f"Optional learner description: {description.strip() if description else '(none)'}\n\n"
+        + "\n\n".join(excerpts)
+    )
+    try:
+        raw = call_openai(
+            model or configured_model(),
+            "Name the course using only the supplied source. Do not invent source content.",
+            prompt,
+            max_tokens=180,
+            json_response=True,
+        )
+        parsed = json.loads(raw)
+        title = str(parsed.get("title", "")).strip()[:80]
+        generated_goal = str(parsed.get("goal", "")).strip()[:4000]
+    except (json.JSONDecodeError, OpenLearnError, TypeError, AttributeError):
+        return fallback_name, fallback_goal
+    goal = (
+        description.strip()
+        if description and description.strip()
+        else generated_goal or fallback_goal
+    )
+    return title or fallback_name, goal
+
+
+def build_quick_learn_from_source(
     source: str,
     *,
     name: str | None,
     goal: str | None,
     model: str | None,
-    input_func=input,
+    infer_identity: bool = False,
     output_func=print,
-    enter_repl: bool,
-) -> int:
+) -> str:
+    """Create and populate a Quick Learn course, returning its slug."""
     source_kind, source_label = quick_source_kind_and_label(source)
     contexts = quick_source_contexts(source, source_kind, output_func)
-    topic_name = (name or source_label.replace("-", " ")).strip()
+    if infer_identity:
+        generated_name, generated_goal = quick_learn_identity(
+            contexts,
+            source_label=source_label,
+            description=goal,
+            model=model,
+        )
+    else:
+        generated_name = source_label.replace("-", " ")
+        generated_goal = f"Prepare for an upcoming assessment using {source_label}."
+    topic_name = (name or generated_name).strip()
     if not topic_name:
         raise OpenLearnError("Quick Learn topic name cannot be empty")
     slug = slugify(topic_name)
     if topic_path(slug).exists():
         raise OpenLearnError(f"topic already exists: {slug}; choose another name with --name")
-    quick_goal = (goal or f"Prepare for an upcoming assessment using {source_label}.").strip()
+    quick_goal = (goal or generated_goal).strip()
     cmd_new(
         argparse.Namespace(
             topic=topic_name,
@@ -9282,6 +9346,27 @@ def quick_learn_from_source(
     output_func("")
     save_course_started(topic, outline_prompt, outline)
     teach_first_lesson(read_topic(slug), outline, selected_model, output_func)
+    return slug
+
+
+def quick_learn_from_source(
+    source: str,
+    *,
+    name: str | None,
+    goal: str | None,
+    model: str | None,
+    input_func=input,
+    output_func=print,
+    enter_repl: bool,
+) -> int:
+    slug = build_quick_learn_from_source(
+        source,
+        name=name,
+        goal=goal,
+        model=model,
+        output_func=output_func,
+    )
+    selected_model = model or str(read_topic(slug).metadata.get("model") or configured_model())
     if enter_repl:
         run_repl(
             topic_value=slug,
@@ -19106,6 +19191,13 @@ def _mock_openai_response(model: str, system: str, user: str) -> str:
     simple and deterministic for CI use when OPENLEARN_MOCK=1.
     """
     prompt = user.lower()
+    if "create a name and study goal for a quick learn course" in prompt:
+        return json.dumps(
+            {
+                "title": "Source Review",
+                "goal": "Review the important concepts in the uploaded source.",
+            }
+        )
     if "Current branch: engagement check due" in system:
         return (
             "**Check:**\nWithout adding new material, explain how you would apply the "

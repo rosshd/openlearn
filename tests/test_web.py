@@ -148,11 +148,11 @@ def test_default_web_app_runs_setup_dashboard_course_and_tutor_flow(
 ) -> None:
     empty_dashboard = client.get("/").text
     assert "Choose your first course" in empty_dashboard
-    assert "Technical Interview Prep" in empty_dashboard
+    assert "Technical Interview Prep" not in empty_dashboard
     assert "New course" in empty_dashboard
 
     new_course = client.get("/courses/new")
-    assert "Technical Interview Prep" in new_course.text
+    assert "Starter courses" not in new_course.text
     token = new_course.cookies["openlearn_csrf"]
     create = client.post(
         "/api/courses",
@@ -1196,16 +1196,14 @@ def test_unknown_follow_up_status_uses_stable_not_found_envelope(
     }
 
 
-def test_empty_dashboard_embeds_varied_starters_and_creation_choices(
+def test_empty_dashboard_offers_only_custom_and_quick_learn_creation(
     client: TestClient,
 ) -> None:
     response = client.get("/dashboard")
 
     assert response.status_code == 200
-    assert response.text.index("Technical Interview Prep") < response.text.index(
-        "Computer Networking"
-    )
-    assert "Starter course" in response.text
+    assert "Technical Interview Prep" not in response.text
+    assert "Starter course" not in response.text
     assert "Custom course" in response.text
     assert "Quick Learn" in response.text
     assert "Choose a starting point" not in response.text
@@ -1217,7 +1215,7 @@ def test_empty_dashboard_embeds_varied_starters_and_creation_choices(
     assert 'class="utilities-menu"' not in response.text
 
 
-def test_dashboard_starter_starts_once_and_enters_placement(
+def test_legacy_starter_endpoint_starts_once_and_enters_placement(
     client: TestClient,
 ) -> None:
     dashboard = client.get("/dashboard")
@@ -1226,9 +1224,7 @@ def test_dashboard_starter_starts_once_and_enters_placement(
     start_path = "/courses/starters/technical-interview-prep/start"
 
     assert dashboard.status_code == 200
-    assert f'{start_path}"' in dashboard.text
-    assert 'method="post"' in dashboard.text
-    assert "/courses/new?template=technical-interview-prep" not in dashboard.text
+    assert start_path not in dashboard.text
 
     first = client.post(
         start_path,
@@ -1510,15 +1506,67 @@ def test_course_creation_has_a_no_javascript_form_fallback(client: TestClient) -
     assert "/placement" in created.headers["location"] or "/setup" in created.headers["location"]
 
 
-def test_starter_courses_prioritize_variety_and_use_bounded_horizontal_browsing(
-    client: TestClient,
-) -> None:
+def test_new_course_page_omits_starter_catalog(client: TestClient) -> None:
     page = client.get("/courses/new")
 
-    assert page.text.index("Technical Interview Prep") < page.text.index("Computer Networking")
-    assert page.text.index("Computer Networking") < page.text.index(">Vim<")
-    assert 'data-starter-track tabindex="0"' in page.text
-    assert 'aria-label="More starter courses"' in page.text
+    assert page.status_code == 200
+    assert "Starter courses" not in page.text
+    assert "Course name" in page.text
+    assert "Your goal" in page.text
+
+
+def test_quick_learn_page_is_source_first(client: TestClient) -> None:
+    page = client.get("/quick-learn")
+
+    assert page.status_code == 200
+    assert "Choose a source file" in page.text
+    assert "Optional" in page.text
+    assert "Course name" not in page.text
+    assert "Starter courses" not in page.text
+
+
+def test_quick_learn_upload_names_and_builds_review(client: TestClient) -> None:
+    page = client.get("/quick-learn")
+    response = client.post(
+        "/api/quick-learn",
+        headers={"x-csrf-token": page.cookies["openlearn_csrf"]},
+        files={"file": ("networking-notes.md", b"# TCP\nConnections use a handshake.")},
+        data={"description": "Focus on exam review."},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["title"] == "Source Review"
+    assert body["focus_url"].endswith("/courses/source-review")
+    topic = cli.read_topic("source-review")
+    assert topic.metadata["learning_mode"] == "quick"
+    assert topic.metadata["goal"] == "Focus on exam review."
+
+
+def test_quick_learn_provider_credentials_failure_returns_setup(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    services = client.app.state.services
+    monkeypatch.setattr(
+        services,
+        "create_quick_learn",
+        lambda *_args: {
+            "ok": False,
+            "state": "setup_required",
+            "error": "Provider credentials were rejected.",
+        },
+    )
+    page = client.get("/quick-learn")
+    response = client.post(
+        "/api/quick-learn",
+        headers={"x-csrf-token": page.cookies["openlearn_csrf"]},
+        files={"file": ("notes.md", b"# Notes")},
+        data={"description": ""},
+    )
+
+    assert response.status_code == 428
+    assert response.json()["state"] == "setup_required"
+    assert "/setup?next=" in response.json()["setup_url"]
 
 
 def test_data_page_is_read_only_and_data_mutations_require_csrf(client: TestClient) -> None:

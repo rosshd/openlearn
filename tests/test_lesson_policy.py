@@ -147,6 +147,25 @@ def test_ordinary_initialization_preserves_valid_lesson_and_rejects_quiz_metadat
         assert response == cli.sanitize_model_output(VALID_LESSON)
 
 
+def test_first_lesson_normalizes_extra_model_sections(course: cli.Topic) -> None:
+    verbose = (
+        "### Lesson:\nA definition gives a term one precise meaning. "
+        "It makes later reasoning consistent.\n\n"
+        "### Example:\nA triangle is defined as a shape with three straight sides.\n\n"
+        "### Check:\nWhat defines a triangle?"
+    )
+
+    normalized = lesson_policy.enforce_first_lesson_response(
+        course.metadata,
+        cli.first_lesson_prompt(OUTLINE),
+        verbose,
+    )
+
+    assert lesson_policy.first_lesson_response_is_valid(normalized)
+    assert "What defines" not in normalized
+    assert "<!-- covered: Definitions -->" in normalized
+
+
 @pytest.mark.parametrize("prompt", [cli.first_lesson_prompt(OUTLINE), lesson_policy.COURSE_INITIALIZATION_PROMPT])
 def test_override_initialization_uses_same_guard(course: cli.Topic, prompt: str) -> None:
     with pytest.raises(cli.OpenLearnError, match="Retry the first lesson"):

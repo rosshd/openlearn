@@ -118,6 +118,17 @@ def enforce_first_lesson_response(metadata: Mapping[str, object], prompt: str, a
         or (len(declared) == 1 and declared[0].casefold() in valid_concept_keys)
     ):
         return answer
+    unsafe_metadata = bool(
+        re.search(r"<!--\s*openlearn-action\b", answer, flags=re.IGNORECASE)
+        or declared
+        and (len(declared) != 1 or declared[0].casefold() not in valid_concept_keys)
+    )
+    normalized = None if unsafe_metadata else normalize_first_lesson_response(answer)
+    if normalized is not None:
+        marker = f"\n\n<!-- covered: {concept} -->" if valid_concepts else ""
+        candidate = f"{normalized}{marker}"
+        if first_lesson_response_is_valid(candidate):
+            return candidate
     system_design_heavy = "Coding Pattern Maintenance" in unit_titles
     if concept.casefold() == "clarifying requirements" and system_design_heavy:
         lesson = (
@@ -139,6 +150,44 @@ def enforce_first_lesson_response(metadata: Mapping[str, object], prompt: str, a
     else:
         raise FirstLessonUnavailable(FIRST_LESSON_RETRY_MESSAGE)
     return f"**Lesson:**\n{lesson}\n\n<!-- covered: {concept} -->"
+
+
+def normalize_first_lesson_response(answer: str) -> str | None:
+    """Salvage grounded lesson prose when the model adds forbidden framing."""
+    visible = re.sub(r"<!--.*?-->", "", answer, flags=re.DOTALL).strip()
+    visible = re.split(
+        r"(?im)^\s*(?:#+\s*)?(?:\*\*)?(?:Check|Question|Next|Action):(?:\*\*)?",
+        visible,
+        maxsplit=1,
+    )[0]
+    visible = re.sub(
+        r"(?im)^\s*(?:#+\s*)?(?:\*\*)?(?:Lesson|Explanation):(?:\*\*)?\s*",
+        "",
+        visible,
+    )
+    visible = re.sub(
+        r"(?im)^\s*(?:#+\s*)?(?:\*\*)?Example:(?:\*\*)?\s*",
+        "For example, ",
+        visible,
+    )
+    match = re.search(r"(?i)\bfor example,\s*", visible)
+    if match is None:
+        return None
+
+    def usable_sentences(value: str, limit: int) -> list[str]:
+        sentences = re.split(r"(?<=[.!?])\s+", " ".join(value.split()))
+        return [sentence.strip(" -*#") for sentence in sentences if sentence.strip()
+                and "?" not in sentence][:limit]
+
+    explanation = usable_sentences(visible[: match.start()], 2)
+    example = usable_sentences(visible[match.end() :], 2)
+    if not explanation or not example:
+        return None
+    normalized = (
+        f"**Lesson:**\n{' '.join(explanation)}\n\n"
+        f"For example, {' '.join(example)}"
+    )
+    return normalized if first_lesson_response_is_valid(normalized) else None
 
 
 def first_lesson_response_is_valid(answer: str) -> bool:

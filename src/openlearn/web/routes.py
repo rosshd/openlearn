@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from fastapi import APIRouter, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import ValidationError
 from starlette.concurrency import run_in_threadpool
@@ -236,14 +236,6 @@ async def _dashboard_response(request: Request) -> Any:
         except ValueError as error:
             raise HTTPException(status_code=404, detail="Course not found") from error
     snapshot = public_mapping(await _call_dashboard(request, selected_slug))
-    starters = snapshot.get("starters") if not snapshot.get("courses") else []
-    starters = starters if isinstance(starters, list) else []
-    starter_submission_ids = {
-        str(starter["id"]): str(uuid4())
-        for starter in starters
-        if isinstance(starter, dict)
-        and isinstance(starter.get("id"), str)
-    }
     proposal = None
     proposal_id = request.query_params.get("proposal")
     selected = snapshot.get("selected_course")
@@ -264,7 +256,6 @@ async def _dashboard_response(request: Request) -> Any:
         _context(
             request,
             dashboard=snapshot,
-            starter_submission_ids=starter_submission_ids,
             follow_up_proposal=proposal,
             page_title="Your courses",
         ),
@@ -273,21 +264,11 @@ async def _dashboard_response(request: Request) -> Any:
 
 @router.get("/courses/new", response_class=HTMLResponse, name="new_course")
 async def new_course(request: Request) -> Any:
-    templates = await _call(request, "course_templates")
-    selected_template = None
-    requested_template = request.query_params.get("template")
-    if requested_template:
-        selected_template = next(
-            (item for item in templates if item.get("id") == requested_template),
-            None,
-        )
     return _templates(request).TemplateResponse(
         request,
         "course_create.html",
         _context(
             request,
-            course_templates=templates,
-            selected_template=selected_template,
             page_title="Start a course",
         ),
     )
@@ -948,17 +929,52 @@ async def update_placement(request: Request, slug: str) -> JSONResponse:
 
 @router.get("/quick-learn", response_class=HTMLResponse, name="quick_learn")
 async def quick_learn(request: Request) -> Any:
-    templates = await _call(request, "course_templates")
     return _templates(request).TemplateResponse(
         request,
-        "course_create.html",
+        "quick_learn.html",
         _context(
             request,
-            course_templates=templates,
-            quick_learn=True,
             page_title="Quick Learn",
         ),
     )
+
+
+@router.post("/api/quick-learn", response_class=JSONResponse)
+async def create_quick_learn(
+    request: Request,
+    file: UploadFile = File(...),
+    description: str = Form(default="", max_length=4000),
+) -> JSONResponse:
+    if not await _provider_ready(request):
+        return _setup_required(request, next_path=request.url_for("quick_learn").path)
+    filename = Path(file.filename or "source.txt").name
+    if filename in {"", ".", ".."}:
+        filename = "source.txt"
+    content = await file.read(QUICK_LEARN_MAX_FILE_BYTES + 1)
+    await file.close()
+    if len(content) > QUICK_LEARN_MAX_FILE_BYTES:
+        return _json_error("The selected file exceeds the import size limit.", 413)
+    try:
+        with tempfile.TemporaryDirectory(prefix="openlearn-quick-learn-") as directory:
+            source_path = Path(directory) / filename
+            source_path.write_bytes(content)
+            result = public_mapping(
+                await _call(
+                    request,
+                    "create_quick_learn",
+                    source_path,
+                    filename,
+                    description,
+                )
+            )
+    except OSError:
+        return _json_error("The selected file could not be prepared for import.", 422)
+    if result.get("state") == "setup_required":
+        return _setup_required(request, next_path=request.url_for("quick_learn").path)
+    if not result.get("ok"):
+        return _json_error(str(result.get("error") or "Quick Learn could not start."), 422)
+    result["focus_url"] = str(request.url_for("focus", slug=result["slug"]))
+    return JSONResponse(result)
 
 
 @router.get("/progress", response_class=HTMLResponse, name="progress")

@@ -8,7 +8,7 @@
       <p class="eyebrow">Course library</p>
       <h1 id="dashboard-title">{% if dashboard.courses %}Choose a course and see its path{% else %}Choose your first course{% endif %}</h1>
     </div>
-    <p>{% if dashboard.courses %}Preview the next topics before you enter a course. Your active course changes only when you continue learning.{% else %}Start with a proven path, or build one around your own goal. Every course stays editable as you learn.{% endif %}</p>
+    <p>{% if dashboard.courses %}Preview the next topics before you enter a course. Your active course changes only when you continue learning.{% else %}Build a course around a goal or turn one source into a focused review.{% endif %}</p>
   </header>
 
   <section class="course-library-frame" data-course-workspace>
@@ -19,7 +19,6 @@
         <details class="new-course-menu">
           <summary class="primary-action compact course-add-action">New course <span aria-hidden="true">+</span></summary>
           <div aria-label="New course choices">
-            <a href="{{ url_for('new_course') }}#starter-courses"><strong>Starter course</strong><small>Begin with a proven course path.</small></a>
             <a href="{{ url_for('new_course') }}#custom-course"><strong>Custom course</strong><small>Describe anything you want to learn.</small></a>
             <a href="{{ url_for('quick_learn') }}"><strong>Quick Learn</strong><small>Learn from one bounded source.</small></a>
           </div>
@@ -47,19 +46,7 @@
         <a class="preview-jump quiet-link" href="#selected-course-preview">View selected course preview</a>
       {% else %}
         <div class="empty-course-library" data-empty-course-library>
-          <p>Three strong starting points, each with a ready-made course path.</p>
-          <div class="starter-grid" aria-label="Recommended starter courses">
-          {% for starter in dashboard.starters %}
-            <form method="post" action="{{ url_for('start_starter_course', template_id=starter.id) }}">
-              <input type="hidden" name="submission_id" value="{{ starter_submission_ids[starter.id] }}">
-              <button class="starter-tile" type="submit">
-                <span class="starter-index">{{ "%02d"|format(loop.index) }}</span>
-                <strong>{{ starter.title }}</strong>
-                <small>{{ starter.description }}</small>
-              </button>
-            </form>
-          {% endfor %}
-          </div>
+          <p>No courses yet. Use New course to build one from a goal or a source file.</p>
         </div>
       {% endif %}
     </section>

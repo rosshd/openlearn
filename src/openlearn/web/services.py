@@ -744,7 +744,6 @@ class OpenLearnWebServices:
             "active_slug": snapshot.active_slug,
             "resume_course": courses_by_slug.get(snapshot.resume.slug) if snapshot.resume else None,
             "due_reviews": snapshot.reviews.due_today,
-            "starters": self.course_templates()[:3],
         }
 
     def activate_course(self, slug: str) -> dict[str, object]:
@@ -1109,6 +1108,35 @@ class OpenLearnWebServices:
 
     def import_github_source(self, slug: str, url: str) -> dict[str, object]:
         return self._import_source(slug, source_imports.PublicGitHubSource(url))
+
+    def create_quick_learn(
+        self, path: Path, filename: str, description: str
+    ) -> dict[str, object]:
+        try:
+            slug = cli.build_quick_learn_from_source(
+                str(path),
+                name=None,
+                goal=description.strip() or None,
+                model=None,
+                infer_identity=True,
+                output_func=lambda _message: None,
+            )
+        except cli.ProviderRequestError as error:
+            return {
+                "ok": False,
+                "state": "setup_required"
+                if error.category == "provider_credentials"
+                else "provider_error",
+                "error": str(error),
+            }
+        except (cli.OpenLearnError, OSError, ValueError) as error:
+            return {"ok": False, "error": str(error)}
+        topic = cli.read_topic(slug)
+        return {
+            "ok": True,
+            "slug": slug,
+            "title": str(topic.metadata.get("topic") or filename),
+        }
 
     @staticmethod
     def _import_source(

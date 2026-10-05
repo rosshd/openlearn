@@ -2,30 +2,8 @@
 {% block content %}
 <section class="create-shell" aria-labelledby="create-title">
   <div class="section-heading">
-    <div><p class="eyebrow">{{ 'Quick Learn' if quick_learn else 'New work' }}</p><h1 id="create-title">{{ 'Learn from a source now.' if quick_learn else 'What do you want to understand?' }}</h1></div>
+    <div><p class="eyebrow">New course</p><h1 id="create-title">What do you want to understand?</h1></div>
     <a class="quiet-link" href="{{ url_for('dashboard') }}">Back to dashboard</a>
-  </div>
-
-  <div class="starter-strip" id="starter-courses" aria-labelledby="starters-title" data-starter-strip>
-    <div class="panel-heading">
-      <h2 id="starters-title">Starter courses</h2>
-      <div class="starter-controls" aria-label="Browse starter courses">
-        <button type="button" data-starter-scroll="previous" aria-label="Previous starter courses">←</button>
-        <button type="button" data-starter-scroll="next" aria-label="More starter courses">→</button>
-      </div>
-    </div>
-    <div class="starter-grid" data-starter-track tabindex="0">
-      {% for starter in course_templates %}
-      <button class="starter-tile" type="button" data-template-choice
-        data-template-id="{{ starter.id }}" data-title="{{ starter.title }}" data-goal="{{ starter.description }}">
-        <span class="starter-index">{{ "%02d"|format(loop.index) }}</span>
-        <strong>{{ starter.title }}</strong>
-        <small>{{ starter.description }}</small>
-      </button>
-      {% else %}
-      <p class="quiet-copy">Starter courses are loading. You can still create any course below.</p>
-      {% endfor %}
-    </div>
   </div>
 
   {% if create_error %}<div class="error-summary" role="alert" tabindex="-1">{{ create_error }}</div>{% endif %}
@@ -40,7 +18,7 @@
     <label for="experience">What have you tried already? <span class="optional">Optional</span></label>
     <textarea id="experience" name="experience" rows="3" maxlength="4000" placeholder="A few words is enough. This guides the first example, but does not count as mastery."></textarea>
     <div class="form-footer">
-      <p class="field-note" role="status" aria-live="polite" aria-atomic="true" data-form-status>{% if quick_learn %}Create the course, then use its Sources action to add a bounded file, folder, or public GitHub repository. No outline approval or imported code execution.{% else %}One short prompt, then teaching starts.{% endif %}</p>
+      <p class="field-note" role="status" aria-live="polite" aria-atomic="true" data-form-status>One short prompt, then teaching starts.</p>
       <button class="primary-action" type="submit">Build the first lesson <span aria-hidden="true">→</span></button>
     </div>
   </form>
