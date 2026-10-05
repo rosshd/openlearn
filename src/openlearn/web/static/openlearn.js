@@ -446,8 +446,6 @@ let latestAppliedCourseRevision = Number(focusShell?.dataset.revision || 0);
 let latestAppliedChatRevision = Number(focusShell?.dataset.chatRevision || 0);
 
 let activeToolOpener = null;
-let preparedVideo = null;
-let videoRequestGeneration = 0;
 let codeRevision = null;
 let codeDirty = false;
 let codeEditVersion = 0;
@@ -455,7 +453,7 @@ let toolOpenVersion = 0;
 let surfaceMotionVersion = 0;
 const focusLayoutAnimations = new Map();
 
-const availableTools = new Set(["chat", "code", "video", "sources"]);
+const availableTools = new Set(["chat", "code", "sources"]);
 
 function chatDraftStorageKey() {
   return focusShell?.dataset.courseSlug
@@ -662,18 +660,6 @@ function confirmDiscardCodeChanges() {
   return window.confirm("Discard unsaved changes to this Python draft?");
 }
 
-function clearPreparedVideo() {
-  preparedVideo = null;
-  const consent = toolSurface?.querySelector("[data-video-consent]");
-  if (consent) consent.hidden = true;
-  toolSurface?.querySelector("[data-video-frame]")?.replaceChildren();
-}
-
-function invalidatePreparedVideo() {
-  videoRequestGeneration += 1;
-  clearPreparedVideo();
-}
-
 function renderCodeResult(result) {
   const region = toolSurface?.querySelector("[data-code-result]");
   if (!region) return;
@@ -754,7 +740,7 @@ async function openTool(tool, opener, {updateUrl = true} = {}) {
   for (const panel of toolSurface.querySelectorAll("[data-tool-panel]")) {
     panel.hidden = panel.dataset.toolPanel !== tool;
   }
-  const titles = {chat: "Tutor chat", code: "Code workbench", video: "Video player", sources: "Course sources"};
+  const titles = {chat: "Tutor chat", code: "Code workbench", sources: "Course sources"};
   toolSurface.querySelector("[data-tool-title]").textContent = titles[tool] || "Learning tool";
   if (toolSurface.hidden || toolSurface.getAttribute("aria-hidden") === "true") {
     revealSurface(toolSurface, () => {
@@ -767,13 +753,11 @@ async function openTool(tool, opener, {updateUrl = true} = {}) {
   toolStatus(
     tool === "chat"
       ? "Your lesson stays open while you ask."
-      : tool === "video"
-        ? "Video stays private until you load it."
-        : "Loading local tool state…"
+      : "Loading local tool state…"
   );
   try {
     await loadToolState(tool);
-    if (openVersion === toolOpenVersion && tool !== "video") toolStatus("Ready.");
+    if (openVersion === toolOpenVersion) toolStatus("Ready.");
   } catch (error) {
     if (openVersion === toolOpenVersion) toolStatus(error.message, true);
   }
@@ -794,7 +778,6 @@ function closeTool({updateUrl = true} = {}) {
   const opener = activeToolOpener;
   activeToolOpener = null;
   opener?.focus();
-  toolSurface.querySelector("[data-video-frame]")?.replaceChildren();
   if (compactFocusLayout()) {
     hideSurface(toolSurface, () => {
       if (focusShell.dataset.toolActive === currentTool) {
@@ -908,44 +891,6 @@ toolSurface?.querySelector("[data-code-reset]")?.addEventListener("click", async
   } catch (error) { toolStatus(error.message, true); }
 });
 
-toolSurface?.querySelector("[data-video-form]")?.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const form = event.currentTarget;
-  invalidatePreparedVideo();
-  const requestGeneration = videoRequestGeneration;
-  try {
-    const descriptor = await requestJson(toolEndpoint("video"), {
-      method: "POST",
-      body: JSON.stringify({url: form.elements.url.value}),
-    });
-    if (requestGeneration !== videoRequestGeneration) return;
-    preparedVideo = descriptor;
-    const consent = toolSurface.querySelector("[data-video-consent]");
-    consent.hidden = false;
-    consent.querySelector("[data-video-title]").textContent = preparedVideo.label || "Video ready to load.";
-    toolSurface.querySelector("[data-video-frame]").replaceChildren();
-    toolStatus("Validated locally. YouTube has not been contacted.");
-  } catch (error) {
-    if (requestGeneration === videoRequestGeneration) toolStatus(error.message, true);
-  }
-});
-
-toolSurface?.querySelector("#video-url")?.addEventListener("input", invalidatePreparedVideo);
-
-toolSurface?.querySelector("[data-video-load]")?.addEventListener("click", () => {
-  if (!preparedVideo?.embed_url) return;
-  const frame = document.createElement("iframe");
-  frame.src = preparedVideo.embed_url;
-  frame.title = preparedVideo.label || "YouTube lesson video";
-  frame.loading = "lazy";
-  frame.referrerPolicy = "no-referrer";
-  frame.allow = "accelerometer; encrypted-media; picture-in-picture";
-  frame.setAttribute("sandbox", "allow-scripts allow-same-origin allow-presentation");
-  frame.setAttribute("allowfullscreen", "");
-  toolSurface.querySelector("[data-video-frame]").replaceChildren(frame);
-  toolStatus("Video loaded from YouTube's privacy-enhanced player.");
-});
-
 if (focusShell) {
   const requestedTool = toolFromUrl();
   const hasToolParameter = new URL(window.location.href).searchParams.has("tool");
@@ -966,6 +911,11 @@ if (focusShell) {
     } else if (!toolSurface.hidden) {
       const closed = closeTool({updateUrl: false});
       if (!closed && currentTool) setToolUrl(currentTool, {replace: true});
+      else if (new URL(window.location.href).searchParams.has("tool")) {
+        setToolUrl(null, {replace: true});
+      }
+    } else if (new URL(window.location.href).searchParams.has("tool")) {
+      setToolUrl(null, {replace: true});
     }
   });
 }

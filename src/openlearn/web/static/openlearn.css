@@ -677,10 +677,8 @@ h2 { font-size: clamp(1.35rem, 3vw, 2rem); line-height: 1.1; letter-spacing: -0.
 .tool-actions { display: flex; flex-wrap: wrap; gap: 0.65rem; }
 .tool-actions button:not(.primary-action), .tool-form button:not(.primary-action) { min-height: 2.75rem; padding: 0.6rem 0.8rem; }
 .tool-form { display: grid; gap: 0.65rem; padding: 0.9rem; border: 1px solid var(--line); background: var(--surface); }
-.code-result, .source-results, .video-consent { padding: 0.9rem; border: 1px solid var(--line); background: var(--surface); }
+.code-result, .source-results { padding: 0.9rem; border: 1px solid var(--line); background: var(--surface); }
 .code-result pre { max-height: 20rem; margin: 0.8rem 0 0; padding: 0.9rem; background: var(--chrome); color: var(--chrome-ink); overflow: auto; white-space: pre-wrap; }
-.video-frame { position: relative; width: 100%; }
-.video-frame iframe { display: block; width: 100%; aspect-ratio: 16 / 9; border: 1px solid var(--line-strong); }
 .source-result { padding: 0.7rem 0; border-top: 1px solid var(--line); }
 .drawer { position: fixed; z-index: 30; top: 4rem; right: 0; width: min(26rem, 92vw); height: calc(100vh - 4rem); padding: 2rem; border-left: 1px solid var(--line-strong); background: var(--surface-raised); box-shadow: -12px 0 35px rgb(0 0 0 / 14%); overflow-y: auto; }
 .drawer-close { float: right; width: 2.75rem; height: 2.75rem; border: 1px solid var(--line); background: transparent; font-size: 1.5rem; cursor: pointer; }

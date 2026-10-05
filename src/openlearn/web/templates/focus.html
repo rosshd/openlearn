@@ -27,7 +27,6 @@
     <p class="rail-caption">Lesson tools</p>
     <button type="button" class="rail-button" data-tool-open="chat" aria-expanded="false" aria-controls="learning-tool-surface">{{ tool_icon('M4 4h16v12H9l-5 4V4 M8 8h8 M8 12h5') }} Chat</button>
     <button type="button" class="rail-button" data-tool-open="code" aria-expanded="false" aria-controls="learning-tool-surface">{{ tool_icon('m7 6-5 6 5 6 m10-12 5 6-5 6 M14 4l-4 16') }} Code</button>
-    <button type="button" class="rail-button" data-tool-open="video" aria-expanded="false" aria-controls="learning-tool-surface">{{ tool_icon('M3 5h18v14H3V5 m7 4 6 3-6 3V9') }} Video</button>
     <button type="button" class="rail-button" data-tool-open="sources" aria-expanded="false" aria-controls="learning-tool-surface">{{ tool_icon('M5 2h9l5 5v15H5V2 M14 2v5h5 M9 12h6 M9 16h6') }} Sources</button>
     <button type="button" class="rail-button" data-drawer-toggle="progress-drawer" aria-expanded="false" aria-controls="progress-drawer">{{ tool_icon('M5 20V11 M12 20V4 M19 20V8') }} Progress</button>
     <button type="button" class="rail-button" data-drawer-toggle="history-drawer" aria-expanded="false" aria-controls="history-drawer">{{ tool_icon('M3 11a9 9 0 1 1 2 7 M3 4v7h7 M12 7v5l3 2') }} History</button>
@@ -178,22 +177,6 @@
         <div class="panel-heading"><h3>Run result</h3><span data-code-result-kind></span></div>
         <pre><code data-code-output></code></pre>
       </div>
-    </section>
-
-    <section class="tool-panel" data-tool-panel="video" hidden aria-labelledby="video-tool-title">
-      <h3 id="video-tool-title">YouTube player</h3>
-      <p class="quiet-copy">Paste a YouTube link. Nothing is sent to YouTube until you choose Load video.</p>
-      <form class="tool-form" data-video-form>
-        <label for="video-url">YouTube URL</label>
-        <input id="video-url" name="url" type="url" maxlength="2048" required placeholder="https://www.youtube.com/watch?v=…">
-        <button class="primary-action compact" type="submit">Prepare video</button>
-      </form>
-      <div class="video-consent" data-video-consent hidden>
-        <p><strong data-video-title>Ready to load this video.</strong></p>
-        <p class="field-note">Loading connects your browser to YouTube's privacy-enhanced player.</p>
-        <button type="button" class="primary-action compact" data-video-load>Load video</button>
-      </div>
-      <div class="video-frame" data-video-frame></div>
     </section>
 
     <section class="tool-panel" data-tool-panel="sources" hidden aria-labelledby="sources-tool-title">

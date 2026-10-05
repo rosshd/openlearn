@@ -73,6 +73,169 @@ def _assert_no_page_overflow(page) -> None:
     )
 
 
+def test_real_browser_stale_video_url_recovers_with_hidden_and_open_tool(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    playwright = pytest.importorskip("playwright.sync_api")
+    port = _free_loopback_port()
+    base_url = f"http://127.0.0.1:{port}"
+    home = tmp_path / "openlearn-home"
+    monkeypatch.setenv("OPENLEARN_HOME", str(home))
+    monkeypatch.setenv("OPENLEARN_MOCK", "1")
+    for name in (
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "OPENLEARN_API_KEY",
+        "OPENLEARN_BASE_URL",
+        "OPENLEARN_MODEL",
+        "OPENLEARN_PROVIDER",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    cli.clear_config_cache()
+    cli.cmd_new(
+        argparse.Namespace(topic="Stale Video Browser", goal="Recover stale tool URLs"),
+        output_func=lambda _text: None,
+    )
+    slug = "stale-video-browser"
+    environment = {
+        **os.environ,
+        "OPENLEARN_HOME": str(home),
+        "OPENLEARN_MOCK": "1",
+        "PYTHONPATH": str(SOURCE_ROOT),
+    }
+    command = f"from openlearn.web.launcher import run; run(port={port}, open_browser=False)"
+    log_path = tmp_path / "openlearn-web.log"
+    with log_path.open("wb") as log:
+        process = subprocess.Popen(
+            [sys.executable, "-c", command],
+            cwd=tmp_path,
+            env=environment,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+        )
+        try:
+            bootstrap_url, app_url = _wait_until_ready(base_url, process, home)
+            with playwright.sync_playwright() as runtime:
+                browser = runtime.chromium.launch()
+                page = browser.new_page()
+                requests: list[str] = []
+                page.goto(bootstrap_url)
+                page.on("request", lambda request: requests.append(request.url))
+                page.goto(
+                    f"{app_url}/courses/{slug}?keep=1&tool=video#move-title"
+                )
+
+                assert page.locator('[data-tool-open="video"]').count() == 0
+                assert page.locator('[data-tool-panel="video"]').count() == 0
+                assert page.locator("iframe").count() == 0
+                assert "tool=" not in page.url
+                assert "keep=1" in page.url
+                assert page.url.endswith("#move-title")
+                assert not any("/tools/video" in url for url in requests)
+
+                page.evaluate(
+                    """() => {
+                      const url = new URL(window.location.href);
+                      url.searchParams.set("tool", "video");
+                      history.pushState({}, "", url);
+                      window.dispatchEvent(new PopStateEvent("popstate"));
+                    }"""
+                )
+                page.wait_for_function(
+                    "!new URL(window.location.href).searchParams.has('tool')"
+                )
+                assert page.locator("[data-tool-surface]").is_hidden()
+
+                page.get_by_role("button", name="Chat", exact=True).click()
+                page.wait_for_function(
+                    "() => document.querySelector('[data-tool-panel=chat]')"
+                    "?.hidden === false"
+                )
+                assert "tool=chat" in page.url
+                page.evaluate(
+                    """() => {
+                      const url = new URL(window.location.href);
+                      url.searchParams.set("tool", "video");
+                      history.pushState({}, "", url);
+                      window.dispatchEvent(new PopStateEvent("popstate"));
+                    }"""
+                )
+                page.wait_for_function(
+                    "!new URL(window.location.href).searchParams.has('tool')"
+                )
+                assert page.locator("[data-tool-surface]").is_hidden()
+                assert page.locator("iframe").count() == 0
+                assert not any("/tools/video" in url for url in requests)
+
+                page.get_by_role("button", name="Sources", exact=True).click()
+                assert "tool=sources" in page.url
+                page.locator("#source-file").set_input_files(
+                    {
+                        "name": "browser-notes.md",
+                        "mimeType": "text/markdown",
+                        "buffer": b"# Browser source\n",
+                    }
+                )
+                page.get_by_role("button", name="Import file").click()
+                playwright.expect(
+                    page.locator("[data-source-results]")
+                ).to_contain_text("browser-notes.md")
+                page.get_by_role("button", name="Close learning tool").click()
+
+                page.get_by_role("button", name="Progress", exact=True).click()
+                playwright.expect(page.locator("#progress-drawer")).to_be_visible()
+                page.locator("body").press("Escape")
+                playwright.expect(page.locator("#progress-drawer")).to_be_hidden()
+                page.get_by_role("button", name="History", exact=True).click()
+                playwright.expect(page.locator("#history-drawer")).to_be_visible()
+                page.get_by_role("button", name="Close history").click()
+                playwright.expect(page.locator("#history-drawer")).to_be_hidden()
+
+                page.get_by_role("button", name="Code", exact=True).click()
+                page.locator("[data-code-draft]").fill("print('keep this draft')\n")
+                page.once("dialog", lambda dialog: dialog.dismiss())
+                page.evaluate(
+                    """() => {
+                      const url = new URL(window.location.href);
+                      url.searchParams.set("tool", "video");
+                      history.pushState({}, "", url);
+                      window.dispatchEvent(new PopStateEvent("popstate"));
+                    }"""
+                )
+                page.wait_for_function(
+                    "new URL(window.location.href).searchParams.get('tool') === 'code'"
+                )
+                playwright.expect(
+                    page.locator('[data-tool-panel="code"]')
+                ).to_be_visible()
+                assert page.locator("[data-code-draft]").input_value() == (
+                    "print('keep this draft')\n"
+                )
+                page.once("dialog", lambda dialog: dialog.accept())
+                page.evaluate(
+                    """() => {
+                      const url = new URL(window.location.href);
+                      url.searchParams.set("tool", "video");
+                      history.pushState({}, "", url);
+                      window.dispatchEvent(new PopStateEvent("popstate"));
+                    }"""
+                )
+                page.wait_for_function(
+                    "!new URL(window.location.href).searchParams.has('tool')"
+                )
+                playwright.expect(page.locator("[data-tool-surface]")).to_be_hidden()
+                assert not any("/tools/video" in url for url in requests)
+                browser.close()
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+
+
 def test_real_browser_course_polling_theme_conflict_and_keyboard_submit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -370,7 +533,7 @@ def test_real_browser_course_polling_theme_conflict_and_keyboard_submit(
                 assert code_saved.value.status == 200
                 first.locator("[data-code-draft]").fill("print('unsaved draft')\n")
                 first.once("dialog", lambda dialog: dialog.dismiss())
-                first.get_by_role("button", name="Video").click()
+                first.get_by_role("button", name="Sources").click()
                 playwright.expect(first.locator('[data-tool-panel="code"]')).to_be_visible()
                 assert first.locator("[data-code-draft]").input_value() == (
                     "print('unsaved draft')\n"
@@ -378,16 +541,16 @@ def test_real_browser_course_polling_theme_conflict_and_keyboard_submit(
                 assert "tool=code" in first.url
 
                 first.once("dialog", lambda dialog: dialog.accept())
-                first.get_by_role("button", name="Video").click()
-                playwright.expect(first.locator('[data-tool-panel="video"]')).to_be_visible()
-                assert "tool=video" in first.url
+                first.get_by_role("button", name="Sources").click()
+                playwright.expect(first.locator('[data-tool-panel="sources"]')).to_be_visible()
+                assert "tool=sources" in first.url
                 first.go_back()
                 playwright.expect(first.locator('[data-tool-panel="code"]')).to_be_visible()
                 playwright.expect(first.locator("[data-code-draft]")).to_have_value(
                     "print('browser workspace')\n"
                 )
                 first.go_forward()
-                playwright.expect(first.locator('[data-tool-panel="video"]')).to_be_visible()
+                playwright.expect(first.locator('[data-tool-panel="sources"]')).to_be_visible()
                 first.go_back()
                 playwright.expect(first.locator('[data-tool-panel="code"]')).to_be_visible()
 
@@ -435,32 +598,24 @@ def test_real_browser_course_polling_theme_conflict_and_keyboard_submit(
                 assert first.locator("[data-tool-surface]").get_attribute("data-motion") is None
                 first.emulate_media(reduced_motion="no-preference")
 
-                first.get_by_role("button", name="Video").click()
-                first.locator("#video-url").fill("https://youtu.be/dQw4w9WgXcQ")
-                first.get_by_role("button", name="Prepare video").click()
-                playwright.expect(first.locator("[data-video-consent]")).to_be_visible()
-                assert first.locator("[data-video-frame] iframe").count() == 0
-                first.locator("#video-url").fill("https://example.com/not-youtube")
-                playwright.expect(first.locator("[data-video-consent]")).to_be_hidden()
-                assert first.locator("[data-video-frame] iframe").count() == 0
-                first.get_by_role("button", name="Prepare video").click()
-                playwright.expect(first.locator("[data-tool-status]")).to_contain_text(
-                    "valid supported YouTube"
+                first.evaluate(
+                    """() => {
+                      const url = new URL(window.location.href);
+                      url.searchParams.set("tool", "video");
+                      history.pushState({}, "", url);
+                      window.dispatchEvent(new PopStateEvent("popstate"));
+                    }"""
                 )
-                playwright.expect(first.locator("[data-video-consent]")).to_be_hidden()
-                first.locator("#video-url").fill("https://youtu.be/dQw4w9WgXcQ")
-                first.get_by_role("button", name="Prepare video").click()
-                playwright.expect(first.locator("[data-video-consent]")).to_be_visible()
-                context.route("https://www.youtube-nocookie.com/**", lambda route: route.abort())
-                first.get_by_role("button", name="Load video").click()
-                assert first.locator("[data-video-frame] iframe").count() == 1
-                first.locator("#video-url").fill("https://youtu.be/abcdefghijk")
-                playwright.expect(first.locator("[data-video-consent]")).to_be_hidden()
-                assert first.locator("[data-video-frame] iframe").count() == 0
+                first.wait_for_function(
+                    "!new URL(window.location.href).searchParams.has('tool')"
+                )
+                playwright.expect(first.locator("[data-tool-surface]")).to_be_hidden()
+                assert first.locator("iframe").count() == 0
+
+                first.get_by_role("button", name="Chat", exact=True).click()
+                playwright.expect(first.locator('[data-tool-panel="chat"]')).to_be_visible()
+                assert "tool=chat" in first.url
                 first.get_by_role("button", name="Close learning tool").click()
-                assert first.get_by_role("button", name="Video").evaluate(
-                    "button => button === document.activeElement"
-                )
 
                 first.get_by_role("button", name="Sources").click()
                 assert "tool=sources" in first.url

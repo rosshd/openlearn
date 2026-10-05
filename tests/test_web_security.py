@@ -196,7 +196,7 @@ def test_every_normal_response_has_browser_security_headers(client: TestClient) 
     assert "SameSite=Strict" in response.headers["set-cookie"]
 
 
-def test_video_embed_preserves_no_referrer_policy() -> None:
+def test_lesson_client_does_not_create_video_iframes() -> None:
     script = (
         Path(__file__).parents[1]
         / "src"
@@ -206,8 +206,8 @@ def test_video_embed_preserves_no_referrer_policy() -> None:
         / "openlearn.js"
     ).read_text(encoding="utf-8")
 
-    assert 'frame.referrerPolicy = "no-referrer"' in script
-    assert "strict-origin-when-cross-origin" not in script
+    assert 'createElement("iframe")' not in script
+    assert "youtube-nocookie.com" not in script
 
 
 def test_code_output_rendering_preserves_whitespace() -> None:

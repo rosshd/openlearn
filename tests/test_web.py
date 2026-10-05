@@ -2802,7 +2802,7 @@ def test_skip_placement_does_not_hide_adapter_internal_type_error() -> None:
         )
 
 
-def test_video_preparation_ignores_out_of_order_responses() -> None:
+def test_lesson_client_has_no_video_state_or_handlers() -> None:
     javascript = (
         Path(__file__).resolve().parents[1]
         / "src"
@@ -2811,23 +2811,10 @@ def test_video_preparation_ignores_out_of_order_responses() -> None:
         / "static"
         / "openlearn.js"
     ).read_text(encoding="utf-8")
-    handler_start = javascript.index(
-        'toolSurface?.querySelector("[data-video-form]")?.addEventListener'
-    )
-    handler_end = javascript.index(
-        'toolSurface?.querySelector("[data-video-load]")', handler_start
-    )
-    handler = javascript[handler_start:handler_end]
-
-    assert "invalidatePreparedVideo();" in handler
-    assert "const requestGeneration = videoRequestGeneration;" in handler
-    assert handler.index("await requestJson") < handler.index(
-        "if (requestGeneration !== videoRequestGeneration) return;"
-    ) < handler.index("preparedVideo = descriptor;")
-    assert (
-        'querySelector("#video-url")?.addEventListener("input", invalidatePreparedVideo)'
-        in handler
-    )
+    assert "preparedVideo" not in javascript
+    assert "videoRequestGeneration" not in javascript
+    assert "data-video-" not in javascript
+    assert '"video"' not in javascript
 
 
 def test_outline_change_is_previewed_before_confirm_and_retries_one_submission() -> None:
@@ -3719,7 +3706,7 @@ def test_initialization_refresh_recovers_orphaned_saved_operation(
     assert operation_id in focus.headers["location"]
 
 
-def test_focus_exposes_optional_dual_surface_without_opening_a_tool(
+def test_focus_excludes_video_and_keeps_remaining_tools(
     client: TestClient,
 ) -> None:
     slug = create_tool_course()
@@ -3727,9 +3714,15 @@ def test_focus_exposes_optional_dual_surface_without_opening_a_tool(
     response = client.get(f"/courses/{slug}")
 
     assert response.status_code == 200
+    assert 'data-tool-open="chat"' in response.text
     assert 'data-tool-open="code"' in response.text
-    assert 'data-tool-open="video"' in response.text
+    assert 'data-tool-open="video"' not in response.text
+    assert 'data-tool-panel="video"' not in response.text
+    assert 'data-video-' not in response.text
+    assert "YouTube" not in response.text
     assert 'data-tool-open="sources"' in response.text
+    assert 'data-drawer-toggle="progress-drawer"' in response.text
+    assert 'data-drawer-toggle="history-drawer"' in response.text
     assert 'data-tool-surface hidden' in response.text
 
 
