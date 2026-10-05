@@ -97,7 +97,28 @@ def sanitize_model_output(text: str) -> str:
         cleaned_lines.append(line)
     text = "\n".join(cleaned_lines)
     text = re.sub(r"(?m)^(\s*)\*\s+", r"\1- ", text)
-    return normalize_multiple_choice_layout(text).strip()
+    return strip_source_audit_footer(normalize_multiple_choice_layout(text)).strip()
+
+
+def strip_source_audit_footer(text: str) -> str:
+    """Hide model-appended extraction bookkeeping, not source facts or code."""
+    lines: list[str] = []
+    fence: str | None = None
+    for line in text.splitlines():
+        marker = re.match(r"^\s*(`{3,}|~{3,})", line)
+        if marker:
+            if fence is None:
+                fence = marker.group(1)
+            elif marker.group(1)[0] == fence[0] and len(marker.group(1)) >= len(fence):
+                fence = None
+        if fence is None and re.match(
+            r"^\s*(?:#+\s*)?(?:\*\*)?Source (?:excerpts provided|audit|provenance):"
+            r"\s*(?:\*\*)?\s*$",
+            line, flags=re.IGNORECASE,
+        ):
+            break
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def normalize_multiple_choice_layout(text: str) -> str:

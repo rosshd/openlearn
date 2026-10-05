@@ -419,7 +419,8 @@ h2 { font-size: clamp(1.35rem, 3vw, 2rem); line-height: 1.1; letter-spacing: -0.
 .quick-learn-submit .field-note { max-width: 36rem; margin: 0; }
 
 .focus-status { position: sticky; top: 4rem; z-index: 15; min-height: 3.5rem; background: var(--chrome); color: var(--chrome-ink); }
-.focus-identity { display: flex; gap: 0.8rem; align-items: baseline; }
+.focus-identity { min-width: 0; display: flex; gap: 0.8rem; align-items: baseline; }
+.focus-identity strong, .focus-identity span { min-width: 0; overflow-wrap: anywhere; }
 .focus-identity span { opacity: 0.68; font-size: 0.85rem; }
 .saved-state { display: inline-flex; align-items: center; gap: 0.5rem; font-size: 0.8rem; }
 .focus-shell {
@@ -448,17 +449,18 @@ h2 { font-size: clamp(1.35rem, 3vw, 2rem); line-height: 1.1; letter-spacing: -0.
 .rail-button[aria-expanded="true"] { border-color: var(--orange); background: color-mix(in srgb, var(--orange) 11%, var(--surface-raised)); box-shadow: inset 3px 0 var(--orange); }
 .focus-column {
   min-width: 0;
+  max-width: 44rem;
   flex: 0 1 44rem;
   display: grid;
   gap: 1rem;
   transition: flex-grow var(--surface-motion-duration) cubic-bezier(0.4, 0, 0.2, 1), flex-basis var(--surface-motion-duration) cubic-bezier(0.4, 0, 0.2, 1);
 }
 .focus-shell[data-tool-active] .focus-column { flex-grow: 0.92; flex-basis: 24rem; }
-.move-surface { min-height: min(48vh, 33rem); padding: clamp(1.4rem, 5vw, 3.2rem); border: 1px solid var(--line-strong); border-top: 7px solid var(--orange); background: var(--surface); box-shadow: var(--shadow); }
+.move-surface { min-width: 0; min-height: min(48vh, 33rem); padding: clamp(1rem, 2.5vw, 2rem); border: 1px solid var(--line-strong); border-top: 7px solid var(--orange); background: var(--surface); box-shadow: var(--shadow); }
 .move-surface[data-streaming] { overflow: visible; }
-.move-surface h1 { max-width: 20ch; font-size: clamp(2rem, 5vw, 3.5rem); }
+.move-surface h1 { font-size: clamp(1.7rem, 3vw, 2.4rem); overflow-wrap: anywhere; }
 .move-surface[data-move-type="feedback"], .move-surface[data-move-type="hint"] { border-top-color: var(--teal); }
-.move-content { max-width: 56ch; font-size: 1.08rem; line-height: 1.65; }
+.move-content { min-width: 0; font-size: 1.08rem; line-height: 1.65; overflow-wrap: anywhere; }
 .move-content p, .move-content ul, .move-content ol { margin-bottom: 1.15rem; }
 .move-content > p:first-child { font-size: 1.12rem; }
 .slide-takeaway, .slide-example { padding: 1rem 1.1rem; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface-raised); }

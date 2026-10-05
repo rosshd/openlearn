@@ -18373,6 +18373,9 @@ def system_prompt(
 
         {quick_learn_prompt}
 
+        Source teaching boundary:
+        {lesson_policy.SOURCE_TEACHING_INSTRUCTIONS}
+
         Do not keep printing full progress summaries after every answer. Mention
         progress only when it helps the learner feel oriented or encouraged.
         Vary wording naturally. Do not use the same labels or sentence pattern
@@ -18916,7 +18919,11 @@ def generation_system_prompt(topic: Topic, current_plan: str = "") -> str:
         generic CS coverage.
 
         Output only the requested material. Use plain text with short labels and
-        hyphen bullets. No Markdown headings, no decorative formatting.
+        hyphen bullets unless the request specifies a lesson format. No Markdown
+        headings, no decorative formatting.
+
+        Source teaching boundary:
+        {lesson_policy.SOURCE_TEACHING_INSTRUCTIONS}
 
         Course:
         {topic.metadata.get("topic", topic.slug)}
