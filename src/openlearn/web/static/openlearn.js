@@ -2038,6 +2038,8 @@ function initializeReview() {
   let busy = false;
   let operation = 0;
   let timer = null;
+  let dockObserver = null;
+  let updateActionDock = null;
   const skipped = new Set();
   const receipts = new Set();
   const reviewedCards = new Set();
@@ -2068,7 +2070,63 @@ function initializeReview() {
     element.addEventListener("click", action);
     return element;
   }
-  function focusHeading(element) { element?.focus(); }
+  function reviewHeaderHeight() {
+    const header = document.querySelector(".site-header");
+    return header && ["sticky", "fixed"].includes(getComputedStyle(header).position) ? header.offsetHeight : 0;
+  }
+  function clearActionDock() {
+    dockObserver?.disconnect();
+    dockObserver = null;
+    updateActionDock = null;
+    panel.style.setProperty("--review-dock-height", "0px");
+    panel.style.setProperty("--review-header-offset", `${reviewHeaderHeight() + 16}px`);
+  }
+  function configureActionDock(footer) {
+    const update = () => {
+      if (!panel.contains(footer)) return;
+      const headerHeight = reviewHeaderHeight();
+      const dockHeight = footer.offsetHeight;
+      footer.classList.toggle("review-footer--flow", dockHeight > window.innerHeight * 0.34
+        || window.innerHeight - headerHeight - dockHeight < 230);
+      const sticky = getComputedStyle(footer).position === "sticky";
+      panel.style.setProperty("--review-dock-height", `${sticky ? dockHeight : 0}px`);
+      panel.style.setProperty("--review-header-offset", `${headerHeight + 16}px`);
+    };
+    updateActionDock = update;
+    dockObserver?.disconnect();
+    dockObserver = new ResizeObserver(update);
+    dockObserver.observe(footer);
+    dockObserver.observe(document.documentElement);
+    update();
+  }
+  window.addEventListener("resize", () => updateActionDock?.());
+  function focusHeading(element, block = "nearest") {
+    element?.focus({preventScroll: true});
+    element?.scrollIntoView({block});
+  }
+  function appendProse(container, text, className, kind) {
+    const prose = node("div", undefined, "review-prose");
+    prose.dataset.reviewProse = kind;
+    // Keep original characters and line boundaries; only wrap reliable prose.
+    for (const part of (text || "").split(/(\r?\n[ \t]*\r?\n(?:[ \t]*\r?\n)*)/)) {
+      if (!part) continue;
+      if (!part.trim()) { prose.append(document.createTextNode(part)); continue; }
+      const structured = /[\r\n`{}[\]\\=<>_^]|\b(?:e\.g|i\.e|Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|vs|etc|approx|Fig|Eq|Corp|Inc)\./i.test(part);
+      let start = 0;
+      if (!structured && part.split(/\s+/).length > 45) {
+        // Boundaries require an ordinary long word, punctuation, and a new
+        // capitalized sentence. Ambiguous abbreviations/formulas stay intact.
+        for (const match of part.matchAll(/[a-z]{4,}[.!?](?:["'])?(\s+)(?=[A-Z])/g)) {
+          const separatorStart = match.index + match[0].length - match[1].length;
+          if (part.slice(start, separatorStart).split(/\s+/).length < 20) continue;
+          prose.append(node("p", part.slice(start, separatorStart), className), document.createTextNode(match[1]));
+          start = separatorStart + match[1].length;
+        }
+      }
+      if (start < part.length) prose.append(node("p", part.slice(start), className));
+    }
+    container.append(prose);
+  }
   function updateSummary() {
     const returns = items.filter(waiting).length;
     const skippedCount = items.filter((item) => skipped.has(itemKey(item))).length;
@@ -2110,8 +2168,12 @@ function initializeReview() {
     return result;
   }
   function conflict(error) { return error.payload?.state === "conflict"; }
-  function addSkip() {
-    const footer = node("div", undefined, "review-footer");
+  function addSkip(ratings = null) {
+    const footer = node("footer", undefined, ratings ? "review-footer review-footer--ratings" : "review-footer");
+    if (ratings) {
+      footer.dataset.reviewActions = "";
+      footer.append(ratings);
+    }
     footer.append(button("Skip for now", () => {
       if (busy || pending) return;
       skipped.add(itemKey(current));
@@ -2119,10 +2181,12 @@ function initializeReview() {
       announce("Skipped for this session. This review remains due.");
     }, "quiet-action"));
     panel.append(footer);
+    if (ratings) configureActionDock(footer);
   }
   function showConflict() {
     mode = "conflict";
     pending = null;
+    clearActionDock();
     panel.replaceChildren();
     const title = heading("This card changed in another tab");
     panel.append(title, node("p", "Refresh the review to continue from its current schedule."),
@@ -2142,11 +2206,12 @@ function initializeReview() {
   }
   function showCard(focus = false) {
     clearTimeout(timer);
+    clearActionDock();
     mode = current.state === "needs_preparation" ? "preparation" : "question";
     revealed = null;
     pending = null;
     panel.replaceChildren();
-    panel.append(node("p", current.course, "eyebrow"), node("p", current.concept, "review-context"));
+    panel.append(node("p", current.course, "review-course"), node("p", current.concept, "review-context"));
     const title = heading(mode === "preparation" ? "Prepare this review card" : current.question);
     title.dataset.reviewQuestion = "";
     panel.append(title);
@@ -2206,10 +2271,10 @@ function initializeReview() {
     const title = heading("Answer", "h3");
     title.dataset.reviewAnswer = "";
     answer.append(title);
-    for (const [text, className] of [[revealed.answer, "review-answer-text"], [revealed.explanation, "review-explanation"]]) {
-      for (const paragraph of (text || "").split(/\n\s*\n/).filter((value) => value.trim())) {
-        answer.append(node("p", paragraph, className));
-      }
+    appendProse(answer, revealed.answer, "review-answer-text", "answer");
+    if (revealed.explanation) {
+      answer.append(node("h3", "Explanation"));
+      appendProse(answer, revealed.explanation, "review-explanation", "explanation");
     }
     const ratings = node("div", undefined, "review-ratings");
     for (const result of results) {
@@ -2225,10 +2290,9 @@ function initializeReview() {
         node("span", preview.interval, "review-rating-interval"));
       ratings.append(control);
     }
-    answer.append(ratings);
     panel.append(answer);
-    addSkip();
-    focusHeading(title);
+    addSkip(ratings);
+    focusHeading(title, "start");
     announce("Answer and explanation revealed. Choose a rating.");
   }
   async function reveal() {
@@ -2297,6 +2361,7 @@ function initializeReview() {
     current = items.find((item) => !skipped.has(itemKey(item)) && !waiting(item));
     if (current) { showCard(focus); return; }
     mode = "rest";
+    clearActionDock();
     panel.replaceChildren();
     const waitingItems = items.filter(waiting);
     let title;

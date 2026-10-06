@@ -4,6 +4,7 @@ from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import json
 import os
+import re
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -15,7 +16,7 @@ from openlearn.web.app import PlaceholderServices
 
 
 STATIC = Path(__file__).resolve().parents[1] / "src/openlearn/web/static"
-ARTIFACTS = Path(__file__).resolve().parents[1] / ".artifacts/review-ui"
+ARTIFACTS = Path(__file__).resolve().parents[1] / ".artifacts/review-readability"
 ANSWER = "An outlier can be a valid observation. Noise obscures the signal."
 QUESTION = "How does an outlier differ from noise, and can an outlier be valid?"
 pytestmark = pytest.mark.skipif(
@@ -57,6 +58,7 @@ class ReviewBrowser:
         self.unexpected = []
         self.reveal_failure = None
         self.answer = ANSWER
+        self.explanation = "Being unusual alone does not make an observation noise.\n\nA valid observation may still lie far from the overall pattern."
         self.prepare_failure = None
         self.grade_failure = None
         self.grade_hold = None
@@ -97,7 +99,7 @@ class ReviewBrowser:
                     route.fulfill(status=409 if self.reveal_failure.get("state") == "conflict" else 200, json=self.reveal_failure)
                 else:
                     route.fulfill(json={
-                        "ok": True, "answer": self.answer, "explanation": "Being unusual alone does not make an observation noise.\n\nA valid observation may still lie far from the overall pattern.",
+                        "ok": True, "answer": self.answer, "explanation": self.explanation,
                         "sources": [{"label": "Course notes <script>", "excerpt": "Outliers can be valid. <img src=x onerror=alert(1)>"}],
                         "reveal_token": "reveal-1", "ratings": [
                             {"result": result, "label": result.title(), "interval": interval}
@@ -397,4 +399,171 @@ def test_late_session_response_cannot_replace_reloaded_question(review_page):
     expect(review_page.locator("[data-review-question]")).to_have_text("New occurrence after reload?")
     old_route.fulfill(json={"items": [old_item], "count": 1, "server_time": timestamp()})
     expect(review_page.locator("[data-review-question]")).to_have_text("New occurrence after reload?")
+    assert app.errors == app.unexpected == []
+
+
+LONG_QUESTION = (
+    "According to the course material, how should you distinguish an observation that lies far "
+    "from the overall pattern from unwanted variation in measurements, and why can that "
+    "unusual recorded observation still represent a valid result rather than noise?"
+)
+LONG_COURSE = "CS 4267 Machine Learning Classwork 0831 Review: Data Quality and Measurement"
+LONG_ANSWER = (
+    "An outlier is an observation that lies unusually far from the overall pattern in a dataset, "
+    "but that distance alone does not make it incorrect. Noise is unwanted variation or error "
+    "that makes the underlying signal harder to see. A rare event, unusual participant, or "
+    "extreme measurement may still be valid, so investigate the observation and its context "
+    "before deciding whether it should be treated as noise."
+)
+LONG_EXPLANATION = (
+    "Noise is random variation mixed into a measurement, so repeated readings can "
+    "scatter even when the underlying quantity stays constant. For example, readings "
+    "of the same 1 g standard might be 1.015 g, 0.990 g, and 1.013 g. Only the "
+    "readings vary, not the true value. An outlier, by contrast, may represent a real "
+    "rare event such as unusually high sales during a holiday rush. Being unusual "
+    "alone does not establish that the observation is noise or a measurement error. "
+    "The distinction depends on what generated the data and whether the unusual "
+    "observation carries useful information. This final sentence must remain readable "
+    "above the review controls."
+)
+
+
+@pytest.mark.parametrize("width,height", [(1280, 800), (375, 812)])
+@pytest.mark.parametrize("theme", ["light", "dark"])
+def test_long_revealed_card_keeps_actions_visible_and_text_faithful(review_page, width, height, theme):
+    from playwright.sync_api import expect
+
+    assert len(LONG_QUESTION.split()) == 38
+    assert len(LONG_ANSWER.split()) >= 65
+    assert len(LONG_EXPLANATION.split()) >= 100
+    review_page.set_viewport_size({"width": width, "height": height})
+    app = ReviewBrowser(review_page, [card(question=LONG_QUESTION, course=LONG_COURSE)])
+    app.answer, app.explanation = LONG_ANSWER, LONG_EXPLANATION
+    app.open()
+    review_page.evaluate("theme => setTheme(theme)", theme)
+    review_page.get_by_role("button", name="Show answer and explanation", exact=True).click()
+    expect(review_page.locator("[data-review-answer]")).to_be_focused()
+    footer = review_page.locator("[data-review-actions]")
+    assert footer.evaluate("element => getComputedStyle(element).position") == "sticky"
+    for control in footer.locator("button").all():
+        bounds = control.bounding_box()
+        assert bounds["height"] >= 44
+        assert 0 <= bounds["x"] and bounds["x"] + bounds["width"] <= width
+        assert bounds["y"] >= 0 and bounds["y"] + bounds["height"] <= height
+    title_bounds = review_page.locator("[data-review-answer]").bounding_box()
+    header_bounds = review_page.locator(".site-header").bounding_box()
+    assert title_bounds["y"] >= header_bounds["y"] + header_bounds["height"]
+    assert title_bounds["y"] + title_bounds["height"] <= footer.bounding_box()["y"]
+    assert review_page.locator("[data-review-prose='answer']").text_content() == LONG_ANSWER
+    assert review_page.locator("[data-review-prose='explanation']").text_content() == LONG_EXPLANATION
+    assert review_page.locator(".review-answer-text").count() >= 2
+    assert review_page.locator(".review-explanation").count() >= 3
+    first_answer = review_page.locator(".review-answer-text").first.bounding_box()
+    assert first_answer["y"] + first_answer["height"] <= footer.bounding_box()["y"]
+    colors = review_page.locator(".review-answer-text, .review-explanation").evaluate_all(
+        "paragraphs => paragraphs.map(p => ({foreground:getComputedStyle(p).color, background:getComputedStyle(p.closest('.review-panel')).backgroundColor}))"
+    )
+    def luminance(color):
+        values = [int(value) / 255 for value in re.findall(r"\d+", color)[:3]]
+        linear = [value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4 for value in values]
+        return sum(value * coefficient for value, coefficient in zip(linear, (0.2126, 0.7152, 0.0722)))
+    for pair in colors:
+        low, high = sorted([luminance(pair["foreground"]), luminance(pair["background"])])
+        assert (high + 0.05) / (low + 0.05) >= 4.5
+    assert review_page.locator(".review-course").text_content() == LONG_COURSE
+    assert review_page.locator(".review-course").evaluate("p => getComputedStyle(p).textTransform") == "none"
+    assert review_page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+    ARTIFACTS.mkdir(parents=True, exist_ok=True)
+    review_page.screenshot(path=str(ARTIFACTS / f"long-reveal-{theme}-{width}x{height}.png"))
+    review_page.locator(".review-explanation").last.evaluate("p => p.scrollIntoView({block:'end'})")
+    last = review_page.locator(".review-explanation").last.bounding_box()
+    assert last["y"] + last["height"] <= footer.bounding_box()["y"]
+    review_page.screenshot(path=str(ARTIFACTS / f"long-final-sentence-{theme}-{width}x{height}.png"))
+    assert app.errors == app.unexpected == []
+
+
+@pytest.mark.parametrize("text", [
+    "  A reading is 1.015 g, not 0.990 g. A later reading is 1.013 g.\nThis existing line stays intact.\n\nThe unit is g.  ",
+    "Dr. Dawson uses e.g. and i.e. with U.S. measurements. " + LONG_ANSWER,
+    "Use x = 3.14 and y = x^2.\n```python\nreturn {'mass': 1.015}\n```\n\nThe final line remains.",
+    "<img src=x onerror=alert(1)> <script>throw 'unsafe'</script>\n\n" + LONG_EXPLANATION,
+    LONG_ANSWER + " " + LONG_ANSWER,
+])
+def test_saved_paragraphs_preserve_every_character_and_remain_plain_text(review_page, text):
+    from playwright.sync_api import expect
+
+    app = ReviewBrowser(review_page, [card()])
+    app.answer = app.explanation = text
+    app.open()
+    review_page.get_by_role("button", name="Show answer and explanation", exact=True).click()
+    expect(review_page.locator("[data-review-answer]")).to_be_focused()
+    assert review_page.locator("[data-review-prose='answer']").text_content() == text
+    assert review_page.locator("[data-review-prose='explanation']").text_content() == text
+    assert review_page.locator(".review-answer img, .review-answer script, .review-answer pre, .review-answer code").count() == 0
+    assert app.errors == app.unexpected == []
+
+
+def test_height_resize_and_enlarged_text_use_ordinary_flow_without_stale_clearance(review_page):
+    from playwright.sync_api import expect
+
+    review_page.set_viewport_size({"width": 375, "height": 812})
+    app = ReviewBrowser(review_page, [card(question=LONG_QUESTION, course=LONG_COURSE)])
+    app.answer, app.explanation = LONG_ANSWER, LONG_EXPLANATION
+    app.open()
+    review_page.get_by_role("button", name="Show answer and explanation", exact=True).click()
+    footer = review_page.locator("[data-review-actions]")
+    assert footer.evaluate("element => getComputedStyle(element).position") == "sticky"
+    review_page.set_viewport_size({"width": 375, "height": 430})
+    review_page.wait_for_function("getComputedStyle(document.querySelector('[data-review-actions]')).position === 'static' && document.querySelector('[data-review-panel]').style.getPropertyValue('--review-dock-height') === '0px'")
+    review_page.set_viewport_size({"width": 375, "height": 812})
+    review_page.wait_for_function("getComputedStyle(document.querySelector('[data-review-actions]')).position === 'sticky' && parseFloat(document.querySelector('[data-review-panel]').style.getPropertyValue('--review-dock-height')) > 0")
+    review_page.evaluate("document.documentElement.style.fontSize = '28px'")
+    review_page.wait_for_function("getComputedStyle(document.querySelector('[data-review-actions]')).position === 'static' && document.querySelector('[data-review-panel]').style.getPropertyValue('--review-dock-height') === '0px'")
+    assert review_page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+    review_page.get_by_role("button", name="Skip for now", exact=True).scroll_into_view_if_needed()
+    expect(review_page.get_by_role("button", name="Skip for now", exact=True)).to_be_in_viewport()
+    review_page.screenshot(path=str(ARTIFACTS / "enlarged-text-375x812.png"))
+    review_page.evaluate("document.documentElement.style.fontSize = ''")
+    review_page.get_by_role("button", name="Skip for now", exact=True).click()
+    expect(review_page.get_by_role("heading", name="Reviews remain due")).to_be_focused()
+    assert review_page.locator("[data-review-panel]").evaluate("panel => panel.style.getPropertyValue('--review-dock-height')") == "0px"
+    assert app.errors == app.unexpected == []
+
+
+def test_320px_short_screen_has_no_nested_scroll_or_unreachable_controls(review_page):
+    from playwright.sync_api import expect
+
+    review_page.set_viewport_size({"width": 320, "height": 480})
+    app = ReviewBrowser(review_page, [card(question=LONG_QUESTION, course=LONG_COURSE)])
+    app.answer, app.explanation = LONG_ANSWER, LONG_EXPLANATION
+    app.open()
+    review_page.get_by_role("button", name="Show answer and explanation", exact=True).click()
+    assert review_page.locator("[data-review-actions]").evaluate("element => getComputedStyle(element).position") == "static"
+    assert review_page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+    assert review_page.locator("[data-review-panel]").evaluate("panel => !['auto','scroll'].includes(getComputedStyle(panel).overflowY)")
+    for control in review_page.locator("[data-review-actions] button").all():
+        control.scroll_into_view_if_needed()
+        expect(control).to_be_in_viewport()
+        assert control.bounding_box()["height"] >= 44
+    review_page.screenshot(path=str(ARTIFACTS / "short-320x480.png"))
+    assert app.errors == app.unexpected == []
+
+
+@pytest.mark.parametrize("width,height,theme", [(1280, 800, "light"), (375, 812, "dark")])
+def test_concise_card_layout_and_keyboard_skip_stay_usable(review_page, width, height, theme):
+    from playwright.sync_api import expect
+
+    review_page.set_viewport_size({"width": width, "height": height})
+    app = ReviewBrowser(review_page, [card()])
+    app.open()
+    review_page.evaluate("theme => setTheme(theme)", theme)
+    review_page.locator("[data-review-question]").focus()
+    review_page.keyboard.press("Space")
+    expect(review_page.locator("[data-review-answer]")).to_be_focused()
+    review_page.screenshot(path=str(ARTIFACTS / f"concise-reveal-{theme}-{width}x{height}.png"))
+    skip = review_page.get_by_role("button", name="Skip for now", exact=True)
+    skip.focus()
+    review_page.keyboard.press("Enter")
+    expect(review_page.get_by_role("heading", name="Reviews remain due")).to_be_focused()
+    assert app.posts("") == []
     assert app.errors == app.unexpected == []
