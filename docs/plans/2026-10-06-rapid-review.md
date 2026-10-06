@@ -33,6 +33,7 @@ Saved cards must retain their complete text and remain usable without a provider
 2. Rename the primary reveal control to Show answer.
    Reveal the complete reference answer with clear foreground contrast and modest typographic emphasis.
    Retain the question, quiet course context, and topic heading.
+   Use the minimum reveal scroll needed to expose the focus target, keeping question and topic in view when the card fits.
    Do not parse arbitrary Markdown, invent emphasized terms, summarize saved text, truncate content, or hide required answer points.
 3. Put conceptual explanation behind one collapsed native details/summary disclosure.
    The summary says Show explanation when closed and Hide explanation when open.
