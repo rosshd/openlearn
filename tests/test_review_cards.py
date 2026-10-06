@@ -531,3 +531,147 @@ def test_source_repair_finds_old_relevant_lesson_after_33_new_unrelated_lessons(
     assert selected[0]["label"] == "Saved lesson 1"
     assert NOTES in selected[0]["text"]
     _source_preparation(monkeypatch, "Saved lesson 1")
+
+
+BOUNDARY_CONTENT = {
+    "question": (
+        "For the stated sensor model, how can a 1.5 ms outlier remain valid, "
+        "and why must it not automatically be classified as measurement noise?"
+    ),
+    "answer": (
+        "In this sensor model, an outlier is a value far from the pattern, such as a valid "
+        "1.5 ms observation from an unusual event. Its rarity alone does not establish error.\n\n"
+        "Noise is unwanted measurement variation. The source uses σ² = E[(X − μ)²] to "
+        "describe variance, but warns that variance alone cannot determine whether an "
+        "individual observation is noise."
+    ),
+    "explanation": (
+        "A rare real event can shift the observed value without corrupting the measurement. "
+        "The model therefore requires evidence about the event and measurement process "
+        "before discarding it; otherwise, filtering unusual values can erase legitimate "
+        "and useful signal from the data."
+    ),
+}
+
+
+def _boundary_preparation(home, monkeypatch, field=None, extra_word=False):
+    topic = cli.read_topic("review-course")
+    material = BOUNDARY_CONTENT["answer"] + "\n\n" + BOUNDARY_CONTENT["explanation"]
+    cli.write_topic(topic.path, topic.metadata, "## Notes\n" + material)
+    generated = {**BOUNDARY_CONTENT, "sources": [{"label": "Course notes", "excerpt": material}]}
+    if extra_word:
+        generated[field] += " unexpectedly"
+    calls = []
+    def provider(*args, **kwargs):
+        calls.append((args, kwargs))
+        assert kwargs["max_attempts"] == 1
+        return json.dumps(generated)
+    monkeypatch.setattr(cli, "call_openai", provider)
+    return generated, calls
+
+
+def test_new_card_accepts_exact_word_limits_without_altering_caveats_or_paragraphs(home, monkeypatch):
+    generated, calls = _boundary_preparation(home, monkeypatch)
+    assert {key: len(generated[key].split()) for key in BOUNDARY_CONTENT} == {
+        "question": 24, "answer": 60, "explanation": 40,
+    }
+    current = item()
+    result = review_cards.prepare(ReviewPrepareRequest(**current))
+    assert result["ok"]
+    assert len(calls) == 1
+    saved = raw()["review_due"][0]["review_card"]
+    for field in BOUNDARY_CONTENT:
+        assert saved[field] == generated[field]
+    assert saved["sources"] == generated["sources"]
+    assert saved["content_version"] == 1
+    assert saved["explanation_kind"] == "conceptual"
+    assert raw()["review_due"][0]["due"] == current["due"]
+    shown = reveal(result["item"])
+    assert shown["answer"] == generated["answer"]
+    assert shown["explanation"] == generated["explanation"]
+
+
+@pytest.mark.parametrize("field,limit", [("question", 24), ("answer", 60), ("explanation", 40)])
+def test_new_card_rejects_one_word_over_limit_without_retry_or_partial_save(home, monkeypatch, field, limit):
+    generated, calls = _boundary_preparation(home, monkeypatch, field, extra_word=True)
+    assert len(generated[field].split()) == limit + 1
+    current = item()
+    metadata_before = raw()
+    text_before = cli.topic_path("review-course").read_text(encoding="utf-8")
+    result = review_cards.prepare(ReviewPrepareRequest(**current))
+    assert not result["ok"]
+    assert result["state"] == "preparation_failed"
+    assert len(calls) == 1
+    assert item() == current
+    assert raw() == metadata_before
+    assert cli.topic_path("review-course").read_text(encoding="utf-8") == text_before
+    assert not raw()["review_due"][0].get("review_card")
+
+
+@pytest.mark.parametrize("field", ["question", "answer", "explanation"])
+@pytest.mark.parametrize("invalid", [" \n\t ", None, ["not text"]])
+def test_new_card_word_limits_keep_nonempty_string_validation(home, monkeypatch, field, invalid):
+    generated, calls = _boundary_preparation(home, monkeypatch)
+    generated[field] = invalid
+    current = item()
+    result = review_cards.prepare(ReviewPrepareRequest(**current))
+    assert result["state"] == "preparation_failed"
+    assert len(calls) == 1
+    assert item() == current
+
+
+@pytest.mark.parametrize("field,char_limit", [("question", 2000), ("answer", 4000), ("explanation", 2000)])
+def test_new_card_retains_character_limit_even_with_one_word(home, monkeypatch, field, char_limit):
+    generated, calls = _boundary_preparation(home, monkeypatch)
+    generated[field] = "x" * (char_limit + 1)
+    assert len(generated[field].split()) == 1
+    current = item()
+    result = review_cards.prepare(ReviewPrepareRequest(**current))
+    assert result["state"] == "preparation_failed"
+    assert len(calls) == 1
+    assert item() == current
+
+
+@pytest.mark.parametrize("explanation_kind", ["conceptual", "recall_checklist", None])
+def test_saved_over_budget_cards_reveal_and_rate_without_rewriting_content(home, monkeypatch, explanation_kind):
+    from copy import deepcopy
+
+    prepare(monkeypatch)
+    topic = cli.read_topic("review-course")
+    saved = topic.metadata["review_due"][0]["review_card"]
+    saved["question"] = " ".join([BOUNDARY_CONTENT["question"]] * 2)
+    saved["answer"] = "\n\n".join([BOUNDARY_CONTENT["answer"]] * 2)
+    saved["explanation"] = "\n\n".join([BOUNDARY_CONTENT["explanation"]] * 3)
+    if explanation_kind is None:
+        saved.pop("explanation_kind")
+    else:
+        saved["explanation_kind"] = explanation_kind
+    before_card = deepcopy(saved)
+    cli.write_topic(topic.path, topic.metadata, topic.body)
+    before_metadata = raw()
+    current = item()
+    assert current["state"] == "question"
+    monkeypatch.setattr(cli, "call_openai", lambda *args, **kwargs: pytest.fail("saved card regenerated"))
+    assert review_cards.prepare(ReviewPrepareRequest(**current))["item"] == current
+    assert raw() == before_metadata
+    shown = reveal(current)
+    assert shown["answer"] == before_card["answer"]
+    assert shown["explanation"] == (before_card["explanation"] if explanation_kind == "conceptual" else "")
+    after_reveal = raw()
+    after_reveal["review_due"][0].pop("review_reveals")
+    assert after_reveal == before_metadata
+    request = grade_request(current, shown, "good")
+    result = review_cards.grade(request)
+    assert result["state"] == "committed"
+    assert review_cards.grade(request) == result
+    after_rating = raw()
+    assert after_rating["review_due"][0]["review_card"] == before_card
+    after_rating.pop("review_rating_receipts")
+    scheduled = after_rating["review_due"][0]
+    original = before_metadata["review_due"][0]
+    for key in ("due", "difficulty", "last_reviewed", "review_revision"):
+        if key in original:
+            scheduled[key] = original[key]
+        else:
+            scheduled.pop(key, None)
+    assert after_rating == before_metadata
