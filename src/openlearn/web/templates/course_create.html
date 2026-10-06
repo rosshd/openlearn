@@ -29,7 +29,7 @@
       <textarea id="goal" name="goal" rows="2" maxlength="4000" required placeholder="What would you like to understand or be able to do?">{{ values.get('goal') or '' }}</textarea>
     </div>
     {% if not quick %}
-    <details class="creation-disclosure" id="course-sources" data-creation-sources{% if source_kind %} open{% endif %}>
+    <details class="creation-disclosure" id="course-sources" data-creation-sources open>
       <summary>Source <span class="optional">Optional</span><span class="source-selection" data-source-selection></span></summary>
       {% include "creation_sources.html" %}
     </details>

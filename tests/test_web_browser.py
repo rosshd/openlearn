@@ -2142,8 +2142,7 @@ def test_source_creation_user_entrypoints_navigation_drafts_and_consent(tmp_path
                     page.get_by_label("Course name", exact=True).fill(f"Synthetic {link}")
                     page.get_by_label("Your goal", exact=True).fill("Learn equal parts")
                     if link == "Custom course":
-                        assert not page.locator("[data-creation-sources]").get_attribute("open")
-                        page.locator("[data-creation-sources] summary").click()
+                        assert page.locator("[data-creation-sources]").get_attribute("open") is not None
                     page.get_by_label("Source type", exact=True).select_option("github")
                     assert page.get_by_label("Public GitHub repository URL", exact=True).is_visible()
                     assert page.get_by_label("Source file", exact=True).is_hidden()
@@ -2279,7 +2278,7 @@ def test_source_creation_user_entrypoints_navigation_drafts_and_consent(tmp_path
                 for route in ("courses/new", "quick-learn"):
                     upload_page.goto(f"{app_url}/{route}?new=1")
                     if route == "courses/new":
-                        upload_page.locator("[data-creation-sources] summary").click()
+                        assert upload_page.locator("[data-creation-sources]").get_attribute("open") is not None
                     upload_page.get_by_label("Source type", exact=True).select_option("folder")
                     responses = iter([
                         (200, {"ok": True, "path": "/synthetic/Linear algebra/"}),
@@ -2320,7 +2319,7 @@ def test_source_creation_user_entrypoints_navigation_drafts_and_consent(tmp_path
                 plain.goto(f"{app_url}/courses/new")
                 plain.get_by_label("Course name", exact=True).fill("No JavaScript source")
                 plain.get_by_label("Your goal", exact=True).fill("Learn fractions")
-                plain.locator("[data-creation-sources] summary").click()
+                assert plain.locator("[data-creation-sources]").get_attribute("open") is not None
                 plain.get_by_label("Source type", exact=True).select_option("file")
                 plain.get_by_label("Source file", exact=True).set_input_files(
                     {"name": "native.md", "mimeType": "text/markdown", "buffer": b"A half is one of two equal parts."})
