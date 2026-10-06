@@ -410,7 +410,7 @@ def test_again_remains_actionable_on_browser_dashboard_and_progress(home, monkey
     with TestClient(create_app(testing=True)) as client:
         response = client.get("/dashboard?course=review-course")
         assert response.status_code == 200
-        assert "Start focused review" in response.text
+        assert "Review 1 item" in response.text
         assert "review?course=review-course" in response.text
 
 

@@ -147,7 +147,7 @@ def test_default_web_app_runs_setup_dashboard_course_and_tutor_flow(
     client: TestClient,
 ) -> None:
     empty_dashboard = client.get("/").text
-    assert "Choose your first course" in empty_dashboard
+    assert '<h1 id="dashboard-title">Your courses</h1>' in empty_dashboard
     assert "Technical Interview Prep" not in empty_dashboard
     assert "New course" in empty_dashboard
 
@@ -190,13 +190,13 @@ def test_default_web_app_runs_setup_dashboard_course_and_tutor_flow(
     assert "Your courses" in client.get("/dashboard").text
     dashboard_html = client.get("/dashboard").text
     dashboard_intro, courses_panel = dashboard_html.split("data-course-workspace", 1)
-    assert "New course" not in dashboard_intro
-    assert "New course" in courses_panel
-    assert "new-course-menu" in courses_panel
+    assert 'aria-label="New course"' in dashboard_intro
+    assert "new-course-menu" in dashboard_intro
+    assert "new-course-menu" not in courses_panel
     assert 'class="library-toolbar"' not in courses_panel
-    assert courses_panel.index('class="course-list"') < courses_panel.index(
-        'class="new-course-menu"'
-    )
+    assert 'class="panel-heading"' not in courses_panel
+    assert '/courses/new#custom-course' in dashboard_intro
+    assert '/quick-learn' in dashboard_intro
     course_heading = courses_panel.split("</div>", 2)[0]
     assert "<span>1</span>" not in course_heading
     assert 'class="course-tool"' not in courses_panel
@@ -1112,15 +1112,74 @@ def test_dashboard_hides_empty_review_and_shows_course_path_and_management(
     assert response.status_code == 200
     assert "0 due" not in response.text
     assert 'data-course-workspace' in response.text
-    assert 'data-course-coverage' in response.text
-    assert 'class="course-controls-panel"' in response.text
-    assert "View full course path" in response.text
+    assert 'data-course-coverage' not in response.text
+    assert 'class="course-controls-panel"' not in response.text
+    assert 'class="course-manage-menu" data-course-menu' in response.text
+    assert 'aria-label="Manage course" title="Manage course"' in response.text
+    assert 'aria-label="New course" title="New course"' in response.text
+    assert '<h2 class="sr-only" id="courses-title">Courses</h2>' in response.text
+    assert response.text.count('data-course-menu-panel') == 2
+    assert "Describe anything you want to learn." not in response.text
+    assert "Learn from one bounded source." not in response.text
+    assert 'class="course-outline-chevron"' in response.text
+    assert "Course outline" in response.text
+    assert "Needs setup" in response.text
+    assert "Ready to learn" not in response.text
     assert f'/courses/{course.slug}/settings' in response.text
-    assert f'/courses/{course.slug}/delete' in response.text
+    assert f'/courses/{course.slug}/delete' not in response.text
+    settings = client.get(f"/courses/{course.slug}/settings")
+    assert "Review permanent deletion" in settings.text
+    assert f'/courses/{course.slug}/delete' in settings.text
     assert "Change course outline" in response.text
     assert "View progress" in response.text
     assert "Quick Learn" in response.text
     assert "Settings and local data" not in response.text
+
+
+@pytest.mark.parametrize("review_kind", ["scheduled", "canonical"])
+def test_dashboard_preserves_review_and_collapsed_growth_actions(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, review_kind: str,
+) -> None:
+    course = application.create_course(
+        application.CourseCreationRequest(name="Review Course", goal="Retain learning")
+    ).course
+    services = client.app.state.services
+    snapshot = services.dashboard(course.slug)
+    selected = snapshot["selected_course"]
+    selected.update({
+        "path": [{"title": "Foundations", "status": "current"}],
+        "coverage": {"covered": 0, "total": 1, "percent": 0},
+        "coverage_summary": "0 of 1 course topics covered once.",
+        "review": {"actionable": True, "due": 1, "kind": review_kind},
+        "review_due": 1,
+        "first_pass_complete": True,
+        "readiness_summary": "Keep practicing",
+    })
+    monkeypatch.setattr(services, "dashboard", lambda selected_slug=None: snapshot)
+
+    response = client.get(f"/dashboard?course={course.slug}")
+
+    assert response.status_code == 200
+    actions = response.text.split('<div class="course-learning-actions">', 1)[1]
+    actions = actions.split('</div>', 1)[0]
+    assert f'/courses/{course.slug}/activate"' in actions
+    assert "Review 1 item" in actions
+    if review_kind == "canonical":
+        assert f'/courses/{course.slug}/growth"' in actions
+        assert 'name="action" value="practice"' in actions
+        assert 'name="submission_id" value="' in actions
+        assert f'/review?course={course.slug}"' not in actions
+    else:
+        assert f'/review?course={course.slug}"' in actions
+        assert 'name="action" value="practice"' not in actions
+    assert '<details class="course-more-options">' in response.text
+    growth = response.text.split('<details class="course-more-options">', 1)[1]
+    growth = growth.split('</details>', 1)[0]
+    assert "Practice weak areas" in growth
+    assert "Go deeper" in growth
+    assert 'name="action" value="practice"' in growth
+    assert 'name="action" value="deepen"' in growth
+    assert growth.count('name="submission_id" value="') >= 2
 
 
 def test_dashboard_offers_resume_for_a_persisted_pending_follow_up(

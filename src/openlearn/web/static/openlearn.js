@@ -271,6 +271,40 @@ for (const form of document.querySelectorAll("[data-enter-flow]")) {
   });
 }
 
+function closeCourseMenus(except = null) {
+  for (const menu of document.querySelectorAll("details[data-course-menu][open]")) {
+    if (menu !== except) menu.open = false;
+  }
+}
+
+// Delegate so course previews replaced by renderDashboard retain native menus.
+document.addEventListener("click", (event) => {
+  const menu = event.target.closest("details[data-course-menu]");
+  const summary = event.target.closest("details[data-course-menu] > summary");
+  if (summary) closeCourseMenus(menu);
+  else if (!menu || event.target.closest("[data-course-menu-panel] a")) closeCourseMenus();
+});
+
+document.addEventListener("toggle", (event) => {
+  if (event.target.matches("details[data-course-menu]") && event.target.open) {
+    closeCourseMenus(event.target);
+  }
+}, true);
+
+document.addEventListener("focusout", (event) => {
+  const menu = event.target.closest("details[data-course-menu]");
+  if (menu && !menu.contains(event.relatedTarget)) menu.open = false;
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  const menu = document.querySelector("details[data-course-menu][open]");
+  if (!menu) return;
+  event.preventDefault();
+  closeCourseMenus();
+  menu.querySelector(":scope > summary")?.focus();
+});
+
 let dashboardPreviewRequest = 0;
 const DASHBOARD_RENDERED = "rendered";
 const DASHBOARD_STALE = "stale";
@@ -1302,11 +1336,12 @@ document.addEventListener("keydown", (event) => {
     || event.metaKey
     || event.ctrlKey
     || event.isComposing
+    || !focusShell
     || turnForm
     || document.querySelector("[data-review-shell]")
     || focusShell?.dataset.toolActive
     || document.querySelector(".drawer:not([hidden])")
-    || event.target.closest?.("button, a, input, textarea, select")
+    || event.target.closest?.("button, a, input, textarea, select, summary")
   ) return;
   event.preventDefault();
   submitTurn("next");

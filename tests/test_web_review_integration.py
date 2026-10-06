@@ -151,7 +151,7 @@ def test_real_service_preparation_offline_relearning_and_completion(review_fixtu
         first = cli.read_topic("review-integration").metadata["review_due"][0]
         assert datetime.fromisoformat(first["relearn_at"]) == clock[0] + timedelta(minutes=1)
         dashboard = client.get("/dashboard?course=review-integration")
-        assert "Start focused review" in dashboard.text
+        assert "Review 1 item" in dashboard.text
         assert "/review?course=review-integration" in dashboard.text
         page.reload()
         page.get_by_role("heading", name="Your next card returns soon").wait_for()
