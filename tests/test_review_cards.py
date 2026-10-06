@@ -206,9 +206,9 @@ def test_normalization_and_legacy_schedule_keep_card_invalidate_occurrence(home,
 
 def test_source_selection_excludes_learner_answers_and_unrelated_courses(home):
     body = "## Session Log\n### 2026-10-06 - chat\n**Prompt**\n" + NOTES + "\n**Response**\nYour answer is wrong.\n"
-    assert review_cards.selected_sources("review-course", body) == []
+    assert review_cards.selected_sources("review-course", body, "outlier vs noise distinction") == []
     body += "### 2026-10-06 - lesson\n**Prompt**\nPRIVATE LEARNER TEXT\n**Response**\n" + NOTES
-    selected = review_cards.selected_sources("review-course", body)
+    selected = review_cards.selected_sources("review-course", body, "outlier vs noise distinction")
     assert len(selected) == 1
     assert selected[0]["text"] == NOTES
     assert "PRIVATE" not in json.dumps(selected)
@@ -329,7 +329,7 @@ def test_web_chat_teaching_sections_are_sources_without_prompts_or_checks(home):
     response += "\n\n**Example:**\nA valid unusual observation may still carry useful signal."
     response += "\n\n**Check:**\nPRIVATE RETRIEVAL QUESTION\n\n**Next:**\nPRIVATE NEXT STEP"
     body = "## Session Log\n### 2026-10-06 - chat\n**Prompt**\nPRIVATE LEARNER ANSWER\n**Response**\n" + response
-    selected = review_cards.selected_sources("review-course", body)
+    selected = review_cards.selected_sources("review-course", body, "outlier vs noise distinction")
     assert len(selected) == 1
     assert NOTES in selected[0]["text"]
     assert "valid unusual observation" in selected[0]["text"]
@@ -379,3 +379,122 @@ def test_again_remains_actionable_on_browser_dashboard_and_progress(home, monkey
         assert response.status_code == 200
         assert "Start focused review" in response.text
         assert "review?course=review-course" in response.text
+
+
+UNRELATED_MATERIAL = "Linear transformations preserve algebraic structure in vector spaces. " * 90
+
+
+def _source_preparation(monkeypatch, expected_label):
+    calls = []
+    def provider(_model, _system, user, **kwargs):
+        supplied = json.loads(user)["sources"]
+        assert any(source["label"] == expected_label and NOTES in source["text"]
+                   for source in supplied)
+        assert sum(len(source["text"]) for source in supplied) <= review_cards.SOURCE_LIMIT
+        assert all(len(source["text"]) <= review_cards.PER_SOURCE_LIMIT for source in supplied)
+        assert "PRIVATE LEARNER" not in user
+        assert "PRIVATE FEEDBACK" not in user
+        assert kwargs["max_attempts"] == 1
+        calls.append(user)
+        return json.dumps({**GENERATED, "sources": [{"label": expected_label, "excerpt": NOTES}]})
+    monkeypatch.setattr(cli, "call_openai", provider)
+    result = review_cards.prepare(ReviewPrepareRequest(**item()))
+    assert result["ok"]
+    assert len(calls) == 1
+    assert raw()["review_due"][0]["review_card"]["sources"] == [
+        {"label": expected_label, "excerpt": NOTES}
+    ]
+
+
+def _saved_chat_lessons(texts):
+    return "## Session Log\n" + "\n".join(
+        f"### 2026-10-06 - chat\n**Prompt**\nPRIVATE LEARNER ANSWER\n"
+        f"**Response**\n**Lesson:**\n{text}\n\n**Feedback:**\nPRIVATE FEEDBACK\n"
+        for text in texts
+    )
+
+
+def test_source_repair_finds_support_after_first_4000_note_characters(home, monkeypatch):
+    body = "## Notes\n" + UNRELATED_MATERIAL + "\n\n" + NOTES
+    assert body.index(NOTES) > review_cards.PER_SOURCE_LIMIT
+    topic = cli.read_topic("review-course")
+    cli.write_topic(topic.path, topic.metadata, body)
+    _source_preparation(monkeypatch, "Course notes")
+
+
+def test_source_repair_prioritizes_fourth_relevant_lesson_over_old_long_lessons(home, monkeypatch):
+    body = _saved_chat_lessons([UNRELATED_MATERIAL] * 3 + [NOTES])
+    topic = cli.read_topic("review-course")
+    cli.write_topic(topic.path, topic.metadata, body)
+    selected = review_cards.selected_sources("review-course", body, "outlier vs noise distinction")
+    assert selected[0]["label"] == "Saved lesson 4"
+    assert NOTES in selected[0]["text"]
+    _source_preparation(monkeypatch, "Saved lesson 4")
+
+
+def test_source_repair_finds_late_import_without_old_teaching_crowding_it_out(home, monkeypatch):
+    body = _saved_chat_lessons([UNRELATED_MATERIAL] * 3)
+    topic = cli.read_topic("review-course")
+    cli.write_topic(topic.path, topic.metadata, body)
+    directory = cli.topic_context_dir("review-course")
+    directory.mkdir(parents=True, exist_ok=True)
+    imported = directory / "material.txt"
+    prefix = UNRELATED_MATERIAL * 4
+    assert len(prefix) > review_cards.SOURCE_LIMIT
+    assert len(prefix) + len(NOTES) < review_cards.SOURCE_SCAN_LIMIT
+    imported.write_text(prefix + "\n\n" + NOTES, encoding="utf-8")
+    selected = review_cards.selected_sources("review-course", body, "outlier vs noise distinction")
+    assert selected[0]["label"] == "material.txt"
+    assert NOTES in selected[0]["text"]
+    _source_preparation(monkeypatch, "material.txt")
+
+
+def test_source_selection_bounds_import_reads_skips_symlinks_and_total_prompt(home, monkeypatch):
+    directory = cli.topic_context_dir("review-course")
+    directory.mkdir(parents=True, exist_ok=True)
+    imported = directory / "large.txt"
+    imported.write_text((NOTES + "\n") * 1000, encoding="utf-8")
+    private_source = home / "other-course.txt"
+    private_source.write_text("PRIVATE LEARNER ANSWER " * 10, encoding="utf-8")
+    (directory / "linked.txt").symlink_to(private_source)
+    original_open = Path.open
+    read_sizes = []
+    class BoundedImport:
+        def __init__(self, handle):
+            self.handle = handle
+        def __enter__(self):
+            self.handle.__enter__()
+            return self
+        def __exit__(self, *args):
+            return self.handle.__exit__(*args)
+        def read(self, size):
+            read_sizes.append(size)
+            return self.handle.read(size)
+    def tracked_open(path, *args, **kwargs):
+        assert path != directory / "linked.txt"
+        handle = original_open(path, *args, **kwargs)
+        return BoundedImport(handle) if path == imported else handle
+    monkeypatch.setattr(Path, "open", tracked_open)
+    body = (NOTES + "\n") * 1000 + _saved_chat_lessons([(NOTES + "\n") * 1000] * 3)
+    selected = review_cards.selected_sources("review-course", body, "outlier vs noise")
+    assert read_sizes == [review_cards.SOURCE_SCAN_LIMIT]
+    assert sum(len(source["text"]) for source in selected) <= review_cards.SOURCE_LIMIT
+    assert all(len(source["text"]) <= review_cards.PER_SOURCE_LIMIT for source in selected)
+    assert "PRIVATE LEARNER" not in json.dumps(selected)
+
+
+def test_source_selection_prefers_recent_teaching_when_relevance_is_equal(home):
+    body = _saved_chat_lessons([UNRELATED_MATERIAL] * 4)
+    selected = review_cards.selected_sources("review-course", body, "outlier vs noise")
+    assert selected[0]["label"] == "Saved lesson 4"
+    assert len(selected) == 3
+
+
+def test_source_repair_finds_old_relevant_lesson_after_33_new_unrelated_lessons(home, monkeypatch):
+    body = _saved_chat_lessons([NOTES] + [UNRELATED_MATERIAL] * 33)
+    topic = cli.read_topic("review-course")
+    cli.write_topic(topic.path, topic.metadata, body)
+    selected = review_cards.selected_sources("review-course", body, "outlier vs noise distinction")
+    assert selected[0]["label"] == "Saved lesson 1"
+    assert NOTES in selected[0]["text"]
+    _source_preparation(monkeypatch, "Saved lesson 1")

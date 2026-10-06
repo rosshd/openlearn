@@ -17,6 +17,9 @@ from openlearn import cli
 
 RATING_LABELS = {"again": "Again", "hard": "Hard", "good": "Good", "easy": "Easy"}
 SOURCE_LIMIT = 12_000
+PER_SOURCE_LIMIT = 4_000
+SOURCE_SCAN_LIMIT = 64_000
+SOURCE_COUNT_LIMIT = 32
 
 
 class InsufficientReviewSource(ValueError):
@@ -150,21 +153,53 @@ def _teaching_text(entry: dict) -> str:
     return "\n\n".join(parts)
 
 
-def selected_sources(slug: str, body: str) -> list[dict]:
+def _concept_terms(concept: str) -> set[str]:
+    ignored = {"the", "and", "for", "with", "how", "what", "why", "versus",
+               "distinction", "difference", "concept", "review"}
+    return {word.rstrip("s") for word in re.findall(r"[a-z0-9]+", concept.casefold())
+            if len(word) >= 3 and word not in ignored}
+
+
+def _source_window(text: str, terms: set[str]) -> tuple[str, tuple[int, int]]:
+    """Select a relevant overlapping window before applying the prompt budget."""
+    text = text.strip()[:SOURCE_SCAN_LIMIT]
+    last_start = max(0, len(text) - PER_SOURCE_LIMIT)
+    starts = sorted({*range(0, last_start + 1, PER_SOURCE_LIMIT // 2), last_start})
+    windows = []
+    for start in starts:
+        window = text[start:start + PER_SOURCE_LIMIT]
+        words = [word.rstrip("s") for word in re.findall(r"[a-z0-9]+", window.casefold())]
+        matched = terms.intersection(words)
+        score = (len(matched), sum(min(words.count(term), 10) for term in matched))
+        windows.append((score, start, window))
+    score, _start, window = max(windows)
+    return window, score
+
+
+def selected_sources(slug: str, body: str, concept: str) -> list[dict]:
     context, log = cli.split_session_log(body)
-    candidates = [("Course notes", context)]
+    candidates = [("Course notes", context, (0, 0))]
     # Only tutor teaching responses, never learner prompts or answer assessments.
-    candidates.extend((f"Saved lesson {index + 1}", _teaching_text(entry))
-                      for index, entry in enumerate(cli.session_entries(log))
-                      if entry["kind"] in {"lesson", "next", "chat"})
+    teaching = [(index, entry) for index, entry in enumerate(cli.session_entries(log))
+                if entry["kind"] in {"lesson", "next", "chat"}]
+    candidates.extend((f"Saved lesson {index + 1}", _teaching_text(entry), (1, index))
+                      for index, entry in teaching)
     for path in cli.context_source_files(slug)[:8]:
         if not path.is_symlink():
             with path.open(encoding="utf-8", errors="replace") as handle:
-                candidates.append((path.name, handle.read(SOURCE_LIMIT)))
+                candidates.append((path.name, handle.read(SOURCE_SCAN_LIMIT),
+                                   (2, path.stat().st_mtime_ns)))
+    ranked = []
+    terms = _concept_terms(concept)
+    for label, text, recency in candidates:
+        window, relevance = _source_window(text, terms)
+        ranked.append((relevance, recency, label, window))
     sources = []
     budget = SOURCE_LIMIT
-    for label, text in candidates:
-        text = text.strip()[:min(budget, 4_000)]
+    # A matching source outranks an unrelated one regardless of its age or kind.
+    # Within equal relevance prefer imports and recent saved teaching over notes.
+    for _relevance, _recency, label, window in sorted(ranked, reverse=True)[:SOURCE_COUNT_LIMIT]:
+        text = window[:budget]
         # Reject empty headings/labels as insufficient source material.
         material = " ".join(line for line in text.splitlines()
                             if line.strip() and not line.lstrip().startswith("#"))
@@ -227,7 +262,7 @@ def prepare(request) -> dict:
                 return conflict()
             if _card(item):
                 return {"ok": True, "item": public_item(request.slug, metadata, item, now())}
-            sources = selected_sources(request.slug, body)
+            sources = selected_sources(request.slug, body, request.concept)
             model = cli.configured_model({**cli.read_config(), **metadata})
         if not sources:
             return missing_source()
