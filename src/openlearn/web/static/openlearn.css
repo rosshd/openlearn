@@ -564,7 +564,7 @@ h2 { font-size: var(--type-section); line-height: 1.25; letter-spacing: -0.025em
 .source-local-controls { display: grid; gap: 0.5rem; }
 .source-local-label { color: var(--library-normal); font-size: 0.9rem; font-weight: 500; }
 .source-pick-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
-.creation-panel .source-pick-actions .source-browse { min-height: 2.75rem; padding: 0.6rem 0.8rem; border-radius: var(--radius); background: var(--surface-raised); color: var(--library-normal); font-size: 0.9rem; font-weight: 500; box-shadow: none; transform: none; }
+.creation-panel .source-pick-actions .source-browse { border: 1px solid var(--line); min-height: 2.75rem; padding: 0.6rem 0.8rem; border-radius: var(--radius); background: var(--surface-raised); color: var(--library-normal); font-size: 0.9rem; font-weight: 500; box-shadow: none; transform: none; }
 .creation-panel .source-pick-actions .quiet-link { color: var(--library-muted); font-size: 0.82rem; font-weight: 500; }
 .source-selection-actions { display: flex; gap: 0.5rem; }
 .creation-panel .source-selection-actions .quiet-link { padding: 0.25rem 0.4rem; border: 0; background: transparent; color: var(--library-muted); font-size: 0.82rem; font-weight: 500; box-shadow: none; transform: none; }

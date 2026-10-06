@@ -212,6 +212,7 @@ if (createForm) {
       createForm.querySelector("[data-source-actions]").hidden = !selected;
       const selection = createForm.querySelector("[data-source-selection]");
       if (selection) {
+        selection.hidden = !selected;
         selection.textContent = selected;
         selection.title = selected;
       }

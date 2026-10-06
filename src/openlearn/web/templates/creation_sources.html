@@ -17,6 +17,7 @@
         <span data-source-folder-action></span>
         <button type="button" class="quiet-link" data-source-github>Use GitHub</button>
       </div>
+      {% if quick %}<p class="field-note" data-source-selection aria-live="polite"></p>{% endif %}
     </div>
     <div class="form-field" data-source-file-field>
       <label for="source-file">Source file</label>
