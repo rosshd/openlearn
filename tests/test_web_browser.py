@@ -310,6 +310,8 @@ def test_real_browser_course_polling_theme_conflict_and_keyboard_submit(
                 first.locator("#course-title").press("Enter")
                 assert first.locator("#goal").evaluate("field => field === document.activeElement")
                 first.locator("#goal").press("Enter")
+                assert first.locator("#source-value").evaluate("field => field === document.activeElement")
+                first.locator("#source-value").press("Enter")
                 assert first.locator("#experience").evaluate("field => field === document.activeElement")
                 first.locator("#experience").fill(
                     "I know basic Python and want interview practice."
