@@ -154,6 +154,7 @@ def math_browser():
         assert engine in {"chromium", "firefox", "webkit"}
         browser = getattr(runtime, engine).launch()
         page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.emulate_media(reduced_motion="reduce")
         page.on("pageerror", lambda error: errors.append(str(error)))
         page.add_init_script("window.mathCsp=[];document.addEventListener('securitypolicyviolation',e=>mathCsp.push(e.violatedDirective));")
 
@@ -181,7 +182,6 @@ def math_browser():
 
         page.route("**/*", handle)
         page.goto("https://math.test/courses/synthetic-matrix")
-        page.emulate_media(reduced_motion="reduce")
         yield page, playwright.expect
         browser.close()
     assert errors == []
