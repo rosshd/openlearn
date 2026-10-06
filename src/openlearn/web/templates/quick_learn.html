@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="quick-learn-shell" aria-labelledby="quick-learn-title">
+  <header class="quick-learn-intro">
+    <div>
+      <p class="eyebrow">Quick Learn</p>
+      <h1 id="quick-learn-title">Turn one file into a focused review.</h1>
+    </div>
+    <p>Upload the material you need to learn. openlearn will name the course, build the review, and start with the first useful concept.</p>
+  </header>
+
+  <form class="quick-learn-form" data-quick-learn-form enctype="multipart/form-data">
+    <div class="error-summary" role="alert" tabindex="-1" data-form-error hidden></div>
+    <label class="source-drop" for="quick-source">
+      <span class="source-drop-mark" aria-hidden="true">↑</span>
+      <strong>Choose a source file</strong>
+      <span data-file-name>PDF, DOCX, text, Markdown, or code</span>
+      <input id="quick-source" name="file" type="file" required>
+    </label>
+
+    <label for="quick-description">What should the review focus on? <span class="optional">Optional</span></label>
+    <textarea id="quick-description" name="description" rows="3" maxlength="4000" placeholder="For example: focus on the sections covered by Friday's exam."></textarea>
+
+    <div class="quick-learn-submit">
+      <p class="field-note" role="status" aria-live="polite" data-form-status>The file stays local except for the bounded text sent to your configured model.</p>
+      <button class="primary-action" type="submit">Create review <span aria-hidden="true">→</span></button>
+    </div>
+  </form>
+
+  <a class="quiet-link" href="{{ url_for('dashboard') }}">Back to courses</a>
+</section>
+{% endblock %}

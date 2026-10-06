@@ -206,6 +206,8 @@ def test_lesson_tools_cannot_launch_external_video_frames() -> None:
         / "openlearn.js"
     ).read_text(encoding="utf-8")
 
+    assert 'createElement("iframe")' not in script
+    assert "youtube-nocookie.com" not in script
     assert 'document.createElement("iframe")' not in script
     assert "youtube-nocookie.com" not in script
     assert "data-video-load" not in script

@@ -309,6 +309,40 @@ for (const form of document.querySelectorAll("[data-enter-flow]")) {
   });
 }
 
+function closeCourseMenus(except = null) {
+  for (const menu of document.querySelectorAll("details[data-course-menu][open]")) {
+    if (menu !== except) menu.open = false;
+  }
+}
+
+// Delegate so course previews replaced by renderDashboard retain native menus.
+document.addEventListener("click", (event) => {
+  const menu = event.target.closest("details[data-course-menu]");
+  const summary = event.target.closest("details[data-course-menu] > summary");
+  if (summary) closeCourseMenus(menu);
+  else if (!menu || event.target.closest("[data-course-menu-panel] a")) closeCourseMenus();
+});
+
+document.addEventListener("toggle", (event) => {
+  if (event.target.matches("details[data-course-menu]") && event.target.open) {
+    closeCourseMenus(event.target);
+  }
+}, true);
+
+document.addEventListener("focusout", (event) => {
+  const menu = event.target.closest("details[data-course-menu]");
+  if (menu && !menu.contains(event.relatedTarget)) menu.open = false;
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  const menu = document.querySelector("details[data-course-menu][open]");
+  if (!menu) return;
+  event.preventDefault();
+  closeCourseMenus();
+  menu.querySelector(":scope > summary")?.focus();
+});
+
 let dashboardPreviewRequest = 0;
 const DASHBOARD_RENDERED = "rendered";
 const DASHBOARD_STALE = "stale";
@@ -839,6 +873,11 @@ if (focusShell) {
     } else if (!toolSurface.hidden) {
       const closed = closeTool({updateUrl: false});
       if (!closed && currentTool) setToolUrl(currentTool, {replace: true});
+      else if (new URL(window.location.href).searchParams.has("tool")) {
+        setToolUrl(null, {replace: true});
+      }
+    } else if (new URL(window.location.href).searchParams.has("tool")) {
+      setToolUrl(null, {replace: true});
     }
   });
 }
@@ -951,12 +990,13 @@ if (initializationShell) {
 }
 
 function setOperationState(message, isError = false, result = null) {
-  const state = document.querySelector("[data-operation-state]");
+  const state = document.querySelector("[data-operation-state]:not([data-focus-shell])");
   if (!state) return;
   state.hidden = false;
   const messageNode = state.querySelector("[data-operation-message]");
-  if (messageNode) messageNode.textContent = message;
-  else state.textContent = message;
+  if (messageNode) {
+    if (messageNode.textContent !== message) messageNode.textContent = message;
+  } else state.textContent = message;
   state.classList.toggle("error", isError);
   state.setAttribute("aria-live", isError ? "assertive" : "polite");
   const recovery = state.querySelector("[data-provider-recovery]");
@@ -966,237 +1006,19 @@ function setOperationState(message, isError = false, result = null) {
   if (isError) state.focus();
 }
 
-let tutorPreviewTarget = "";
-let tutorPreviewVisible = "";
-let tutorPreviewFrame = null;
-let tutorPreviewLastAt = 0;
-let tutorPreviewCommitted = false;
-let tutorPreviewCommitRate = 2200;
-let tutorPreviewDrainResolve = null;
-let tutorPreviewTextNode = null;
-const tutorPreviewHeightCache = new Map();
 const navigationIntents = new Set(["next", "skip", "practice"]);
 
-function navigationPreview(preview, intent) {
-  if (!navigationIntents.has(intent)) return preview || "";
-  return (preview || "").replace(
-    /(?:^|\n)\s*(?:\*\*)?Check\s*:(?:\*\*)?[\s\S]*$/i,
-    "",
-  ).trimEnd();
+function turnProcessingMessage(intent) {
+  if (navigationIntents.has(intent)) return "Preparing…";
+  return intent === "answer" ? "Checking answer…" : "Processing…";
 }
 
-function prepareNavigationPreview(intent) {
-  if (!navigationIntents.has(intent)) return;
-  const surface = document.querySelector("[data-current-move]");
-  surface?.querySelector("[data-move-prompt]")?.setAttribute("hidden", "");
-  setTutorPreviewLabel(
-    intent === "practice" ? "Preparing practice" : "Preparing the next concept",
-  );
-}
-
-function setTutorPreviewLabel(text) {
-  const surface = document.querySelector("[data-current-move]");
-  const label = surface?.querySelector(".stream-label");
-  if (label) {
-    const pulse = label.querySelector(".stream-pulse");
-    label.replaceChildren();
-    if (pulse) label.append(pulse);
-    label.append(text);
-  }
-}
-
-function tutorPreviewNodes() {
-  const surface = document.querySelector("[data-current-move]");
-  const region = surface?.querySelector("[data-tutor-stream-preview]");
-  const text = region?.querySelector("[data-tutor-stream-text]");
-  return { surface, region, text };
-}
-
-function previewTextNode(text) {
-  if (!text) return null;
-  if (!tutorPreviewTextNode || tutorPreviewTextNode.parentNode !== text) {
-    text.replaceChildren();
-    tutorPreviewTextNode = document.createTextNode("");
-    text.append(tutorPreviewTextNode);
-  }
-  return tutorPreviewTextNode;
-}
-
-function setPreviewSlotHeight(region, height) {
-  if (!region || !Number.isFinite(height)) return;
-  region.dataset.streamOpen = "true";
-  region.style.height = `${Math.ceil(height)}px`;
-}
-
-function openTutorPreviewSlot(region) {
-  if (!region || !region.hidden) return;
-  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-  region.hidden = false;
-  region.setAttribute("aria-busy", "true");
-  if (reduceMotion) {
-    setPreviewSlotHeight(region, 176);
-    return;
-  }
-  region.style.height = "0px";
-  window.requestAnimationFrame(() => setPreviewSlotHeight(region, 176));
-}
-
-function measureTutorPreviewHeight(region, finalPreview) {
-  const width = Math.ceil(region.getBoundingClientRect().width);
-  const cacheKey = `${width}:${finalPreview}`;
-  const cached = tutorPreviewHeightCache.get(cacheKey);
-  if (cached !== undefined) return cached;
-  const clone = region.cloneNode(true);
-  const cloneText = clone.querySelector("[data-tutor-stream-text]");
-  clone.hidden = false;
-  clone.removeAttribute("data-stream-open");
-  clone.setAttribute("aria-hidden", "true");
-  clone.inert = true;
-  if (cloneText) cloneText.textContent = finalPreview || "Lesson ready.";
-  Object.assign(clone.style, {
-    animation: "none",
-    height: "auto",
-    left: "-10000px",
-    maxHeight: "none",
-    overflow: "visible",
-    pointerEvents: "none",
-    position: "fixed",
-    top: "0",
-    transition: "none",
-    visibility: "hidden",
-    width: `${width}px`,
-  });
-  document.body.append(clone);
-  const measured = Math.ceil(clone.getBoundingClientRect().height);
-  clone.remove();
-  const height = Math.max(144, Math.min(measured, Math.max(240, window.innerHeight * 0.45)));
-  tutorPreviewHeightCache.set(cacheKey, height);
-  if (tutorPreviewHeightCache.size > 8) {
-    tutorPreviewHeightCache.delete(tutorPreviewHeightCache.keys().next().value);
-  }
-  return height;
-}
-
-function paintTutorPreview(now) {
-  tutorPreviewFrame = null;
-  const { region, text } = tutorPreviewNodes();
-  if (!region || !text) return;
-  const node = previewTextNode(text);
-  if (!node) return;
-  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-  if (!reduceMotion && tutorPreviewLastAt && now - tutorPreviewLastAt < 32) {
-    tutorPreviewFrame = window.requestAnimationFrame(paintTutorPreview);
-    return;
-  }
-  const previousLength = tutorPreviewVisible.length;
-  if (reduceMotion) {
-    tutorPreviewVisible = tutorPreviewTarget;
-  } else if (tutorPreviewVisible.length < tutorPreviewTarget.length) {
-    const elapsed = tutorPreviewLastAt ? Math.min(now - tutorPreviewLastAt, 80) : 16;
-    const rate = tutorPreviewCommitted ? tutorPreviewCommitRate : 240;
-    const count = Math.max(8, Math.floor((elapsed * rate) / 1000));
-    tutorPreviewVisible = tutorPreviewTarget.slice(
-      0,
-      Math.min(tutorPreviewVisible.length + count, tutorPreviewTarget.length),
-    );
-  }
-  tutorPreviewLastAt = now;
-  if (tutorPreviewVisible) {
-    if (node.data === "Thinking through your answer…") node.data = "";
-    const suffix = tutorPreviewVisible.slice(previousLength);
-    if (suffix) node.appendData(suffix);
-  } else if (!node.data) {
-    node.data = "Thinking through your answer…";
-  }
-  text.classList.toggle("stream-placeholder", !tutorPreviewVisible);
-  if (tutorPreviewVisible.length < tutorPreviewTarget.length) {
-    tutorPreviewFrame = window.requestAnimationFrame(paintTutorPreview);
-  } else if (tutorPreviewDrainResolve) {
-    const resolve = tutorPreviewDrainResolve;
-    tutorPreviewDrainResolve = null;
-    resolve();
-  }
-}
-
-function scheduleTutorPreview() {
-  if (tutorPreviewFrame === null) {
-    tutorPreviewFrame = window.requestAnimationFrame(paintTutorPreview);
-  }
-}
-
-function renderTutorPreview(preview) {
-  const { surface, region, text } = tutorPreviewNodes();
-  if (!surface || !region || !text) return;
-  const visible = (preview || "").trimStart();
-  if (!surface.dataset.streaming) {
-    openTutorPreviewSlot(region);
-    surface.dataset.streaming = "true";
-    const node = previewTextNode(text);
-    if (node) node.data = "Thinking through your answer…";
-    text.classList.add("stream-placeholder");
-  }
-  if (visible === tutorPreviewTarget) return;
-  if (!visible.startsWith(tutorPreviewVisible)) {
-    let commonLength = 0;
-    while (
-      commonLength < visible.length
-      && commonLength < tutorPreviewVisible.length
-      && visible[commonLength] === tutorPreviewVisible[commonLength]
-    ) commonLength += 1;
-    tutorPreviewVisible = tutorPreviewVisible.slice(0, commonLength);
-    const node = previewTextNode(text);
-    if (node) node.data = tutorPreviewVisible;
-  }
-  tutorPreviewTarget = visible;
-  scheduleTutorPreview();
-}
-
-async function finishTutorPreview(finalPreview) {
-  renderTutorPreview(finalPreview);
-  tutorPreviewCommitted = true;
-  tutorPreviewCommitRate = Math.max(
-    2200,
-    Math.ceil((tutorPreviewTarget.length - tutorPreviewVisible.length) / 1.8),
-  );
-  scheduleTutorPreview();
-  if (tutorPreviewVisible.length < tutorPreviewTarget.length) {
-    await Promise.race([
-      new Promise((resolve) => { tutorPreviewDrainResolve = resolve; }),
-      new Promise((resolve) => window.setTimeout(resolve, 2200)),
-    ]);
-  }
-  if (tutorPreviewVisible !== tutorPreviewTarget) {
-    tutorPreviewVisible = tutorPreviewTarget;
-    const { region, text } = tutorPreviewNodes();
-    const node = previewTextNode(text);
-    if (node) node.data = tutorPreviewVisible;
-    if (region) region.setAttribute("aria-busy", "false");
-  }
-  const { region } = tutorPreviewNodes();
-  if (region) {
-    region.setAttribute("aria-busy", "false");
-    setPreviewSlotHeight(region, measureTutorPreviewHeight(region, tutorPreviewTarget));
-  }
-}
-
-function restoreTutorSurfaceAfterError() {
-  const { surface, region } = tutorPreviewNodes();
-  if (!surface || !region) return;
-  if (tutorPreviewFrame !== null) window.cancelAnimationFrame(tutorPreviewFrame);
-  tutorPreviewFrame = null;
-  tutorPreviewCommitted = false;
-  tutorPreviewCommitRate = 2200;
-  tutorPreviewTarget = "";
-  tutorPreviewVisible = "";
-  tutorPreviewTextNode = null;
-  region.hidden = true;
-  region.style.height = "";
-  region.removeAttribute("data-stream-open");
-  region.removeAttribute("aria-busy");
-  surface.querySelector("[data-move-content]")?.removeAttribute("hidden");
-  surface.querySelector("[data-move-prompt]")?.removeAttribute("hidden");
-  setTutorPreviewLabel("Tutor response");
-  delete surface.dataset.streaming;
+function setTurnProcessing(active) {
+  const state = document.querySelector("[data-operation-state]:not([data-focus-shell])");
+  const indicator = state?.querySelector("[data-operation-indicator]");
+  if (indicator) indicator.hidden = !active;
+  if (state) state.classList.toggle("processing", active);
+  document.querySelector("[data-current-move]")?.setAttribute("aria-busy", String(active));
 }
 
 function lockTurnForm(locked) {
@@ -1208,6 +1030,7 @@ function lockTurnForm(locked) {
     "[data-navigation-intent], [data-progression-action]",
   )) control.disabled = locked;
   turnInFlight = locked;
+  setTurnProcessing(locked);
 }
 
 function lockProgressionControls(locked) {
@@ -1217,7 +1040,7 @@ function lockProgressionControls(locked) {
   progressionInFlight = locked;
 }
 
-async function waitForOperation(operationId, setStatus, previewSink = null) {
+async function waitForOperation(operationId, setStatus) {
   const slug = focusShell.dataset.courseSlug;
   for (;;) {
     await new Promise((resolve) => window.setTimeout(resolve, 250));
@@ -1229,9 +1052,6 @@ async function waitForOperation(operationId, setStatus, previewSink = null) {
       generating: "Preparing the next useful move…",
       validating: "Checking the lesson before showing it…",
     };
-    if (previewSink && (state === "generating" || result.preview_text)) {
-      previewSink(result.preview_text || "");
-    }
     setStatus(labels[state] || result.message || "Working…", false, result);
     if (["committed", "conflict", "retryable_error"].includes(state)) return result;
   }
@@ -1245,7 +1065,8 @@ function syncNextLessonHandoff() {
 }
 
 function showNextLessonHandoff() {
-  const state = document.querySelector("[data-operation-state]");
+  setTurnProcessing(false);
+  const state = document.querySelector("[data-operation-state]:not([data-focus-shell])");
   if (!state) return;
   setOperationState(
     chatInFlight
@@ -1285,17 +1106,14 @@ function showNextLessonHandoff() {
 async function pollOperation(operationId, submittedIntent = "") {
   const result = await waitForOperation(
     operationId,
-    setOperationState,
-    (preview) => renderTutorPreview(navigationPreview(preview, submittedIntent)),
+    () => setOperationState(turnProcessingMessage(submittedIntent)),
   );
   if (result.state === "committed") {
-    await finishTutorPreview(navigationPreview(result.preview_text, submittedIntent));
-    if (result.message_kind === "answer" || submittedIntent === "answer") {
-      storeChatDraft();
-      window.location.reload();
-      return;
-    }
-    if (navigationIntents.has(submittedIntent) && !chatInFlight) {
+    if (
+      (result.message_kind === "answer" || submittedIntent === "answer"
+        || navigationIntents.has(submittedIntent))
+      && !chatInFlight
+    ) {
       storeChatDraft();
       window.location.reload();
       return;
@@ -1304,7 +1122,6 @@ async function pollOperation(operationId, submittedIntent = "") {
     showNextLessonHandoff();
     return;
   }
-  restoreTutorSurfaceAfterError();
   if (result.state === "conflict") {
     setOperationState("This course changed elsewhere. Refresh to continue from the newest move.", true);
   } else {
@@ -1333,7 +1150,7 @@ if (focusShell?.dataset.operationState) {
     );
   } else {
     lockTurnForm(true);
-    setOperationState("Resuming your saved tutor turn…");
+    setOperationState(turnProcessingMessage(""));
     pollOperation(focusShell.dataset.operationId).catch((error) => {
       setOperationState(error.message, true);
       lockTurnForm(false);
@@ -1435,9 +1252,8 @@ async function submitTurn(overrideIntent = null) {
     setOperationState(error.message, true);
     return;
   }
-  prepareNavigationPreview(payload.intent);
   lockTurnForm(true);
-  setOperationState("Saving your response locally…");
+  setOperationState(turnProcessingMessage(payload.intent));
   try {
     const result = await requestJson(`/api/courses/${encodeURIComponent(focusShell.dataset.courseSlug)}/turns`, {
       method: "POST",
@@ -1445,10 +1261,11 @@ async function submitTurn(overrideIntent = null) {
     });
     if (result.operation_id) await pollOperation(result.operation_id, payload.intent);
     else if (result.state === "committed") {
-      if (result.message_kind === "answer" || payload.intent === "answer") {
-        storeChatDraft();
-        window.location.reload();
-      } else if (navigationIntents.has(payload.intent) && !chatInFlight) {
+      if (
+        (result.message_kind === "answer" || payload.intent === "answer"
+          || navigationIntents.has(payload.intent))
+        && !chatInFlight
+      ) {
         storeChatDraft();
         window.location.reload();
       } else {
@@ -1457,16 +1274,13 @@ async function submitTurn(overrideIntent = null) {
       }
     }
     else if (result.state === "retryable_error") {
-      restoreTutorSurfaceAfterError();
       setOperationState(result.error || "Your response is saved. Retry when the provider is available.", true, result);
       lockTurnForm(false);
     } else {
-      restoreTutorSurfaceAfterError();
       setOperationState(result.message || "Your response is saved.");
       lockTurnForm(false);
     }
   } catch (error) {
-    restoreTutorSurfaceAfterError();
     setOperationState(error.message, true);
     lockTurnForm(false);
   }
@@ -1501,10 +1315,12 @@ document.addEventListener("keydown", (event) => {
     || event.metaKey
     || event.ctrlKey
     || event.isComposing
+    || !focusShell
     || turnForm
+    || document.querySelector("[data-review-shell]")
     || focusShell?.dataset.toolActive
     || document.querySelector(".drawer:not([hidden])")
-    || event.target.closest?.("button, a, input, textarea, select")
+    || event.target.closest?.("button, a, input, textarea, select, summary")
   ) return;
   event.preventDefault();
   submitTurn("next");
@@ -1562,7 +1378,15 @@ function appendPresentationBlocks(container, blocks) {
       container.append(note);
     } else {
       const content = document.createElement("p");
-      appendPresentationText(content, block.text, block.parts);
+      if (block.inline?.length) {
+        for (const segment of block.inline) {
+          const fragment = document.createElement(segment.strong ? "strong" : "span");
+          appendPresentationText(fragment, segment.text, segment.parts);
+          content.append(fragment);
+        }
+      } else {
+        appendPresentationText(content, block.text, block.parts);
+      }
       container.append(content);
     }
   }
@@ -2198,29 +2022,351 @@ for (const button of document.querySelectorAll("[data-placement-action]")) {
   }));
 }
 
-for (const button of document.querySelectorAll("[data-review-grade]")) {
-  button.addEventListener("click", async () => {
-    const item = button.closest("[data-review-item]");
-    if (!item) return;
-    for (const control of item.querySelectorAll("button")) control.disabled = true;
+function initializeReview() {
+  const shell = document.querySelector("[data-review-shell]");
+  if (!shell) return;
+  const panel = shell.querySelector("[data-review-panel]");
+  const summary = shell.querySelector("[data-review-summary]");
+  const snapshot = JSON.parse(shell.querySelector("[data-review-snapshot]").textContent);
+  let items = snapshot.items;
+  let clockOffset = Date.parse(snapshot.server_time) - Date.now();
+  if (!Number.isFinite(clockOffset)) clockOffset = 0;
+  let current = null;
+  let mode = "question";
+  let revealed = null;
+  let pending = null;
+  let busy = false;
+  let operation = 0;
+  let timer = null;
+  const skipped = new Set();
+  const receipts = new Set();
+  const reviewedCards = new Set();
+  const hadItems = items.length > 0;
+  const meanings = {
+    again: "Forgotten or incorrect", hard: "Correct with difficulty",
+    good: "Correct with effort", easy: "Correct with little effort",
+  };
+  const results = ["again", "hard", "good", "easy"];
+  const itemKey = (item) => JSON.stringify([item.slug, item.concept]);
+  const now = () => Date.now() + clockOffset;
+  const waiting = (item) => item.relearn_at && Date.parse(item.relearn_at) > now();
+  const sessionUrl = () => `/api/review/session${shell.dataset.course ? `?course=${encodeURIComponent(shell.dataset.course)}` : ""}`;
+  function node(tag, text, className) {
+    const element = document.createElement(tag);
+    if (text !== undefined) element.textContent = text;
+    if (className) element.className = className;
+    return element;
+  }
+  function heading(text, tag = "h2") {
+    const element = node(tag, text);
+    element.tabIndex = -1;
+    return element;
+  }
+  function button(text, action, className = "secondary-action") {
+    const element = node("button", text, className);
+    element.type = "button";
+    element.addEventListener("click", action);
+    return element;
+  }
+  function focusHeading(element) { element?.focus(); }
+  function updateSummary() {
+    const returns = items.filter(waiting).length;
+    const skippedCount = items.filter((item) => skipped.has(itemKey(item))).length;
+    summary.textContent = `${items.length} remaining · ${receipts.size} reviewed${returns ? ` · ${returns} returns soon` : ""}${skippedCount ? ` · ${skippedCount} skipped` : ""}`;
+  }
+  function lock(value) {
+    busy = value;
+    panel.setAttribute("aria-busy", String(value));
+    for (const control of panel.querySelectorAll("button, summary")) {
+      if (control.tagName === "BUTTON") control.disabled = value;
+      else if (value) control.setAttribute("aria-disabled", "true");
+      else control.removeAttribute("aria-disabled");
+    }
+    for (const link of panel.querySelectorAll("a")) {
+      if (value) link.setAttribute("aria-disabled", "true");
+      else link.removeAttribute("aria-disabled");
+    }
+  }
+  panel.addEventListener("click", (event) => {
+    if (busy && event.target.closest("a, summary")) event.preventDefault();
+  });
+  function replaceItem(item, previous = current) {
+    items = items.filter((value) => itemKey(value) !== itemKey(previous));
+    if (item) items.push(item);
+  }
+  function payload() {
+    return {
+      slug: current.slug, concept: current.concept, card_id: current.card_id,
+      content_version: current.content_version, review_revision: current.review_revision,
+    };
+  }
+  async function post(url, body) {
+    const result = await requestJson(url, {method: "POST", body: JSON.stringify(body)});
+    if (result.ok !== true) {
+      const error = new Error(result.error || "The review operation could not be completed.");
+      error.payload = result;
+      throw error;
+    }
+    return result;
+  }
+  function conflict(error) { return error.payload?.state === "conflict"; }
+  function addSkip() {
+    const footer = node("div", undefined, "review-footer");
+    footer.append(button("Skip for now", () => {
+      if (busy || pending) return;
+      skipped.add(itemKey(current));
+      showNext(true);
+      announce("Skipped for this session. This review remains due.");
+    }, "quiet-action"));
+    panel.append(footer);
+  }
+  function showConflict() {
+    mode = "conflict";
+    pending = null;
+    panel.replaceChildren();
+    const title = heading("This card changed in another tab");
+    panel.append(title, node("p", "Refresh the review to continue from its current schedule."),
+      button("Refresh review", () => refresh(true)));
+    focusHeading(title);
+    announce("This card changed in another tab. Refresh the review.");
+  }
+  function errorMessage(titleText, detail, retry, retryLabel) {
+    panel.querySelector("[data-review-message]")?.remove();
+    const message = node("div", undefined, "review-message");
+    message.dataset.reviewMessage = "";
+    const title = heading(titleText, "h3");
+    message.append(title, node("p", detail), button(retryLabel, retry));
+    panel.append(message);
+    focusHeading(title);
+    announce(titleText);
+  }
+  function showCard(focus = false) {
+    clearTimeout(timer);
+    mode = current.state === "needs_preparation" ? "preparation" : "question";
+    revealed = null;
+    pending = null;
+    panel.replaceChildren();
+    panel.append(node("p", current.course, "eyebrow"), node("p", current.concept, "review-context"));
+    const title = heading(mode === "preparation" ? "Prepare this review card" : current.question);
+    title.dataset.reviewQuestion = "";
+    panel.append(title);
+    if (mode === "preparation") {
+      panel.append(node("p", "This concept needs a question and reference answer before you can review it."),
+        node("p", "Preparation uses your configured AI provider and saved course material.", "quiet-copy"),
+        button("Prepare card", prepare, "primary-action"));
+    } else {
+      const control = button("Show answer and explanation", reveal, "primary-action");
+      control.setAttribute("aria-label", "Show answer and explanation");
+      control.setAttribute("aria-keyshortcuts", "Space");
+      control.title = "Show answer and explanation (Space)";
+      panel.append(control);
+    }
+    addSkip();
+    updateSummary();
+    if (focus) focusHeading(title);
+  }
+  async function prepare() {
+    if (busy) return;
+    const id = ++operation;
+    const identity = itemKey(current);
+    lock(true);
+    const status = node("p", "Preparing question and answer…", "quiet-copy");
+    panel.append(status);
+    announce("Preparing question and answer.");
     try {
-      await requestJson("/api/review", {
-        method: "POST",
-        body: JSON.stringify({
-          slug: item.dataset.slug,
-          concept: item.dataset.concept,
-          due: item.dataset.due,
-          result: button.dataset.reviewGrade,
-        }),
+      const result = await post("/api/review/prepare", {
+        slug: current.slug, concept: current.concept, review_revision: current.review_revision,
       });
-      item.remove();
-      announce("Review result saved and the schedule was updated.");
+      if (id !== operation || identity !== itemKey(current)) return;
+      if (!result.item?.question || result.item.state !== "question") throw new Error("The prepared card could not be confirmed.");
+      replaceItem(result.item);
+      current = result.item;
+      showCard(true);
+      announce("Review card prepared. Recall the answer before revealing it.");
     } catch (error) {
-      announce(error.message);
-      for (const control of item.querySelectorAll("button")) control.disabled = false;
+      if (id !== operation) return;
+      status.remove();
+      if (conflict(error)) showConflict();
+      else {
+        const needsSource = error.payload?.state === "needs_source";
+        errorMessage(needsSource ? "More course material is needed" : "Could not prepare this card",
+          `${error.message} This item remains due.`, prepare, "Retry preparation");
+        const link = node("a", "Open course", "quiet-link");
+        link.href = appUrl(`/courses/${encodeURIComponent(current.slug)}`);
+        panel.querySelector("[data-review-message]").append(link);
+      }
+    } finally { if (id === operation) lock(false); }
+  }
+  function showAnswer() {
+    mode = "revealed";
+    panel.querySelector("[data-review-message]")?.remove();
+    panel.querySelector(".primary-action")?.remove();
+    panel.querySelector(".review-footer")?.remove();
+    const answer = node("section", undefined, "review-answer");
+    const title = heading("Answer", "h3");
+    title.dataset.reviewAnswer = "";
+    answer.append(title);
+    for (const [text, className] of [[revealed.answer, "review-answer-text"], [revealed.explanation, "review-explanation"]]) {
+      for (const paragraph of (text || "").split(/\n\s*\n/).filter((value) => value.trim())) {
+        answer.append(node("p", paragraph, className));
+      }
+    }
+    const ratings = node("div", undefined, "review-ratings");
+    for (const result of results) {
+      const preview = revealed.ratings.find((rating) => rating.result === result);
+      const control = button("", () => grade(result), "secondary-action review-rating");
+      control.dataset.reviewGrade = result;
+      const shortcut = String(results.indexOf(result) + 1);
+      const description = `${preview.label}, ${preview.interval}. ${meanings[result]}. Shortcut ${shortcut}.`;
+      control.setAttribute("aria-label", description);
+      control.setAttribute("aria-keyshortcuts", shortcut);
+      control.title = description;
+      control.append(node("span", preview.label, "review-rating-label"),
+        node("span", preview.interval, "review-rating-interval"));
+      ratings.append(control);
+    }
+    answer.append(ratings);
+    panel.append(answer);
+    addSkip();
+    focusHeading(title);
+    announce("Answer and explanation revealed. Choose a rating.");
+  }
+  async function reveal() {
+    if (busy || mode !== "question") return;
+    const id = ++operation;
+    const identity = itemKey(current);
+    lock(true);
+    try {
+      const result = await post("/api/review/reveal", payload());
+      if (id !== operation || identity !== itemKey(current)) return;
+      if (!result.answer || !result.reveal_token || !Array.isArray(result.ratings)
+        || !results.every((value) => result.ratings.some((rating) => rating.result === value && rating.interval && rating.label))) {
+        throw new Error("The reference answer or review intervals could not be loaded.");
+      }
+      revealed = result;
+      showAnswer();
+    } catch (error) {
+      if (id !== operation) return;
+      if (conflict(error)) showConflict();
+      else errorMessage("Could not reveal this answer", error.message, reveal, "Retry reveal");
+    } finally { if (id === operation) lock(false); }
+  }
+  async function grade(result) {
+    if (busy || (mode !== "revealed" && mode !== "uncertain")) return;
+    if (!pending) pending = {...payload(), reveal_token: revealed.reveal_token, result, submission_id: crypto.randomUUID()};
+    const submitted = pending;
+    const previous = current;
+    const id = ++operation;
+    lock(true);
+    panel.querySelector("[data-review-message]")?.remove();
+    announce("Saving your review rating.");
+    try {
+      const receipt = await post("/api/review", submitted);
+      if (id !== operation || pending !== submitted) return;
+      if (receipt.state !== "committed" || receipt.submission_id !== submitted.submission_id) {
+        throw new Error("The server did not confirm a committed rating.");
+      }
+      receipts.add(receipt.submission_id);
+      reviewedCards.add(itemKey(previous));
+      replaceItem(receipt.item, previous);
+      pending = null;
+      current = null;
+      showNext(true);
+      announce("Review rating saved and schedule updated.");
+    } catch (error) {
+      if (id !== operation || pending !== submitted) return;
+      if (conflict(error)) showConflict();
+      else {
+        mode = "uncertain";
+        errorMessage("Could not confirm this rating was saved",
+          `Your ${submitted.result[0].toUpperCase() + submitted.result.slice(1)} rating is kept for retry.`,
+          () => grade(submitted.result), "Retry saving");
+      }
+    } finally {
+      if (id === operation) {
+        lock(false);
+        if (pending) {
+          for (const control of panel.querySelectorAll("[data-review-grade], .review-footer button")) control.disabled = true;
+        }
+      }
+    }
+  }
+  function showNext(focus = false) {
+    clearTimeout(timer);
+    updateSummary();
+    current = items.find((item) => !skipped.has(itemKey(item)) && !waiting(item));
+    if (current) { showCard(focus); return; }
+    mode = "rest";
+    panel.replaceChildren();
+    const waitingItems = items.filter(waiting);
+    let title;
+    if (waitingItems.length) {
+      title = heading("Your next card returns soon");
+      const at = Math.min(...waitingItems.map((item) => Date.parse(item.relearn_at)));
+      const time = node("time", new Date(at).toLocaleTimeString([], {hour: "numeric", minute: "2-digit", second: "2-digit"}));
+      time.dateTime = new Date(at).toISOString();
+      const line = node("p", "Next review at ");
+      line.append(time);
+      const countdown = node("p", "", "review-countdown");
+      countdown.dataset.reviewCountdown = "";
+      panel.append(title, line, countdown, node("p", "You can leave and resume later.", "quiet-copy"));
+      const tick = () => {
+        if (mode !== "rest") return;
+        const seconds = Math.max(0, Math.ceil((at - now()) / 1000));
+        countdown.textContent = seconds ? `Returns in ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}` : "Checking which cards are ready…";
+        if (seconds) timer = setTimeout(tick, 1000);
+        else refresh(true);
+      };
+      tick();
+    } else if (items.length) {
+      title = heading("Reviews remain due");
+      panel.append(title, node("p", "You skipped these cards for now. Their review schedules have not changed."));
+    } else {
+      title = heading(hadItems || reviewedCards.size ? "Review complete" : "Nothing is due");
+      panel.append(title, node("p", reviewedCards.size ? `${reviewedCards.size} distinct card${reviewedCards.size === 1 ? "" : "s"} reviewed. Come back when more are due.` : "Keep learning and your review tray will update."));
+    }
+    if (items.some((item) => skipped.has(itemKey(item)))) {
+      if (waitingItems.length) panel.append(node("p", "Skipped reviews also remain due.", "quiet-copy"));
+      panel.append(button("Try skipped cards again", () => {
+        if (busy) return;
+        skipped.clear();
+        showNext(true);
+      }));
+    }
+    if (focus) focusHeading(title);
+  }
+  async function refresh(focus = false) {
+    if (busy || pending) return;
+    clearTimeout(timer);
+    const id = ++operation;
+    lock(true);
+    try {
+      const next = await requestJson(sessionUrl());
+      if (id !== operation) return;
+      if (!Array.isArray(next.items)) throw new Error("The review queue could not be confirmed.");
+      items = next.items;
+      const offset = Date.parse(next.server_time) - Date.now();
+      if (Number.isFinite(offset)) clockOffset = offset;
+      showNext(focus);
+    } catch (error) {
+      if (id === operation) errorMessage("Could not refresh your review", error.message, () => refresh(true), "Retry refresh");
+    } finally { if (id === operation) lock(false); }
+  }
+  document.addEventListener("keydown", (event) => {
+    if (event.defaultPrevented || event.repeat || event.isComposing || event.ctrlKey || event.altKey || event.metaKey || event.shiftKey
+      || event.target.closest?.("button, a, input, textarea, select, summary, [contenteditable]:not([contenteditable='false']), [role='button']") || busy) return;
+    if (event.code === "Space" && mode === "question") { event.preventDefault(); reveal(); }
+    else if (mode === "revealed" && results[Number(event.key) - 1]) {
+      event.preventDefault();
+      grade(results[Number(event.key) - 1]);
     }
   });
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && mode === "rest") refresh(true);
+  });
+  showNext();
 }
+initializeReview();
 
 const dataManagement = document.querySelector("[data-data-management]");
 const dataStatus = dataManagement?.querySelector("[data-data-status]");

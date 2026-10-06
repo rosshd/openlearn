@@ -17,6 +17,7 @@ from openlearn import (
     interview_prep,
     lesson_policy,
     providers,
+    review_cards,
     source_context,
     source_imports,
     tutor_service,
@@ -54,6 +55,8 @@ from .schemas import (
     PlacementRequest,
     ProgressionActionRequest,
     ReviewGradeRequest,
+    ReviewPrepareRequest,
+    ReviewRevealRequest,
     TutorSubmissionRequest,
     VideoToolRequest,
 )
@@ -116,6 +119,10 @@ def _card(card: CourseCard) -> dict[str, object]:
         vars(library.recommendation) if library.recommendation is not None else None
     )
     blocker = vars(library.blocker) if library.blocker is not None else None
+    queue = review_cards.session([card.slug])
+    review_count = max(library.review.due, int(queue["count"]))
+    waiting_times = [str(item["relearn_at"]) for item in queue["items"]
+                     if item.get("state") == "waiting"]
     base = {
         "slug": card.slug,
         "title": card.title,
@@ -129,9 +136,11 @@ def _card(card: CourseCard) -> dict[str, object]:
         "coverage_summary": library.coverage.summary,
         "review": {
             **vars(library.review),
-            "actionable": library.review.actionable,
+            "due": review_count,
+            "actionable": review_count > 0,
+            "next_retrieval": min(waiting_times) if waiting_times else library.review.next_retrieval,
         },
-        "review_due": library.review.due,
+        "review_due": review_count,
         "path": path,
         "upcoming": [vars(item) for item in library.upcoming],
         "weak_areas": list(library.weak_areas),
@@ -141,6 +150,7 @@ def _card(card: CourseCard) -> dict[str, object]:
         "blocker": blocker,
         "completed": card.completed,
         "started": card.started,
+        "source_start": not path and library.blocker is None and card.interview is None,
         "template_id": card.template_id,
         "is_interview": card.interview is not None,
     }
@@ -440,6 +450,46 @@ def _without_check_section(value: str) -> str:
     return _CHECK_SECTION.sub("", value).strip()
 
 
+def _prose_block(value: str) -> dict[str, object]:
+    """Retain optional authored emphasis as escaped text, never model HTML."""
+    source = value.strip()
+    presented = _presentation_text(source)
+    text = str(presented["text"])
+    block: dict[str, object] = {"kind": "paragraph", **presented}
+    segments: list[dict[str, object]] = []
+    offset = 0
+
+    def append(chunk: str, strong: bool = False) -> None:
+        if not chunk:
+            return
+        # Preserve boundary spaces when cleaning each inline fragment.
+        leading = chunk[:len(chunk) - len(chunk.lstrip())]
+        trailing = chunk[len(chunk.rstrip()):]
+        presented = _presentation_text(chunk)
+        cleaned = leading + str(presented["text"]) + trailing if chunk.strip() else chunk
+        segment: dict[str, object] = {"text": cleaned, "strong": strong}
+        if "parts" in presented:
+            parts = presented["parts"]
+            if leading:
+                parts.insert(0, {"kind": "text", "text": leading})
+            if trailing:
+                parts.append({"kind": "text", "text": trailing})
+            segment["parts"] = parts
+        segments.append(segment)
+
+    for match in re.finditer(r"(?<!`)(?P<ticks>`+)(?!`).*?(?<!`)(?P=ticks)(?!`)"
+        r"|(?<!\\)\\\(.*?\\\)|(?P<marker>\*\*|__)(?=\S)(?P<strong>.+?)(?P=marker)", source):
+        append(source[offset:match.start()])
+        append(match.group("strong") if match.group("marker") else match.group(), bool(match.group("marker")))
+        offset = match.end()
+    append(source[offset:])
+    if any(segment["strong"] for segment in segments) and "".join(
+        str(segment["text"]) for segment in segments
+    ) == text:
+        block["inline"] = segments
+    return block
+
+
 def _present_response(value: str) -> tuple[str, list[dict[str, object]]]:
     """Parse a small safe Markdown subset into explicit presentation blocks."""
     text = cli.strip_tutor_enter_advance_cue(cli.sanitize_model_output(value))
@@ -515,25 +565,46 @@ def _present_response(value: str) -> tuple[str, list[dict[str, object]]]:
                 break
             paragraph.append(re.sub(r"^#{1,6}\s+", "", current.strip()))
             index += 1
-        blocks.append({"kind": "paragraph", **_presentation_text("\n".join(paragraph))})
+        blocks.append({"kind": "paragraph", "text": "\n".join(paragraph)})
 
-    first = blocks[0].get("text", "") if blocks and blocks[0]["kind"] == "paragraph" else ""
+    first = (
+        _plain_text(str(blocks[0].get("text", "")))
+        if blocks and blocks[0]["kind"] == "paragraph" else ""
+    )
     label = "Lesson"
     match = re.match(r"^([A-Za-z][A-Za-z ]{1,30}):\s*(.*)$", str(first), flags=re.DOTALL)
     if match:
         label = match.group(1).strip().title()
         remainder = match.group(2).strip()
         if remainder:
-            blocks[0]["text"] = remainder
-            parts = blocks[0].get("parts")
-            if isinstance(parts, list) and parts and parts[0]["kind"] == "text":
-                parts[0]["text"] = re.sub(r"^[A-Za-z][A-Za-z ]{1,30}:\s*", "", parts[0]["text"])
+            raw_remainder, count = re.subn(
+                r"^\s*(?:\*\*|__|\*|_)?[A-Za-z][A-Za-z ]{1,30}(?:\*\*|__|\*|_)?:"
+                r"(?:\*\*|__|\*|_)?\s*",
+                "", str(blocks[0]["text"]), count=1,
+            )
+            blocks[0]["text"] = raw_remainder if count else remainder
         else:
             blocks.pop(0)
+    for index, block in enumerate(blocks):
+        if block["kind"] == "paragraph":
+            blocks[index] = _prose_block(str(block["text"]))
+    if label == "Lesson":
+        first_paragraph = True
+        for block in blocks:
+            if block.get("kind") != "paragraph":
+                continue
+            block_text = str(block.get("text") or "")
+            if block_text.casefold().startswith("for example,"):
+                block["kind"] = "example"
+            elif first_paragraph:
+                # Style a concise authored lead; never split or summarize long prose.
+                if len(block_text) <= 180 and len(block_text.split()) <= 28:
+                    block["kind"] = "takeaway"
+                first_paragraph = False
     visible_text = " ".join(
         str(block.get("text") or "")
         for block in blocks
-        if block.get("kind") == "paragraph"
+        if block.get("kind") in {"paragraph", "takeaway", "example"}
     )
     defines_invariant = re.search(
         r"(?is)\b(?:rule|condition)\b.{0,80}\b(?:stays?|remains?|must\s+(?:stay|"
@@ -804,8 +875,7 @@ class OpenLearnWebServices:
             "active_course": active,
             "active_slug": snapshot.active_slug,
             "resume_course": courses_by_slug.get(snapshot.resume.slug) if snapshot.resume else None,
-            "due_reviews": snapshot.reviews.due_today,
-            "starters": [],
+            "due_reviews": sum(int(card["review_due"]) for card in courses),
         }
 
     def activate_course(self, slug: str) -> dict[str, object]:
@@ -1170,6 +1240,35 @@ class OpenLearnWebServices:
 
     def import_github_source(self, slug: str, url: str) -> dict[str, object]:
         return self._import_source(slug, source_imports.PublicGitHubSource(url))
+
+    def create_quick_learn(
+        self, path: Path, filename: str, description: str
+    ) -> dict[str, object]:
+        try:
+            slug = cli.build_quick_learn_from_source(
+                str(path),
+                name=None,
+                goal=description.strip() or None,
+                model=None,
+                infer_identity=True,
+                output_func=lambda _message: None,
+            )
+        except cli.ProviderRequestError as error:
+            return {
+                "ok": False,
+                "state": "setup_required"
+                if error.category == "provider_credentials"
+                else "provider_error",
+                "error": str(error),
+            }
+        except (cli.OpenLearnError, OSError, ValueError) as error:
+            return {"ok": False, "error": str(error)}
+        topic = cli.read_topic(slug)
+        return {
+            "ok": True,
+            "slug": slug,
+            "title": str(topic.metadata.get("topic") or filename),
+        }
 
     @staticmethod
     def _import_source(
@@ -1719,7 +1818,7 @@ class OpenLearnWebServices:
                         "known": coverage["covered"],
                         "total": coverage["total"],
                         "units": [],
-                        "due_reviews": readiness["due"],
+                        "due_reviews": max(int(readiness["due"]), int(projected["review_due"])),
                     }
                 )
             else:
@@ -1729,35 +1828,24 @@ class OpenLearnWebServices:
                         "known": card.progress.known,
                         "total": card.progress.total,
                         "units": [vars(unit) for unit in card.progress.units],
-                        "due_reviews": card.progress.reviews.due_today,
+                        "due_reviews": projected["review_due"],
                     }
                 )
         return {"courses": courses}
 
     def due_reviews(self, slug: str | None = None) -> dict[str, object]:
-        items: list[dict[str, object]] = []
         cards = application.dashboard(selected_slug=slug).courses
-        if slug is not None:
-            cards = tuple(card for card in cards if card.slug == slug)
-        for card in cards:
-            topic = cli.read_topic_stats(card.slug)
-            items.extend({"slug": card.slug, "course": card.title, **item} for item in cli.due_review_items(topic.metadata))
-        return {"items": items, "count": len(items)}
+        slugs = [card.slug for card in cards if slug is None or card.slug == slug]
+        return review_cards.session(slugs)
+
+    def prepare_review(self, request: ReviewPrepareRequest) -> dict[str, object]:
+        return review_cards.prepare(request)
+
+    def reveal_review(self, request: ReviewRevealRequest) -> dict[str, object]:
+        return review_cards.reveal(request)
 
     def grade_review(self, request: ReviewGradeRequest) -> dict[str, object]:
-        topic = cli.read_topic_stats(request.slug)
-        due = next(
-            (
-                item
-                for item in cli.due_review_items(topic.metadata)
-                if item.get("concept") == request.concept and item.get("due") == request.due
-            ),
-            None,
-        )
-        if due is None:
-            return {"state": "conflict", "error": "This review changed elsewhere. Reload to continue."}
-        cli.schedule_review_outcomes(request.slug, [(due, request.result)])
-        return {"ok": True}
+        return review_cards.grade(request)
 
     def data_summary(self) -> dict[str, object]:
         inventory = application.data_inventory()

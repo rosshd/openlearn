@@ -74,6 +74,154 @@ def _assert_no_page_overflow(page) -> None:
     )
 
 
+def test_real_browser_retired_tool_url_recovers_with_hidden_and_open_tool(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    playwright = pytest.importorskip("playwright.sync_api")
+    port = _free_loopback_port()
+    base_url = f"http://127.0.0.1:{port}"
+    home = tmp_path / "openlearn-home"
+    monkeypatch.setenv("OPENLEARN_HOME", str(home))
+    monkeypatch.setenv("OPENLEARN_MOCK", "1")
+    for name in (
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "OPENLEARN_API_KEY",
+        "OPENLEARN_BASE_URL",
+        "OPENLEARN_MODEL",
+        "OPENLEARN_PROVIDER",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    cli.clear_config_cache()
+    cli.cmd_new(
+        argparse.Namespace(topic="Stale Video Browser", goal="Recover stale tool URLs"),
+        output_func=lambda _text: None,
+    )
+    slug = "stale-video-browser"
+    environment = {
+        **os.environ,
+        "OPENLEARN_HOME": str(home),
+        "OPENLEARN_MOCK": "1",
+        "PYTHONPATH": str(SOURCE_ROOT),
+    }
+    command = f"from openlearn.web.launcher import run; run(port={port}, open_browser=False)"
+    log_path = tmp_path / "openlearn-web.log"
+    with log_path.open("wb") as log:
+        process = subprocess.Popen(
+            [sys.executable, "-c", command],
+            cwd=tmp_path,
+            env=environment,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+        )
+        try:
+            bootstrap_url, app_url = _wait_until_ready(base_url, process, home)
+            with playwright.sync_playwright() as runtime:
+                browser = runtime.chromium.launch()
+                page = browser.new_page()
+                requests: list[str] = []
+                page.goto(bootstrap_url)
+                page.on("request", lambda request: requests.append(request.url))
+                page.goto(
+                    f"{app_url}/courses/{slug}?keep=1&tool=video#move-title"
+                )
+
+                assert page.locator('[data-tool-open="video"]').count() == 0
+                assert page.locator('[data-tool-panel="video"]').count() == 0
+                assert page.locator('[data-tool-open="code"]').count() == 0
+                assert page.locator('[data-tool-panel="code"]').count() == 0
+                assert page.locator("iframe").count() == 0
+                assert "tool=" not in page.url
+                assert "keep=1" in page.url
+                assert page.url.endswith("#move-title")
+                assert not any("/tools/video" in url for url in requests)
+
+                page.evaluate(
+                    """() => {
+                      const url = new URL(window.location.href);
+                      url.searchParams.set("tool", "video");
+                      history.pushState({}, "", url);
+                      window.dispatchEvent(new PopStateEvent("popstate"));
+                    }"""
+                )
+                page.wait_for_function(
+                    "!new URL(window.location.href).searchParams.has('tool')"
+                )
+                playwright.expect(page.locator("[data-tool-surface]")).to_be_hidden()
+
+                page.get_by_role("button", name="Chat", exact=True).click()
+                page.wait_for_function(
+                    "() => document.querySelector('[data-tool-panel=chat]')"
+                    "?.hidden === false"
+                )
+                assert "tool=chat" in page.url
+                page.evaluate(
+                    """() => {
+                      const url = new URL(window.location.href);
+                      url.searchParams.set("tool", "video");
+                      history.pushState({}, "", url);
+                      window.dispatchEvent(new PopStateEvent("popstate"));
+                    }"""
+                )
+                page.wait_for_function(
+                    "!new URL(window.location.href).searchParams.has('tool')"
+                )
+                playwright.expect(page.locator("[data-tool-surface]")).to_be_hidden()
+                assert page.locator("iframe").count() == 0
+                assert not any("/tools/video" in url for url in requests)
+
+                page.get_by_role("button", name="Sources", exact=True).click()
+                assert "tool=sources" in page.url
+                page.locator("#source-file").set_input_files(
+                    {
+                        "name": "browser-notes.md",
+                        "mimeType": "text/markdown",
+                        "buffer": b"# Browser source\n",
+                    }
+                )
+                page.get_by_role("button", name="Import file").click()
+                playwright.expect(
+                    page.locator("[data-source-results]")
+                ).to_contain_text("browser-notes.md")
+                page.get_by_role("button", name="Close learning tool").click()
+
+                page.get_by_role("button", name="Progress", exact=True).click()
+                playwright.expect(page.locator("#progress-drawer")).to_be_visible()
+                page.locator("body").press("Escape")
+                playwright.expect(page.locator("#progress-drawer")).to_be_hidden()
+                page.get_by_role("button", name="History", exact=True).click()
+                playwright.expect(page.locator("#history-drawer")).to_be_visible()
+                page.get_by_role("button", name="Close history").click()
+                playwright.expect(page.locator("#history-drawer")).to_be_hidden()
+
+                page.get_by_role("button", name="Options", exact=True).click()
+                playwright.expect(page.locator('[data-tool-panel="options"]')).to_be_visible()
+                assert not page.locator("[data-source-mode]").is_checked()
+                page.evaluate(
+                    """() => {
+                      const url = new URL(window.location.href);
+                      url.searchParams.set("tool", "code");
+                      history.pushState({}, "", url);
+                      window.dispatchEvent(new PopStateEvent("popstate"));
+                    }"""
+                )
+                page.wait_for_function(
+                    "!new URL(window.location.href).searchParams.has('tool')"
+                )
+                playwright.expect(page.locator("[data-tool-surface]")).to_be_hidden()
+                assert not any("/tools/video" in url for url in requests)
+                assert not any("/tools/code" in url for url in requests)
+                browser.close()
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+
+
 def test_real_browser_course_polling_theme_conflict_and_keyboard_submit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -391,6 +539,25 @@ def test_real_browser_course_polling_theme_conflict_and_keyboard_submit(
                 assert first.locator("[data-tool-surface]").is_hidden()
                 first.emulate_media(reduced_motion="no-preference")
 
+                first.evaluate(
+                    """() => {
+                      const url = new URL(window.location.href);
+                      url.searchParams.set("tool", "video");
+                      history.pushState({}, "", url);
+                      window.dispatchEvent(new PopStateEvent("popstate"));
+                    }"""
+                )
+                first.wait_for_function(
+                    "!new URL(window.location.href).searchParams.has('tool')"
+                )
+                playwright.expect(first.locator("[data-tool-surface]")).to_be_hidden()
+                assert first.locator("iframe").count() == 0
+
+                first.get_by_role("button", name="Chat", exact=True).click()
+                playwright.expect(first.locator('[data-tool-panel="chat"]')).to_be_visible()
+                assert "tool=chat" in first.url
+                first.get_by_role("button", name="Close learning tool").click()
+
                 first.get_by_role("button", name="Sources").click()
                 assert "tool=sources" in first.url
                 first.reload()
@@ -635,6 +802,108 @@ def test_real_browser_restored_historical_chat_draft_submits_without_advancing(
             cli.clear_config_cache()
 
 
+def test_dynamic_prose_preserves_emphasis_and_explicit_math() -> None:
+    playwright = pytest.importorskip("playwright.sync_api")
+    javascript = SOURCE_ROOT / "openlearn" / "web" / "static" / "openlearn.js"
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch()
+        page = browser.new_page()
+        page.set_content('<main id="content"></main>')
+        page.evaluate(
+            """
+            window.renderedMath = [];
+            window.OpenLearnMath = {render(target, tex) {
+              window.renderedMath.push(tex);
+              target.textContent = tex;
+            }};
+            void 0;
+            """
+        )
+        page.add_script_tag(path=str(javascript))
+        page.evaluate(
+            """appendPresentationBlocks(document.querySelector('#content'), [{
+              kind: 'paragraph', inline: [
+                {strong: true, text: 'Keep x_i', parts: [
+                  {kind: 'text', text: 'Keep '}, {kind: 'math', text: 'x_i'}]},
+                {text: ' costs $5 <script>unsafe</script>'},
+              ],
+            }]);"""
+        )
+        playwright.expect(page.locator("#content strong")).to_have_text("Keep x_i")
+        playwright.expect(page.locator("#content")).to_contain_text("$5 <script>unsafe</script>")
+        assert page.locator("#content script").count() == 0
+        assert page.evaluate("window.renderedMath") == ["x_i"]
+        page.evaluate(
+            """delete window.OpenLearnMath;
+            appendPresentationBlocks(document.querySelector('#content'), [{
+              kind: 'paragraph', parts: [{kind: 'math', text: 'x_j'}],
+            }]);"""
+        )
+        playwright.expect(page.locator("#content .math-expression").last).to_have_text("x_j")
+        browser.close()
+
+
+def test_tutor_enter_shortcut_preserves_native_disclosures_and_stays_in_tutor() -> None:
+    playwright = pytest.importorskip("playwright.sync_api")
+    javascript = SOURCE_ROOT / "openlearn" / "web" / "static" / "openlearn.js"
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch()
+        for in_tutor in (True, False):
+            page = browser.new_page()
+            shell = 'data-focus-shell data-course-slug="test-course" data-revision="0"' if in_tutor else ""
+            page.route(
+                "https://openlearn.test/**",
+                lambda route: route.fulfill(
+                    content_type="text/html",
+                    body=f"""<meta name="csrf-token" content="test-token">
+                    <main {shell}>
+                      <details><summary>Course outline</summary><p>Topics</p></details>
+                    </main>""",
+                ),
+            )
+            page.goto("https://openlearn.test/keyboard")
+            page.evaluate(
+                """
+                window.turnRequests = [];
+                window.fetch = async (url, options) => {
+                  window.turnRequests.push({url, payload: JSON.parse(options.body)});
+                  return new Response(JSON.stringify({state: 'retryable_error', error: 'Mock pause'}), {
+                    status: 200, headers: {'Content-Type': 'application/json'},
+                  });
+                };
+                void 0;
+                """
+            )
+            page.add_script_tag(path=str(javascript))
+            page.evaluate(
+                """
+                document.addEventListener('keydown', event => {
+                  if (event.key === 'Enter') window.enterPrevented = event.defaultPrevented;
+                });
+                """
+            )
+            page.locator("summary").focus()
+            page.keyboard.press("Enter")
+            playwright.expect(page.locator("details > p")).to_be_visible()
+            assert page.evaluate("window.turnRequests.length") == 0
+            assert page.evaluate("window.enterPrevented") is False
+
+            page.locator("body").evaluate("body => { body.tabIndex = 0; body.focus(); }")
+            page.keyboard.press("Enter")
+            if in_tutor:
+                page.wait_for_function("window.turnRequests.length === 1")
+                request = page.evaluate("window.turnRequests[0]")
+                assert request["url"] == "/api/courses/test-course/turns"
+                assert request["payload"]["intent"] == "next"
+                assert request["payload"]["expected_revision"] == 0
+                assert page.evaluate("window.enterPrevented") is True
+            else:
+                assert page.evaluate("window.turnRequests.length") == 0
+                assert page.evaluate("window.enterPrevented") is False
+            page.close()
+        browser.close()
+
+
 def test_progression_action_locks_every_competing_control_until_handled() -> None:
     playwright = pytest.importorskip("playwright.sync_api")
     javascript = (
@@ -775,8 +1044,9 @@ def test_progression_action_locks_every_competing_control_until_handled() -> Non
         )
         concurrent.add_script_tag(path=str(javascript))
         playwright.expect(
-            concurrent.locator("[data-tutor-stream-text]")
-        ).to_contain_text("MAIN PREVIEW")
+            concurrent.get_by_role("button", name="Show next lesson")
+        ).to_be_visible()
+        assert concurrent.locator("[data-tutor-stream-preview]").is_hidden()
         concurrent.get_by_role("button", name="Ask tutor").click()
         playwright.expect(
             concurrent.get_by_role("button", name="Show next lesson")
@@ -803,127 +1073,10 @@ def test_progression_action_locks_every_competing_control_until_handled() -> Non
         assert "SIDE ANSWER" not in concurrent.locator(
             "[data-tutor-stream-text]"
         ).inner_text()
-        assert "MAIN PREVIEW" in concurrent.locator(
-            "[data-tutor-stream-text]"
-        ).inner_text()
+        assert concurrent.locator("[data-tutor-stream-text]").inner_text() == ""
         browser.close()
 
 
-def test_stream_preview_is_separate_smooth_and_bounded() -> None:
-    playwright = pytest.importorskip("playwright.sync_api")
-    static_dir = (
-        Path(__file__).resolve().parents[1] / "src" / "openlearn" / "web" / "static"
-    )
-    javascript = static_dir / "openlearn.js"
-    stylesheet = static_dir / "openlearn.css"
-    long_preview = " ".join(f"token-{index}" for index in range(900))
-    with playwright.sync_playwright() as runtime:
-        browser = runtime.chromium.launch()
-        page = browser.new_page(viewport={"width": 1100, "height": 800})
-        page.set_content(
-            """
-            <meta name="csrf-token" content="test-token">
-            <main data-focus-shell data-course-slug="technical-interview-prep"
-                  data-operation-id="main-operation" data-operation-state="generating"
-                  data-revision="2">
-              <article class="move-surface" data-current-move>
-                <h1>Current lesson remains readable</h1>
-                <div class="move-content" data-move-content>
-                  <p>Keep this lesson visible while the next response is generated.</p>
-                </div>
-                <div class="tutor-stream-preview" data-tutor-stream-preview hidden>
-                  <p class="stream-label">Tutor response</p>
-                  <div data-tutor-stream-text></div>
-                </div>
-              </article>
-              <p data-operation-state hidden tabindex="-1">
-                <span data-operation-message></span>
-              </p>
-            </main>
-            """
-        )
-        page.add_style_tag(path=str(stylesheet))
-        page.evaluate(
-            """preview => {
-              window.previewMutations = 0;
-              new MutationObserver((records) => {
-                window.previewMutations += records.length;
-              }).observe(document.querySelector('[data-tutor-stream-text]'), {
-                childList: true,
-                characterData: true,
-                subtree: true,
-              });
-              window.previewPoll = 0;
-              window.fetch = async () => {
-                window.previewPoll += 1;
-                return new Response(JSON.stringify({
-                  state: window.previewPoll === 1 ? 'generating' : 'committed',
-                  preview_text: preview,
-                }), {status: 200, headers: {'Content-Type': 'application/json'}});
-              };
-            }""",
-            long_preview,
-        )
-        page.add_script_tag(path=str(javascript))
-
-        playwright.expect(page.get_by_text("Current lesson remains readable")).to_be_visible()
-        playwright.expect(page.locator("[data-tutor-stream-preview]")).to_be_visible()
-        playwright.expect(
-            page.get_by_role("button", name="Show next lesson")
-        ).to_be_visible(timeout=6_000)
-        preview_box = page.locator("[data-tutor-stream-preview]").bounding_box()
-        assert preview_box and 140 <= preview_box["height"] <= 370
-        assert page.locator("[data-current-move]").evaluate(
-            "surface => surface.style.height === ''"
-        )
-        assert page.evaluate("window.previewMutations") < 180
-
-        reduced = browser.new_page(viewport={"width": 1100, "height": 800})
-        reduced.emulate_media(reduced_motion="reduce")
-        reduced.set_content(
-            """
-            <meta name="csrf-token" content="test-token">
-            <main data-focus-shell data-course-slug="technical-interview-prep"
-                  data-operation-id="reduced-operation" data-operation-state="generating"
-                  data-revision="2">
-              <article class="move-surface" data-current-move>
-                <h1>Long current lesson</h1>
-                <div class="move-content" data-move-content>
-                  <p>Existing explanation.</p><p>Existing example.</p>
-                  <p>Existing tradeoffs.</p><p>Existing constraints.</p>
-                  <p>Existing walkthrough.</p><p>Existing summary.</p>
-                </div>
-                <div class="tutor-stream-preview" data-tutor-stream-preview hidden>
-                  <p class="stream-label">Tutor response</p>
-                  <div data-tutor-stream-text></div>
-                </div>
-              </article>
-              <p data-operation-state hidden tabindex="-1">
-                <span data-operation-message></span>
-              </p>
-            </main>
-            """
-        )
-        reduced.add_style_tag(path=str(stylesheet))
-        reduced.evaluate(
-            """
-            window.fetch = async () => new Response(JSON.stringify({
-              state: 'committed', preview_text: 'A short next lesson.',
-            }), {status: 200, headers: {'Content-Type': 'application/json'}});
-            """
-        )
-        reduced.add_script_tag(path=str(javascript))
-        playwright.expect(
-            reduced.get_by_role("button", name="Show next lesson")
-        ).to_be_visible()
-        region = reduced.locator("[data-tutor-stream-preview]")
-        assert region.evaluate("node => getComputedStyle(node).transitionDuration") == "0s"
-        first_height = reduced.locator("[data-current-move]").bounding_box()["height"]
-        reduced.wait_for_timeout(300)
-        second_height = reduced.locator("[data-current-move]").bounding_box()["height"]
-        assert abs(first_height - second_height) < 2
-        assert region.bounding_box()["height"] <= 180
-        browser.close()
 
 
 def test_answer_commit_keeps_text_until_feedback_reloads() -> None:
@@ -1197,16 +1350,42 @@ def test_real_browser_course_library_preview_history_responsive_and_no_js(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     playwright = pytest.importorskip("playwright.sync_api")
+
+    def document_bounds(locator):
+        return locator.evaluate(
+            """element => {
+              const bounds = element.getBoundingClientRect();
+              return {x: bounds.x + scrollX, y: bounds.y + scrollY,
+                      width: bounds.width, height: bounds.height};
+            }"""
+        )
+
     home = tmp_path / "library-home"
     monkeypatch.setenv("OPENLEARN_HOME", str(home))
     monkeypatch.setenv("OPENLEARN_MOCK", "1")
     cli.clear_config_cache()
+    active_title = "CS 4267 Machine Learning Classwork 0831 Review"
     active = application.create_course(
-        application.CourseCreationRequest(name="Active Course", goal="Keep learning")
+        application.CourseCreationRequest(
+            name=active_title, goal="Keep learning"
+        )
     ).course
     preview = application.create_course(
         application.CourseCreationRequest(name="Preview Course", goal="Inspect first")
     ).course
+    cli.save_course_started(
+        cli.read_topic(active.slug), "Accepted plan",
+        "Units:\n1. Measurement Precision and Bias (2 slides)\n"
+        "Concepts: precision, bias\n2. Regression Imputation (2 slides)\n"
+        "Concepts: imputation\n3. Feature Scaling Effect on Distance (2 slides)\n"
+        "Concepts: scaling",
+    )
+    topic = cli.read_topic(active.slug)
+    metadata = dict(topic.metadata)
+    metadata["review_due"] = [
+        {"concept": "Precision", "due": "2020-01-01", "difficulty": "hard"}
+    ]
+    cli.write_topic(topic.path, metadata, topic.body)
     application.activate_course(active.slug)
 
     port = _free_loopback_port()
@@ -1231,7 +1410,9 @@ def test_real_browser_course_library_preview_history_responsive_and_no_js(
             bootstrap_url, app_url = _wait_until_ready(base_url, process, home)
             with playwright.sync_playwright() as runtime:
                 browser = runtime.chromium.launch()
-                context = browser.new_context(viewport={"width": 1280, "height": 800})
+                context = browser.new_context(
+                    viewport={"width": 1280, "height": 800}, reduced_motion="reduce"
+                )
                 page = context.new_page()
                 page.goto(bootstrap_url)
                 page.goto(f"{app_url}/dashboard?course={active.slug}")
@@ -1242,24 +1423,126 @@ def test_real_browser_course_library_preview_history_responsive_and_no_js(
                 playwright.expect(workspace).to_be_visible()
                 assert workspace.bounding_box()["width"] >= 1100
                 assert workspace.locator(".library-toolbar").count() == 0
-                playwright.expect(
-                    workspace.locator(".course-list").get_by_role(
-                        "heading", name="Your courses"
-                    )
-                ).to_be_visible()
-                playwright.expect(
-                    workspace.locator(".course-list .new-course-menu")
-                ).to_be_visible()
+                courses_heading = workspace.locator(".course-list").get_by_role(
+                    "heading", name="Courses", exact=True
+                )
+                assert courses_heading.count() == 1
+                assert courses_heading.bounding_box()["width"] <= 1
+                assert workspace.locator(".course-list .panel-heading").count() == 0
+                assert workspace.locator(".new-course-menu").count() == 0
+                playwright.expect(page.locator(".course-library-intro .new-course-menu")).to_be_visible()
                 assert workspace.evaluate(
                     "element => getComputedStyle(element).borderTopWidth"
                 ) == "1px"
-                playwright.expect(page.locator(".course-controls-panel")).to_be_visible()
+                assert page.locator(".course-controls-panel").count() == 0
+                assert page.get_by_role("link", name="Delete course").count() == 0
+                playwright.expect(page.locator("#selected-course-title")).to_have_text(active_title)
+                playwright.expect(
+                    page.locator(f'[data-course-slug="{active.slug}"] strong')
+                ).to_have_text(active_title)
+                manage = page.locator(".course-manage-menu")
+                new_course = page.locator(".new-course-menu")
+                playwright.expect(manage.locator("summary")).to_have_accessible_name("Manage course")
+                playwright.expect(new_course.locator("summary")).to_have_accessible_name("New course")
+                assert manage.get_attribute("open") is None
+                manage.locator("summary").focus()
+                page.keyboard.press("Enter")
                 playwright.expect(
                     page.get_by_role("link", name="Change course outline")
                 ).to_be_visible()
-                assert page.locator(".course-library-dashboard h1").evaluate(
-                    "heading => parseFloat(getComputedStyle(heading).fontSize) <= 40"
+                assert page.get_by_role("link", name="Course settings", exact=True).get_attribute(
+                    "href"
+                ) == f"{app_url}/courses/{active.slug}/settings"
+                manage.locator("summary").focus()
+                page.keyboard.press("Escape")
+                assert manage.get_attribute("open") is None
+                assert manage.locator("summary").evaluate("trigger => trigger === document.activeElement")
+                page.keyboard.press("Space")
+                playwright.expect(page.get_by_role("link", name="Course settings", exact=True)).to_be_visible()
+                page.keyboard.press("Tab")
+                assert page.get_by_role("link", name="Course settings", exact=True).evaluate(
+                    "link => link === document.activeElement"
                 )
+                page.keyboard.press("Escape")
+                manage.locator("summary").click()
+                new_course.locator("summary").click()
+                assert manage.get_attribute("open") is None
+                playwright.expect(page.get_by_role("link", name="Custom course", exact=True)).to_be_visible()
+                page.locator("#selected-course-title").click()
+                assert new_course.get_attribute("open") is None
+                new_course.locator("summary").click()
+                page.locator("#selected-course-preview").focus()
+                assert new_course.get_attribute("open") is None
+                assert page.locator("#selected-course-preview").evaluate(
+                    "preview => preview === document.activeElement"
+                )
+                outline = page.locator(".course-path-disclosure")
+                assert outline.get_attribute("open") is None
+                playwright.expect(outline.locator("ol")).not_to_be_visible()
+                assert outline.locator("li").count() == 3
+                assert page.locator(".course-path-preview").count() == 0
+                outline.locator("summary").focus()
+                page.keyboard.press("Enter")
+                playwright.expect(outline.locator("ol")).to_be_visible()
+                playwright.expect(outline.locator('[data-path-status="current"]')).to_contain_text(
+                    "Measurement Precision and Bias"
+                )
+                outline.locator("summary").focus()
+                page.keyboard.press("Enter")
+                continue_action = page.get_by_role("button", name="Continue learning")
+                review_action = page.get_by_role("link", name="Review 1 item", exact=True)
+                playwright.expect(continue_action).to_be_visible()
+                playwright.expect(review_action).to_be_visible()
+                assert review_action.get_attribute("href") == f"{app_url}/review?course={active.slug}"
+                assert abs(continue_action.bounding_box()["y"] - review_action.bounding_box()["y"]) < 8
+                assert continue_action.bounding_box()["height"] >= 44
+                assert review_action.bounding_box()["height"] >= 44
+                before_hover = document_bounds(continue_action)
+                continue_action.hover()
+                assert document_bounds(continue_action) == before_hover
+                continue_action.focus()
+                assert continue_action.evaluate("action => action.matches(':focus-visible')")
+                assert continue_action.evaluate(
+                    "action => parseFloat(getComputedStyle(action).outlineWidth) > 0"
+                )
+                playwright.expect(page.get_by_role("heading", name="Your courses", exact=True)).to_be_visible()
+                assert page.locator(".course-library-dashboard h1").evaluate(
+                    "heading => parseFloat(getComputedStyle(heading).fontSize) <= 32"
+                )
+                for width, font_size in ((1440, "100%"), (1024, "100%"), (760, "100%"),
+                                         (390, "100%"), (320, "100%"), (320, "150%")):
+                    page.set_viewport_size({"width": width, "height": 900})
+                    page.locator("html").evaluate("(root, size) => root.style.fontSize = size", font_size)
+                    _assert_no_page_overflow(page)
+                    header_title = document_bounds(page.locator("#dashboard-title"))
+                    new_trigger = document_bounds(new_course.locator("summary"))
+                    assert new_trigger["x"] >= header_title["x"] + header_title["width"]
+                    assert abs(
+                        (new_trigger["y"] + new_trigger["height"] / 2)
+                        - (header_title["y"] + header_title["height"] / 2)
+                    ) <= 2
+                    for action in (continue_action, review_action):
+                        bounds = action.bounding_box()
+                        assert bounds["x"] >= 0
+                        assert bounds["x"] + bounds["width"] <= width
+                    for menu in (manage, new_course):
+                        before_heading = document_bounds(page.locator("#selected-course-title"))
+                        before_action = document_bounds(continue_action)
+                        menu.locator("summary").click()
+                        _assert_no_page_overflow(page)
+                        panel = menu.locator("[data-course-menu-panel]")
+                        playwright.expect(panel).to_be_visible()
+                        bounds = panel.bounding_box()
+                        assert bounds["x"] >= 0
+                        assert bounds["x"] + bounds["width"] <= width
+                        assert document_bounds(page.locator("#selected-course-title")) == before_heading
+                        assert document_bounds(continue_action) == before_action
+                        for link in panel.locator("a").all():
+                            assert link.bounding_box()["height"] >= 44
+                        page.keyboard.press("Escape")
+                        assert menu.get_attribute("open") is None
+                page.locator("html").evaluate("root => root.style.fontSize = '100%'")
+                page.set_viewport_size({"width": 1280, "height": 800})
 
                 preview_row = page.locator(f'[data-course-slug="{preview.slug}"]')
                 preview_row.click()
@@ -1271,6 +1554,13 @@ def test_real_browser_course_library_preview_history_responsive_and_no_js(
                 playwright.expect(page.locator("[data-live-region]")).to_contain_text(
                     "Preview Course preview updated"
                 )
+                playwright.expect(page.locator(".course-next-move h3")).to_have_text("Needs setup")
+                manage.locator("summary").click()
+                assert page.get_by_role("link", name="Course settings", exact=True).get_attribute(
+                    "href"
+                ) == f"{app_url}/courses/{preview.slug}/settings"
+                page.keyboard.press("Escape")
+                assert manage.get_attribute("open") is None
 
                 page.go_back()
                 playwright.expect(
@@ -1317,12 +1607,46 @@ def test_real_browser_course_library_preview_history_responsive_and_no_js(
                 ).new_page()
                 no_js.goto(bootstrap_url)
                 no_js.goto(f"{app_url}/dashboard?course={active.slug}")
+                no_js.locator(".course-library-intro .new-course-menu > summary").click()
+                playwright.expect(no_js.get_by_role("link", name="Custom course", exact=True)).to_be_visible()
+                playwright.expect(no_js.get_by_role("link", name="Quick Learn", exact=True)).to_be_visible()
+                new_panel_bounds = no_js.locator(".new-course-menu [data-course-menu-panel]").bounding_box()
+                assert new_panel_bounds["x"] >= 0
+                assert new_panel_bounds["x"] + new_panel_bounds["width"] <= 320
+                no_js.locator(".new-course-menu > summary").click()
                 no_js.locator(f'[data-course-slug="{preview.slug}"]').click()
                 no_js.wait_for_url(f"**/dashboard?course={preview.slug}")
                 assert no_js.locator("[data-selected-course]").get_attribute(
                     "data-active-course"
                 ) == active.slug
+                no_js.locator(".course-manage-menu > summary").click()
+                playwright.expect(no_js.get_by_role("link", name="Course settings", exact=True)).to_be_visible()
+                panel_bounds = no_js.locator(".course-manage-links").bounding_box()
+                assert panel_bounds["x"] >= 0
+                assert panel_bounds["x"] + panel_bounds["width"] <= 320
+                no_js.locator(".course-path-disclosure > summary").click()
+                playwright.expect(no_js.locator(".course-path-disclosure > p")).to_be_visible()
                 _assert_no_page_overflow(no_js)
+
+                # A menu link closes before normal navigation without blocking it.
+                page.goto(f"{app_url}/dashboard?course={active.slug}")
+                manage.locator("summary").click()
+                page.evaluate(
+                    """
+                    document.addEventListener('click', event => {
+                      if (!event.target.closest('[data-course-menu-panel] a')) return;
+                      sessionStorage.setItem('course-menu-link-state', JSON.stringify({
+                        prevented: event.defaultPrevented,
+                        openMenus: document.querySelectorAll('[data-course-menu][open]').length,
+                      }));
+                    });
+                    """
+                )
+                page.get_by_role("link", name="Course settings", exact=True).click()
+                page.wait_for_url(f"**/courses/{active.slug}/settings")
+                assert page.evaluate("JSON.parse(sessionStorage.getItem('course-menu-link-state'))") == {
+                    "prevented": False, "openMenus": 0,
+                }
                 browser.close()
         finally:
             process.terminate()
@@ -1660,24 +1984,17 @@ def test_real_browser_unverified_provider_stays_in_setup(
                 empty_library = page.locator("[data-empty-course-library]")
                 playwright.expect(empty_library).to_be_visible()
                 assert page.locator(".empty-preview").count() == 0
-                creation_tiles = empty_library.locator(".creation-tile")
-                assert creation_tiles.count() >= 3
-                assert creation_tiles.first.bounding_box()["width"] >= 220
-                assert (
-                    page.locator(".course-list .new-course-menu > summary").bounding_box()[
-                        "width"
-                    ]
-                    < 260
-                )
-                assert creation_tiles.first.evaluate(
-                    "element => getComputedStyle(element).textDecorationLine"
-                ) == "none"
+                new_course = page.locator(".course-library-intro .new-course-menu > summary")
+                assert new_course.bounding_box()["width"] >= 44
+                new_course.click()
+                playwright.expect(page.get_by_role("link", name="Custom course", exact=True)).to_be_visible()
+                playwright.expect(page.get_by_role("link", name="Quick Learn", exact=True)).to_be_visible()
                 playwright.expect(page.locator("[data-theme-toggle]")).to_be_visible()
                 assert page.locator(".local-status").count() == 0
                 _assert_no_page_overflow(page)
                 assert "Technical Interview Prep" not in empty_library.inner_text()
-                creation_tiles.first.click()
-                page.wait_for_url("**/courses/new")
+                page.get_by_role("link", name="Custom course", exact=True).click()
+                page.wait_for_url("**/courses/new**")
                 assert page.locator("[data-template-choice]").count() == 0
                 assert page.locator("#course-title").input_value() == ""
                 page.goto(f"{app_url}/setup")

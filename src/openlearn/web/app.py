@@ -70,6 +70,8 @@ class WebServices(Protocol):
 
     def import_github_source(self, slug: str, url: str) -> Any: ...
 
+    def create_quick_learn(self, path: Path, filename: str, description: str) -> Any: ...
+
     def create_course(self, request: Any) -> Any: ...
 
     def course_initialization(self, slug: str, operation_id: str) -> Any: ...
@@ -89,6 +91,10 @@ class WebServices(Protocol):
     def progress(self) -> Any: ...
 
     def due_reviews(self, slug: str | None = None) -> Any: ...
+
+    def prepare_review(self, request: Any) -> Any: ...
+
+    def reveal_review(self, request: Any) -> Any: ...
 
     def grade_review(self, request: Any) -> Any: ...
 
@@ -183,6 +189,11 @@ class PlaceholderServices:
     def import_github_source(self, slug: str, url: str) -> dict[str, Any]:
         return {"ok": False, "error": "Source imports are unavailable."}
 
+    def create_quick_learn(
+        self, path: Path, filename: str, description: str
+    ) -> dict[str, Any]:
+        return {"ok": False, "error": "Quick Learn is unavailable."}
+
     def create_course(self, request: Any) -> dict[str, Any]:
         return {"ok": False, "error": "Course services are not available yet.", "fields": request}
 
@@ -219,6 +230,12 @@ class PlaceholderServices:
 
     def due_reviews(self, slug: str | None = None) -> dict[str, Any]:
         return {"items": [], "count": 0}
+
+    def prepare_review(self, request: Any) -> dict[str, Any]:
+        return {"ok": False, "error": "Review services are unavailable."}
+
+    def reveal_review(self, request: Any) -> dict[str, Any]:
+        return {"ok": False, "error": "Review services are unavailable."}
 
     def grade_review(self, request: Any) -> dict[str, Any]:
         return {"ok": False, "error": "Review services are unavailable."}

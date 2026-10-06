@@ -33,6 +33,8 @@ from .schemas import (
     ProgressionActionRequest,
     ProviderSetupRequest,
     ReviewGradeRequest,
+    ReviewPrepareRequest,
+    ReviewRevealRequest,
     TutorSubmissionRequest,
     VideoToolRequest,
     canonical_slug,
@@ -1072,6 +1074,38 @@ async def review(request: Request) -> Any:
         "review.html",
         _context(request, review=snapshot, page_title="Due review"),
     )
+
+
+@router.get("/api/review/session", response_class=JSONResponse)
+async def review_session(request: Request) -> JSONResponse:
+    slug = request.query_params.get("course")
+    if slug is not None:
+        try:
+            slug = canonical_slug(slug)
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail="Course not found") from error
+    snapshot = public_mapping(await _call(request, "due_reviews", slug))
+    return JSONResponse(snapshot)
+
+
+@router.post("/api/review/prepare", response_class=JSONResponse)
+async def prepare_review(request: Request) -> JSONResponse:
+    try:
+        payload = ReviewPrepareRequest.model_validate(await request.json())
+    except (ValidationError, ValueError):
+        return _json_error("Refresh the review and try preparation again.")
+    result = public_mapping(await _call(request, "prepare_review", payload))
+    return JSONResponse(result, status_code=409 if result.get("state") == "conflict" else 200)
+
+
+@router.post("/api/review/reveal", response_class=JSONResponse)
+async def reveal_review(request: Request) -> JSONResponse:
+    try:
+        payload = ReviewRevealRequest.model_validate(await request.json())
+    except (ValidationError, ValueError):
+        return _json_error("Refresh the review and try revealing again.")
+    result = public_mapping(await _call(request, "reveal_review", payload))
+    return JSONResponse(result, status_code=409 if result.get("state") == "conflict" else 200)
 
 
 @router.post("/api/review", response_class=JSONResponse)

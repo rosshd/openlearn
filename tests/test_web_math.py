@@ -58,7 +58,7 @@ def test_math_never_inferred_from_currency_code_or_arrays():
         "**Lesson:**\nCost is $5 and $10. Array [[1, 2], [3, 4]]. "
         r"Code `\(x\)` stays code." + "\n\n```python\n" + r"value = '\[x\]'" + "\n```"
     )
-    assert blocks[0] == {"kind": "paragraph", "text": r"Cost is $5 and $10. Array [[1, 2], [3, 4]]. Code \(x\) stays code."}
+    assert blocks[0] == {"kind": "takeaway", "text": r"Cost is $5 and $10. Array [[1, 2], [3, 4]]. Code \(x\) stays code."}
     assert blocks[1]["kind"] == "code"
     assert blocks[1]["text"] == r"value = '\[x\]'"
 
@@ -77,19 +77,19 @@ def test_multi_tick_code_keeps_inner_backtick_and_does_not_hide_later_math():
 
 def test_unclosed_delimiters_stay_readable():
     _, blocks = _present_response(r"**Lesson:** Missing \(close and \[end")
-    assert blocks == [{"kind": "paragraph", "text": r"Missing \(close and \[end"}]
+    assert blocks == [{"kind": "takeaway", "text": r"Missing \(close and \[end"}]
 
 
 @pytest.mark.parametrize("source", ["Before\n\\[\nx+1", "\\[\\]", "\\[\n\n\\]"])
 def test_incomplete_or_empty_display_stays_text(source):
     _, blocks = _present_response(source)
     assert blocks
-    assert all(block["kind"] == "paragraph" for block in blocks)
+    assert all(block["kind"] in {"paragraph", "takeaway"} for block in blocks)
 
 
 def test_display_after_paragraph_and_inline_list_math():
     _, blocks = _present_response("Before\n\\[x+1\\]\n\n- First \\(x_1\\)\n- Plain item")
-    assert blocks[0] == {"kind": "paragraph", "text": "Before"}
+    assert blocks[0] == {"kind": "takeaway", "text": "Before"}
     assert blocks[1] == {"kind": "math", "text": "x+1"}
     assert blocks[2]["item_parts"] == [[{"kind": "text", "text": "First "}, {"kind": "math", "text": "x_1"}], None]
 
@@ -99,6 +99,15 @@ def test_math_parts_do_not_repeat_section_label_and_keep_subscripts():
     assert kind == "Lesson"
     assert blocks[0]["parts"][0]["text"] == "Use "
     assert blocks[0]["parts"][1]["text"] == "x_{i_j}"
+
+
+def test_authored_emphasis_keeps_math_parts_and_safe_text():
+    _, blocks = _present_response(r"**Lesson:** **Remember** \(x_{i_j}\) and **\(y_1\)** <script>x</script>.")
+    block = blocks[0]
+    assert [part["text"] for part in block["parts"] if part["kind"] == "math"] == ["x_{i_j}", "y_1"]
+    assert [segment["text"] for segment in block["inline"] if segment["strong"]] == ["Remember", r"\(y_1\)"]
+    strong_math = next(segment for segment in block["inline"] if segment["strong"] and "parts" in segment)
+    assert strong_math["parts"] == [{"kind": "math", "text": "y_1"}]
 
 
 class MathServices(PlaceholderServices):

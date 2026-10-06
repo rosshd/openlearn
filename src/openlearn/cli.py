@@ -5525,6 +5525,8 @@ def teach_first_lesson(
                 lesson_prompt if attempt == 0 else lesson_policy.first_lesson_repair_prompt(lesson_prompt),
                 retry_status=output_func,
             )
+        except ProviderRequestError:
+            raise
         except OpenLearnError as error:
             if getattr(error, "category", None) == "qa_budget_stop":
                 raise
@@ -9258,25 +9260,87 @@ def save_quick_learn_metadata(slug: str, source_kind: str, source_label: str) ->
     write_topic(topic.path, metadata, topic.body)
 
 
-def quick_learn_from_source(
+def quick_learn_identity(
+    contexts: list[PendingContext],
+    *,
+    source_label: str,
+    description: str | None,
+    model: str | None,
+) -> tuple[str, str]:
+    """Generate a concise course identity from bounded source excerpts."""
+    excerpt_budget = 12_000
+    excerpts: list[str] = []
+    remaining = excerpt_budget
+    for context in contexts:
+        if remaining <= 0:
+            break
+        excerpt = context.text[:remaining]
+        excerpts.append(f"FILE: {context.filename}\n{excerpt}")
+        remaining -= len(excerpt)
+    fallback_name = source_label.replace("-", " ").strip() or "Quick Learn"
+    fallback_goal = (
+        description.strip()
+        if description and description.strip()
+        else f"Review the important material in {source_label}."
+    )
+    prompt = (
+        "Create a name and study goal for a Quick Learn course from the source excerpts below.\n"
+        "Return JSON only with string fields title and goal.\n"
+        "The title must be specific, plain, and no longer than 80 characters.\n"
+        "The goal must be one sentence grounded only in the source.\n"
+        f"Optional learner description: {description.strip() if description else '(none)'}\n\n"
+        + "\n\n".join(excerpts)
+    )
+    try:
+        raw = call_openai(
+            model or configured_model(),
+            "Name the course using only the supplied source. Do not invent source content.",
+            prompt,
+            max_tokens=180,
+            json_response=True,
+        )
+        parsed = json.loads(raw)
+        title = str(parsed.get("title", "")).strip()[:80]
+        generated_goal = str(parsed.get("goal", "")).strip()[:4000]
+    except (json.JSONDecodeError, OpenLearnError, TypeError, AttributeError):
+        return fallback_name, fallback_goal
+    goal = (
+        description.strip()
+        if description and description.strip()
+        else generated_goal or fallback_goal
+    )
+    return title or fallback_name, goal
+
+
+def build_quick_learn_from_source(
     source: str,
     *,
     name: str | None,
     goal: str | None,
     model: str | None,
-    input_func=input,
+    infer_identity: bool = False,
     output_func=print,
-    enter_repl: bool,
-) -> int:
+) -> str:
+    """Create and populate a Quick Learn course, returning its slug."""
     source_kind, source_label = quick_source_kind_and_label(source)
     contexts = quick_source_contexts(source, source_kind, output_func)
-    topic_name = (name or source_label.replace("-", " ")).strip()
+    if infer_identity:
+        generated_name, generated_goal = quick_learn_identity(
+            contexts,
+            source_label=source_label,
+            description=goal,
+            model=model,
+        )
+    else:
+        generated_name = source_label.replace("-", " ")
+        generated_goal = f"Prepare for an upcoming assessment using {source_label}."
+    topic_name = (name or generated_name).strip()
     if not topic_name:
         raise OpenLearnError("Quick Learn topic name cannot be empty")
     slug = slugify(topic_name)
     if topic_path(slug).exists():
         raise OpenLearnError(f"topic already exists: {slug}; choose another name with --name")
-    quick_goal = (goal or f"Prepare for an upcoming assessment using {source_label}.").strip()
+    quick_goal = (goal or generated_goal).strip()
     cmd_new(
         argparse.Namespace(
             topic=topic_name,
@@ -9314,6 +9378,27 @@ def quick_learn_from_source(
     output_func("")
     save_course_started(topic, outline_prompt, outline)
     teach_first_lesson(read_topic(slug), outline, selected_model, output_func)
+    return slug
+
+
+def quick_learn_from_source(
+    source: str,
+    *,
+    name: str | None,
+    goal: str | None,
+    model: str | None,
+    input_func=input,
+    output_func=print,
+    enter_repl: bool,
+) -> int:
+    slug = build_quick_learn_from_source(
+        source,
+        name=name,
+        goal=goal,
+        model=model,
+        output_func=output_func,
+    )
+    selected_model = model or str(read_topic(slug).metadata.get("model") or configured_model())
     if enter_repl:
         run_repl(
             topic_value=slug,
@@ -15394,6 +15479,8 @@ def normalize_review_due_metadata(metadata: dict[str, object]) -> None:
     normalized: list[dict[str, object]] = []
     seen: set[str] = set()
     for item in items:
+        last_reviewed = None
+        ebisu_model = None
         if isinstance(item, str):
             concept = item.strip()
             due = today()
@@ -15407,7 +15494,7 @@ def normalize_review_due_metadata(metadata: dict[str, object]) -> None:
             difficulty = (
                 difficulty_value
                 if isinstance(difficulty_value, str)
-                and difficulty_value in {"easy", "hard", "missed"}
+                and difficulty_value in {"easy", "hard", "good", "missed", "again"}
                 else "hard"
             )
             ebisu_model = normalized_ebisu_model(item.get("ebisu_model"))
@@ -15428,6 +15515,10 @@ def normalize_review_due_metadata(metadata: dict[str, object]) -> None:
             "due": due,
             "difficulty": difficulty,
         }
+        if isinstance(item, dict):
+            for retained in ("review_card", "review_revision", "relearn_at", "review_reveals"):
+                if retained in item:
+                    normalized_item[retained] = item[retained]
         if isinstance(item, dict) and ebisu_model is not None:
             normalized_item["ebisu_model"] = ebisu_model
         if last_reviewed is not None:
@@ -15518,7 +15609,7 @@ def schedule_review_item(
     concept = concept.strip()
     if not concept:
         return
-    if difficulty not in {"easy", "hard", "missed"}:
+    if difficulty not in {"easy", "hard", "good", "missed", "again"}:
         difficulty = "hard"
     model_state = normalized_ebisu_model(ebisu_model)
     if model_state is None:
@@ -15540,6 +15631,10 @@ def schedule_review_item(
             item["concept"] = concept
             item["due"] = due
             item["difficulty"] = difficulty
+            # Shared CLI changes invalidate any browser occurrence and reveal.
+            item.pop("review_revision", None)
+            item.pop("review_reveals", None)
+            item.pop("relearn_at", None)
             if model_state is not None:
                 item["ebisu_model"] = model_state
             else:
@@ -15566,15 +15661,15 @@ def next_review_due(difficulty: str, ebisu_model: object = None) -> str:
 
 
 def next_review_due_fixed(difficulty: str) -> str:
-    days = {"easy": 7, "hard": 2, "missed": 1}.get(difficulty, 2)
+    days = {"easy": 7, "good": 4, "hard": 2, "missed": 1, "again": 1}.get(difficulty, 2)
     return (date.fromisoformat(today()) + timedelta(days=days)).isoformat()
 
 
 # Ebisu 2.x integration. Models are stored as [alpha, beta, t] lists where t is
 # the half-life in days. A new concept starts with a half-life seeded from its
 # first difficulty; updateRecall then grows or shrinks it from review evidence.
-EBISU_INITIAL_HALFLIFE_DAYS = {"easy": 7.0, "hard": 2.0, "missed": 1.0}
-EBISU_REVIEW_OUTCOME = {"easy": (1, 1), "hard": (1, 2), "missed": (0, 1)}
+EBISU_INITIAL_HALFLIFE_DAYS = {"easy": 7.0, "good": 4.0, "hard": 2.0, "missed": 1.0, "again": 1.0}
+EBISU_REVIEW_OUTCOME = {"easy": (1, 1), "good": (1, 1), "hard": (1, 2), "missed": (0, 1), "again": (0, 1)}
 EBISU_DEFAULT_THRESHOLD = 0.5
 
 
@@ -15745,7 +15840,8 @@ def remove_known_from_review_lists(metadata: dict[str, object]) -> None:
             for item in values
             if (
                 isinstance(item, dict)
-                and concept_key(str(item.get("concept") or "")) not in known_values
+                and (concept_key(str(item.get("concept") or "")) not in known_values
+                     or isinstance(item.get("relearn_at"), str))
             )
             or (isinstance(item, str) and concept_key(item) not in known_values)
         ]
@@ -18408,6 +18504,9 @@ def system_prompt(
 
         {quick_learn_prompt}
 
+        Source teaching boundary:
+        {lesson_policy.SOURCE_TEACHING_INSTRUCTIONS}
+
         Do not keep printing full progress summaries after every answer. Mention
         progress only when it helps the learner feel oriented or encouraged.
         Vary wording naturally. Do not use the same labels or sentence pattern
@@ -18951,7 +19050,11 @@ def generation_system_prompt(topic: Topic, current_plan: str = "") -> str:
         generic CS coverage.
 
         Output only the requested material. Use plain text with short labels and
-        hyphen bullets. No Markdown headings, no decorative formatting.
+        hyphen bullets unless the request specifies a lesson format. No Markdown
+        headings, no decorative formatting.
+
+        Source teaching boundary:
+        {lesson_policy.SOURCE_TEACHING_INSTRUCTIONS}
 
         Course:
         {topic.metadata.get("topic", topic.slug)}
@@ -19226,6 +19329,13 @@ def _mock_openai_response(model: str, system: str, user: str) -> str:
     simple and deterministic for CI use when OPENLEARN_MOCK=1.
     """
     prompt = user.lower()
+    if "create a name and study goal for a quick learn course" in prompt:
+        return json.dumps(
+            {
+                "title": "Source Review",
+                "goal": "Review the important concepts in the uploaded source.",
+            }
+        )
     if "Current branch: engagement check due" in system:
         return (
             "**Check:**\nWithout adding new material, explain how you would apply the "
