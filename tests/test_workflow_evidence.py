@@ -82,3 +82,13 @@ def test_qa_environment_drops_provider_and_primary_home_settings(tmp_path, monke
     assert result["OPENLEARN_MOCK"] == "1"
     assert "OPENAI_API_KEY" not in result
     assert "OPENLEARN_PROVIDER" not in result
+
+
+@pytest.mark.parametrize("name", ["PYTEST_PLUGINS", "PYTEST_DISABLE_PLUGIN_AUTOLOAD"])
+def test_pytest_plugin_environment_invalidates_receipt(repository, monkeypatch, name):
+    monkeypatch.delenv(name, raising=False)
+    command = [sys.executable, "-c", "print('gate passed')"]
+    assert evidence.check(command) == 0
+    assert evidence.reusable(command)
+    monkeypatch.setenv(name, "fixture-plugin" if name == "PYTEST_PLUGINS" else "1")
+    assert not evidence.reusable(command)

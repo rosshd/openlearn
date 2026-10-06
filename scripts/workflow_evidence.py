@@ -19,13 +19,13 @@ RECEIPT = ROOT / ".artifacts/gate/receipt.json"
 
 
 def git(*args: str) -> str:
-    return subprocess.check_output(["git", *args], cwd=ROOT).decode().strip()
+    return subprocess.check_output(["git", "--no-optional-locks", *args], cwd=ROOT).decode().strip()
 
 
 def candidate() -> str:
     digest = sha256()
     paths = subprocess.check_output(
-        ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"], cwd=ROOT
+        ["git", "--no-optional-locks", "ls-files", "-z", "--cached", "--others", "--exclude-standard"], cwd=ROOT
     ).split(b"\0")
     for raw in sorted(set(paths) - {b""}):
         path = ROOT / os.fsdecode(raw)
@@ -57,6 +57,8 @@ def environment() -> str:
         "mock": os.environ.get("OPENLEARN_MOCK", ""),
         "learner_home": os.environ.get("OPENLEARN_HOME", ""),
         "pytest_addopts": os.environ.get("PYTEST_ADDOPTS", ""),
+        "pytest_plugins": os.environ.get("PYTEST_PLUGINS", ""),
+        "pytest_disable_plugin_autoload": os.environ.get("PYTEST_DISABLE_PLUGIN_AUTOLOAD", ""),
         "makeflags": os.environ.get("MAKEFLAGS", ""),
         "browser_path": os.environ.get("PLAYWRIGHT_BROWSERS_PATH", ""),
         "ci": os.environ.get("CI", ""),

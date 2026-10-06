@@ -10,7 +10,7 @@ import subprocess
 
 
 def git(*args: str, cwd: Path | None = None) -> str:
-    return subprocess.check_output(["git", *args], cwd=cwd, text=True).strip()
+    return subprocess.check_output(["git", "--no-optional-locks", *args], cwd=cwd, text=True).strip()
 
 
 def inventory() -> tuple[Path, dict, list[dict]]:
@@ -23,15 +23,27 @@ def inventory() -> tuple[Path, dict, list[dict]]:
         path = Path(fields["worktree"]).resolve()
         if path == common.parent.resolve():
             continue
-        owner = owners.get(str(path), {})
+        owner_path = str(path)
+        owner = owners.get(owner_path, {})
+        if not owner:
+            for recorded_path, record in owners.items():
+                if fields.get("branch") == f"refs/heads/{record.get('branch')}":
+                    owner_path, owner = recorded_path, record
+                    break
         try:
             dirty = bool(git("status", "--porcelain", cwd=path))
             merged = subprocess.run(
-                ["git", "merge-base", "--is-ancestor", "HEAD", "main"], cwd=path,
+                ["git", "--no-optional-locks", "merge-base", "--is-ancestor", "HEAD", "main"], cwd=path,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             ).returncode == 0
-            if owner.get("state") == "active":
+            if owner and owner_path != str(path):
+                state = "unresolved"
+            elif owner.get("state") == "active":
                 state = "active"
+            elif owner.get("state") == "retired" and (
+                fields.get("branch") != f"refs/heads/{owner.get('branch')}"
+            ):
+                state = "unresolved"
             elif owner.get("state") == "retired" and not dirty:
                 state = "retired"
             elif dirty or not merged:
@@ -51,6 +63,7 @@ def execute() -> None:
     parser.add_argument("issue", nargs="?")
     parser.add_argument("--base", default="main")
     parser.add_argument("--start-sha", default="HEAD")
+    parser.add_argument("--worktree")
     args = parser.parse_args()
     index, owners, rows = inventory()
     if args.action == "count":
@@ -59,9 +72,14 @@ def execute() -> None:
         for row in rows:
             print(f"  {row['state']}: {row['path']} ({row['owner'].get('task', 'unregistered')})")
     elif args.action == "can-finish":
+        if not args.worktree:
+            parser.error("can-finish requires the exact target worktree path")
+        target = str(Path(args.worktree).resolve())
         for row in rows:
             owner = row["owner"]
-            if owner.get("state") == "active" and args.task in {owner.get("branch"), owner.get("base")}:
+            if owner.get("state") == "active" and (
+                row["path"] == target or args.task in {owner.get("branch"), owner.get("base")}
+            ):
                 parser.error("branch still has an active owner or registered child dependency")
     else:
         path = git("rev-parse", "--show-toplevel")
@@ -75,7 +93,9 @@ def execute() -> None:
             if owners.get(path, {}).get("state") == "active" and owners[path]["task"] != args.task:
                 parser.error("worktree already has a different active owner")
             start_sha = git("rev-parse", "--verify", f"{args.start_sha}^{{commit}}")
-            if subprocess.run(["git", "merge-base", "--is-ancestor", start_sha, "HEAD"]).returncode:
+            if subprocess.run([
+                "git", "--no-optional-locks", "merge-base", "--is-ancestor", start_sha, "HEAD",
+            ]).returncode:
                 parser.error("start SHA must be an ancestor of this candidate")
             owners[path] = {
                 "task": args.task, "issue": args.issue, "state": "active",

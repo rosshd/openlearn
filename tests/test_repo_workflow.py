@@ -166,6 +166,36 @@ class RepoWorkflowTests(unittest.TestCase):
         self.assertIn("active owner", denied.stderr)
         self.assertTrue((self.repo / ".worktrees/active").exists())
 
+    def test_finish_preserves_active_checkout_after_branch_switch(self) -> None:
+        self.workflow("start", "docs", "active")
+        worktree = self.repo / ".worktrees/active"
+        self.workflow_from(worktree, "register", "owner",
+                           "https://github.com/rosshd/openlearn/issues/114")
+        self.git("switch", "-c", "docs/switched", cwd=worktree)
+        denied = self.workflow("finish", "active", check=False)
+        self.assertNotEqual(denied.returncode, 0)
+        self.assertIn("active owner", denied.stderr)
+        self.assertTrue(worktree.exists())
+        self.assertIn("docs/switched", self.git("branch", "--format=%(refname:short)").stdout)
+
+    def test_retired_owner_with_changed_branch_is_unresolved(self) -> None:
+        self.workflow("start", "docs", "retired")
+        worktree = self.repo / ".worktrees/retired"
+        self.workflow_from(worktree, "register", "owner",
+                           "https://github.com/rosshd/openlearn/issues/114")
+        self.workflow_from(worktree, "retire")
+        self.git("switch", "-c", "docs/reused", cwd=worktree)
+        self.assertIn("unresolved", self.workflow("status").stdout)
+
+    def test_retired_owner_with_moved_path_is_unresolved(self) -> None:
+        self.workflow("start", "docs", "retired")
+        worktree = self.repo / ".worktrees/retired"
+        self.workflow_from(worktree, "register", "owner",
+                           "https://github.com/rosshd/openlearn/issues/114")
+        self.workflow_from(worktree, "retire")
+        self.git("worktree", "move", str(worktree), str(self.repo / ".worktrees/moved"))
+        self.assertIn("unresolved", self.workflow("status").stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -66,9 +66,9 @@ status() {
   "${PYTHON:-python3}" "$(dirname "$0")/worktree_owners.py" status
   while IFS= read -r path; do
     local summary
-    summary="$(git -C "$path" status --short --branch | sed -n '1p')"
+    summary="$(git --no-optional-locks -C "$path" status --short --branch | sed -n '1p')"
     printf '  %s  %s\n' "$path" "$summary"
-    if [ -n "$(git -C "$path" status --porcelain)" ]; then
+    if [ -n "$(git --no-optional-locks -C "$path" status --porcelain)" ]; then
       echo "    dirty"
     fi
   done < <(git -C "$root" worktree list --porcelain | sed -n 's/^worktree //p')
@@ -143,7 +143,7 @@ finish_worktree() {
     echo "Expected a feature branch in $path, found: ${branch:-detached HEAD}" >&2
     exit 1
   fi
-  if [ -n "$(git -C "$path" status --porcelain)" ]; then
+  if [ -n "$(git --no-optional-locks -C "$path" status --porcelain)" ]; then
     echo "Worktree is dirty and will not be removed: $path" >&2
     exit 1
   fi
@@ -151,7 +151,7 @@ finish_worktree() {
     echo "Branch is not merged into main and will not be removed: $branch" >&2
     exit 1
   fi
-  "${PYTHON:-python3}" "$(dirname "$0")/worktree_owners.py" can-finish "$branch"
+  "${PYTHON:-python3}" "$(dirname "$0")/worktree_owners.py" can-finish "$branch" --worktree "$path"
 
   git -C "$root" worktree remove "$path"
   git -C "$root" branch -d "$branch"
