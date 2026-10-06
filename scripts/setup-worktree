@@ -9,7 +9,8 @@ command -v uv >/dev/null || { echo 'Install uv, then rerun scripts/setup-worktre
 if [ ! -d .venv ]; then
   uv venv --python '>=3.11,<3.14' .venv
 fi
-uv pip install --python .venv/bin/python -e '.[dev]'
+# Package regression tests invoke python -m pip even when uv owns installation.
+uv pip install --python .venv/bin/python 'pip>=25,<27' -e '.[dev]'
 if [ "${1:-}" = "--browser" ]; then
   .venv/bin/python -m playwright install chromium
 fi

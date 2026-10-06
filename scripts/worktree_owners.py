@@ -50,6 +50,7 @@ def execute() -> None:
     parser.add_argument("task", nargs="?")
     parser.add_argument("issue", nargs="?")
     parser.add_argument("--base", default="main")
+    parser.add_argument("--start-sha", default="HEAD")
     args = parser.parse_args()
     index, owners, rows = inventory()
     if args.action == "count":
@@ -73,9 +74,12 @@ def execute() -> None:
                 parser.error("issue must be a canonical OpenLearn GitHub issue URL")
             if owners.get(path, {}).get("state") == "active" and owners[path]["task"] != args.task:
                 parser.error("worktree already has a different active owner")
+            start_sha = git("rev-parse", "--verify", f"{args.start_sha}^{{commit}}")
+            if subprocess.run(["git", "merge-base", "--is-ancestor", start_sha, "HEAD"]).returncode:
+                parser.error("start SHA must be an ancestor of this candidate")
             owners[path] = {
                 "task": args.task, "issue": args.issue, "state": "active",
-                "branch": git("branch", "--show-current"), "start_sha": git("rev-parse", "HEAD"),
+                "branch": git("branch", "--show-current"), "start_sha": start_sha,
                 "base": args.base,
             }
         else:

@@ -113,13 +113,15 @@ class RepositoryContractTests(unittest.TestCase):
         agent_map = read(REPOSITORY / "AGENTS.md")
         runbook = read(REPOSITORY / "docs" / "AGENT_RUNS.md")
 
-        check_target = re.search(r"(?m)^check:\s+(.+)$", makefile)
-        self.assertIsNotNone(check_target)
-        assert check_target is not None
+        self.assertRegex(makefile, r"(?m)^check:\n\t.*workflow_evidence\.py check")
+        gate_target = re.search(r"(?m)^gate:[ \t]+(.+)$", makefile)
+        self.assertIsNotNone(gate_target)
+        assert gate_target is not None
         self.assertTrue(
-            {"lint", "pytest", "smoke", "e2e"}.issubset(check_target.group(1).split())
+            {"lint", "pytest", "smoke", "e2e"}.issubset(gate_target.group(1).split())
         )
         self.assertRegex(makefile, r"(?m)^review:$")
+        self.assertRegex(makefile, r"(?m)^review:\n\t.*workflow_evidence\.py review")
         self.assertIn("`make check` is the one canonical local gate.", agent_map)
         self.assertIn("`make review` is an optional evidence collector.", agent_map)
         self.assertIn("running it is not an independent review", runbook)
