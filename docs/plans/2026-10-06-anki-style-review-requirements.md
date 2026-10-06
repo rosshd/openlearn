@@ -13,7 +13,7 @@ Ross explicitly selected answer reveal and self-rating only, without typed answe
 ## Decisions
 
 1. Present one review card at a time with a specific question and a hidden reference answer.
-   Show Answer reveals the answer and a short explanation of the essential distinction or reasoning.
+   Show answer and explanation reveals the answer and a short explanation of the essential distinction or reasoning.
    Ratings become available only after reveal.
    A learner who cannot recall the answer can reveal immediately and choose Again.
 2. Use Again, Hard, Good, and Easy.
@@ -48,7 +48,7 @@ This example illustrates the interaction; its final wording must be checked agai
 - Back: An outlier is an observation unusually far from the overall pattern and can be valid.
   Noise is unwanted variation or error that obscures the signal.
   Being unusual alone does not establish that an observation is noise.
-- Feedback: Compare whether your answer distinguished unusual observations from unwanted variation and allowed for valid outliers.
+- Explanation: An unusual observation may reflect a real rare event; it is not automatically a measurement error or unwanted variation.
 - Controls after reveal: Again, Hard, Good, Easy, with the corresponding next review times.
 
 ## Scope and non-goals
@@ -118,20 +118,25 @@ Skip affects this page session only and never changes storage or schedule.
 ### Question and reveal
 
 The panel shows course name as an eyebrow, concept as secondary context, and the actual question as its h2.
-Show Answer is the primary action, with Space to show answer as a quiet hint.
+Show answer and explanation is the primary action.
+Keep keyboard shortcuts available through accessible labels and control hints without separate visible instruction paragraphs.
 The initial HTML and queue response must not include reference answers or source excerpts.
-On reveal, retain the question and add a separated Reference answer section followed by Check your recall.
-Use the saved answer and short explanation, plus a collapsed Source disclosure with bounded source labels and supporting excerpts.
+On reveal, retain the question and add one readable Answer section with the saved answer and a brief conceptual explanation.
+Do not show source disclosures, a recall checklist, or self-rating instruction paragraphs on rapid-review cards.
+Use comfortable line height, a constrained text measure, clear paragraph spacing, and a prominent answer with explanation beneath it.
+New card preparation must produce conceptual reasoning or a relevant example instead of instructions to check recall.
+Mark new explanations as conceptual; retain older saved answers and provenance, but omit their legacy checklist explanations from presentation.
+Source references remain stored for grounding and validation.
 Render all generated/source text as escaped plain text, never raw HTML.
-Show Rate what you recalled before revealing the answer above the ratings.
 Do not show correct/incorrect badges, scores, or mastery claims.
 
 ### Rating controls
 
 Use four equally sized secondary buttons in this order: Again, Hard, Good, Easy.
-Each button shows the label, backend interval preview, and short meaning.
+Each button shows only the rating label and backend interval preview.
+Keep the rating meaning available in accessible labels and tooltips.
 Again means Forgotten or incorrect; Hard means Correct with difficulty; Good means Correct with effort; Easy means Correct with little effort.
-Show the hint 1 Again · 2 Hard · 3 Good · 4 Easy.
+Expose the 1 through 4 shortcuts accessibly without a separate visible hint paragraph.
 Saving disables all competing panel actions until the result is known.
 A successful HTTP response is insufficient: require an explicit committed result before advancing.
 
