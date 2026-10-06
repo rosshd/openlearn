@@ -153,6 +153,7 @@ def test_default_web_app_runs_setup_dashboard_course_and_tutor_flow(
 
     new_course = client.get("/courses/new")
     assert "Starter courses" not in new_course.text
+    assert "Technical Interview Prep" not in new_course.text
     token = new_course.cookies["openlearn_csrf"]
     create = client.post(
         "/api/courses",
@@ -1255,7 +1256,7 @@ def test_unknown_follow_up_status_uses_stable_not_found_envelope(
     }
 
 
-def test_empty_dashboard_offers_only_custom_and_quick_learn_creation(
+def test_empty_dashboard_offers_custom_source_and_quick_learn_creation(
     client: TestClient,
 ) -> None:
     response = client.get("/dashboard")
@@ -1264,6 +1265,9 @@ def test_empty_dashboard_offers_only_custom_and_quick_learn_creation(
     assert "Technical Interview Prep" not in response.text
     assert "Starter course" not in response.text
     assert "Custom course" in response.text
+    assert "Computer Networking" not in response.text
+    assert "Starter course" not in response.text
+    assert "Source course" in response.text
     assert "Quick Learn" in response.text
     assert "Choose a starting point" not in response.text
     assert 'data-empty-course-library' in response.text
@@ -1274,7 +1278,7 @@ def test_empty_dashboard_offers_only_custom_and_quick_learn_creation(
     assert 'class="utilities-menu"' not in response.text
 
 
-def test_legacy_starter_endpoint_starts_once_and_enters_placement(
+def test_internal_starter_start_remains_idempotent_while_hidden(
     client: TestClient,
 ) -> None:
     dashboard = client.get("/dashboard")
@@ -1284,6 +1288,8 @@ def test_legacy_starter_endpoint_starts_once_and_enters_placement(
 
     assert dashboard.status_code == 200
     assert start_path not in dashboard.text
+    assert f'{start_path}"' not in dashboard.text
+    assert "/courses/new?template=technical-interview-prep" not in dashboard.text
 
     first = client.post(
         start_path,
@@ -1321,7 +1327,7 @@ def test_legacy_starter_endpoint_starts_once_and_enters_placement(
     assert len(application.dashboard().courses) == 1
 
 
-def test_provider_setup_resumes_non_interview_starter_without_creation_form(
+def test_stale_preset_resume_returns_to_own_topic_without_creating_course(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1352,10 +1358,11 @@ def test_provider_setup_resumes_non_interview_starter_without_creation_form(
     resume = client.get(resume_path)
 
     assert resume.status_code == 200
-    assert f'{start_path}"' in resume.text
-    assert f'value="{submission_id}"' in resume.text
-    assert "Continue to Computer Networking" in resume.text
-    assert "data-starter-resume-form" in resume.text
+    assert resume.url.path.endswith("/courses/new")
+    assert "Computer Networking" not in resume.text
+    assert "data-starter-resume-form" not in resume.text
+    assert 'name="template_id" value=""' in resume.text
+    assert application.dashboard().courses == ()
 
     assert client.get(
         f"/courses/starters/not-a-template/resume?submission_id={submission_id}"
@@ -1565,67 +1572,17 @@ def test_course_creation_has_a_no_javascript_form_fallback(client: TestClient) -
     assert "/placement" in created.headers["location"] or "/setup" in created.headers["location"]
 
 
-def test_new_course_page_omits_starter_catalog(client: TestClient) -> None:
+def test_creation_hides_catalog_and_ignores_old_template_links(
+    client: TestClient,
+) -> None:
     page = client.get("/courses/new")
 
-    assert page.status_code == 200
-    assert "Starter courses" not in page.text
-    assert "Course name" in page.text
-    assert "Your goal" in page.text
-
-
-def test_quick_learn_page_is_source_first(client: TestClient) -> None:
-    page = client.get("/quick-learn")
-
-    assert page.status_code == 200
-    assert "Choose a source file" in page.text
-    assert "Optional" in page.text
-    assert "Course name" not in page.text
-    assert "Starter courses" not in page.text
-
-
-def test_quick_learn_upload_names_and_builds_review(client: TestClient) -> None:
-    page = client.get("/quick-learn")
-    response = client.post(
-        "/api/quick-learn",
-        headers={"x-csrf-token": page.cookies["openlearn_csrf"]},
-        files={"file": ("networking-notes.md", b"# TCP\nConnections use a handshake.")},
-        data={"description": "Focus on exam review."},
-    )
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["title"] == "Source Review"
-    assert body["focus_url"].endswith("/courses/source-review")
-    topic = cli.read_topic("source-review")
-    assert topic.metadata["learning_mode"] == "quick"
-    assert topic.metadata["goal"] == "Focus on exam review."
-
-
-def test_quick_learn_provider_credentials_failure_returns_setup(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    services = client.app.state.services
-    monkeypatch.setattr(
-        services,
-        "create_quick_learn",
-        lambda *_args: {
-            "ok": False,
-            "state": "setup_required",
-            "error": "Provider credentials were rejected.",
-        },
-    )
-    page = client.get("/quick-learn")
-    response = client.post(
-        "/api/quick-learn",
-        headers={"x-csrf-token": page.cookies["openlearn_csrf"]},
-        files={"file": ("notes.md", b"# Notes")},
-        data={"description": ""},
-    )
-
-    assert response.status_code == 428
-    assert response.json()["state"] == "setup_required"
-    assert "/setup?next=" in response.json()["setup_url"]
+    assert "Technical Interview Prep" not in page.text
+    assert "Computer Networking" not in page.text
+    assert 'data-template-choice' not in page.text
+    old_link = client.get("/courses/new?template=technical-interview-prep")
+    assert 'name="template_id" value=""' in old_link.text
+    assert 'placeholder="A topic you want to understand" value=""' in old_link.text
 
 
 def test_data_page_is_read_only_and_data_mutations_require_csrf(client: TestClient) -> None:
@@ -2334,7 +2291,7 @@ def test_unverified_provider_allows_provider_free_course_browsing(
     assert browsing_client.get("/dashboard", follow_redirects=False).status_code == 200
     starters = browsing_client.get("/courses/new", follow_redirects=False)
     assert starters.status_code == 200
-    assert "Technical Interview Prep" in starters.text
+    assert "Technical Interview Prep" not in starters.text
 
 
 def test_provider_setup_preserves_safe_model_backed_destination(
@@ -2600,10 +2557,12 @@ def test_unverified_setup_stays_on_setup_and_blocks_teaching(
         },
     )
 
-    for response in (create, turn):
-        assert response.status_code == 428
-        assert response.json()["state"] == "setup_required"
-        assert response.json()["setup_url"].endswith("/setup")
+    assert create.status_code == 503
+    assert create.json()["state"] == "provider_error"
+    assert "setup_url" not in create.json()
+    assert turn.status_code == 428
+    assert turn.json()["state"] == "setup_required"
+    assert turn.json()["setup_url"].endswith("/setup")
     assert not (tmp_path / "learning-topics" / "must-not-be-created.md").exists()
 
 
@@ -2851,7 +2810,7 @@ def test_skip_placement_does_not_hide_adapter_internal_type_error() -> None:
         )
 
 
-def test_lesson_client_has_no_video_state_or_handlers() -> None:
+def test_removed_tools_have_no_frontend_launch_handlers() -> None:
     javascript = (
         Path(__file__).resolve().parents[1]
         / "src"
@@ -2864,6 +2823,9 @@ def test_lesson_client_has_no_video_state_or_handlers() -> None:
     assert "videoRequestGeneration" not in javascript
     assert "data-video-" not in javascript
     assert '"video"' not in javascript
+    assert '["chat", "sources", "options"]' in javascript
+    for removed in ("data-video-form", "data-video-load", "data-code-run", "data-code-save", "codeDirty"):
+        assert removed not in javascript
 
 
 def test_outline_change_is_previewed_before_confirm_and_retries_one_submission() -> None:
@@ -3755,7 +3717,7 @@ def test_initialization_refresh_recovers_orphaned_saved_operation(
     assert operation_id in focus.headers["location"]
 
 
-def test_focus_excludes_video_and_keeps_remaining_tools(
+def test_focus_exposes_supported_optional_tools_without_opening_one(
     client: TestClient,
 ) -> None:
     slug = create_tool_course()
@@ -3763,15 +3725,10 @@ def test_focus_excludes_video_and_keeps_remaining_tools(
     response = client.get(f"/courses/{slug}")
 
     assert response.status_code == 200
-    assert 'data-tool-open="chat"' in response.text
-    assert 'data-tool-open="code"' in response.text
+    assert 'data-tool-open="code"' not in response.text
     assert 'data-tool-open="video"' not in response.text
-    assert 'data-tool-panel="video"' not in response.text
-    assert 'data-video-' not in response.text
-    assert "YouTube" not in response.text
     assert 'data-tool-open="sources"' in response.text
-    assert 'data-drawer-toggle="progress-drawer"' in response.text
-    assert 'data-drawer-toggle="history-drawer"' in response.text
+    assert 'data-tool-open="options"' in response.text
     assert 'data-tool-surface hidden' in response.text
 
 
@@ -4016,6 +3973,47 @@ def test_source_tool_rejects_likely_secrets_without_echoing_or_persisting(
     ]
     assert secret not in response.text
     assert list(cli.context_source_files(slug)) == []
+
+
+@pytest.mark.parametrize("url,is_pages", [
+    ("https://mwang808.github.io/MathDrive/m3260/math3260-fall2026.html", True),
+    ("https://MWANG808.GITHUB.IO/MathDrive/", True),
+    ("https://github.io/course", False),
+    ("https://mwang808.github.io.attacker.example/course", False),
+    ("https://github.com/owner", False),
+    ("not a URL", False),
+    ("https://[broken", False),
+])
+def test_source_tool_rejects_webpages_and_malformed_repository_urls(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    url: str, is_pages: bool,
+) -> None:
+    slug = create_tool_course()
+    token = csrf(client, f"/courses/{slug}")
+    before = {path.relative_to(tmp_path): path.read_bytes()
+              for path in tmp_path.rglob("*") if path.is_file()}
+    monkeypatch.setattr(cli, "quick_source_contexts",
+                        lambda *_args, **_kwargs: pytest.fail("unexpected source fetch"))
+    monkeypatch.setattr(cli, "call_openai",
+                        lambda **_kwargs: pytest.fail("unexpected provider call"))
+
+    response = client.post(
+        f"/api/courses/{slug}/tools/sources/github",
+        headers={"x-csrf-token": token}, json={"url": url},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["imported"] == []
+    message = response.json()["failed"][0]["message"]
+    if is_pages:
+        assert "GitHub Pages webpage, not a repository" in message
+        assert "Upload a file" in message
+        assert "export PowerPoint slides to PDF" in message
+    else:
+        assert message == "Enter a public GitHub repository URL."
+    after = {path.relative_to(tmp_path): path.read_bytes()
+             for path in tmp_path.rglob("*") if path.is_file()}
+    assert after == before
 
 
 def test_source_tool_public_github_route_is_shallow_and_inert(

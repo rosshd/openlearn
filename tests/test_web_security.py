@@ -196,7 +196,7 @@ def test_every_normal_response_has_browser_security_headers(client: TestClient) 
     assert "SameSite=Strict" in response.headers["set-cookie"]
 
 
-def test_lesson_client_does_not_create_video_iframes() -> None:
+def test_lesson_tools_cannot_launch_external_video_frames() -> None:
     script = (
         Path(__file__).parents[1]
         / "src"
@@ -208,9 +208,12 @@ def test_lesson_client_does_not_create_video_iframes() -> None:
 
     assert 'createElement("iframe")' not in script
     assert "youtube-nocookie.com" not in script
+    assert 'document.createElement("iframe")' not in script
+    assert "youtube-nocookie.com" not in script
+    assert "data-video-load" not in script
 
 
-def test_code_output_rendering_preserves_whitespace() -> None:
+def test_lesson_code_rendering_preserves_plain_text_and_whitespace() -> None:
     script = (
         Path(__file__).parents[1]
         / "src"
@@ -220,8 +223,14 @@ def test_code_output_rendering_preserves_whitespace() -> None:
         / "openlearn.js"
     ).read_text(encoding="utf-8")
 
-    assert '.join("\\n").trim()' not in script
-    assert "output.length ? output" in script
+    code_rendering = script[
+        script.index('if (block.kind === "code")'):
+        script.index('} else if (block.kind === "unordered_list"')
+    ]
+    assert 'document.createElement("pre")' in code_rendering
+    assert 'code.textContent = block.text || ""' in code_rendering
+    assert "innerHTML" not in code_rendering
+    assert ".trim(" not in code_rendering
 
 
 def test_rejects_unknown_host_with_security_headers(client: TestClient) -> None:

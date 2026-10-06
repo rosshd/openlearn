@@ -1,10 +1,15 @@
 {% extends "base.html" %}
+{% from "components/math.html" import expression, text_parts %}
+{% block presentation_scripts %}
+<script src="{{ url_for('static', path='/vendor/katex/katex.min.js') }}" defer></script>
+<script src="{{ url_for('static', path='/math-renderer.js') }}" defer></script>
+{% endblock %}
 {% macro prose(block) -%}
   {%- if block.inline -%}
     {%- for segment in block.inline -%}
-      {%- if segment.strong -%}<strong>{{ segment.text }}</strong>{%- else -%}{{ segment.text }}{%- endif -%}
+      {%- if segment.strong -%}<strong>{{ text_parts(segment.text, segment.parts) }}</strong>{%- else -%}{{ text_parts(segment.text, segment.parts) }}{%- endif -%}
     {%- endfor -%}
-  {%- else -%}{{ block.text }}{%- endif -%}
+  {%- else -%}{{ text_parts(block.text, block.parts) }}{%- endif -%}
 {%- endmacro %}
 {% macro tool_icon(path) -%}
 <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ path }}"/></svg>
@@ -15,7 +20,8 @@
   <a href="{{ url_for('dashboard') }}" class="exit-link">← Dashboard</a>
   <div class="focus-identity">
     <strong>{{ course.title }}</strong>
-    <span>{{ course.current_unit or course.unit or 'Current lesson' }}</span>
+    {% set unit_label = course.current_unit or course.unit or 'Current lesson' %}
+    {% if unit_label|trim|lower != course.title|trim|lower %}<span>{{ unit_label }}</span>{% endif %}
   </div>
   <span class="saved-state" data-saved-state><span aria-hidden="true"></span>{{ course.saved_state or 'Saved locally' }}</span>
 </div>
@@ -26,21 +32,32 @@
   <aside class="tool-rail" aria-label="Lesson tools">
     <p class="rail-caption">Lesson tools</p>
     <button type="button" class="rail-button" data-tool-open="chat" aria-expanded="false" aria-controls="learning-tool-surface">{{ tool_icon('M4 4h16v12H9l-5 4V4 M8 8h8 M8 12h5') }} Chat</button>
-    <button type="button" class="rail-button" data-tool-open="code" aria-expanded="false" aria-controls="learning-tool-surface">{{ tool_icon('m7 6-5 6 5 6 m10-12 5 6-5 6 M14 4l-4 16') }} Code</button>
     <button type="button" class="rail-button" data-tool-open="sources" aria-expanded="false" aria-controls="learning-tool-surface">{{ tool_icon('M5 2h9l5 5v15H5V2 M14 2v5h5 M9 12h6 M9 16h6') }} Sources</button>
+    <button type="button" class="rail-button" data-tool-open="options" aria-expanded="false" aria-controls="learning-tool-surface">{{ tool_icon('M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8 M12 2v3 M12 19v3 M2 12h3 M19 12h3 M5 5l2 2 M17 17l2 2 M5 19l2-2 M17 7l2-2') }} Options</button>
     <button type="button" class="rail-button" data-drawer-toggle="progress-drawer" aria-expanded="false" aria-controls="progress-drawer">{{ tool_icon('M5 20V11 M12 20V4 M19 20V8') }} Progress</button>
     <button type="button" class="rail-button" data-drawer-toggle="history-drawer" aria-expanded="false" aria-controls="history-drawer">{{ tool_icon('M3 11a9 9 0 1 1 2 7 M3 4v7h7 M12 7v5l3 2') }} History</button>
   </aside>
 
   <section class="focus-column" aria-labelledby="move-title">
-    {% if course.feedback %}
-    <aside class="feedback-strip {{ course.feedback.tone or '' }}" aria-label="Tutor feedback">
-      <strong>{{ course.feedback.label or 'Tutor note' }}</strong>
-      <p>{{ course.feedback.content }}</p>
-    </aside>
-    {% endif %}
-
+    {% if course.source_start %}<p class="field-note">Your source is saved locally. Ask for your first source lesson in Chat, then review and approve the screened request. Source mode requires the selected DeepSeek model on OpenRouter.</p>{% endif %}
+    <dialog data-source-preview aria-labelledby="source-preview-title">
+      <h2 id="source-preview-title">Review screened tutor request</h2>
+      <div class="dialog-request" tabindex="0" role="region" aria-label="Screened request and disclosure">
+        <p data-source-disclosure></p>
+        <pre data-source-preview-text></pre>
+      </div>
+      <div class="dialog-actions">
+        <button class="secondary-action" type="button" data-source-cancel>Cancel</button>
+        <button class="primary-action compact" type="button" data-source-send>Send screened request</button>
+      </div>
+    </dialog>
     <article class="move-surface" data-current-move data-move-type="{{ course.move.kind|lower }}">
+      {% if course.feedback %}
+      <aside class="feedback-strip {{ course.feedback.tone or '' }}" aria-label="Tutor feedback">
+        <strong>{{ course.feedback.label or 'Tutor note' }}</strong>
+        <p>{{ course.feedback.content }}</p>
+      </aside>
+      {% endif %}
       <div class="move-header">
         <p class="eyebrow" data-move-kind>{{ course.move.kind or 'Current move' }}</p>
         <span class="move-number">{{ course.move.position or course.position or 'Now' }}</span>
@@ -52,9 +69,10 @@
           {% elif block.kind == 'takeaway' %}<p class="slide-takeaway">{{ prose(block) }}</p>
           {% elif block.kind == 'example' %}<section class="slide-example"><span>Example</span><p>{{ prose(block) }}</p></section>
           {% elif block.kind == 'definition' %}<aside class="term-note"><strong>{{ block.term }}</strong><span>{{ block.text }}</span></aside>
-          {% elif block.kind == 'unordered_list' %}<ul>{% for item in block['items'] %}<li>{{ item }}</li>{% endfor %}</ul>
-          {% elif block.kind == 'ordered_list' %}<ol>{% for item in block['items'] %}<li>{{ item }}</li>{% endfor %}</ol>
+          {% elif block.kind == 'unordered_list' %}<ul>{% for item in block['items'] %}<li>{{ text_parts(item, block.item_parts[loop.index0] if block.item_parts else none) }}</li>{% endfor %}</ul>
+          {% elif block.kind == 'ordered_list' %}<ol>{% for item in block['items'] %}<li>{{ text_parts(item, block.item_parts[loop.index0] if block.item_parts else none) }}</li>{% endfor %}</ol>
           {% elif block.kind == 'code' %}<pre><code{% if block.language %} data-language="{{ block.language }}"{% endif %}>{{ block.text }}</code></pre>
+          {% elif block.kind == 'math' %}{{ expression(block.text, true) }}
           {% endif %}
         {% endfor %}
         {% if course.move.content %}<p>{{ course.move.content }}</p>{% endif %}
@@ -129,7 +147,6 @@
   <aside class="learning-tool" id="learning-tool-surface" data-tool-surface hidden aria-labelledby="learning-tool-title">
     <header class="learning-tool-header">
       <div>
-        <p class="eyebrow">Dual Surface</p>
         <h2 id="learning-tool-title" data-tool-title>Learning tool</h2>
       </div>
       <button class="drawer-close" type="button" data-tool-close aria-label="Close learning tool">×</button>
@@ -154,7 +171,7 @@
         <input type="hidden" name="source_lesson_revision" value="{{ course.revision or 0 }}">
         {% endif %}
         <label for="chat-question">Your question</label>
-        <textarea id="chat-question" name="text" rows="4" maxlength="32000" autocomplete="off" required placeholder="What would you like clarified?"></textarea>
+        <textarea id="chat-question" name="text" rows="4" maxlength="32000" autocomplete="off" required placeholder="{{ 'Ask about a concept in your source.' if course.source_start else 'What would you like clarified?' }}"></textarea>
         <div class="tool-actions">
           <button class="primary-action compact" type="submit" data-chat-submit>Ask tutor</button>
         </div>
@@ -162,24 +179,15 @@
       </form>
     </section>
 
-    <section class="tool-panel" data-tool-panel="code" hidden aria-labelledby="code-tool-title">
-      <h3 id="code-tool-title">Python workbench</h3>
-      <p class="quiet-copy">A plain editor with no autocomplete. Running is explicit and does not change mastery.</p>
-      <label for="code-draft">Python draft</label>
-      <textarea id="code-draft" class="code-editor" rows="18" maxlength="50000" spellcheck="false" autocomplete="off" data-code-draft></textarea>
-      <div class="tool-actions">
-        <button class="primary-action compact" type="button" data-code-run>Run draft</button>
-        <button type="button" data-code-save>Save</button>
-        <button type="button" data-code-reset>Reset</button>
-      </div>
-      <div class="code-result" data-code-result hidden>
-        <div class="panel-heading"><h3>Run result</h3><span data-code-result-kind></span></div>
-        <pre><code data-code-output></code></pre>
-      </div>
+    <section class="tool-panel" data-tool-panel="options" hidden aria-labelledby="options-tool-title">
+      <h3 class="sr-only" id="options-tool-title">Source use and settings</h3>
+      <label class="check-row"><input type="checkbox" data-source-mode{% if course.source_start %} checked{% endif %}> Use screened class sources for this turn</label>
+      <a class="quiet-link" href="{{ url_for('course_settings', slug=course.slug) }}">Course settings</a>
+      <a class="quiet-link" href="{{ url_for('setup') }}">Tutor settings</a>
     </section>
 
     <section class="tool-panel" data-tool-panel="sources" hidden aria-labelledby="sources-tool-title">
-      <h3 id="sources-tool-title">Course sources</h3>
+      <h3 class="sr-only" id="sources-tool-title">Import sources</h3>
       <p class="quiet-copy">Imports are stored and processed locally, bounded, deduplicated, and never executed. When the tutor uses a source later, selected excerpts may be sent to your configured model provider.</p>
       <form class="tool-form" data-source-file-form>
         <label for="source-file">File</label>

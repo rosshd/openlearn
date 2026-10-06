@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import re
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, TypeAlias
+from urllib.parse import urlsplit
 
 from openlearn import cli
 from openlearn.constants import QUICK_LEARN_MAX_FILE_BYTES
@@ -101,6 +103,7 @@ class CourseSource:
     context_file: str
     summary_file: str
     checksum: str
+    context_checksum: str | None = None
 
 
 @dataclass(frozen=True)
@@ -194,13 +197,28 @@ def _import_github(
     course_slug: str, source: PublicGitHubSource, model: str | None
 ) -> CourseSourceImportResult:
     kind: SourceKind = "github"
-    parts = cli.github_repository_parts(source.url)
+    try:
+        parts = cli.github_repository_parts(source.url)
+    except ValueError:
+        parts = None
     if parts is None:
+        message = "Enter a public GitHub repository URL."
+        try:
+            host = urlsplit(source.url).hostname or ""
+        except ValueError:
+            host = ""
+        if host.endswith(".github.io"):
+            message = (
+                "This is a GitHub Pages webpage, not a repository URL. "
+                "Webpage imports are not supported here. Download the specific class "
+                "material and use Upload a file (.txt, .md, .pdf or .docx); "
+                "export PowerPoint slides to PDF first."
+            )
         return _failure(
             course_slug,
             kind,
             "Public GitHub repository",
-            "Enter a public GitHub repository URL.",
+            message,
         )
     label = f"{parts[0]}/{parts[1]}"
     canonical_url = f"https://github.com/{parts[0]}/{parts[1]}"
@@ -266,6 +284,7 @@ def _import_context(
                 context_file=saved.name,
                 summary_file=summary.name,
                 checksum=checksum,
+                context_checksum=hashlib.sha256(saved.read_bytes()).hexdigest(),
             ),
         )
         if not persisted:
@@ -315,6 +334,7 @@ def _persist_source(course_slug: str, source: CourseSource) -> bool:
                 "context_file": source.context_file,
                 "summary_file": source.summary_file,
                 "checksum": source.checksum,
+                "context_checksum": source.context_checksum,
             }
         )
         metadata[COURSE_SOURCES_METADATA_KEY] = sources
@@ -350,6 +370,11 @@ def _parse_source(value: object) -> CourseSource | None:
         context_file=str(fields["context_file"]),
         summary_file=str(fields["summary_file"]),
         checksum=str(fields["checksum"]),
+        context_checksum=(
+            value["context_checksum"]
+            if isinstance(value.get("context_checksum"), str)
+            else None
+        ),
     )
 
 

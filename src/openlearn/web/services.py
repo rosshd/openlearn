@@ -18,6 +18,7 @@ from openlearn import (
     lesson_policy,
     providers,
     review_cards,
+    source_context,
     source_imports,
     tutor_service,
     video_tools,
@@ -31,6 +32,7 @@ from openlearn.application import (
 )
 from openlearn.course_templates import CourseTemplateError
 from openlearn.courses import (
+    CALIBRATION_STATE_KEY,
     CREATION_SUBMISSION_METADATA_KEY,
     CREATION_SUBMISSION_STATE_KEY,
     CourseDeletionConflictError,
@@ -42,6 +44,7 @@ from openlearn.courses import (
 from .schemas import (
     CodeToolRequest,
     CourseCreateRequest,
+    SourceCourseCreateRequest,
     CourseDeletionRequest,
     CourseGrowthRequest,
     CourseSettingsConfirmationRequest,
@@ -147,6 +150,7 @@ def _card(card: CourseCard) -> dict[str, object]:
         "blocker": blocker,
         "completed": card.completed,
         "started": card.started,
+        "source_start": not path and library.blocker is None and card.interview is None,
         "template_id": card.template_id,
         "is_interview": card.interview is not None,
     }
@@ -385,6 +389,42 @@ def _plain_text(value: str) -> str:
     return text.strip()
 
 
+def _presentation_text(value: str) -> dict[str, object]:
+    """Protect explicit math from Markdown cleanup; never interpret code or dollars."""
+    if "\ue000" in value or "\ue001" in value:
+        return {"text": _plain_text(value)}
+    expressions: list[str] = []
+
+    def protect(match: re.Match[str]) -> str:
+        formula = match.group("math")
+        if formula is None or not formula.strip():
+            return match.group(0)
+        expressions.append(formula)
+        return f"\ue000{len(expressions) - 1}\ue001"
+
+    protected = re.sub(
+        r"(?<!`)(?P<ticks>`+)(?!`).*?(?<!`)(?P=ticks)(?!`)"
+        r"|(?<!\\)\\\((?P<math>.*?)\\\)",
+        protect, value, flags=re.DOTALL,
+    )
+    if not expressions:
+        return {"text": _plain_text(value)}
+    cleaned = _plain_text(protected)
+    parts: list[dict[str, str]] = []
+    position = 0
+    for match in re.finditer(r"\ue000(\d+)\ue001", cleaned):
+        if match.start() > position:
+            parts.append({"kind": "text", "text": cleaned[position:match.start()]})
+        parts.append({"kind": "math", "text": expressions[int(match.group(1))]})
+        position = match.end()
+    if position < len(cleaned):
+        parts.append({"kind": "text", "text": cleaned[position:]})
+    return {
+        "text": "".join(r"\(" + part["text"] + r"\)" if part["kind"] == "math" else part["text"] for part in parts),
+        "parts": parts,
+    }
+
+
 def _pending_prompt_text(value: str | None) -> str:
     if not value:
         return ""
@@ -413,8 +453,9 @@ def _without_check_section(value: str) -> str:
 def _prose_block(value: str) -> dict[str, object]:
     """Retain optional authored emphasis as escaped text, never model HTML."""
     source = value.strip()
-    text = _plain_text(source)
-    block: dict[str, object] = {"kind": "paragraph", "text": text}
+    presented = _presentation_text(source)
+    text = str(presented["text"])
+    block: dict[str, object] = {"kind": "paragraph", **presented}
     segments: list[dict[str, object]] = []
     offset = 0
 
@@ -424,12 +465,22 @@ def _prose_block(value: str) -> dict[str, object]:
         # Preserve boundary spaces when cleaning each inline fragment.
         leading = chunk[:len(chunk) - len(chunk.lstrip())]
         trailing = chunk[len(chunk.rstrip()):]
-        cleaned = leading + _plain_text(chunk) + trailing if chunk.strip() else chunk
-        segments.append({"text": cleaned, "strong": strong})
+        presented = _presentation_text(chunk)
+        cleaned = leading + str(presented["text"]) + trailing if chunk.strip() else chunk
+        segment: dict[str, object] = {"text": cleaned, "strong": strong}
+        if "parts" in presented:
+            parts = presented["parts"]
+            if leading:
+                parts.insert(0, {"kind": "text", "text": leading})
+            if trailing:
+                parts.append({"kind": "text", "text": trailing})
+            segment["parts"] = parts
+        segments.append(segment)
 
-    for match in re.finditer(r"`[^`\n]+`|(\*\*|__)(?=\S)(.+?)\1", source):
+    for match in re.finditer(r"(?<!`)(?P<ticks>`+)(?!`).*?(?<!`)(?P=ticks)(?!`)"
+        r"|(?<!\\)\\\(.*?\\\)|(?P<marker>\*\*|__)(?=\S)(?P<strong>.+?)(?P=marker)", source):
         append(source[offset:match.start()])
-        append(match.group(2) if match.group(1) else match.group(), bool(match.group(1)))
+        append(match.group("strong") if match.group("marker") else match.group(), bool(match.group("marker")))
         offset = match.end()
     append(source[offset:])
     if any(segment["strong"] for segment in segments) and "".join(
@@ -468,19 +519,36 @@ def _present_response(value: str) -> tuple[str, list[dict[str, object]]]:
                 }
             )
             continue
+        display = re.fullmatch(r"\s*\\\[(.*?)\\\]\s*", line)
+        closing = None
+        if line.strip() == r"\[":
+            closing = next((end for end in range(index + 1, len(lines))
+                            if lines[end].strip() == r"\]"), None)
+        if display or closing is not None:
+            formula = display.group(1) if display else "\n".join(lines[index + 1:closing])
+            if formula.strip():
+                blocks.append({"kind": "math", "text": formula.strip()})
+                index = index + 1 if display else closing + 1
+                continue
         unordered = re.match(r"^\s*[-*+]\s+(.+)$", line)
         ordered = re.match(r"^\s*\d+[.)]\s+(.+)$", line)
         if unordered or ordered:
             kind = "unordered_list" if unordered else "ordered_list"
             pattern = r"^\s*[-*+]\s+(.+)$" if unordered else r"^\s*\d+[.)]\s+(.+)$"
             items: list[str] = []
+            item_parts: list[object] = []
             while index < len(lines):
                 item = re.match(pattern, lines[index])
                 if item is None:
                     break
-                items.append(_plain_text(item.group(1)))
+                presented = _presentation_text(item.group(1))
+                items.append(str(presented["text"]))
+                item_parts.append(presented.get("parts"))
                 index += 1
-            blocks.append({"kind": kind, "items": items})
+            block: dict[str, object] = {"kind": kind, "items": items}
+            if any(item_parts):
+                block["item_parts"] = item_parts
+            blocks.append(block)
             continue
         paragraph: list[str] = []
         while index < len(lines):
@@ -491,6 +559,8 @@ def _present_response(value: str) -> tuple[str, list[dict[str, object]]]:
                 re.match(r"^\s*```", current)
                 or re.match(r"^\s*[-*+]\s+", current)
                 or re.match(r"^\s*\d+[.)]\s+", current)
+                or current.strip() == r"\["
+                or re.fullmatch(r"\s*\\\[.*?\\\]\s*", current)
             ):
                 break
             paragraph.append(re.sub(r"^#{1,6}\s+", "", current.strip()))
@@ -666,7 +736,20 @@ class OpenLearnWebServices:
                 credentials.model,
             )
         if validation.status is not providers.ValidationStatus.VALID:
-            return status
+            if validation.status is providers.ValidationStatus.REJECTED:
+                code = "provider_credentials"
+                reason = "That API key was rejected. Check the provider setup and test again."
+            elif validation.detail == "http_429":
+                code = "provider_rate_limited"
+                reason = "The provider is rate limited. Wait, then retry. Your saved key was not changed."
+            else:
+                code = "provider_unavailable"
+                reason = (
+                    "That model is not available from this provider. Review the model or retry later."
+                    if validation.detail == "model_unavailable"
+                    else "The provider is temporarily unavailable. Retry later. Your saved key was not changed."
+                )
+            return {**status, "error_code": code, "reason": reason}
         if status.get("managed"):
             self._validated_provider_fingerprint = fingerprint
             return {**status, "ready": True, "verified": True, "reason": ""}
@@ -1203,7 +1286,79 @@ class OpenLearnWebServices:
             return {"ok": False, "missing": True, "error": "Course not found."}
         return _source_result(result)
 
+    def create_source_course(
+        self, request: SourceCourseCreateRequest,
+        source: source_imports.CourseSourceInput,
+    ) -> dict[str, object]:
+        result = self._create_course_record(request)
+        if not result.get("ok"):
+            return result
+        slug = str(result["slug"])
+        # Keep rejected imports editable as one pending creation draft.
+        # Completed courses remain immutable on submission replay.
+        with cli.topic_store_locks(slug, include_journal=True):
+            topic = cli.read_topic(slug)
+            metadata = dict(topic.metadata)
+            if result["created"]:
+                metadata.update(web_source_start=True, web_source_mode=request.mode,
+                                web_source_pending=True)
+            elif metadata.get("web_source_mode") != request.mode:
+                return {"ok": False, "error": "This saved creation belongs to another mode. Start a new course."}
+            if not metadata.get("web_source_pending"):
+                return {**result, "state": "source_ready"}
+            if metadata.get("web_source_pending"):
+                if metadata.get("course_started") or tutor_service.course_revision(slug) > 0:
+                    return {"ok": False, "error": "This course has started. Change its details in Course settings."}
+                old_title = str(metadata.get("topic") or "")
+                old_goal = str(metadata.get("goal") or "")
+                metadata.update(topic=request.title, goal=request.goal.strip())
+                body = topic.body.replace(f"# {old_title}\n", f"# {request.title}\n", 1)
+                body = body.replace(f"## Current Goal\n\n{old_goal}\n\n## Notes",
+                                    f"## Current Goal\n\n{request.goal.strip()}\n\n## Notes", 1)
+                state = cli.load_state(slug)
+                state[CALIBRATION_STATE_KEY] = {
+                    "goal": request.goal.strip(), "experience": request.experience.strip(),
+                    "skipped": not bool(request.experience.strip()),
+                    "recorded_at": datetime.now(timezone.utc).isoformat(),
+                }
+                cli.save_state(slug, state)
+                cli.write_text_atomic(topic.path, cli.format_topic(cli.stable_metadata_for_topic(metadata), body))
+                creation_state = {key: state[key] for key in (CALIBRATION_STATE_KEY, CREATION_SUBMISSION_STATE_KEY)
+                                  if key in state}
+        # Importing stops at the existing per-request consent boundary;
+        # no ordinary, ungrounded lesson or provider request starts here.
+        imported = self._import_source(slug, source)
+        # The importer owns dynamic source state; retain creation calibration.
+        cli.update_state_atomic(slug, lambda state: state.update(creation_state))
+        if not imported.get("ok") or not imported.get("sources"):
+            failures = imported.get("failed") or []
+            message = str(failures[0].get("message")) if failures else str(imported.get("error") or "No usable source was imported.")
+            return {"ok": False, "error": message, "slug": slug}
+        with cli.file_lock(cli.topic_path(slug)):
+            topic = cli.read_topic(slug)
+            metadata = dict(topic.metadata)
+            if request.mode == "quick":
+                sources = imported["sources"]
+                metadata.update(learning_mode="quick", quick_source_type=request.source_kind,
+                                quick_source_label=str(sources[0]["label"]), coverage_contract=True)
+            metadata["web_source_pending"] = False
+            cli.write_text_atomic(topic.path, cli.format_topic(cli.stable_metadata_for_topic(metadata), topic.body))
+        return {**result, "state": "source_ready"}
+
     def create_course(self, request: CourseCreateRequest) -> dict[str, object]:
+        result = self._create_course_record(request)
+        if not result.get("ok"):
+            return result
+        slug = str(result["slug"])
+        initialization_id = _course_initialization_id(request.submission_id)
+        if self.course_entry_mode(application.course(slug).card.template_id) == "interview_prep":
+            return {**result, "state": "placement_recommended"}
+        return self._start_course_initialization(
+            slug, initialization_id, created=bool(result["created"])
+        )
+
+    @staticmethod
+    def _create_course_record(request: CourseCreateRequest) -> dict[str, object]:
         calibration = CalibrationContext(
             goal=request.goal,
             experience=request.experience,
@@ -1222,18 +1377,7 @@ class OpenLearnWebServices:
             )
         except (cli.OpenLearnError, CourseTemplateError) as error:
             return {"ok": False, "error": str(error)}
-        slug = result.course.slug
-        initialization_id = _course_initialization_id(request.submission_id)
-        if self.course_entry_mode(result.course.card.template_id) == "interview_prep":
-            return {
-                "ok": True,
-                "slug": slug,
-                "created": result.created,
-                "state": "placement_recommended",
-            }
-        return self._start_course_initialization(
-            slug, initialization_id, created=result.created
-        )
+        return {"ok": True, "slug": result.course.slug, "created": result.created}
 
     def _start_course_initialization(
         self,
@@ -1242,6 +1386,8 @@ class OpenLearnWebServices:
         *,
         created: bool | None = None,
     ) -> dict[str, object]:
+        if cli.read_topic(slug).metadata.get("web_source_start"):
+            return {"ok": True, "slug": slug, "state": "source_ready"}
         initialization_id = initialization_id or _initialization_id_for_slug(slug)
         if initialization_id is None:
             return {"ok": False, "error": "Course initialization is unavailable."}
@@ -1802,6 +1948,7 @@ class OpenLearnWebServices:
             "operation_id": operation_id,
             "state": result.status,
             "error": result.error_message or "",
+            "error_code": result.error_code or "",
         }
 
     def retry_course_initialization(
@@ -1884,7 +2031,7 @@ class OpenLearnWebServices:
         initialization_id = _initialization_id_for_slug(slug)
         revision = tutor_service.course_revision(slug)
         initialization: dict[str, object] | None = None
-        if initialization_id is not None and revision == 0:
+        if initialization_id is not None and revision == 0 and not topic.metadata.get("web_source_start"):
             initialization_result = tutor_service.operation_status(slug, initialization_id)
             if initialization_result is None or initialization_result.status != "committed":
                 initialization = {
@@ -1924,6 +2071,7 @@ class OpenLearnWebServices:
                     }
         return {
             "slug": slug,
+            "source_start": bool(topic.metadata.get("web_source_start")) and revision == 0,
             "title": snapshot.card.title,
             "current_unit": move_title,
             "revision": revision,
@@ -1943,7 +2091,41 @@ class OpenLearnWebServices:
             "saved_response": saved_response,
         }
 
+    @staticmethod
+    def _source_request_text(request: TutorSubmissionRequest) -> str:
+        return {
+            "skip": "Skip this for now and continue with a useful next move.",
+            "next": "Continue to the next useful concept.",
+            "practice": "Practice now using a covered curriculum concept.",
+        }.get(request.intent, request.text.strip())
+
+    def _preview_source_turn(self, slug: str, request: TutorSubmissionRequest) -> tuple[dict[str, object], str | None]:
+        if not request.source_mode:
+            return {"ok": False, "error": "Enable source mode for this request first."}, None
+        try:
+            context = source_context.snapshot(
+                cli.read_topic(slug), self._source_request_text(request),
+                config.configured_model(), opted_in=True,
+            )
+            preview = source_context.request_preview(context)
+        except cli.OpenLearnError as error:
+            return {"ok": False, "error": str(error)}, None
+        binding = repr((slug, request.intent, request.text, request.expected_revision,
+                        request.source_lesson_id, request.source_lesson_title,
+                        request.source_lesson_revision, context.revision, preview))
+        return {"ok": True, "disclosure": source_context.CONSENT_TEXT + " The stored grading key is sent when needed but hidden in this learner preview.",
+                "preview": source_context.learner_request_preview(context),
+                "approval": sha256(binding.encode()).hexdigest()}, preview
+
+    def preview_source_turn(self, slug: str, request: TutorSubmissionRequest) -> dict[str, object]:
+        return self._preview_source_turn(slug, request)[0]
+
     def submit_turn(self, slug: str, request: TutorSubmissionRequest) -> dict[str, object]:
+        source_preview = None
+        if request.source_mode:
+            result, source_preview = self._preview_source_turn(slug, request)
+            if not result.get("ok") or request.source_approval != result.get("approval"):
+                return {"state": "conflict", "error": "Review and approve a fresh screened request before sending."}
         intent = {
             "answer": "answer",
             "question": "question",
@@ -2002,6 +2184,7 @@ class OpenLearnWebServices:
                 source_lesson_id=source_fields[0],
                 source_lesson_title=source_fields[1],
                 source_lesson_revision=source_fields[2],
+                source_preview=source_preview,
             )
         except tutor_service.TutorConflictError as error:
             return {"state": "conflict", "error": str(error)}
@@ -2102,7 +2285,7 @@ class OpenLearnWebServices:
                     "blocks": blocks,
                     "content": "\n\n".join(
                         str(block.get("text", ""))
-                        if block["kind"] in {"paragraph", "code"}
+                        if block["kind"] in {"paragraph", "code", "math"}
                         else "\n".join(str(item) for item in block.get("items", []))
                         for block in blocks
                     ),

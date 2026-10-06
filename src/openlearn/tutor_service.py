@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 import threading
 from collections.abc import Mapping
 from contextlib import nullcontext
@@ -693,7 +694,20 @@ def _generate_follow_up_record(record: dict[str, object], claim_token: str):
             ),
         )
         title, goal = _parse_follow_up_response(raw)
-    except (providers.ProviderError, config.ConfigError):
+    except (providers.ProviderError, config.ConfigError) as exc:
+        if getattr(exc, "category", None) == "qa_budget_stop":
+            return _finish_claimed_follow_up_record(
+                record,
+                claim_token,
+                {
+                    "state": "error",
+                    "error_code": "qa_budget_stop",
+                    "error_message": (
+                        "Live QA budget stopped. Review the batch ledger and limits "
+                        "before making another provider request."
+                    ),
+                },
+            )
         return _finish_claimed_follow_up_record(
             record,
             claim_token,
@@ -1043,6 +1057,15 @@ def _turn_failure(exc: Exception) -> tuple[str, str]:
 
     current: BaseException | None = exc
     while current is not None:
+        if getattr(current, "category", None) == "qa_budget_stop":
+            return (
+                "qa_budget_stop",
+                "Your response is saved. Live QA budget stopped. Review the batch "
+                "ledger and limits before making another provider request.",
+            )
+        current = current.__cause__ or current.__context__
+    current = exc
+    while current is not None:
         if isinstance(current, lesson_policy.FirstLessonUnavailable):
             return "first_lesson_unavailable", lesson_policy.FIRST_LESSON_RETRY_MESSAGE
         if isinstance(current, cli.ProviderRequestError):
@@ -1066,6 +1089,19 @@ def _turn_failure(exc: Exception) -> tuple[str, str]:
     )
 
 
+def _turn_provider_diagnostics(exc: BaseException) -> dict[str, object]:
+    from openlearn import cli
+
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, cli.ProviderRequestError):
+            return cli._safe_provider_diagnostics(current.diagnostics)
+        current = current.__cause__ or current.__context__
+    return {}
+
+
 def _save_operation(
     slug: str,
     *,
@@ -1075,6 +1111,7 @@ def _save_operation(
     prompt: str,
     result: TutorTurnResult | None = None,
     error_code: str | None = None,
+    error_diagnostics: Mapping[str, object] | None = None,
     payload_hash: str | None = None,
     owner_pid: int | None = None,
     session_kind: TutorSessionKind = "chat",
@@ -1089,6 +1126,8 @@ def _save_operation(
 
     def update(state: dict[str, object]) -> None:
         internal = _internal_state(state)
+        error_at = _now() if error_code else None
+        diagnostics = cli._safe_provider_diagnostics(error_diagnostics)
         active_key = _active_operation_key(session_kind)
         previous_active = internal.get(active_key)
         previous_active = previous_active if isinstance(previous_active, dict) else {}
@@ -1153,7 +1192,12 @@ def _save_operation(
         if result is not None:
             results = internal.get("turn_results")
             results = dict(results) if isinstance(results, dict) else {}
-            results[submission_id] = _receipt_dict(result)
+            record = _receipt_dict(result)
+            if error_code:
+                record["error_at"] = error_at
+                if diagnostics:
+                    record["error_diagnostics"] = diagnostics
+            results[submission_id] = record
             while len(results) > 50:
                 results.pop(next(iter(results)))
             internal["turn_results"] = results
@@ -1161,8 +1205,10 @@ def _save_operation(
             internal["last_turn_error"] = {
                 "submission_id": submission_id,
                 "code": error_code,
-                "updated_at": _now(),
+                "updated_at": error_at,
             }
+            if diagnostics:
+                internal["last_turn_error"]["diagnostics"] = diagnostics
         state["_openlearn_internal"] = internal
 
     cli.update_state_atomic(slug, update)
@@ -1233,6 +1279,45 @@ def _active_turn_age(active: dict[str, object]) -> timedelta | None:
     return datetime.now(timezone.utc) - updated_at.astimezone(timezone.utc)
 
 
+def _windows_process_is_alive(pid: int) -> bool:
+    """Query a process handle without sending Windows console control events."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    open_process = kernel.OpenProcess
+    open_process.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    open_process.restype = wintypes.HANDLE
+    wait = kernel.WaitForSingleObject
+    wait.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    wait.restype = wintypes.DWORD
+    close = kernel.CloseHandle
+    close.argtypes = [wintypes.HANDLE]
+    close.restype = wintypes.BOOL
+
+    # SYNCHRONIZE grants only the right to observe process termination.
+    handle = open_process(0x100000, False, pid)
+    if not handle:
+        # ERROR_INVALID_PARAMETER means the PID no longer exists. Keep the
+        # reservation on access denial or an unknown error to avoid adoption.
+        return ctypes.get_last_error() != 87
+    try:
+        # WAIT_OBJECT_0 means exited; timeout or a failed query retains ownership.
+        return wait(handle, 0) != 0
+    finally:
+        close(handle)
+
+
+def _process_is_alive(pid: int) -> bool:
+    if sys.platform == "win32":
+        return _windows_process_is_alive(pid)
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
 def _recover_active_turn(
     slug: str,
     active: dict[str, object],
@@ -1255,11 +1340,7 @@ def _recover_active_turn(
     if _future_active(slug, submission_id):
         return None
     if isinstance(owner_pid, int) and owner_pid > 0 and owner_pid != os.getpid():
-        try:
-            os.kill(owner_pid, 0)
-        except (OSError, ProcessLookupError):
-            pass
-        else:
+        if _process_is_alive(owner_pid):
             return None
     if age is None:
         code = "operation_interrupted"
@@ -1778,6 +1859,7 @@ def _execute_prepared_turn_inner(
     model: str | None,
     session_kind: TutorSessionKind,
     progression_intent: ProgressionIntent | None,
+    source_preview: str | None = None,
 ) -> TutorTurnResult:
     from openlearn import cli
 
@@ -2091,6 +2173,8 @@ def _execute_prepared_turn_inner(
             cli.ask_topic(
                 slug,
                 normalized,
+                source_mode=source_preview is not None,
+                approved_source_preview=source_preview,
                 model=model,
                 output_func=lambda _text="": None,
                 pending_learner_prompt=(
@@ -2185,6 +2269,7 @@ def _execute_prepared_turn_inner(
                 prompt=normalized,
                 result=result,
                 error_code=error_code,
+                error_diagnostics=_turn_provider_diagnostics(exc),
                 payload_hash=payload_hash,
                 session_kind=session_kind,
             )
@@ -2202,6 +2287,7 @@ def _execute_prepared_turn(
     model: str | None,
     session_kind: TutorSessionKind,
     progression_intent: ProgressionIntent | None,
+    source_preview: str | None = None,
 ) -> TutorTurnResult:
     """Run a prepared turn with a durable failure boundary around all setup."""
     from openlearn import cli
@@ -2216,6 +2302,7 @@ def _execute_prepared_turn(
             model,
             session_kind,
             progression_intent,
+            source_preview,
         )
     except Exception as exc:
         _clear_live_turn((slug, sid))
@@ -2264,6 +2351,7 @@ def _execute_prepared_turn(
                 prompt=normalized,
                 result=result,
                 error_code=error_code,
+                error_diagnostics=_turn_provider_diagnostics(exc),
                 payload_hash=payload_hash,
                 session_kind=session_kind,
             )
@@ -2341,6 +2429,7 @@ def start_turn(
     source_lesson_id: str | None = None,
     source_lesson_title: str | None = None,
     source_lesson_revision: int | None = None,
+    source_preview: str | None = None,
 ) -> TutorTurnResult:
     """Persist a turn, then execute it in the bounded tutor worker pool."""
     sid, normalized = _validate_turn(text, submission_id)
@@ -2391,6 +2480,7 @@ def start_turn(
                 model,
                 session_kind,
                 progression_intent,
+                source_preview,
             )
         except RuntimeError as exc:
             failed = TutorTurnResult(
@@ -2471,11 +2561,7 @@ def resume_interview_progression(
         raise TutorConflictError("This interview turn is still running.")
     owner_pid = active_turn.get("owner_pid") if isinstance(active_turn, dict) else None
     if isinstance(owner_pid, int) and owner_pid > 0 and owner_pid != os.getpid():
-        try:
-            os.kill(owner_pid, 0)
-        except (OSError, ProcessLookupError):
-            pass
-        else:
+        if _process_is_alive(owner_pid):
             raise TutorConflictError("This interview turn is still running in another process.")
     return submit_turn(
         slug,

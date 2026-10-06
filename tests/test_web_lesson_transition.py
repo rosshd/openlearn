@@ -112,7 +112,7 @@ def test_pending_turn_is_compact_and_feedback_stays_on_result(intent, width, red
                 state["loads"] += 1
                 route.fulfill(body=final if state["committed"] else initial, content_type="text/html")
             elif path.startswith("/static/"):
-                route.fulfill(path=str(STATIC / Path(path).name))
+                route.fulfill(path=str(STATIC / path.removeprefix("/static/")))
             elif path.endswith("/turns"):
                 state["posts"] += 1
                 assert route.request.post_data_json["intent"] == intent
@@ -200,7 +200,7 @@ def test_failed_turn_restores_controls_and_preserves_the_answer(failure):
             if path == "/courses/transition":
                 route.fulfill(body=html, content_type="text/html")
             elif path.startswith("/static/"):
-                route.fulfill(path=str(STATIC / Path(path).name))
+                route.fulfill(path=str(STATIC / path.removeprefix("/static/")))
             elif path.endswith("/turns"):
                 if failure == "network":
                     route.abort()
@@ -241,7 +241,7 @@ def test_resumed_operation_uses_neutral_status_and_explicit_handoff():
             if path == "/courses/transition":
                 route.fulfill(body=html, content_type="text/html")
             elif path.startswith("/static/"):
-                route.fulfill(path=str(STATIC / Path(path).name))
+                route.fulfill(path=str(STATIC / path.removeprefix("/static/")))
             else:
                 route.fulfill(json={"state": "committed" if state["done"] else "generating", "preview_text": "Never flash this response."})
 
@@ -276,7 +276,7 @@ def test_active_chat_defers_result_navigation_for_both_commit_paths(answer, imme
                 state["loads"] += 1
                 route.fulfill(body=html, content_type="text/html")
             elif path.startswith("/static/"):
-                route.fulfill(path=str(STATIC / Path(path).name))
+                route.fulfill(path=str(STATIC / path.removeprefix("/static/")))
             elif path.endswith("/turns"):
                 payload = route.request.post_data_json
                 if payload["intent"] == "question":

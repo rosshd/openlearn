@@ -34,9 +34,16 @@ REQUIRED_PACKAGE_FILES = frozenset(
         "openlearn/web/static/favicon.svg",
         "openlearn/web/static/openlearn.css",
         "openlearn/web/static/openlearn.js",
+        "openlearn/web/static/math-renderer.js",
+        "openlearn/web/static/vendor/katex/katex.min.js",
+        "openlearn/web/static/vendor/katex/LICENSE",
+        "openlearn/web/static/vendor/stix/STIXTwoMath-Regular.woff2",
+        "openlearn/web/static/vendor/stix/OFL.txt",
+        "openlearn/web/static/vendor/stix/PROVENANCE.txt",
         "openlearn/web/templates/base.html",
         "openlearn/web/templates/data.html",
         "openlearn/web/templates/focus.html",
+        "openlearn/web/templates/components/math.html",
         "openlearn/web/templates/setup.html",
     }
 )

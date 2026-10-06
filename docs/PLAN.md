@@ -11,16 +11,18 @@ The local web app remains the default interface, and the keyboard-first CLI also
 They share teaching policy and learner state, while presentation features may differ by interface.
 The optional TUI remains supported in its current form, with no further expansion planned.
 
-Technical Interview Prep is a supported reference course for improving general tutor behavior and lesson design.
-It is not a separate interview-training product scope.
+Built-in curriculum development and its web catalog offerings are paused.
+Course creation and Quick Learn are the top priorities: users bring their own topic or a supported source.
+Preserve existing built-in course definitions, saved courses, progress, and internal entry points for reversibility.
 The tutor must remain useful across subjects without assuming every course is academic or interview-focused.
 
 ## Current baseline
 
 - Local course files and learner state remain the source of truth.
 - Users bring their own hosted provider key or use a configured local endpoint.
-- Course creation supports templates, custom topics, and Quick Learn imports.
-- Technical Interview Prep remains available as a course with role context and rapid confidence ratings.
+- The web creation UI prioritizes own topics, source courses, and Quick Learn imports.
+- Built-in catalog, starter tiles, curated recommendations, and template defaults are hidden.
+- Existing saved courses, including Technical Interview Prep, remain resumable.
 - Lessons teach one focused idea and keep checks optional for refreshers.
 - Existing source imports, coding tools, interview records, and terminal workflows remain supported.
 - Web and CLI use shared teaching policy and learner state; interface-specific presentation does not need exact feature parity.
@@ -28,13 +30,14 @@ The tutor must remain useful across subjects without assuming every course is ac
 
 ## Before the first public release
 
-1. Complete repeated manual learning journeys from a fresh learner home.
-2. Close every blocker involving provider setup, course creation, placement, lesson progression, resume, and deletion.
-3. Verify installation and the local web app from built wheel and source distributions.
-4. Verify macOS, Windows, and Linux on supported Python versions.
-5. Finish accessibility, dark-mode, responsive-layout, and plain-language review.
-6. Run the public release dogfood gate with learner-owned provider accounts or local endpoints.
-7. Build one immutable release candidate and publish only its matching tag and artifacts.
+1. Verify own-topic and supported-source creation, including Quick Learn source selection and cancel/retry without lost input.
+2. Verify creation → first lesson → resume, including missing-provider recovery, using a fresh learner home.
+3. Close remaining blockers involving placement, lesson progression, resume, and deletion.
+4. Verify installation and the local web app from built wheel and source distributions.
+5. Verify macOS, Windows, and Linux on supported Python versions.
+6. Finish accessibility, dark-mode, responsive-layout, and plain-language review.
+7. Run the public release dogfood gate with learner-owned provider accounts or local endpoints.
+8. Build one immutable release candidate and publish only its matching tag and artifacts.
 
 ## Scope boundary
 

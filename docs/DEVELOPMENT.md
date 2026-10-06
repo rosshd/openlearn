@@ -5,7 +5,7 @@
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -e .[dev]
+pip install -e '.[dev]'
 ```
 
 ## Loop
@@ -62,12 +62,69 @@ The PyPI project and its trusted-publishing settings must exist before the first
 - Use `OPENLEARN_MOCK=1` for model-free CLI smoke.
 - Use a temporary `OPENLEARN_HOME` for tests and manual flows.
 - For provider-configuration tests, clear provider environment variables, mock saved config reads, and reset the config cache.
-- Do not test against real topics, config, state, or API keys.
+- Do not let automated tests read real topics, config, state, or API keys.
 - Do not weaken lint, tests, or smoke to make the gate pass.
 
 ## Exploratory Dogfooding
 
 See [Exploratory Dogfood Evidence](DOGFOOD_EVIDENCE.md) for the real-PTY mock mission, evidence contract, and sanitization boundaries.
+
+## Headless and bounded tutor QA
+
+Use a supported Python 3.11-3.13 environment and a synthetic-only temporary learner home.
+Before testing, record the intended commit and confirm that the running interpreter imports that checkout, not an older installed package:
+
+```bash
+git rev-parse HEAD
+git status --short
+python -c 'import openlearn, openlearn.cli; print(openlearn.__version__); print(openlearn.cli.__file__)'
+make check
+OPENLEARN_HOME="$(mktemp -d)" OPENLEARN_MOCK=1 openlearn web --no-browser
+```
+
+Keep provider environment overrides and real credentials out of the mock test home/session, exercise only offline/mock flows, and stop the mock server with Ctrl-C before a separately authorized paid run.
+Restart the application and reload the browser after source changes; a version number alone does not prove that the tested fixes are running.
+Use `make e2e` for the mocked public CLI journey when browser access is unavailable.
+
+`--no-browser` suppresses automatic browser opening; it does not expose the loopback server to another machine or separately managed cloud browser.
+Use a supported browser on the same host that can access loopback, such as the owner's Mac browser with permission.
+If that browser is unavailable or blocks loopback, keep browser QA blocked and continue offline CLI/mock checks.
+Do not disable browser safeguards, add a tunnel/proxy, change loopback binding, or transfer an existing learner/config directory to work around the restriction.
+
+On a trusted headless host, the owner can use `openlearn init` in an interactive terminal for provider setup, or `openlearn config set-key` without an argument for hidden key entry.
+Stop if hidden terminal input is unavailable; do not pipe a key, put it in command arguments/history, paste it into an agent chat, or record the credential-entry screen.
+`config set-key` saves a key but does not prove provider/model validation succeeded.
+`init` validates the provider/model through metadata requests and finishes setup without starting tutor inference.
+`openlearn config show` reports key presence without printing its value.
+Keep keys, capability-bearing browser launch URLs, raw source/request previews, and learner/config files out of logs and handoffs.
+
+Paid QA is a separate opt-in operation, not part of `make check`.
+Obtain explicit permission for the provider, screened synthetic inputs, request ceiling, and conservative dollar ceiling before starting.
+The current guard supports the approved OpenRouter source-mode endpoint/model and requires a trusted pricing/bounds snapshot verified within the last day; do not invent prices or copy a stale fixture.
+For example, the operator can set a smaller six-request/$0.03 batch using existing controls:
+
+```bash
+export OPENLEARN_QA_BUDGET=1
+export OPENLEARN_QA_PRICING="/absolute/private/path/verified-pricing.json"
+export OPENLEARN_QA_LEDGER="/absolute/private/path/qa-ledger.json"
+export OPENLEARN_QA_MAX_CALLS=6
+export OPENLEARN_QA_MAX_USD=0.03
+```
+
+These variables configure the guard, not provider credentials or permission to spend.
+All generation, judging, extraction, repair, and retry subcalls count; guarded transports disable automatic retries and reserve a conservative bound before each request.
+Stop the batch on the first rate-limit, funding/access restriction, or unknown-usage transport failure, without a manual retry.
+Retain unknown-cost reservations instead of treating failures as free, clearing the ledger, changing its pricing/caps, or switching providers to continue.
+A new batch needs separate authorization and a separate ledger; carry every earlier reservation into cumulative reporting rather than resetting prior evidence.
+Review and approve each screened source-mode request in the application; prior consent does not carry over.
+
+Report a short evidence checklist:
+
+- Passed: exact commit/import, offline gate, and only the browser/model behaviors actually observed.
+- Blocked: the failing step and safely retained status, retry timing, or provider attribution, if available; omit raw responses and private state.
+- Untested: grading, hints, correction, or delayed unaided recall not reached; mocked tests and tiny synthetic runs do not demonstrate learning gains.
+- Cost: provider request count, confirmed usage calculations, unknown-cost reservations, cumulative conservative exposure, and invoice cost only when independently known.
+- Cleanup: no active requests, server stopped, temporary browser tab closed, and learner data and previous ledgers preserved.
 
 ## Phase Work
 

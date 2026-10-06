@@ -33,6 +33,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from enum import Enum, auto
+from email.utils import parsedate_to_datetime
 from pathlib import Path, PureWindowsPath
 from uuid import UUID, uuid4
 from urllib.parse import urlencode, urlparse
@@ -42,7 +43,7 @@ from typing import Literal, Protocol
 
 from platformdirs import user_data_dir
 
-from openlearn import __version__, code_runner, lesson_policy
+from openlearn import __version__, code_runner, lesson_policy, qa_budget
 from openlearn.lesson_policy import (
     first_lesson_prompt as first_lesson_prompt,
     first_lesson_response_is_valid as first_lesson_response_is_valid,
@@ -853,6 +854,10 @@ def build_parser() -> argparse.ArgumentParser:
     chat_parser.add_argument("topic", help="Topic slug")
     chat_parser.add_argument("prompt", help="Question or request")
     chat_parser.add_argument("--model", default=None, help="Override model for this request")
+    chat_parser.add_argument(
+        "--source-mode", action="store_true",
+        help="Preview screened class context and confirm one OpenRouter tutoring request",
+    )
     add_dry_run_argument(chat_parser)
     chat_parser.set_defaults(func=cmd_chat)
 
@@ -1573,7 +1578,9 @@ def require_safe_source_path(directory: Path, source: Path) -> Path:
     return resolved_source
 
 
-def snapshot_source_file(directory: Path, source: Path) -> SourceSnapshot:
+def snapshot_source_file(
+    directory: Path, source: Path, *, max_bytes: int | None = None
+) -> SourceSnapshot:
     """Read one stable regular-file snapshot without following path symlinks."""
     try:
         root = directory.expanduser().resolve()
@@ -1588,7 +1595,7 @@ def snapshot_source_file(directory: Path, source: Path) -> SourceSnapshot:
         raise OpenLearnError(f"source is not a regular file: {source}")
 
     if os.name == "nt":
-        return _snapshot_source_file_windows(root, lexical_source)
+        return _snapshot_source_file_windows(root, lexical_source, max_bytes=max_bytes)
 
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     cloexec = getattr(os, "O_CLOEXEC", 0)
@@ -1612,7 +1619,7 @@ def snapshot_source_file(directory: Path, source: Path) -> SourceSnapshot:
             os.O_RDONLY | nofollow | cloexec,
             dir_fd=parent_descriptor,
         )
-        data = _read_stable_source_descriptor(file_descriptor, source)
+        data = _read_stable_source_descriptor(file_descriptor, source, max_bytes=max_bytes)
         return SourceSnapshot(
             lexical_source,
             data,
@@ -1627,12 +1634,21 @@ def snapshot_source_file(directory: Path, source: Path) -> SourceSnapshot:
             os.close(descriptor)
 
 
-def _read_stable_source_descriptor(file_descriptor: int, source: Path) -> bytes:
+def _read_stable_source_descriptor(
+    file_descriptor: int, source: Path, *, max_bytes: int | None = None
+) -> bytes:
     before = os.fstat(file_descriptor)
     if not stat.S_ISREG(before.st_mode):
         raise OpenLearnError(f"source is not a regular file: {source}")
+    if max_bytes is not None and before.st_size > max_bytes:
+        raise OpenLearnError("source exceeds the selected text read budget")
     chunks: list[bytes] = []
-    while chunk := os.read(file_descriptor, 1024 * 1024):
+    remaining = max_bytes
+    while chunk := os.read(file_descriptor, min(1024 * 1024, remaining + 1) if remaining is not None else 1024 * 1024):
+        if remaining is not None:
+            remaining -= len(chunk)
+            if remaining < 0:
+                raise OpenLearnError("source exceeds the selected text read budget")
         chunks.append(chunk)
     after = os.fstat(file_descriptor)
     identity_before = (
@@ -1654,7 +1670,9 @@ def _read_stable_source_descriptor(file_descriptor: int, source: Path) -> bytes:
     return b"".join(chunks)
 
 
-def _snapshot_source_file_windows(root: Path, source: Path) -> SourceSnapshot:
+def _snapshot_source_file_windows(
+    root: Path, source: Path, *, max_bytes: int | None = None
+) -> SourceSnapshot:
     import msvcrt
 
     file_descriptor = -1
@@ -1667,7 +1685,7 @@ def _snapshot_source_file_windows(root: Path, source: Path) -> SourceSnapshot:
         opened_path = _windows_final_path_for_handle(handle)
         resolved_root = _windows_final_path_for_root(root)
         _validate_windows_opened_source(root, source, resolved_root, opened_path)
-        data = _read_stable_source_descriptor(file_descriptor, source)
+        data = _read_stable_source_descriptor(file_descriptor, source, max_bytes=max_bytes)
         return SourceSnapshot(
             source,
             data,
@@ -2119,11 +2137,19 @@ def read_repl_message(prompt: str, input_func=input) -> str:
         return first_line
 
     lines = [first_line]
+    previous_carriage_return = False
     wait_seconds = REPL_PASTE_INITIAL_WAIT_SECONDS
     while stdin_has_line(wait_seconds):
         line = _read_stdin_line_unbuffered()
         if line == "":
             break
+        # Only pair terminators still visible in the stream. Readline or
+        # the terminal may already have converted CRLF to two line breaks;
+        # those are indistinguishable from intentional blank lines.
+        paired_line_feed = previous_carriage_return and line == "\n"
+        previous_carriage_return = line.endswith("\r")
+        if paired_line_feed:
+            continue
         lines.append(line.rstrip("\r\n"))
         wait_seconds = REPL_PASTE_CONTINUATION_WAIT_SECONDS
     return "\n".join(lines)
@@ -2137,7 +2163,7 @@ def _read_stdin_line_unbuffered() -> str:
         if not chunk:
             break
         data.extend(chunk)
-        if chunk == b"\n":
+        if chunk in (b"\r", b"\n"):
             break
     return data.decode(sys.stdin.encoding or "utf-8", errors="replace")
 
@@ -5502,6 +5528,8 @@ def teach_first_lesson(
         except ProviderRequestError:
             raise
         except OpenLearnError as error:
+            if getattr(error, "category", None) == "qa_budget_stop":
+                raise
             raise OpenLearnError(
                 f"{lesson_policy.FIRST_LESSON_RETRY_MESSAGE} Use openlearn resume {topic.slug}."
             ) from error
@@ -5866,7 +5894,9 @@ def placement_evaluation(
                 model, METADATA_EXTRACTOR_SYSTEM, prompt, retry_status=retry_status
             )
         )
-    except (OpenLearnError, ValueError, json.JSONDecodeError):
+    except (OpenLearnError, ValueError, json.JSONDecodeError) as exc:
+        if getattr(exc, "category", None) == "qa_budget_stop":
+            raise
         return {"correct": False, "concept": "unknown", "note": "Could not evaluate reliably."}
     return update
 
@@ -6227,7 +6257,9 @@ def infer_mastery_profile_from_goal(goal: str, model: str | None = None) -> str:
             raw = call_openai(model or configured_model(), METADATA_EXTRACTOR_SYSTEM, prompt)
             data = parse_metadata_update(raw)
             return normalize_mastery_profile(data.get("mastery_profile"))
-        except (OpenLearnError, ValueError, json.JSONDecodeError):
+        except (OpenLearnError, ValueError, json.JSONDecodeError) as exc:
+            if getattr(exc, "category", None) == "qa_budget_stop":
+                raise
             pass
     efficient_markers = (
         "exam",
@@ -9472,7 +9504,7 @@ def cmd_paste(args: argparse.Namespace) -> int:
 
 
 def cmd_chat(args: argparse.Namespace) -> int:
-    ask_topic(args.topic, args.prompt, args.model)
+    ask_topic(args.topic, args.prompt, args.model, source_mode=getattr(args, "source_mode", False))
     return 0
 
 
@@ -9518,12 +9550,32 @@ def ask_topic(
         | None
     ) = None,
     interview_target: dict[str, object] | None = None,
+    source_mode: bool = False,
+    approved_source_preview: str | None = None,
 ) -> str:
     topic = read_topic(
         resolve_topic_slug(topic_value) if topic_value is None else slugify(topic_value)
     )
-    set_active_topic(topic.slug)
     model = model or str(topic.metadata.get("model") or configured_model())
+    source_snapshot = None
+    if approved_source_preview is not None and not source_mode:
+        raise OpenLearnError("A source approval cannot enable ordinary tutoring.")
+    if source_mode:
+        from openlearn import source_context
+
+        source_snapshot = source_context.snapshot(topic, prompt, model, opted_in=True)
+        preview = source_context.request_preview(source_snapshot)
+        if approved_source_preview is not None:
+            if approved_source_preview != preview:
+                raise OpenLearnError("The source request changed after preview; review it again. No request was sent.")
+        else:
+            output_func(source_context.CONSENT_TEXT)
+            output_func(preview)
+            if input_func("Type 'send source request' to approve, or Enter to cancel: ").strip() != "send source request":
+                raise OpenLearnError("Source request cancelled; no provider call was made.")
+        source_context.ensure_unchanged(topic, source_snapshot, model)
+        prompt = source_snapshot.user
+    set_active_topic(topic.slug)
     is_review_session = topic.metadata.get("review_session_active") is True
     original_metadata = copy.deepcopy(topic.metadata)
     initializing = (
@@ -9549,7 +9601,7 @@ def ask_topic(
         and not explicit_message_kind
         and learner_message_needs_judgment(topic.metadata, prompt)
     )
-    if session_kind != SIDE_CHAT_SESSION_KIND and not initializing and not practice_requested:
+    if session_kind != SIDE_CHAT_SESSION_KIND and not initializing and not practice_requested and not source_mode:
         record_pending_attempt_reflection(topic, prompt)
     is_navigation = explicit_message_kind == "navigation" or (
         not explicit_message_kind
@@ -9629,6 +9681,7 @@ def ask_topic(
             retry_status=output_func,
             persist=False,
             projection_sink=capture_projection,
+            source_context=source_snapshot,
         )
         topic = Topic(
             slug=topic.slug,
@@ -9676,15 +9729,25 @@ def ask_topic(
             engagement_check_due=engagement_check_due,
             interview_target=interview_target,
             response_metadata_sink=capture_response_metadata,
+            source_context=source_snapshot,
         )
     )
+    if source_snapshot is not None and source_snapshot.reference_error(generated_answer):
+        raise OpenLearnError(
+            "Saved tutor response has unsupported source references. "
+            "The previous question and your answer were preserved for retry."
+        )
     if interview_target is None and initializing:
         # Streaming removes hidden markers and carries coverage separately.
         policy_answer = generated_answer
+        if source_snapshot is not None:
+            policy_answer = source_context.without_ledger(policy_answer)
         if response_metadata.covered_concepts and not extract_covered_concepts(policy_answer):
             declared = "; ".join(response_metadata.covered_concepts)
             policy_answer += f"\n<!-- covered: {declared} -->"
         generated_answer = enforce_first_lesson_response(topic, prompt, policy_answer)
+        if source_snapshot is not None:
+            generated_answer = source_snapshot.attach(generated_answer)
         _visible_initialization, response_metadata = tutor_response_metadata(generated_answer)
     if generated_answer_override is not None or response_metadata == TutorResponseMetadata():
         _visible_override, response_metadata = tutor_response_metadata(
@@ -9889,14 +9952,14 @@ def ask_topic(
         before_metadata=stable_metadata_for_topic(original_metadata),
         after_metadata=stable_metadata_for_topic(projected_metadata),
     )
-    if allow_specialized_actions and coding_drill_action is not None:
+    if allow_specialized_actions and coding_drill_action is not None and not source_mode:
         orchestrate_tutor_coding_drill(
             read_topic(topic.slug),
             coding_drill_action,
             input_func=input_func,
             output_func=output_func,
         )
-    should_finish_turn = session_kind != SIDE_CHAT_SESSION_KIND
+    should_finish_turn = session_kind != SIDE_CHAT_SESSION_KIND and not source_mode
     should_update_metadata = (
         not needs_judgment
         and not is_navigation
@@ -9938,6 +10001,7 @@ def generate_validated_tutor_answer(
     engagement_check_due: bool = False,
     interview_target: dict[str, object] | None = None,
     response_metadata_sink: Callable[[TutorResponseMetadata], object] | None = None,
+    source_context=None,
 ) -> str:
     """Generate, validate, then reveal one tutor response."""
     first_lesson_initializing = (
@@ -9958,7 +10022,14 @@ def generate_validated_tutor_answer(
     }
     enforce_action_labels = engagement_check_due or message_kind in {None, "", "answer", "practice"}
     forbid_choice_claim = message_kind == "navigation"
-    if interview_target is not None:
+    if source_context is not None:
+        from openlearn import source_context as sources
+
+        system = sources.tutor_prompt(
+            source_context, topic.metadata, engagement_check_due=engagement_check_due,
+        )
+        prompt = source_context.user
+    elif interview_target is not None:
         system = system_prompt(
             topic,
             engagement_check_due=engagement_check_due,
@@ -9971,6 +10042,7 @@ def generate_validated_tutor_answer(
     if system_prompt_sink is not None:
         system_prompt_sink(system)
     candidate = ""
+    source_reference_error = None
     buffered_output: list[str] = []
     for attempt in range(2):
         buffered_output = []
@@ -9993,11 +10065,27 @@ def generate_validated_tutor_answer(
                 forbid_check=forbid_check,
                 forbid_choice_claim=forbid_choice_claim,
             )
+            if source_context is not None:
+                # Only the bounded screened draft may be resent for repair.
+                candidate = sources.screened(candidate, 2000)
+                user = tutor_contract_repair_prompt(
+                    candidate, require_check=require_check, forbid_check=forbid_check,
+                    forbid_choice_claim=forbid_choice_claim,
+                )
         if first_lesson_initializing:
             user = lesson_policy.initialization_generation_prompt(user)
+        if source_context is not None:
+            if source_reference_error:
+                user += (
+                    "\n" + source_reference_error
+                    + " Omit unsupported source references; the application adds the real excerpt ledger."
+                )
+            sources.ensure_unchanged(topic, source_context, model)
+            if len(system) + len(user) > sources.PROMPT_CHAR_LIMIT:
+                raise OpenLearnError("Source request exceeds its budget; no request was sent.")
         stream_options = (
             {"stream_sink": stream_sink}
-            if stream_sink is not None and not first_lesson_initializing
+            if stream_sink is not None and not first_lesson_initializing and source_context is None
             else {}
         )
         stream_arguments = {
@@ -10017,6 +10105,15 @@ def generate_validated_tutor_answer(
             candidate = call_openai_streaming(**stream_arguments)
         else:
             candidate = call_openai_streaming(**metadata_arguments)
+        if source_context is not None:
+            source_reference_error = source_context.reference_error(candidate)
+            if source_reference_error:
+                if attempt == 1:
+                    raise OpenLearnError(
+                        "Tutor returned unsupported source references. "
+                        "The previous question and your answer were preserved for retry."
+                    )
+                continue
         if candidate_metadata == TutorResponseMetadata():
             _visible_candidate, candidate_metadata = tutor_response_metadata(candidate)
         if first_lesson_initializing:
@@ -10035,6 +10132,8 @@ def generate_validated_tutor_answer(
                 stream_sink(sanitize_model_output(candidate))
             if response_metadata_sink is not None:
                 response_metadata_sink(candidate_metadata)
+            if source_context is not None:
+                candidate = source_context.attach(candidate)
             emit_tutor_output(sanitize_model_output(candidate), output_func)
             return candidate
         if interview_target is not None:
@@ -10068,6 +10167,11 @@ def generate_validated_tutor_answer(
                 response_metadata_sink(candidate_metadata)
             for line in buffered_output:
                 output_func(line)
+            if source_context is not None:
+                candidate = source_context.attach(candidate)
+                output_func(source_context.ledger.strip())
+                if stream_sink is not None:
+                    stream_sink(sanitize_model_output(candidate))
             return candidate
     raise OpenLearnError(
         "Tutor returned two responses that violated the learner-action contract. "
@@ -14559,6 +14663,9 @@ def save_pending_question(
 
 
 def extract_pending_question_text(text: str) -> str:
+    from openlearn.source_context import without_ledger
+
+    text = without_ledger(text)
     section_pattern = re.compile(
         r"(?i)^\s*(?:\*\*)?"
         r"(Lesson|Feedback|Example|Check|Hint|Next|Action):"
@@ -14847,16 +14954,27 @@ def update_learning_metadata(
     retry_status: Callable[[str], object] | None = None,
     persist: bool = True,
     projection_sink: Callable[[dict[str, object], str], None] | None = None,
+    source_context=None,
 ) -> str:
     previously_shown_text = last_tutor_lesson_response(topic)
     pending_at_answer = topic.metadata.get("pending_question")
     update_prompt = metadata_update_prompt(topic.metadata, learner_prompt, tutor_answer)
+    judge_model = configured_extractor_model(model)
+    if source_context is not None:
+        from openlearn import source_context as sources
+
+        update_prompt = sources.judge_prompt(source_context)
+        judge_model = model
     update: dict[str, object] = {}
     unusable_reason = "an unusable result"
     for attempt in range(1, JUDGE_MAX_ATTEMPTS + 1):
         try:
+            if source_context is not None:
+                from openlearn import source_context as sources
+
+                sources.ensure_unchanged(topic, source_context, judge_model)
             raw_update = call_openai_judgment(
-                configured_extractor_model(model), METADATA_EXTRACTOR_SYSTEM, update_prompt
+                judge_model, METADATA_EXTRACTOR_SYSTEM, update_prompt
             )
             update = parse_metadata_update(raw_update)
         except UnusableModelResponse as exc:
@@ -14873,6 +14991,8 @@ def update_learning_metadata(
                 ) from exc
             return ""
         except OpenLearnError as exc:
+            if getattr(exc, "category", None) == "qa_budget_stop":
+                raise
             if isinstance(pending_at_answer, dict):
                 detail = str(exc).replace("OpenAI request failed", "Provider request failed")
                 raise OpenLearnError(
@@ -19310,23 +19430,108 @@ def is_transient_openai_error(exc: HTTPError | URLError | TimeoutError) -> bool:
     return True
 
 
+def _safe_provider_diagnostics(raw: object) -> dict[str, object]:
+    """Allow only bounded codes, normalized times, and known attribution values."""
+    if not isinstance(raw, Mapping):
+        return {}
+    safe: dict[str, object] = {}
+    for key, minimum, maximum in (
+        ("http_status", 100, 599), ("stream_error_code", 100, 599),
+        ("provider_code", 100, 599), ("retry_after_seconds", 0, 2147483647),
+        ("rate_limit_reset", 0, 253402300799),
+    ):
+        value = raw.get(key)
+        if isinstance(value, str) and re.fullmatch(r"[0-9]{1,12}", value):
+            value = int(value)
+        if type(value) is int and minimum <= value <= maximum:
+            safe[key] = value
+    retry_at = raw.get("retry_after_at")
+    if isinstance(retry_at, str) and len(retry_at) <= 40:
+        try:
+            parsed = datetime.fromisoformat(retry_at)
+            if parsed.tzinfo is not None:
+                safe["retry_after_at"] = parsed.astimezone(timezone.utc).isoformat()
+        except (ValueError, OverflowError):
+            pass
+    limit_source = raw.get("limit_source")
+    if isinstance(limit_source, str) and limit_source in {
+        "openrouter_in_flight_budget", "openrouter_key_limit", "openrouter_credits",
+    }:
+        safe["limit_source"] = limit_source
+    provider = raw.get("provider")
+    # Field-name filtering alone could retain arbitrary secret text as a name.
+    if isinstance(provider, str) and provider.casefold() in {
+        "openinference", "openai", "anthropic", "google", "deepseek",
+    }:
+        safe["provider"] = provider.casefold()
+    return safe
+
+
+def _provider_error_diagnostics(
+    error: object, *, http_status: int | None = None,
+    headers: Mapping[str, str] | None = None, stream_provider: object = None,
+    stream_error_code: object = None,
+) -> dict[str, object]:
+    error = error if isinstance(error, dict) else {}
+    metadata = error.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    raw = {
+        "http_status": http_status,
+        "stream_error_code": stream_error_code,
+        "limit_source": metadata.get("limit_source"),
+        "provider_code": metadata.get("provider_code"),
+        "provider": metadata.get("provider_name"),
+    }
+    if "provider" not in _safe_provider_diagnostics(raw):
+        raw["provider"] = stream_provider
+    if headers is not None and hasattr(headers, "items"):
+        # HTTPMessage and ordinary mocked mappings use different casing behavior.
+        selected = {key.lower(): value for key, value in headers.items()
+                    if isinstance(key, str) and key.lower() in {"retry-after", "x-ratelimit-reset"}}
+        retry = selected.get("retry-after")
+        raw["retry_after_seconds"] = retry
+        raw["rate_limit_reset"] = selected.get("x-ratelimit-reset")
+        if isinstance(retry, str) and re.fullmatch(
+            r"[A-Za-z]{3}, [0-9]{2} [A-Za-z]{3} [0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2} GMT",
+            retry,
+        ):
+            try:
+                raw["retry_after_at"] = parsedate_to_datetime(retry).isoformat()
+            except (ValueError, OverflowError):
+                pass
+    return _safe_provider_diagnostics(raw)
+
+
 def _provider_transport_error(
     exc: HTTPError | URLError | TimeoutError, *, api_key: str
 ) -> ProviderRequestError:
     if isinstance(exc, HTTPError):
+        diagnostics = _provider_error_diagnostics({}, http_status=exc.code, headers=exc.headers)
+        try:
+            # Extract structured metadata only. Never keep the body in the exception.
+            body = exc.read(65537)
+            data = json.loads(body) if len(body) <= 65536 else None
+            if isinstance(data, dict):
+                diagnostics = _provider_error_diagnostics(
+                    data.get("error"), http_status=exc.code, headers=exc.headers,
+                )
+        except (OSError, ValueError, UnicodeError):
+            pass
+        finally:
+            exc.close()
         if exc.code == 401 and not api_key:
             return ProviderRequestError(
                 "provider_credentials",
                 "This endpoint requires an API key. Run: openlearn config set-key",
+                diagnostics=diagnostics,
             )
-        detail = exc.read().decode("utf-8", errors="replace")
         category = (
             "provider_credentials"
             if exc.code in {401, 403}
             else "provider_rate_limited" if exc.code == 429 else "provider_unavailable"
         )
         return ProviderRequestError(
-            category, f"OpenAI request failed: HTTP {exc.code}: {detail}"
+            category, f"OpenAI request failed: HTTP {exc.code}", diagnostics=diagnostics,
         )
     reason = exc.reason if isinstance(exc, URLError) else str(exc)
     return ProviderRequestError(
@@ -19349,23 +19554,64 @@ def _openrouter_request_options(
     return options
 
 
-def _stream_error(event: dict[str, object]) -> ProviderRequestError | None:
+def _stream_error(
+    event: dict[str, object], *, http_status: int | None = None,
+    headers: Mapping[str, str] | None = None,
+) -> ProviderRequestError | None:
     """Extract a safe actionable message from an SSE error event."""
     error = event.get("error")
     if not isinstance(error, dict):
         return None
-    code = error.get("code")
-    message = error.get("message")
-    safe_message = str(message).strip() if isinstance(message, str) else ""
-    safe_code = str(code).strip() if isinstance(code, (str, int)) else ""
-    detail = safe_message[:240] or "The provider ended the response early."
+    diagnostics = _provider_error_diagnostics(
+        error, http_status=http_status, headers=headers,
+        stream_provider=event.get("provider"), stream_error_code=error.get("code"),
+    )
+    safe_code = str(diagnostics.get("stream_error_code", ""))
+    detail = "rate limited" if safe_code == "429" else "The provider ended the response early."
     suffix = f" ({safe_code})" if safe_code else ""
     category = (
         "provider_credentials"
         if safe_code in {"401", "403"}
         else "provider_rate_limited" if safe_code == "429" else "provider_unavailable"
     )
-    return ProviderRequestError(category, f"Provider stream failed{suffix}: {detail}")
+    return ProviderRequestError(
+        category, f"Provider stream failed{suffix}: {detail}", diagnostics=diagnostics,
+    )
+
+
+def _qa_budget_guard() -> qa_budget.QABudget | None:
+    try:
+        return qa_budget.from_environment(lock=file_lock, write=write_text_atomic)
+    except qa_budget.QABudgetStop as exc:
+        raise ProviderRequestError("qa_budget_stop", str(exc)) from exc
+
+
+def _qa_budget_reserve(
+    budget: qa_budget.QABudget | None, base_url: str, payload: dict
+) -> str | None:
+    if budget is None:
+        return None
+    try:
+        return budget.reserve(base_url, payload)
+    except (qa_budget.QABudgetStop, OSError) as exc:
+        message = str(exc) if isinstance(exc, qa_budget.QABudgetStop) else (
+            "Live QA budget stopped: reservation could not be saved."
+        )
+        raise ProviderRequestError("qa_budget_stop", message) from exc
+
+
+def _qa_budget_settle(
+    budget: qa_budget.QABudget | None, attempt_id: str | None, usage: object
+) -> None:
+    if budget is None or attempt_id is None:
+        return
+    try:
+        budget.settle(attempt_id, usage)
+    except (qa_budget.QABudgetStop, OSError) as exc:
+        message = str(exc) if isinstance(exc, qa_budget.QABudgetStop) else (
+            "Live QA budget stopped: accounting could not be saved."
+        )
+        raise ProviderRequestError("qa_budget_stop", message) from exc
 
 
 def call_openai(
@@ -19404,6 +19650,10 @@ def call_openai(
         ],
     }
     payload.update(_openrouter_request_options(base_url, json_response=json_response))
+    budget = _qa_budget_guard()
+    if budget is not None:
+        payload.update(budget.request_options())
+        max_attempts = 1
     headers = {
         "Content-Type": "application/json",
         "User-Agent": f"openLearn/{__version__}",
@@ -19417,9 +19667,11 @@ def call_openai(
         method="POST",
     )
     for attempt in range(1, max_attempts + 1):
+        reservation = _qa_budget_reserve(budget, base_url, payload)
         try:
             with urlopen(request, timeout=timeout_seconds) as response:
                 data = json.loads(response.read().decode("utf-8"))
+            _qa_budget_settle(budget, reservation, data.get("usage") if isinstance(data, dict) else None)
             break
         except (HTTPError, URLError, TimeoutError) as exc:
             if not is_transient_openai_error(exc) or attempt == max_attempts:
@@ -19546,6 +19798,10 @@ def call_openai_streaming(
         ],
     }
     payload.update(_openrouter_request_options(base_url))
+    budget = _qa_budget_guard()
+    if budget is not None:
+        payload.update(budget.request_options())
+        payload["stream_options"] = {"include_usage": True}
     headers = {
         "Content-Type": "application/json",
         "User-Agent": f"openLearn/{__version__}",
@@ -19568,8 +19824,12 @@ def call_openai_streaming(
     if spinner is not None:
         spinner.add_task("waiting", total=None)
     try:
-        for attempt in range(1, OPENAI_MAX_ATTEMPTS + 1):
+        max_attempts = 1 if budget is not None else OPENAI_MAX_ATTEMPTS
+        for attempt in range(1, max_attempts + 1):
             chunks: list[str] = []
+            usage = None
+            stream_done = False
+            reservation = _qa_budget_reserve(budget, base_url, payload)
             try:
                 with urlopen(request, timeout=60) as response:
                     for raw_line in response:
@@ -19578,14 +19838,20 @@ def call_openai_streaming(
                             continue
                         data = line.removeprefix("data:").strip()
                         if data == "[DONE]":
+                            stream_done = True
                             break
                         try:
                             event = json.loads(data)
                         except json.JSONDecodeError:
                             continue
-                        stream_error = _stream_error(event)
+                        stream_error = _stream_error(
+                            event, http_status=getattr(response, "status", None),
+                            headers=getattr(response, "headers", None),
+                        )
                         if stream_error:
                             raise stream_error
+                        if event.get("usage") is not None:
+                            usage = event["usage"]
                         text = extract_stream_delta(event)
                         if not text:
                             continue
@@ -19605,9 +19871,11 @@ def call_openai_streaming(
                                 published_preview = sanitize_stream_preview("".join(chunks))
                                 stream_sink(published_preview)
                                 last_preview_at = now
+                if stream_done:
+                    _qa_budget_settle(budget, reservation, usage)
                 break
             except (HTTPError, URLError, TimeoutError) as exc:
-                if not is_transient_openai_error(exc) or attempt == OPENAI_MAX_ATTEMPTS:
+                if not is_transient_openai_error(exc) or attempt == max_attempts:
                     if tutor_stream is not None:
                         tutor_stream.abort()
                     raise _provider_transport_error(exc, api_key=api_key) from exc
@@ -19826,9 +20094,12 @@ class OpenLearnError(Exception):
 
 
 class ProviderRequestError(OpenLearnError):
-    def __init__(self, category: str, message: str) -> None:
+    def __init__(
+        self, category: str, message: str, *, diagnostics: Mapping[str, object] | None = None,
+    ) -> None:
         super().__init__(message)
         self.category = category
+        self.diagnostics = _safe_provider_diagnostics(diagnostics)
 
 
 class JudgeOutputError(OpenLearnError):

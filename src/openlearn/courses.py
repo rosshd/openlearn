@@ -1180,7 +1180,9 @@ def _course_library_projection(
                 message="Build this course's learning path before the first lesson.",
                 action="Build course path",
             )
-            if not path
+            if not path and not (
+                metadata.get("web_source_start") and not metadata.get("web_source_pending")
+            )
             else None
         )
     current = next((item for item in path if item.status == "current"), None)

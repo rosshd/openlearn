@@ -2,25 +2,33 @@
 {% block content %}
 <section class="create-shell" aria-labelledby="create-title">
   <div class="section-heading">
-    <div><p class="eyebrow">New course</p><h1 id="create-title">What do you want to understand?</h1></div>
+    <div><p class="eyebrow">Own topic</p><h1 id="create-title">What do you want to understand?</h1></div>
     <a class="quiet-link" href="{{ url_for('dashboard') }}">Back to dashboard</a>
   </div>
 
   {% if create_error %}<div class="error-summary" role="alert" tabindex="-1">{{ create_error }}</div>{% endif %}
-  <form class="work-panel form-stack create-form" id="custom-course" method="post" action="{{ url_for('create_course_form') }}" data-json-form data-enter-flow data-endpoint="/api/courses" novalidate>
+  <form class="work-panel form-stack create-form" id="custom-course" method="post" action="{{ url_for('create_course_form') }}" data-json-form data-enter-flow data-endpoint="/api/courses" data-provider-recovery-message="{{ provider_recovery_message or '' }}" novalidate>
     <input type="hidden" name="submission_id" data-uuid value="{{ submission_id }}">
-    <input type="hidden" name="template_id" value="{{ selected_template.id if selected_template else '' }}">
+    <input type="hidden" name="template_id" value="{{ creation_input.template_id or '' if creation_input else '' }}">
     <div class="error-summary" role="alert" tabindex="-1" data-form-error hidden></div>
-    <label for="course-title">Course name</label>
-    <input id="course-title" name="title" maxlength="160" required placeholder="Technical Interview Prep" value="{{ selected_template.title if selected_template else '' }}">
-    <label for="goal">Your goal</label>
-    <textarea id="goal" name="goal" rows="4" maxlength="4000" required placeholder="What should you be able to do when this course is working?">{{ selected_template.description if selected_template else '' }}</textarea>
-    <label for="experience">What have you tried already? <span class="optional">Optional</span></label>
-    <textarea id="experience" name="experience" rows="3" maxlength="4000" placeholder="A few words is enough. This guides the first example, but does not count as mastery."></textarea>
+    <div class="form-field">
+      <label for="course-title">Course name</label>
+      <input id="course-title" name="title" maxlength="160" required placeholder="A topic you want to understand" value="{{ creation_input.title if creation_input else '' }}">
+    </div>
+    <div class="form-field">
+      <label for="goal">Your goal</label>
+      <textarea id="goal" name="goal" rows="4" maxlength="4000" required placeholder="What should you be able to do when this course is working?">{{ creation_input.goal if creation_input else '' }}</textarea>
+    </div>
+    <div class="form-field">
+      <label for="experience">What have you tried already? <span class="optional">Optional</span></label>
+      <textarea id="experience" name="experience" rows="3" maxlength="4000" placeholder="A few words is enough. This guides the first example, but does not count as mastery.">{{ creation_input.experience if creation_input else '' }}</textarea>
+    </div>
     <div class="form-footer">
       <p class="field-note" role="status" aria-live="polite" aria-atomic="true" data-form-status>One short prompt, then teaching starts.</p>
       <button class="primary-action" type="submit">Build the first lesson <span aria-hidden="true">→</span></button>
     </div>
+    <a class="quiet-link" href="{{ url_for('dashboard') }}">Cancel</a>
   </form>
 </section>
+{% with provider_recovery_cancel_label="Cancel and return to course" %}{% include "provider_recovery.html" %}{% endwith %}
 {% endblock %}

@@ -83,42 +83,84 @@ function initializeUuidFields(scope = document) {
 }
 initializeUuidFields();
 
-const quickLearnForm = document.querySelector("[data-quick-learn-form]");
-if (quickLearnForm) {
-  const fileInput = quickLearnForm.elements.file;
-  const fileName = quickLearnForm.querySelector("[data-file-name]");
-  fileInput.addEventListener("change", () => {
-    if (fileInput.files[0]) fileName.textContent = fileInput.files[0].name;
-  });
-  quickLearnForm.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const submit = quickLearnForm.querySelector('[type="submit"]');
-    const errorBox = quickLearnForm.querySelector("[data-form-error]");
-    const status = quickLearnForm.querySelector("[data-form-status]");
-    errorBox.hidden = true;
-    submit.disabled = true;
-    submit.setAttribute("aria-busy", "true");
-    status.textContent = "Reading the file and building your review…";
-    try {
-      const result = await requestJson("/api/quick-learn", {
-        method: "POST",
-        body: new FormData(quickLearnForm),
-      });
-      window.location.assign(appUrl(result.focus_url));
-    } catch (error) {
-      if (error.payload?.state === "setup_required" && error.payload.setup_url) {
-        window.location.assign(appUrl(error.payload.setup_url));
-        return;
+const createForm = document.querySelector(".create-form");
+const creationDraftKey = `openlearn-course-draft:${appRoot}:${window.location.pathname}`;
+const creationDraftFields = {title: 160, goal: 4000, experience: 4000, submission_id: 36, source_kind: 16, source_value: 2048};
+// Historical defaults from the retired web picker, only for migrating old tab drafts.
+// Keep this snapshot independent of future backend template edits; learner edits survive.
+const retiredCreationDefaults = {
+  "algorithms": {"title": "Algorithms & Data Structures", "goal": "Understand and implement core CS algorithms and data structures"},
+  "git": {"title": "Git & GitHub", "goal": "Use Git confidently for daily development work"},
+  "http-apis": {"title": "HTTP & APIs", "goal": "Understand how the web works and build and consume REST APIs"},
+  "linux-cli": {"title": "Linux CLI", "goal": "Navigate and automate tasks in a Linux/Unix terminal"},
+  "networking": {"title": "Computer Networking", "goal": "Understand how computer networks function from physical to application layer"},
+  "python-basics": {"title": "Python Basics", "goal": "Write and understand fundamental Python programs"},
+  "sql": {"title": "SQL Fundamentals", "goal": "Query and manage relational databases with SQL"},
+  "technical-interview-prep": {"title": "Technical Interview Prep", "goal": "Prepare for LeetCode-style coding interviews with algorithms, data structures, and clear solution reasoning"},
+  "vim": {"title": "Vim", "goal": "Edit text efficiently using Vim for real daily work"},
+};
+function saveCreationDraft() {
+  if (!createForm) return;
+  const draft = {};
+  for (const [name, limit] of Object.entries(creationDraftFields)) {
+    if (createForm.elements[name]) draft[name] = createForm.elements[name].value.slice(0, limit);
+  }
+  try { sessionStorage.setItem(creationDraftKey, JSON.stringify(draft)); } catch (_error) { /* optional */ }
+}
+if (createForm) {
+  try {
+    const draft = JSON.parse(sessionStorage.getItem(creationDraftKey) || "null");
+    if (draft && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(draft.submission_id)) {
+      const retired = Object.hasOwn(retiredCreationDefaults, draft.template_id) ? retiredCreationDefaults[draft.template_id] : null;
+      for (const [name, limit] of Object.entries(creationDraftFields)) {
+        if (createForm.elements[name] && typeof draft[name] === "string" && draft[name].length <= limit) {
+          createForm.elements[name].value = retired && draft[name] === retired[name] ? "" : draft[name];
+        }
       }
-      errorBox.textContent = error.message;
-      errorBox.hidden = false;
-      errorBox.focus();
-      status.textContent = "Your file was not changed. Fix the issue and try again.";
-    } finally {
-      submit.disabled = false;
-      submit.removeAttribute("aria-busy");
+      if (retired) saveCreationDraft();
     }
-  });
+  } catch (_error) { /* optional */ }
+  createForm.addEventListener("input", saveCreationDraft);
+  createForm.addEventListener("change", saveCreationDraft);
+  const kind = createForm.querySelector("[data-source-kind]");
+  if (kind) {
+    const updateSourceFields = () => {
+      const file = createForm.elements.source_file;
+      const value = createForm.elements.source_value;
+      const valueLabel = createForm.querySelector("[data-source-value-label]");
+      if (valueLabel) valueLabel.textContent = kind.value === "github" ? "Public GitHub repository URL" : "Local folder path";
+      value.placeholder = kind.value === "github" ? "https://github.com/owner/repository" : "/path/to/your/notes";
+      file.disabled = kind.value !== "file";
+      value.disabled = kind.value === "file";
+      file.hidden = file.disabled;
+      value.hidden = value.disabled;
+      createForm.querySelector('[for="source-file"]').hidden = file.disabled;
+      createForm.querySelector('[for="source-value"]').hidden = value.disabled;
+      createForm.querySelector("[data-source-file-note]").hidden = file.disabled;
+    };
+    kind.addEventListener("change", updateSourceFields);
+    updateSourceFields();
+  }
+}
+
+const providerDialog = document.querySelector("[data-provider-setup-dialog]");
+let pendingProviderResume = null;
+function openProviderSetup(message, resume) {
+  if (!providerDialog) return false;
+  pendingProviderResume = resume;
+  providerDialog.querySelector("[data-provider-recovery-reason]").textContent = message;
+  if (!providerDialog.open) providerDialog.showModal();
+  providerDialog.querySelector("#provider-recovery-title").focus();
+  return true;
+}
+providerDialog?.querySelector("[data-provider-setup-cancel]")?.addEventListener("click", () => providerDialog.close());
+providerDialog?.addEventListener("close", () => {
+  pendingProviderResume = null;
+  const key = providerDialog.querySelector('[name="api_key"]');
+  if (key) key.value = "";
+});
+if (createForm?.dataset.providerRecoveryMessage) {
+  openProviderSetup(createForm.dataset.providerRecoveryMessage, () => createForm.requestSubmit());
 }
 
 const starterResumeForm = document.querySelector("[data-starter-resume-form]");
@@ -187,44 +229,23 @@ if (providerSelect && providerModel && providerBaseUrl) {
   updateProviderPresentation();
 }
 
-for (const choice of document.querySelectorAll("[data-template-choice]")) {
-  choice.addEventListener("click", () => {
-    for (const other of document.querySelectorAll("[data-template-choice]")) other.setAttribute("aria-pressed", "false");
-    choice.setAttribute("aria-pressed", "true");
-    const form = document.querySelector(".create-form");
-    if (!form) return;
-    form.elements.template_id.value = choice.dataset.templateId;
-    form.elements.title.value = choice.dataset.title;
-    form.elements.goal.value = choice.dataset.goal;
-    form.elements.experience.focus();
-    announce(`${choice.dataset.title} selected.`);
-  });
-}
-
-for (const strip of document.querySelectorAll("[data-starter-strip]")) {
-  const track = strip.querySelector("[data-starter-track]");
-  for (const button of strip.querySelectorAll("[data-starter-scroll]")) {
-    button.addEventListener("click", () => {
-      const direction = button.dataset.starterScroll === "previous" ? -1 : 1;
-      track?.scrollBy({left: direction * Math.max(260, track.clientWidth * 0.82), behavior: "smooth"});
-    });
-  }
-}
-
 for (const form of document.querySelectorAll("[data-json-form]")) {
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
+    if (form.dataset.submitting === "true") return;
+    form.dataset.submitting = "true";
+    if (form === createForm) saveCreationDraft();
     const submit = form.querySelector('[type="submit"]');
     const errorBox = form.querySelector("[data-form-error]");
     const status = form.querySelector("[data-form-status]");
     if (errorBox) errorBox.hidden = true;
     submit.disabled = true;
     submit.setAttribute("aria-busy", "true");
-    if (status) status.textContent = form.dataset.endpoint === "/api/setup" ? "Testing connection…" : "Saving course and preparing the first lesson…";
+    if (status) status.textContent = form.hasAttribute("data-multipart") ? "Saving course and screening the source…" : form.dataset.endpoint === "/api/setup" ? "Testing connection…" : "Saving course and preparing the first lesson…";
     try {
       const result = await requestJson(form.dataset.endpoint, {
         method: "POST",
-        body: JSON.stringify(formPayload(form)),
+        body: form.hasAttribute("data-multipart") ? new FormData(form) : JSON.stringify(formPayload(form)),
       });
       if (form.elements.api_key) form.elements.api_key.value = "";
       if (form.dataset.endpoint === "/api/setup" && result.ready === false) {
@@ -233,11 +254,27 @@ for (const form of document.querySelectorAll("[data-json-form]")) {
         if (status) status.textContent = message;
         return;
       }
+      if (form.hasAttribute("data-provider-recovery-form")) {
+        const resume = providerDialog.open ? pendingProviderResume : null;
+        pendingProviderResume = null;
+        providerDialog.close();
+        if (resume) resume();
+        return;
+      }
+      if (form === createForm) {
+        try { sessionStorage.removeItem(creationDraftKey); } catch (_error) { /* optional */ }
+      }
       announce("Saved successfully.");
       const destination = result.setup_url || result.placement_url || result.initialization_url || result.focus_url || result.redirect || form.dataset.successUrl;
       if (destination) window.location.assign(appUrl(destination));
     } catch (error) {
       if (form.elements.api_key && !error.payload?.retain_secret) form.elements.api_key.value = "";
+      if (form === createForm && error.payload?.state === "setup_required") {
+        if (openProviderSetup(error.message, () => createForm.requestSubmit())) {
+          if (status) status.textContent = "Lesson input saved. Test the tutor connection to continue.";
+          return;
+        }
+      }
       if (errorBox) {
         errorBox.textContent = error.message;
         errorBox.hidden = false;
@@ -245,6 +282,7 @@ for (const form of document.querySelectorAll("[data-json-form]")) {
       }
       if (status) status.textContent = "Nothing was lost. Correct the issue and try again.";
     } finally {
+      delete form.dataset.submitting;
       submit.disabled = false;
       submit.removeAttribute("aria-busy");
     }
@@ -480,14 +518,11 @@ let latestAppliedCourseRevision = Number(focusShell?.dataset.revision || 0);
 let latestAppliedChatRevision = Number(focusShell?.dataset.chatRevision || 0);
 
 let activeToolOpener = null;
-let codeRevision = null;
-let codeDirty = false;
-let codeEditVersion = 0;
 let toolOpenVersion = 0;
 let surfaceMotionVersion = 0;
 const focusLayoutAnimations = new Map();
 
-const availableTools = new Set(["chat", "code", "sources"]);
+const availableTools = new Set(["chat", "sources", "options"]);
 
 function chatDraftStorageKey() {
   return focusShell?.dataset.courseSlug
@@ -689,19 +724,6 @@ function setToolUrl(tool, {replace = false} = {}) {
   window.history[replace ? "replaceState" : "pushState"]({}, "", next);
 }
 
-function confirmDiscardCodeChanges() {
-  if (!codeDirty) return true;
-  return window.confirm("Discard unsaved changes to this Python draft?");
-}
-
-function renderCodeResult(result) {
-  const region = toolSurface?.querySelector("[data-code-result]");
-  if (!region) return;
-  region.hidden = false;
-  region.querySelector("[data-code-result-kind]").textContent = result.kind || result.status || "saved";
-  const output = [result.stdout, result.stderr].filter((value) => value !== undefined && value !== null && value !== "").join("\n");
-  region.querySelector("[data-code-output]").textContent = output.length ? output : result.message || "No output.";
-}
 
 function renderSources(result) {
   const region = toolSurface?.querySelector("[data-source-results]");
@@ -737,16 +759,6 @@ function renderSources(result) {
 async function loadToolState(tool) {
   if (tool === "chat") {
     await refreshChat();
-  } else if (tool === "code") {
-    const result = await requestJson(toolEndpoint("code"));
-    const draft = toolSurface.querySelector("[data-code-draft]");
-    codeRevision = result.revision || null;
-    if (!codeDirty) {
-      draft.value = result.source || result.draft || "";
-      codeDirty = false;
-    }
-    if (result.result) renderCodeResult(result.result);
-    else toolSurface.querySelector("[data-code-result]").hidden = true;
   } else if (tool === "sources") {
     renderSources(await requestJson(toolEndpoint("sources")));
   }
@@ -764,8 +776,6 @@ async function openTool(tool, opener, {updateUrl = true} = {}) {
     toolSurface.querySelector("[data-tool-close]")?.focus();
     return true;
   }
-  if (currentTool === "code" && codeDirty && !confirmDiscardCodeChanges()) return false;
-  if (currentTool === "code" && codeDirty) codeDirty = false;
   const openVersion = ++toolOpenVersion;
   activeToolOpener = opener;
   for (const button of document.querySelectorAll("[data-tool-open]")) {
@@ -774,7 +784,7 @@ async function openTool(tool, opener, {updateUrl = true} = {}) {
   for (const panel of toolSurface.querySelectorAll("[data-tool-panel]")) {
     panel.hidden = panel.dataset.toolPanel !== tool;
   }
-  const titles = {chat: "Tutor chat", code: "Code workbench", sources: "Course sources"};
+  const titles = {chat: "Tutor chat", sources: "Course sources", options: "Course options"};
   toolSurface.querySelector("[data-tool-title]").textContent = titles[tool] || "Learning tool";
   if (toolSurface.hidden || toolSurface.getAttribute("aria-hidden") === "true") {
     revealSurface(toolSurface, () => {
@@ -787,7 +797,9 @@ async function openTool(tool, opener, {updateUrl = true} = {}) {
   toolStatus(
     tool === "chat"
       ? "Your lesson stays open while you ask."
-      : "Loading local tool state…"
+      : tool === "options"
+        ? "Local course options."
+        : "Loading local tool state…"
   );
   try {
     await loadToolState(tool);
@@ -804,8 +816,6 @@ async function openTool(tool, opener, {updateUrl = true} = {}) {
 function closeTool({updateUrl = true} = {}) {
   if (!toolSurface || !focusShell) return false;
   const currentTool = focusShell.dataset.toolActive;
-  if (currentTool === "code" && codeDirty && !confirmDiscardCodeChanges()) return false;
-  if (currentTool === "code" && codeDirty) codeDirty = false;
   toolOpenVersion += 1;
   for (const button of document.querySelectorAll("[data-tool-open]")) button.setAttribute("aria-expanded", "false");
   if (updateUrl) setToolUrl(null, {replace: true});
@@ -839,91 +849,6 @@ for (const button of document.querySelectorAll("[data-tool-open]")) {
 }
 toolSurface?.querySelector("[data-tool-close]")?.addEventListener("click", () => closeTool());
 
-toolSurface?.querySelector("[data-code-draft]")?.addEventListener("input", () => {
-  if (!codeDirty) toolStatus("Unsaved Python draft.");
-  codeDirty = true;
-  codeEditVersion += 1;
-});
-
-window.addEventListener("beforeunload", (event) => {
-  if (!codeDirty) return;
-  event.preventDefault();
-  event.returnValue = "";
-});
-
-toolSurface?.querySelector("[data-code-save]")?.addEventListener("click", async () => {
-  const draft = toolSurface.querySelector("[data-code-draft]");
-  const source = draft.value;
-  const editVersion = codeEditVersion;
-  try {
-    const result = await requestJson(toolEndpoint("code"), {
-      method: "POST",
-      body: JSON.stringify({
-        action: "save",
-        source,
-        expected_revision: codeRevision,
-      }),
-    });
-    codeRevision = result.revision || codeRevision;
-    codeDirty = editVersion !== codeEditVersion;
-    toolSurface.querySelector("[data-code-result]").hidden = true;
-    toolStatus(
-      codeDirty
-        ? "Saved the submitted draft. Newer edits remain unsaved."
-        : result.message || "Draft saved locally.",
-    );
-  } catch (error) { toolStatus(error.message, true); }
-});
-
-toolSurface?.querySelector("[data-code-run]")?.addEventListener("click", async (event) => {
-  const button = event.currentTarget;
-  const draft = toolSurface.querySelector("[data-code-draft]");
-  const source = draft.value;
-  const editVersion = codeEditVersion;
-  button.disabled = true;
-  toolStatus("Running in the bounded local workspace…");
-  try {
-    const result = await requestJson(toolEndpoint("code"), {
-      method: "POST",
-      body: JSON.stringify({
-        action: "run",
-        source,
-        expected_revision: codeRevision,
-      }),
-    });
-    codeRevision = result.revision || codeRevision;
-    codeDirty = editVersion !== codeEditVersion;
-    renderCodeResult(result.result || result);
-    toolStatus(
-      codeDirty
-        ? "Run complete for the submitted draft. Newer edits remain unsaved."
-        : result.message || "Run complete.",
-    );
-  } catch (error) { toolStatus(error.message, true); }
-  finally { button.disabled = false; }
-});
-
-toolSurface?.querySelector("[data-code-reset]")?.addEventListener("click", async () => {
-  if (!window.confirm("Reset this saved draft?")) return;
-  const editVersion = codeEditVersion;
-  try {
-    const result = await requestJson(toolEndpoint("code"), {
-      method: "POST",
-      body: JSON.stringify({action: "reset", source: "", expected_revision: codeRevision}),
-    });
-    codeRevision = result.revision || null;
-    codeDirty = editVersion !== codeEditVersion;
-    if (!codeDirty) {
-      toolSurface.querySelector("[data-code-draft]").value = result.source || result.draft || "";
-      toolSurface.querySelector("[data-code-result]").hidden = true;
-    }
-    toolStatus(
-      codeDirty
-        ? "Saved draft reset. Newer edits remain unsaved."
-        : "Draft reset.",
-    );
-  } catch (error) { toolStatus(error.message, true); }
-});
 
 if (focusShell) {
   const requestedTool = toolFromUrl();
@@ -937,6 +862,9 @@ if (focusShell) {
 
   window.addEventListener("popstate", async () => {
     const nextTool = toolFromUrl();
+    if (!nextTool && new URL(window.location.href).searchParams.has("tool")) {
+      setToolUrl(null, {replace: true});
+    }
     const currentTool = focusShell.dataset.toolActive || null;
     if (nextTool) {
       const opener = document.querySelector(`[data-tool-open="${nextTool}"]`);
@@ -1007,6 +935,9 @@ async function pollInitialization() {
       return;
     }
     if (state === "retryable_error" || state === "conflict") {
+      if (result.error_code === "provider_credentials") {
+        openProviderSetup(result.error || "The provider rejected the saved credentials. Test the connection.", retryInitialization);
+      }
       setInitializationState(
         result.error || "Your course is safe. Retry preparing the first lesson.",
         true,
@@ -1017,37 +948,45 @@ async function pollInitialization() {
   }
 }
 
+async function retryInitialization() {
+  const button = initializationShell.querySelector("[data-initialization-retry]");
+  if (button.disabled) return;
+  button.disabled = true;
+  setInitializationState("Retrying your saved first lesson…");
+  try {
+    const result = await requestJson(initializationShell.dataset.retryUrl, {
+      method: "POST",
+      body: "{}",
+    });
+    if (result.state === "committed") {
+      window.location.assign(initializationShell.dataset.focusUrl);
+      return;
+    }
+    await pollInitialization();
+  } catch (error) {
+    setInitializationState(error.message, true);
+    if (error.payload?.state === "setup_required") openProviderSetup(error.message, retryInitialization);
+  } finally {
+    button.disabled = false;
+  }
+}
+
 if (initializationShell) {
   const initialState = initializationShell.dataset.operationState;
-  if (initialState === "retryable_error" || initialState === "conflict") {
-    setInitializationState(
-      initializationShell.dataset.operationError
-        || "Your course is safe. Retry preparing the first lesson.",
-      true,
-    );
+  if (initializationShell.dataset.providerBlocked === "true") {
+    setInitializationState(initializationShell.dataset.providerError || "Test the provider connection before teaching starts.", true);
+    if (initializationShell.dataset.providerSetupRequired === "true") {
+      openProviderSetup(initializationShell.dataset.providerError, retryInitialization);
+    }
+  } else if (initialState === "retryable_error" || initialState === "conflict") {
+    setInitializationState(initializationShell.dataset.operationError || "Your course is safe. Retry preparing the first lesson.", true);
+    if (initializationShell.dataset.operationErrorCode === "provider_credentials") {
+      openProviderSetup(initializationShell.dataset.operationError, retryInitialization);
+    }
   } else {
     pollInitialization().catch((error) => setInitializationState(error.message, true));
   }
-  initializationShell.querySelector("[data-initialization-retry]")?.addEventListener("click", async (event) => {
-    const button = event.currentTarget;
-    button.disabled = true;
-    setInitializationState("Retrying your saved first lesson…");
-    try {
-      const result = await requestJson(initializationShell.dataset.retryUrl, {
-        method: "POST",
-        body: "{}",
-      });
-      if (result.state === "committed") {
-        window.location.assign(initializationShell.dataset.focusUrl);
-        return;
-      }
-      await pollInitialization();
-    } catch (error) {
-      setInitializationState(error.message, true);
-    } finally {
-      button.disabled = false;
-    }
-  });
+  initializationShell.querySelector("[data-initialization-retry]")?.addEventListener("click", retryInitialization);
 }
 
 function setOperationState(message, isError = false, result = null) {
@@ -1259,6 +1198,40 @@ for (const button of document.querySelectorAll("[data-progression-action]")) {
   });
 }
 
+let sourcePreviewInFlight = false;
+async function approveSourceRequest(payload) {
+  if (sourcePreviewInFlight) return false;
+  if (!focusShell?.querySelector("[data-source-mode]")?.checked) return true;
+  const dialog = focusShell.querySelector("[data-source-preview]");
+  if (!dialog || dialog.open) return false;
+  payload.source_mode = true;
+  sourcePreviewInFlight = true;
+  try {
+    const result = await requestJson(`/api/courses/${encodeURIComponent(focusShell.dataset.courseSlug)}/source-preview`, {
+      method: "POST", body: JSON.stringify(payload),
+    });
+    if (!result.ok) throw new Error(result.error || "Source preview is unavailable.");
+    dialog.querySelector("[data-source-disclosure]").textContent = result.disclosure;
+    dialog.querySelector("[data-source-preview-text]").textContent = result.preview;
+    return await new Promise((resolve) => {
+      const finish = (approved) => {
+        dialog.close();
+        dialog.oncancel = null;
+        dialog.querySelector("[data-source-cancel]").onclick = null;
+        dialog.querySelector("[data-source-send]").onclick = null;
+        if (approved) payload.source_approval = result.approval;
+        resolve(approved);
+      };
+      dialog.oncancel = (event) => { event.preventDefault(); finish(false); };
+      dialog.querySelector("[data-source-cancel]").onclick = () => finish(false);
+      dialog.querySelector("[data-source-send]").onclick = () => finish(true);
+      dialog.showModal();
+    });
+  } finally {
+    sourcePreviewInFlight = false;
+  }
+}
+
 async function submitTurn(overrideIntent = null) {
   if (!focusShell || turnInFlight || progressionInFlight) return;
   const payload = turnForm
@@ -1272,6 +1245,12 @@ async function submitTurn(overrideIntent = null) {
   if (overrideIntent) {
     payload.intent = overrideIntent;
     payload.text = "";
+  }
+  try {
+    if (!await approveSourceRequest(payload)) return;
+  } catch (error) {
+    setOperationState(error.message, true);
+    return;
   }
   lockTurnForm(true);
   setOperationState(turnProcessingMessage(payload.intent));
@@ -1347,6 +1326,27 @@ document.addEventListener("keydown", (event) => {
   submitTurn("next");
 });
 
+function appendMath(target, tex, display = false) {
+  target.classList.add("math-expression", "math-fallback");
+  target.dataset.mathDisplay = display ? "true" : "false";
+  if (window.OpenLearnMath) window.OpenLearnMath.render(target, tex, display);
+  else target.textContent = tex;
+}
+
+function appendPresentationText(container, text, parts) {
+  if (!parts) {
+    container.textContent = text || "";
+    return;
+  }
+  for (const part of parts) {
+    if (part.kind === "math") {
+      const span = document.createElement("span");
+      appendMath(span, part.text);
+      container.append(span);
+    } else container.append(document.createTextNode(part.text || ""));
+  }
+}
+
 function appendPresentationBlocks(container, blocks) {
   for (const block of blocks || []) {
     if (block.kind === "code") {
@@ -1355,11 +1355,15 @@ function appendPresentationBlocks(container, blocks) {
       code.textContent = block.text || "";
       pre.append(code);
       container.append(pre);
+    } else if (block.kind === "math") {
+      const formula = document.createElement("div");
+      appendMath(formula, block.text, true);
+      container.append(formula);
     } else if (block.kind === "unordered_list" || block.kind === "ordered_list") {
       const list = document.createElement(block.kind === "ordered_list" ? "ol" : "ul");
-      for (const value of block.items || []) {
+      for (const [index, value] of (block.items || []).entries()) {
         const itemNode = document.createElement("li");
-        itemNode.textContent = value;
+        appendPresentationText(itemNode, value, block.item_parts?.[index]);
         list.append(itemNode);
       }
       container.append(list);
@@ -1377,11 +1381,11 @@ function appendPresentationBlocks(container, blocks) {
       if (block.inline?.length) {
         for (const segment of block.inline) {
           const fragment = document.createElement(segment.strong ? "strong" : "span");
-          fragment.textContent = segment.text || "";
+          appendPresentationText(fragment, segment.text, segment.parts);
           content.append(fragment);
         }
       } else {
-        content.textContent = block.text || "";
+        appendPresentationText(content, block.text, block.parts);
       }
       container.append(content);
     }
@@ -1482,6 +1486,12 @@ chatForm?.addEventListener("submit", async (event) => {
   event.preventDefault();
   if (!chatForm.reportValidity()) return;
   const payload = formPayload(chatForm);
+  try {
+    if (!await approveSourceRequest(payload)) return;
+  } catch (error) {
+    setChatStatus(error.message, true);
+    return;
+  }
   storeChatDraft();
   lockChatForm(true);
   setChatStatus("Saving your question locally…");

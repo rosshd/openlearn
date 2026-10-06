@@ -17,6 +17,7 @@ from .security import BrowserSecurity, LocalSecurityMiddleware
 
 
 mimetypes.add_type("text/javascript", ".js", strict=True)
+mimetypes.add_type("font/woff2", ".woff2", strict=True)
 
 
 @runtime_checkable

@@ -76,6 +76,47 @@ Quick Learn accepts supported text and code files, PDFs, DOCX files, bounded loc
 Imports skip hidden directories, generated files, symlinks, binaries, oversized files, and secret-like names.
 Imported code is read as text and is never executed during import.
 
+For a selected course with imported class notes, the opt-in CLI source mode previews its outbound request before asking for confirmation:
+
+```bash
+openlearn chat my-course "quiz me on the current lesson" --source-mode
+```
+
+Source mode is off by default and requires the configured OpenRouter endpoint with `deepseek/deepseek-v4.1-flash`.
+Each request requires typing `send source request` after reviewing the preview.
+It sends bounded, screened selected-course excerpts, the current lesson answer or question, the pending Check, and at most two relevant lesson exchanges.
+It excludes unrelated profiles, goals, preferences, placement, and private notes, and skips optional metadata extraction, videos, and coding-drill actions.
+Screening is limited; inspect the preview for names or sensitive details before confirming.
+No provider grant or opt-in preference is saved.
+Tutor responses and source provenance remain in local history, which ordinary later tutoring may use under its existing behavior.
+This is not an app-wide privacy setting.
+
+The saved excerpt ledger records source IDs, checksums, and actual extracted-text line ranges, not original slide/page numbers or proof that a generated claim is correct.
+Missing, stale, unsafe, or over-budget material is withheld rather than silently replaced by summaries.
+Image-only formulas and direct PPTX ingestion are not supported; review a text/PDF export locally first.
+In the web lesson, open Options and choose "Use screened class sources for this turn", review the local preview, then choose "Send screened request".
+Every answer, question, or navigation request needs a fresh approval; cancellation sends nothing.
+The stored grading key is hidden in the learner preview but remains in the scoped judge request when needed.
+Changed requests or source material require a new preview.
+
+### Optional math presentation
+
+Web lessons, saved history, and tutor chat render explicitly marked simple algebra with a local KaTeX renderer.
+Use `\(x^2\)` for inline notation and standalone `\[` / `\]` lines for a display equation.
+Explain what each equation means in ordinary language beside it.
+Matrices, fractions, column vectors, roots, subscripts and ordinary equations are supported within bounded input limits.
+Code, currency text, streaming previews and unmarked arrays are never converted into math.
+Unsupported notation appears visibly as `Math (text)` rather than losing meaning or breaking the lesson.
+This first subset excludes custom macros, external resources, arbitrary styles, decorated/font-variant symbols and advanced alignment environments.
+CLI output and backups retain the original notation and explanatory prose; no saved topic is rewritten.
+MathML-only output preserves the existing CSP and uses a bundled math font from the local application.
+No CDN or installed system math font is required. While the font loads, or if it fails to load,
+the escaped notation remains readable as `Math (text)`. Prose and code keep their existing fonts.
+The unchanged STIX Two Math 2.13 b171 WOFF2 font is licensed under SIL OFL 1.1;
+its copyright, license, pinned upstream source and checksum ship in `web/static/vendor/stix/`.
+The bundled KaTeX 0.19.0 script comes from the official npm `katex` archive and retains its MIT license in `src/openlearn/web/static/vendor/katex/LICENSE`.
+Its SHA-256 is `103a53763cc033bba8d175bf3f0ba597c3505c9b6747dd3f2c7bc2a6bfcc8ae7`.
+
 ## Provider setup
 
 Provider setup is available in the web app or through `openlearn init`.

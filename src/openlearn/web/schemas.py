@@ -56,6 +56,12 @@ class CourseCreateRequest(BaseModel):
         return canonical_uuid(value)
 
 
+class SourceCourseCreateRequest(CourseCreateRequest):
+    mode: Literal["course", "quick"] = "course"
+    source_kind: Literal["file", "folder", "github"]
+    source_value: str = Field(default="", max_length=2048)
+
+
 class CourseSettingsRequest(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     goal: str = Field(min_length=1, max_length=4000)
@@ -123,6 +129,8 @@ class TutorSubmissionRequest(BaseModel):
     text: str = Field(default="", max_length=32000)
     submission_id: str = Field(min_length=1, max_length=64)
     expected_revision: int = Field(ge=0)
+    source_mode: bool = False
+    source_approval: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     source_lesson_id: str | None = Field(default=None, min_length=1, max_length=96)
     source_lesson_title: str | None = Field(default=None, min_length=1, max_length=160)
     source_lesson_revision: int | None = Field(default=None, ge=0)

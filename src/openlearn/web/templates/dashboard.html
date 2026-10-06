@@ -12,6 +12,7 @@
       </summary>
       <div class="course-menu-panel" data-course-menu-panel aria-label="New course choices">
         <a href="{{ url_for('new_course') }}#custom-course">Custom course</a>
+        <a href="{{ url_for('source_course') }}">Source course</a>
         <a href="{{ url_for('quick_learn') }}">Quick Learn</a>
       </div>
     </details>
@@ -70,8 +71,8 @@
       {% endif %}
 
       <div class="course-next-move">
-        <p class="current-topic-label">{% if path %}Current topic{% else %}Course setup{% endif %}</p>
-        <h3>{% if path %}{{ course.current_topic }}{% else %}Needs setup{% endif %}</h3>
+        <p class="current-topic-label">{% if path or course.source_start %}Current topic{% else %}Course setup{% endif %}</p>
+        <h3>{% if path or course.source_start %}{{ course.current_topic }}{% else %}Needs setup{% endif %}</h3>
         {% if course.blocker %}
         <div class="inline-notice" role="status">
           <strong>{{ course.blocker.message }}</strong>
@@ -80,7 +81,7 @@
         {% endif %}
         <div class="course-learning-actions">
           <form class="course-activation-form" method="post" action="{{ url_for('activate_course', slug=course.slug) }}">
-            <button class="primary-action" type="submit">{% if course.blocker %}{{ course.blocker.action }}{% elif not path %}Set up course{% else %}Continue learning{% endif %} <span aria-hidden="true">→</span></button>
+            <button class="primary-action" type="submit">{% if course.blocker %}{{ course.blocker.action }}{% elif not path and not course.source_start %}Set up course{% else %}Continue learning{% endif %} <span aria-hidden="true">→</span></button>
           </form>
           {% if course.review and course.review.actionable %}
             {% if course.review.kind == 'canonical' %}
@@ -107,11 +108,11 @@
         {% endfor %}
         </ol>
         {% else %}
-        <p>The course outline will appear after setup.</p>
+        <p>{% if course.source_start %}Your source lesson will build the course outline.{% else %}The course outline will appear after setup.{% endif %}</p>
         {% endif %}
       </details>
 
-      {% if course.first_pass_complete or course.recommendation %}
+      {% if course.first_pass_complete or (course.recommendation and course.recommendation.kind != 'curated') %}
       <details class="course-more-options"{% if follow_up_proposal %} open{% endif %}>
         <summary>More learning options</summary>
       {% if course.first_pass_complete %}
@@ -133,14 +134,11 @@
       </section>
       {% endif %}
 
-      {% if course.recommendation %}
+      {% if course.recommendation and course.recommendation.kind != 'curated' %}
       <section class="course-action-panel follow-up-panel" data-follow-up-panel aria-labelledby="follow-up-title">
         <p class="eyebrow">Suggested next course</p>
         <h3 id="follow-up-title">{{ course.recommendation.title }}</h3>
         <p>{{ course.recommendation.goal }}</p>
-        {% if course.recommendation.kind == 'curated' %}
-          <a class="primary-action compact" href="{{ url_for('new_course') }}?template={{ course.recommendation.template_id }}">Review this course</a>
-        {% else %}
           {% if follow_up_proposal and follow_up_proposal.ok %}
             {% if follow_up_proposal.state == 'ready' %}
               <p><strong>{{ follow_up_proposal.title }}</strong><br>{{ follow_up_proposal.goal }}</p>
@@ -174,7 +172,6 @@
             </form>
           {% endif %}
           <p class="follow-up-status" role="status" aria-live="polite" data-follow-up-status hidden></p>
-        {% endif %}
       </section>
       {% endif %}
       </details>
