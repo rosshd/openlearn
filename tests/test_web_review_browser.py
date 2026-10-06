@@ -589,6 +589,8 @@ def preparation_error(page, *, missing=False):
         "error": "PRIVATE credential <img src=x onerror=alert(1)> provider traceback",
     }
     app.open()
+    # Freeze time before the action so assertion work cannot consume toast time.
+    page.clock.pause_at(datetime.now(timezone.utc) + timedelta(seconds=1))
     page.get_by_role("button", name="Prepare card", exact=True).click()
     return app
 
