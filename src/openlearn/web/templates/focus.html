@@ -196,7 +196,7 @@
       </form>
       <form class="tool-form" data-source-folder-form>
         <label for="source-folder">Local folder path</label>
-        <input id="source-folder" name="path" maxlength="4096" required placeholder="/Users/you/notes">
+        {% with folder_input_id="source-folder", folder_input_name="path", folder_input_required=true, folder_input_maxlength=4096 %}{% include "folder_path.html" %}{% endwith %}
         <button type="submit">Import folder</button>
       </form>
       <form class="tool-form" data-source-github-form>

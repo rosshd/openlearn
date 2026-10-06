@@ -556,6 +556,12 @@ h2 { font-size: var(--type-section); line-height: 1.25; letter-spacing: -0.025em
 .creation-panel input[type="file"]::file-selector-button { margin-right: 0.5rem; padding: 0.3rem 0.5rem; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-raised); color: var(--library-normal); font: inherit; cursor: pointer; }
 .creation-panel .source-choice { padding: 0; border: 0; gap: 0.6rem; }
 .creation-source-grid { display: grid; grid-template-columns: minmax(0, 12rem) minmax(0, 1fr); gap: 0.75rem; align-items: start; }
+.folder-path-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0.5rem; align-items: start; }
+.folder-path-row input { min-width: 0; }
+.folder-path-row .source-browse { min-height: 2.75rem; padding: 0.6rem 0.7rem; border-radius: var(--radius); background: var(--surface-raised); color: var(--graphite-soft); font-size: 0.9rem; font-weight: 500; box-shadow: none; transform: none; }
+.folder-picker-status { grid-column: 1 / -1; }
+.source-selection-actions { display: flex; gap: 0.5rem; }
+.creation-panel .source-selection-actions .quiet-link { padding: 0.25rem 0.4rem; border: 0; background: transparent; color: var(--library-muted); font-size: 0.82rem; font-weight: 500; box-shadow: none; transform: none; }
 .creation-panel .field-note, .creation-panel .optional { color: var(--library-muted); font-size: 0.82rem; }
 .creation-panel .field-note { margin: 0; }
 .creation-disclosure { min-width: 0; border-top: 1px solid var(--library-divider); }

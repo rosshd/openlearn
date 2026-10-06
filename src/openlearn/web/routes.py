@@ -17,6 +17,8 @@ from starlette.datastructures import UploadFile as FormUploadFile
 from openlearn.constants import QUICK_LEARN_MAX_FILE_BYTES
 from openlearn import source_imports
 
+from . import folder_picker
+
 from .schemas import (
     CodeToolRequest,
     CourseCreateRequest,
@@ -43,6 +45,15 @@ from .schemas import (
 )
 
 router = APIRouter()
+
+
+@router.post("/api/sources/folder-picker", response_class=JSONResponse)
+async def choose_source_folder(request: Request) -> JSONResponse:
+    try:
+        path = await run_in_threadpool(folder_picker.pick_folder)
+    except folder_picker.FolderPickerError as error:
+        return _json_error(str(error), 503)
+    return JSONResponse({"ok": True, "path": path})
 
 
 async def _call(request: Request, method: str, *args: Any, **kwargs: Any) -> Any:

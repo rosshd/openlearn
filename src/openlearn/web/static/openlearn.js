@@ -83,6 +83,37 @@ function initializeUuidFields(scope = document) {
 }
 initializeUuidFields();
 
+for (const picker of document.querySelectorAll("[data-folder-picker]")) {
+  const input = picker.querySelector("input");
+  const button = picker.querySelector("[data-folder-browse]");
+  const status = picker.querySelector("[data-folder-picker-status]");
+  button.hidden = false;
+  button.addEventListener("click", async () => {
+    const initialValue = input.value;
+    button.disabled = true;
+    button.setAttribute("aria-busy", "true");
+    status.hidden = false;
+    status.textContent = "Choose a folder in the folder chooser.";
+    try {
+      const result = await requestJson("/api/sources/folder-picker", {method: "POST"});
+      if (result.path && !button.hidden && !input.disabled && input.value === initialValue) {
+        input.value = result.path;
+        input.dispatchEvent(new Event("input", {bubbles: true}));
+        input.dispatchEvent(new Event("change", {bubbles: true}));
+        input.focus();
+      }
+      status.textContent = "";
+      status.hidden = true;
+    } catch (error) {
+      if (!button.hidden) status.textContent = error.message;
+      else status.hidden = true;
+    } finally {
+      button.disabled = false;
+      button.removeAttribute("aria-busy");
+    }
+  });
+}
+
 const createForm = document.querySelector(".create-form");
 const creationDraftKey = `openlearn-course-draft:${appRoot}:${window.location.pathname}`;
 const creationDraftFields = {title: 160, goal: 4000, experience: 4000, submission_id: 36, source_kind: 16, source_value: 2048};
@@ -132,31 +163,64 @@ if (createForm) {
   createForm.addEventListener("change", saveCreationDraft);
   const kind = createForm.querySelector("[data-source-kind]");
   if (kind) {
+    const file = createForm.elements.source_file;
+    const value = createForm.elements.source_value;
+    const browse = createForm.querySelector("[data-folder-browse]");
+    const suggestCourseName = () => {
+      if (createForm.elements.title.value.trim()) return;
+      const label = kind.value === "file" ? file.files[0]?.name?.replace(/\.[^.]+$/, "")
+        : kind.value === "folder" ? value.value.replace(/[\\/]+$/, "").split(/[\\/]/).pop() : "";
+      if (label) {
+        createForm.elements.title.value = label.replace(/[_-]+/g, " ").trim().slice(0, 160);
+        saveCreationDraft();
+      }
+    };
     const updateSourceFields = () => {
-      const file = createForm.elements.source_file;
-      const value = createForm.elements.source_value;
       const valueLabel = createForm.querySelector("[data-source-value-label]");
       if (valueLabel) valueLabel.textContent = kind.value === "github" ? "Public GitHub repository URL" : "Local folder path";
       value.placeholder = kind.value === "github" ? "https://github.com/owner/repository" : "/path/to/your/notes";
       const hasSource = Boolean(kind.value);
       file.disabled = kind.value !== "file";
       value.disabled = !hasSource || kind.value === "file";
+      browse.hidden = kind.value !== "folder";
+      if (browse.hidden) createForm.querySelector("[data-folder-picker-status]").hidden = true;
       createForm.querySelector("[data-source-file-field]").hidden = file.disabled;
       createForm.querySelector("[data-source-value-field]").hidden = value.disabled;
       createForm.querySelector("[data-source-file-note]").hidden = file.disabled;
+      const selected = kind.value === "file" ? file.files[0]?.name || ""
+        : hasSource ? value.value.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || "" : "";
+      createForm.querySelector("[data-source-actions]").hidden = !selected;
+      const selection = createForm.querySelector("[data-source-selection]");
+      if (selection) {
+        selection.textContent = selected;
+        selection.title = selected;
+      }
       if (createForm.dataset.creationMode === "course") {
         createForm.dataset.endpoint = hasSource ? "/courses/from-source" : "/api/courses";
         createForm.toggleAttribute("data-multipart", hasSource);
-        const selection = createForm.querySelector("[data-source-selection]");
-        selection.textContent = kind.value === "file" ? file.files[0]?.name || "Choose a file" : hasSource ? kind.selectedOptions[0].textContent : "";
         const status = createForm.querySelector("[data-form-status]");
         if (createForm.querySelector("[data-form-error]").hidden && !createForm.dataset.submitting) {
-          status.textContent = hasSource ? "Your sources stay local until you review and approve a tutor request." : "You can add sources later, too.";
+          status.textContent = hasSource ? "Your source stays local until you review and approve a tutor request." : "You can add a source later, too.";
         }
       }
     };
     kind.addEventListener("change", updateSourceFields);
-    createForm.elements.source_file.addEventListener("change", updateSourceFields);
+    file.addEventListener("change", () => { suggestCourseName(); updateSourceFields(); });
+    value.addEventListener("input", updateSourceFields);
+    value.addEventListener("change", suggestCourseName);
+    createForm.querySelector("[data-source-change]").addEventListener("click", () => {
+      if (kind.value === "file") file.click();
+      else if (kind.value === "folder") browse.click();
+      else { value.focus(); value.select(); }
+    });
+    createForm.querySelector("[data-source-remove]").addEventListener("click", () => {
+      file.value = "";
+      value.value = "";
+      if (createForm.dataset.creationMode === "course") kind.value = "";
+      updateSourceFields();
+      saveCreationDraft();
+      kind.focus();
+    });
     updateSourceFields();
     if (kind.value && createForm.querySelector("[data-creation-sources]")) createForm.querySelector("[data-creation-sources]").open = true;
   }

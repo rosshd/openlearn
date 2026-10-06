@@ -60,6 +60,36 @@ def csrf(client: TestClient, path: str = "/") -> str:
     return response.cookies["openlearn_csrf"]
 
 
+def test_folder_picker_requires_authentication_and_csrf_and_only_selects(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    from openlearn.web import folder_picker
+
+    calls = []
+    monkeypatch.setattr(folder_picker, "pick_folder", lambda: calls.append(1) or str(tmp_path))
+    with TestClient(create_app(PlaceholderServices()), base_url="http://127.0.0.1") as unauthenticated:
+        assert unauthenticated.post("/api/sources/folder-picker").status_code == 401
+    token = csrf(client)
+    assert client.get("/api/sources/folder-picker").status_code == 405
+    assert client.post("/api/sources/folder-picker", headers={"X-CSRF-Token": "invalid"}).status_code == 403
+    assert client.post("/api/sources/folder-picker", headers={"X-CSRF-Token": token, "Origin": "https://other.example"}).status_code == 403
+    assert not calls
+    response = client.post("/api/sources/folder-picker", headers={"X-CSRF-Token": token})
+    assert response.json() == {"ok": True, "path": str(tmp_path)}
+    assert calls == [1]
+    assert not list((tmp_path / "learning-topics").glob("*.md"))
+    monkeypatch.setattr(folder_picker, "pick_folder", lambda: None)
+    assert client.post("/api/sources/folder-picker", headers={"X-CSRF-Token": token}).json()["path"] is None
+
+    def unavailable() -> None:
+        raise folder_picker.FolderPickerError("Paste or type the path instead.")
+
+    monkeypatch.setattr(folder_picker, "pick_folder", unavailable)
+    response = client.post("/api/sources/folder-picker", headers={"X-CSRF-Token": token})
+    assert response.status_code == 503
+    assert response.json()["error"] == "Paste or type the path instead."
+
+
 def confidence_ratings(focus: str = "coding", **overrides: int) -> dict[str, int]:
     ratings = {
         topic_id: 3

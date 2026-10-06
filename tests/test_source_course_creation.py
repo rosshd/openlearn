@@ -55,7 +55,7 @@ def test_creation_entrypoints_share_one_optional_source_workflow(client):
         assert 'value="folder"' in response.text and 'value="github"' in response.text
         assert "Starter courses" not in response.text
         assert 'enctype="multipart/form-data"' in response.text
-        assert ('value="" selected>No sources' in response.text) == (mode == "course")
+        assert ('value="" selected>No source' in response.text) == (mode == "course")
         assert ('id="course-sources"' in response.text) == (mode == "course")
 
 

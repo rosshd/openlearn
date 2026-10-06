@@ -7,7 +7,7 @@
   <header class="section-heading creation-heading">
     <div>
       <h1 id="create-title">{{ 'Quick Learn' if quick else 'Custom course' }}</h1>
-      <p class="creation-description">{{ 'Create a focused course from one source.' if quick else 'Learn a topic, with optional sources.' }}</p>
+      <p class="creation-description">{{ 'Create a focused course from one source.' if quick else 'Learn a topic, with an optional source.' }}</p>
     </div>
     <a class="quiet-link" href="{{ url_for('dashboard') }}">Back to courses</a>
   </header>
@@ -30,7 +30,7 @@
     </div>
     {% if not quick %}
     <details class="creation-disclosure" id="course-sources" data-creation-sources{% if source_kind %} open{% endif %}>
-      <summary>Sources <span class="optional">Optional</span><span class="source-selection" data-source-selection></span></summary>
+      <summary>Source <span class="optional">Optional</span><span class="source-selection" data-source-selection></span></summary>
       {% include "creation_sources.html" %}
     </details>
     {% endif %}
@@ -41,7 +41,7 @@
         <textarea id="experience" name="experience" rows="2" maxlength="4000" placeholder="A few words about what you know so far.">{{ values.get('experience') or '' }}</textarea>
       </div>
     </details>
-    <p class="field-note creation-status" role="status" aria-live="polite" aria-atomic="true" data-form-status>{{ 'Your source stays local until you review and approve a tutor request.' if quick or source_kind else 'You can add sources later, too.' }}</p>
+    <p class="field-note creation-status" role="status" aria-live="polite" aria-atomic="true" data-form-status>{{ 'Your source stays local until you review and approve a tutor request.' if quick or source_kind else 'You can add a source later, too.' }}</p>
     <div class="creation-actions">
       <button class="primary-action" type="submit">{{ 'Create Quick Learn' if quick else 'Create course' }} <span aria-hidden="true">→</span></button>
       <a class="quiet-link" href="{{ url_for('dashboard') }}">Cancel</a>
