@@ -200,16 +200,31 @@ class PlacementRequest(BaseModel):
         return self
 
 
-class ReviewGradeRequest(BaseModel):
+class ReviewPrepareRequest(BaseModel):
     slug: str
     concept: str = Field(min_length=1, max_length=4000)
-    due: str = Field(min_length=1, max_length=64)
-    result: Literal["easy", "hard", "missed"]
+    review_revision: str = Field(min_length=1, max_length=128)
 
     @field_validator("slug")
     @classmethod
     def valid_slug(cls, value: str) -> str:
         return canonical_slug(value)
+
+
+class ReviewRevealRequest(ReviewPrepareRequest):
+    card_id: str = Field(min_length=1, max_length=128)
+    content_version: int = Field(ge=1)
+
+
+class ReviewGradeRequest(ReviewRevealRequest):
+    reveal_token: str = Field(min_length=1, max_length=128)
+    result: Literal["again", "hard", "good", "easy"]
+    submission_id: str = Field(min_length=1, max_length=64)
+
+    @field_validator("submission_id")
+    @classmethod
+    def valid_submission_id(cls, value: str) -> str:
+        return canonical_uuid(value)
 
 
 class DataManagementRequest(BaseModel):

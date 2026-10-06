@@ -91,6 +91,10 @@ class WebServices(Protocol):
 
     def due_reviews(self, slug: str | None = None) -> Any: ...
 
+    def prepare_review(self, request: Any) -> Any: ...
+
+    def reveal_review(self, request: Any) -> Any: ...
+
     def grade_review(self, request: Any) -> Any: ...
 
     def data_summary(self) -> Any: ...
@@ -225,6 +229,12 @@ class PlaceholderServices:
 
     def due_reviews(self, slug: str | None = None) -> dict[str, Any]:
         return {"items": [], "count": 0}
+
+    def prepare_review(self, request: Any) -> dict[str, Any]:
+        return {"ok": False, "error": "Review services are unavailable."}
+
+    def reveal_review(self, request: Any) -> dict[str, Any]:
+        return {"ok": False, "error": "Review services are unavailable."}
 
     def grade_review(self, request: Any) -> dict[str, Any]:
         return {"ok": False, "error": "Review services are unavailable."}

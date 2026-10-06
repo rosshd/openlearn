@@ -15359,6 +15359,8 @@ def normalize_review_due_metadata(metadata: dict[str, object]) -> None:
     normalized: list[dict[str, object]] = []
     seen: set[str] = set()
     for item in items:
+        last_reviewed = None
+        ebisu_model = None
         if isinstance(item, str):
             concept = item.strip()
             due = today()
@@ -15372,7 +15374,7 @@ def normalize_review_due_metadata(metadata: dict[str, object]) -> None:
             difficulty = (
                 difficulty_value
                 if isinstance(difficulty_value, str)
-                and difficulty_value in {"easy", "hard", "missed"}
+                and difficulty_value in {"easy", "hard", "good", "missed", "again"}
                 else "hard"
             )
             ebisu_model = normalized_ebisu_model(item.get("ebisu_model"))
@@ -15393,6 +15395,10 @@ def normalize_review_due_metadata(metadata: dict[str, object]) -> None:
             "due": due,
             "difficulty": difficulty,
         }
+        if isinstance(item, dict):
+            for retained in ("review_card", "review_revision", "relearn_at", "review_reveals"):
+                if retained in item:
+                    normalized_item[retained] = item[retained]
         if isinstance(item, dict) and ebisu_model is not None:
             normalized_item["ebisu_model"] = ebisu_model
         if last_reviewed is not None:
@@ -15483,7 +15489,7 @@ def schedule_review_item(
     concept = concept.strip()
     if not concept:
         return
-    if difficulty not in {"easy", "hard", "missed"}:
+    if difficulty not in {"easy", "hard", "good", "missed", "again"}:
         difficulty = "hard"
     model_state = normalized_ebisu_model(ebisu_model)
     if model_state is None:
@@ -15505,6 +15511,10 @@ def schedule_review_item(
             item["concept"] = concept
             item["due"] = due
             item["difficulty"] = difficulty
+            # Shared CLI changes invalidate any browser occurrence and reveal.
+            item.pop("review_revision", None)
+            item.pop("review_reveals", None)
+            item.pop("relearn_at", None)
             if model_state is not None:
                 item["ebisu_model"] = model_state
             else:
@@ -15531,15 +15541,15 @@ def next_review_due(difficulty: str, ebisu_model: object = None) -> str:
 
 
 def next_review_due_fixed(difficulty: str) -> str:
-    days = {"easy": 7, "hard": 2, "missed": 1}.get(difficulty, 2)
+    days = {"easy": 7, "good": 4, "hard": 2, "missed": 1, "again": 1}.get(difficulty, 2)
     return (date.fromisoformat(today()) + timedelta(days=days)).isoformat()
 
 
 # Ebisu 2.x integration. Models are stored as [alpha, beta, t] lists where t is
 # the half-life in days. A new concept starts with a half-life seeded from its
 # first difficulty; updateRecall then grows or shrinks it from review evidence.
-EBISU_INITIAL_HALFLIFE_DAYS = {"easy": 7.0, "hard": 2.0, "missed": 1.0}
-EBISU_REVIEW_OUTCOME = {"easy": (1, 1), "hard": (1, 2), "missed": (0, 1)}
+EBISU_INITIAL_HALFLIFE_DAYS = {"easy": 7.0, "good": 4.0, "hard": 2.0, "missed": 1.0, "again": 1.0}
+EBISU_REVIEW_OUTCOME = {"easy": (1, 1), "good": (1, 1), "hard": (1, 2), "missed": (0, 1), "again": (0, 1)}
 EBISU_DEFAULT_THRESHOLD = 0.5
 
 
@@ -15710,7 +15720,8 @@ def remove_known_from_review_lists(metadata: dict[str, object]) -> None:
             for item in values
             if (
                 isinstance(item, dict)
-                and concept_key(str(item.get("concept") or "")) not in known_values
+                and (concept_key(str(item.get("concept") or "")) not in known_values
+                     or isinstance(item.get("relearn_at"), str))
             )
             or (isinstance(item, str) and concept_key(item) not in known_values)
         ]

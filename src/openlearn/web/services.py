@@ -17,6 +17,7 @@ from openlearn import (
     interview_prep,
     lesson_policy,
     providers,
+    review_cards,
     source_imports,
     tutor_service,
     video_tools,
@@ -51,6 +52,8 @@ from .schemas import (
     PlacementRequest,
     ProgressionActionRequest,
     ReviewGradeRequest,
+    ReviewPrepareRequest,
+    ReviewRevealRequest,
     TutorSubmissionRequest,
     VideoToolRequest,
 )
@@ -113,6 +116,10 @@ def _card(card: CourseCard) -> dict[str, object]:
         vars(library.recommendation) if library.recommendation is not None else None
     )
     blocker = vars(library.blocker) if library.blocker is not None else None
+    queue = review_cards.session([card.slug])
+    review_count = max(library.review.due, int(queue["count"]))
+    waiting_times = [str(item["relearn_at"]) for item in queue["items"]
+                     if item.get("state") == "waiting"]
     base = {
         "slug": card.slug,
         "title": card.title,
@@ -126,9 +133,11 @@ def _card(card: CourseCard) -> dict[str, object]:
         "coverage_summary": library.coverage.summary,
         "review": {
             **vars(library.review),
-            "actionable": library.review.actionable,
+            "due": review_count,
+            "actionable": review_count > 0,
+            "next_retrieval": min(waiting_times) if waiting_times else library.review.next_retrieval,
         },
-        "review_due": library.review.due,
+        "review_due": review_count,
         "path": path,
         "upcoming": [vars(item) for item in library.upcoming],
         "weak_areas": list(library.weak_areas),
@@ -783,7 +792,7 @@ class OpenLearnWebServices:
             "active_course": active,
             "active_slug": snapshot.active_slug,
             "resume_course": courses_by_slug.get(snapshot.resume.slug) if snapshot.resume else None,
-            "due_reviews": snapshot.reviews.due_today,
+            "due_reviews": sum(int(card["review_due"]) for card in courses),
         }
 
     def activate_course(self, slug: str) -> dict[str, object]:
@@ -1663,7 +1672,7 @@ class OpenLearnWebServices:
                         "known": coverage["covered"],
                         "total": coverage["total"],
                         "units": [],
-                        "due_reviews": readiness["due"],
+                        "due_reviews": max(int(readiness["due"]), int(projected["review_due"])),
                     }
                 )
             else:
@@ -1673,35 +1682,24 @@ class OpenLearnWebServices:
                         "known": card.progress.known,
                         "total": card.progress.total,
                         "units": [vars(unit) for unit in card.progress.units],
-                        "due_reviews": card.progress.reviews.due_today,
+                        "due_reviews": projected["review_due"],
                     }
                 )
         return {"courses": courses}
 
     def due_reviews(self, slug: str | None = None) -> dict[str, object]:
-        items: list[dict[str, object]] = []
         cards = application.dashboard(selected_slug=slug).courses
-        if slug is not None:
-            cards = tuple(card for card in cards if card.slug == slug)
-        for card in cards:
-            topic = cli.read_topic_stats(card.slug)
-            items.extend({"slug": card.slug, "course": card.title, **item} for item in cli.due_review_items(topic.metadata))
-        return {"items": items, "count": len(items)}
+        slugs = [card.slug for card in cards if slug is None or card.slug == slug]
+        return review_cards.session(slugs)
+
+    def prepare_review(self, request: ReviewPrepareRequest) -> dict[str, object]:
+        return review_cards.prepare(request)
+
+    def reveal_review(self, request: ReviewRevealRequest) -> dict[str, object]:
+        return review_cards.reveal(request)
 
     def grade_review(self, request: ReviewGradeRequest) -> dict[str, object]:
-        topic = cli.read_topic_stats(request.slug)
-        due = next(
-            (
-                item
-                for item in cli.due_review_items(topic.metadata)
-                if item.get("concept") == request.concept and item.get("due") == request.due
-            ),
-            None,
-        )
-        if due is None:
-            return {"state": "conflict", "error": "This review changed elsewhere. Reload to continue."}
-        cli.schedule_review_outcomes(request.slug, [(due, request.result)])
-        return {"ok": True}
+        return review_cards.grade(request)
 
     def data_summary(self) -> dict[str, object]:
         inventory = application.data_inventory()

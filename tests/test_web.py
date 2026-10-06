@@ -1810,19 +1810,9 @@ def test_review_grading_and_detailed_progress_are_actionable(client: TestClient)
             "result": "easy",
         },
     )
-    assert graded.status_code == 200
-    assert graded.json() == {"ok": True}
-    stale = client.post(
-        "/api/review",
-        headers={"x-csrf-token": token},
-        json={
-            "slug": "review-course",
-            "concept": "Leader election",
-            "due": "2020-01-01",
-            "result": "easy",
-        },
-    )
-    assert stale.status_code == 409
+    # Concept-only legacy cards cannot be rated without preparation and reveal.
+    assert graded.status_code == 400
+    assert cli.read_topic("review-course").metadata["review_due"][0]["due"] == "2020-01-01"
 
 
 def test_mock_setup_persists_secret_without_echoing_it(client: TestClient) -> None:
