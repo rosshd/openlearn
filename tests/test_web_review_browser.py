@@ -16,7 +16,7 @@ from openlearn.web.app import PlaceholderServices
 
 
 STATIC = Path(__file__).resolve().parents[1] / "src/openlearn/web/static"
-ARTIFACTS = Path(__file__).resolve().parents[1] / ".artifacts/review-readability"
+ARTIFACTS = Path(__file__).resolve().parents[1] / ".artifacts/review-feedback"
 ANSWER = "An outlier can be a valid observation. Noise obscures the signal."
 QUESTION = "How does an outlier differ from noise, and can an outlier be valid?"
 pytestmark = pytest.mark.skipif(
@@ -60,6 +60,9 @@ class ReviewBrowser:
         self.answer = ANSWER
         self.explanation = "Being unusual alone does not make an observation noise.\n\nA valid observation may still lie far from the overall pattern."
         self.prepare_failure = None
+        self.prepare_hold = False
+        self.prepare_route = None
+        self.session_failure = None
         self.grade_failure = None
         self.grade_hold = None
         self.grade_route = None
@@ -82,12 +85,18 @@ class ReviewBrowser:
             if self.session_hold:
                 self.session_route = route
                 return
+            if self.session_failure:
+                route.fulfill(json=self.session_failure)
+                return
             route.fulfill(json={"items": self.items, "count": len(self.items), "server_time": self.session_time or timestamp()})
         elif path.startswith("/api/review"):
             body = route.request.post_data_json
             self.calls.append((path, body))
             assert route.request.headers["x-csrf-token"]
             if path.endswith("/prepare"):
+                if self.prepare_hold:
+                    self.prepare_route = route
+                    return
                 if self.prepare_failure:
                     route.fulfill(json=self.prepare_failure)
                 else:
@@ -165,7 +174,9 @@ def test_question_reveal_keyboard_safe_sources_and_semantic_completion(review_pa
     expect(review_page.locator("[data-review-answer]")).to_be_focused()
     expect(review_page.locator("[data-review-grade]")).to_have_count(4)
     expect(review_page.get_by_text("4 days", exact=True)).to_be_visible()
-    expect(review_page.get_by_role("heading", name="Answer", exact=True)).to_be_visible()
+    assert review_page.get_by_role("heading", name="Answer", exact=True).count() == 0
+    assert review_page.get_by_role("heading", name="Explanation", exact=True).count() == 0
+    expect(review_page.get_by_role("group", name="Answer", exact=True)).to_be_visible()
     expect(review_page.locator(".review-explanation")).to_have_count(2)
     expect(review_page.locator(".review-answer-text")).to_have_count(2)
     assert review_page.locator(".review-answer img, .review-answer script").count() == 0
@@ -234,16 +245,16 @@ def test_prepare_failure_retry_and_skip_do_not_complete(review_page):
     app = ReviewBrowser(review_page, [card(state="needs_preparation", question="", card_id="")])
     app.prepare_failure = {"ok": False, "state": "needs_source", "error": "Saved notes do not support a card."}
     app.open()
-    expect(review_page.get_by_role("heading", name="Prepare this review card")).to_be_visible()
+    expect(review_page.get_by_role("heading", name="Outliers and noise", exact=True)).to_be_visible()
     assert app.calls == []
     review_page.get_by_role("button", name="Prepare card", exact=True).click()
-    expect(review_page.get_by_role("heading", name="More course material is needed")).to_be_focused()
+    expect(review_page.locator("[data-review-status]")).to_have_text("More course material is needed.")
     expect(review_page.get_by_role("link", name="Open course")).to_be_visible()
     app.prepare_failure = {"ok": False, "state": "preparation_failed", "error": "Provider unavailable."}
-    review_page.get_by_role("button", name="Retry preparation").click()
-    expect(review_page.get_by_role("heading", name="Could not prepare this card")).to_be_visible()
+    review_page.get_by_role("button", name="Try again").click()
+    expect(review_page.locator("[data-review-status]")).to_have_text("Could not prepare this card.")
     app.prepare_failure = None
-    review_page.get_by_role("button", name="Retry preparation").click()
+    review_page.get_by_role("button", name="Try again").click()
     expect(review_page.locator("[data-review-question]")).to_have_text(QUESTION)
     review_page.get_by_role("button", name="Skip for now").click()
     expect(review_page.get_by_role("heading", name="Reviews remain due")).to_be_focused()
@@ -261,7 +272,7 @@ def test_uncertain_receipt_retries_exact_payload_and_locks_other_rating(review_p
     review_page.get_by_role("button", name="Show answer and explanation", exact=True).click()
     app.grade_failure = {"ok": True, "state": "saved"}  # HTTP success is not a receipt.
     review_page.locator("[data-review-grade='easy']").click()
-    expect(review_page.get_by_role("heading", name="Could not confirm this rating was saved")).to_be_focused()
+    expect(review_page.locator("[data-review-status]")).to_have_text("Could not confirm this rating was saved.")
     expect(review_page.locator("[data-review-answer]")).to_be_visible()
     for button in review_page.locator("[data-review-grade]").all():
         expect(button).to_be_disabled()
@@ -302,7 +313,7 @@ def test_stale_occurrence_refresh_never_reapplies_rating(review_page):
     review_page.get_by_role("button", name="Show answer and explanation", exact=True).click()
     app.grade_failure = {"ok": False, "state": "conflict", "error": "Occurrence changed."}
     review_page.locator("[data-review-grade='good']").click()
-    expect(review_page.get_by_role("heading", name="This card changed in another tab")).to_be_focused()
+    expect(review_page.locator("[data-review-status]")).to_have_text("This card changed in another tab.")
     app.items = [card(review_revision="occurrence-2", question="A new occurrence?")]
     review_page.get_by_role("button", name="Refresh review").click()
     expect(review_page.locator("[data-review-question]")).to_have_text("A new occurrence?")
@@ -360,10 +371,10 @@ def test_reveal_failure_retry_and_initially_empty_are_distinct(review_page):
     review_page.reload()
     app.reveal_failure = {"ok": False, "error": "Local storage unavailable."}
     review_page.get_by_role("button", name="Show answer and explanation", exact=True).click()
-    expect(review_page.get_by_role("heading", name="Could not reveal this answer")).to_be_focused()
+    expect(review_page.locator("[data-review-status]")).to_have_text("Could not show this answer.")
     assert app.posts("") == []
     app.reveal_failure = None
-    review_page.get_by_role("button", name="Retry reveal").click()
+    review_page.get_by_role("button", name="Try again").click()
     expect(review_page.locator("[data-review-answer]")).to_be_visible()
 
 
@@ -566,4 +577,216 @@ def test_concise_card_layout_and_keyboard_skip_stay_usable(review_page, width, h
     review_page.keyboard.press("Enter")
     expect(review_page.get_by_role("heading", name="Reviews remain due")).to_be_focused()
     assert app.posts("") == []
+    assert app.errors == app.unexpected == []
+
+
+def preparation_error(page, *, missing=False):
+    page.clock.install()
+    app = ReviewBrowser(page, [card(state="needs_preparation", question=None)])
+    app.prepare_failure = {
+        "ok": False, "state": "needs_source" if missing else "preparation_failed",
+        "code": "missing_source" if missing else "unknown",
+        "error": "PRIVATE credential <img src=x onerror=alert(1)> provider traceback",
+    }
+    app.open()
+    page.get_by_role("button", name="Prepare card", exact=True).click()
+    return app
+
+
+def test_notice_expires_but_single_primary_and_safe_status_remain(review_page):
+    from playwright.sync_api import expect
+
+    app = preparation_error(review_page)
+    toast = review_page.locator("[data-review-toast]")
+    retry = review_page.get_by_role("button", name="Try again", exact=True)
+    expect(toast).to_have_text("!Could not prepare this card.×")
+    expect(retry).to_be_focused()
+    expect(review_page.get_by_role("heading", level=2)).to_have_text("Outliers and noise")
+    expect(review_page.get_by_role("heading", level=1)).to_have_text("Review")
+    assert review_page.locator("[data-review-message]").count() == 0
+    assert review_page.get_by_role("link", name="Open course").count() == 0
+    assert "PRIVATE credential" not in review_page.content()
+    assert review_page.locator("[data-live-region]").text_content() == "Preparing question and answer."
+    persistent = review_page.locator("[data-review-recovery]").text_content()
+    review_page.clock.run_for(7999)
+    expect(toast).to_be_visible()
+    review_page.clock.run_for(1)
+    expect(toast).to_have_count(0)
+    assert review_page.locator("[data-review-recovery]").text_content() == persistent
+    expect(retry).to_be_enabled()
+    assert retry.count() == 1
+    app.prepare_hold = True
+    retry.click()
+    expect(review_page.get_by_role("button", name="Preparing…", exact=True)).to_be_disabled()
+    assert review_page.locator("[data-review-status]").text_content() == ""
+    review_page.wait_for_function("document.querySelector('[data-review-primary]').disabled")
+    assert app.prepare_route is not None
+    app.prepare_route.fulfill(json={"ok": True, "item": card()})
+    expect(review_page.locator("[data-review-question]")).to_have_text(QUESTION)
+    review_page.clock.run_for(10000)
+    expect(toast).to_have_count(0)
+    assert app.errors == app.unexpected == []
+
+
+@pytest.mark.parametrize("pause", ["hover", "focus", "hidden"])
+def test_notice_timer_pauses_and_resumes_with_remaining_duration(review_page, pause):
+    from playwright.sync_api import expect
+
+    app = preparation_error(review_page)
+    toast = review_page.locator("[data-review-toast]")
+    expect(toast).to_be_visible()
+    review_page.clock.run_for(3000)
+    if pause == "hover":
+        toast.hover()
+    elif pause == "focus":
+        review_page.get_by_role("button", name="Dismiss notification").focus()
+    else:
+        review_page.evaluate("Object.defineProperty(document, 'hidden', {configurable:true, get:()=>true}); document.dispatchEvent(new Event('visibilitychange'))")
+    review_page.clock.run_for(15000)
+    expect(toast).to_be_visible()
+    if pause == "hover":
+        review_page.mouse.move(0, 0)
+    elif pause == "focus":
+        review_page.get_by_role("button", name="Try again", exact=True).focus()
+    else:
+        review_page.evaluate("Object.defineProperty(document, 'hidden', {configurable:true, get:()=>false}); document.dispatchEvent(new Event('visibilitychange'))")
+    review_page.clock.run_for(4000)
+    expect(toast).to_be_visible()
+    review_page.clock.run_for(1100)
+    expect(toast).to_have_count(0)
+    assert app.errors == app.unexpected == []
+
+
+def test_dismiss_restores_retry_and_repeated_failures_do_not_stack_or_keep_timers(review_page):
+    from playwright.sync_api import expect
+
+    app = preparation_error(review_page, missing=True)
+    toast = review_page.locator("[data-review-toast]")
+    expect(review_page.get_by_role("link", name="Open course")).to_be_visible()
+    close = review_page.get_by_role("button", name="Dismiss notification")
+    close.focus()
+    review_page.keyboard.press("Enter")
+    expect(toast).to_have_count(0)
+    expect(review_page.get_by_role("button", name="Try again", exact=True)).to_be_focused()
+    review_page.get_by_role("button", name="Try again", exact=True).click()
+    expect(toast).to_have_count(1)
+    review_page.clock.run_for(4000)
+    review_page.get_by_role("button", name="Try again", exact=True).click()
+    expect(toast).to_have_count(1)
+    expect(review_page.locator("[data-review-status]")).to_have_count(1)
+    expect(review_page.get_by_role("button", name="Try again", exact=True)).to_have_count(1)
+    review_page.clock.run_for(5000)
+    expect(toast).to_be_visible()  # The obsolete first timer cannot expire this notice.
+    review_page.get_by_role("button", name="Skip for now", exact=True).click()
+    expect(toast).to_have_count(0)
+    expect(review_page.locator("[data-review-recovery]")).to_have_count(0)
+    review_page.clock.run_for(20000)
+    expect(toast).to_have_count(0)
+    assert app.errors == app.unexpected == []
+
+
+def test_notice_fades_without_motion_reduction(review_page):
+    from playwright.sync_api import expect
+
+    review_page.emulate_media(reduced_motion="no-preference")
+    preparation_error(review_page)
+    toast = review_page.locator("[data-review-toast]")
+    expect(toast).to_be_visible()
+    review_page.clock.run_for(8000)
+    expect(toast).to_have_class("review-toast is-leaving")
+    review_page.clock.run_for(160)
+    expect(toast).to_have_count(0)
+    expect(review_page.get_by_role("button", name="Try again", exact=True)).to_be_enabled()
+
+
+def test_uncertain_rating_retry_survives_expiry_with_exact_payload_and_locked_actions(review_page):
+    from playwright.sync_api import expect
+
+    review_page.clock.install()
+    app = ReviewBrowser(review_page, [card()])
+    app.grade_failure = {"ok": False, "error": "PRIVATE ambiguous response"}
+    app.open()
+    review_page.get_by_role("button", name="Show answer and explanation", exact=True).click()
+    review_page.locator("[data-review-grade='good']").click()
+    retry = review_page.get_by_role("button", name="Retry saving", exact=True)
+    expect(retry).to_be_enabled()
+    original = deepcopy(app.posts("")[0])
+    review_page.clock.run_for(10000)
+    expect(review_page.locator("[data-review-toast]")).to_have_count(0)
+    expect(retry).to_be_focused()
+    assert retry.count() == 1
+    for control in review_page.locator("[data-review-grade], [data-review-actions] button").all():
+        expect(control).to_be_disabled()
+    assert "PRIVATE ambiguous response" not in review_page.content()
+    review_page.locator("[data-review-answer]").focus()
+    review_page.keyboard.press("4")
+    review_page.keyboard.press("Space")
+    assert app.posts("") == [original]
+    assert review_page.get_by_role("button", name="Dismiss notification").count() == 0
+    app.grade_failure = None
+    retry.click()
+    expect(review_page.get_by_role("heading", name="Review complete")).to_be_visible()
+    assert app.posts("") == [original, original]
+    assert review_page.locator("[data-review-recovery], [data-review-toast]").count() == 0
+    assert app.errors == app.unexpected == []
+
+
+def test_stale_refresh_failure_reuses_one_recovery_and_dismiss_restores_it(review_page):
+    from playwright.sync_api import expect
+
+    review_page.clock.install()
+    app = ReviewBrowser(review_page, [card()])
+    app.reveal_failure = {"ok": False, "state": "conflict", "error": "PRIVATE stale"}
+    app.session_failure = {"ok": False, "error": "PRIVATE refresh"}
+    app.open()
+    review_page.get_by_role("button", name="Show answer and explanation", exact=True).click()
+    expect(review_page.get_by_role("button", name="Refresh review", exact=True)).to_be_enabled()
+    review_page.get_by_role("button", name="Refresh review", exact=True).click()
+    expect(review_page.get_by_role("button", name="Retry refresh", exact=True)).to_be_enabled()
+    expect(review_page.locator("[data-review-toast]")).to_have_count(1)
+    close = review_page.get_by_role("button", name="Dismiss notification")
+    close.focus()
+    review_page.keyboard.press("Enter")
+    expect(review_page.get_by_role("button", name="Retry refresh", exact=True)).to_be_focused()
+    review_page.get_by_role("button", name="Retry refresh", exact=True).click()
+    review_page.clock.run_for(10000)
+    expect(review_page.locator("[data-review-toast]")).to_have_count(0)
+    expect(review_page.locator("[data-review-status]")).to_have_text("This card changed. Refresh could not be completed.")
+    assert review_page.locator("[data-review-recovery]").count() == 1
+    app.session_failure = None
+    review_page.get_by_role("button", name="Retry refresh", exact=True).click()
+    expect(review_page.locator("[data-review-question]")).to_have_text(QUESTION)
+    assert "PRIVATE" not in review_page.content()
+    assert app.errors == app.unexpected == []
+
+
+@pytest.mark.parametrize("width,height,theme", [(1280, 800, "light"), (375, 812, "dark"), (320, 480, "light")])
+def test_preparation_notice_and_expired_recovery_viewports(review_page, width, height, theme):
+    from playwright.sync_api import expect
+
+    ARTIFACTS.mkdir(parents=True, exist_ok=True)
+    review_page.set_viewport_size({"width": width, "height": height})
+    review_page.clock.install()
+    app = ReviewBrowser(review_page, [card(state="needs_preparation", question=None)])
+    app.open()
+    review_page.evaluate("theme => setTheme(theme)", theme)
+    review_page.screenshot(path=str(ARTIFACTS / f"preparation-{theme}-{width}x{height}.png"))
+    app.prepare_failure = {"ok": False, "state": "preparation_failed", "error": "PRIVATE"}
+    review_page.get_by_role("button", name="Prepare card", exact=True).click()
+    toast = review_page.locator("[data-review-toast]")
+    expect(toast).to_be_visible()
+    box = toast.bounding_box()
+    header = review_page.locator(".site-header").bounding_box()
+    recovery = review_page.locator("[data-review-recovery]").bounding_box()
+    assert box["y"] >= max(0, header["y"] + header["height"])
+    assert box["x"] >= 0 and box["x"] + box["width"] <= width
+    assert box["y"] + box["height"] <= recovery["y"] or box["y"] >= recovery["y"] + recovery["height"]
+    close = review_page.get_by_role("button", name="Dismiss notification").bounding_box()
+    assert close["width"] >= 44 and close["height"] >= 44
+    assert review_page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    review_page.screenshot(path=str(ARTIFACTS / f"failure-notice-{theme}-{width}x{height}.png"))
+    review_page.clock.run_for(10000)
+    expect(toast).to_have_count(0)
+    review_page.screenshot(path=str(ARTIFACTS / f"expired-recovery-{theme}-{width}x{height}.png"))
+    expect(review_page.get_by_role("button", name="Try again", exact=True)).to_be_enabled()
     assert app.errors == app.unexpected == []

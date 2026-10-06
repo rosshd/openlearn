@@ -894,13 +894,13 @@ h2 { font-size: var(--type-section); line-height: 1.25; letter-spacing: -0.025em
 .review-panel h2 { font-size: clamp(1.1rem, 2vw, 1.4rem); font-weight: 600; line-height: 1.45; letter-spacing: -0.02em; }
 .review-panel p, .review-panel h2, .review-panel h3 { max-width: 65ch; }
 .review-course { color: var(--graphite-soft); font-size: 0.82rem; margin-bottom: 0.4rem; }
-.review-context { color: var(--graphite); font-size: 1.1rem; font-weight: 750; margin-bottom: 0.85rem; }
+.review-panel .review-topic { color: var(--graphite); font-size: 1.15rem; font-weight: 750; margin-bottom: 0.85rem; }
+.review-question { white-space: pre-wrap; line-height: 1.65; }
 .review-answer { margin-top: 1.25rem; padding-top: 1rem; border-top: 1px solid var(--line); }
-.review-answer h3 { margin-bottom: 0.75rem; color: var(--graphite-soft); font-size: 0.85rem; font-weight: 600; letter-spacing: 0.02em; }
 .review-prose { max-width: 57ch; font-size: 1.05rem; color: var(--graphite); }
 .review-answer .review-answer-text, .review-answer .review-explanation { margin-bottom: 1rem; white-space: pre-wrap; line-height: 1.7; }
 .review-prose p:last-child { margin-bottom: 0; }
-.review-prose + h3 { margin-top: 1.4rem; }
+.review-prose + .review-prose { margin-top: 1.4rem; }
 .review-ratings { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.65rem; }
 .review-rating { min-width: 0; padding: 0.8rem 0.6rem; display: flex; flex-direction: column; align-items: center; gap: 0.35rem; text-align: center; }
 .review-rating-label { font-weight: 750; }
@@ -912,7 +912,15 @@ h2 { font-size: var(--type-section); line-height: 1.25; letter-spacing: -0.025em
 .review-footer--flow { position: static; }
 .review-panel [tabindex="-1"], .review-prose p { scroll-margin-top: var(--review-header-offset, 8rem); scroll-margin-bottom: calc(var(--review-dock-height, 0px) + 1rem); }
 @media (max-height: 36em) { .review-footer--ratings { position: static; } }
-.review-message { margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid var(--line); }
+.review-recovery { margin-top: 1rem; }
+.review-status { margin-block: 0.65rem; color: var(--graphite-soft); font-size: 0.9rem; }
+.review-recovery button { scroll-margin-top: var(--review-header-offset, 8rem); scroll-margin-bottom: calc(var(--review-dock-height, 0px) + 1rem); }
+.review-toast { position: fixed; z-index: 30; top: calc(var(--review-notice-top, 5rem) + env(safe-area-inset-top, 0px)); right: max(1rem, env(safe-area-inset-right, 0px)); width: min(22rem, calc(100vw - 2rem - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px))); padding: 0.6rem 0.5rem 0.6rem 0.85rem; display: grid; grid-template-columns: auto minmax(0, 1fr) 2.75rem; align-items: center; gap: 0.65rem; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--surface-raised); color: var(--graphite); box-shadow: var(--shadow); opacity: 1; transition: opacity 160ms ease; overflow-wrap: anywhere; }
+.review-toast p { margin: 0; font-size: 0.9rem; line-height: 1.5; }
+.review-toast-icon { display: grid; place-items: center; width: 1.3rem; height: 1.3rem; border: 1.5px solid currentColor; border-radius: 50%; color: var(--error); font-size: 0.8rem; font-weight: 750; }
+.review-toast-dismiss { min-width: 2.75rem; min-height: 2.75rem; padding: 0; font-size: 1.4rem; }
+.review-toast.is-leaving { opacity: 0; }
+@media (prefers-reduced-motion: reduce) { .review-toast { transition: none; } }
 .review-countdown { color: var(--graphite-soft); font-variant-numeric: tabular-nums; }
 .review-back { justify-self: start; padding-left: 0; }
 @media (max-width: 600px) {

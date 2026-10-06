@@ -2,8 +2,7 @@
 {% block content %}
 <section class="review-shell" data-review-shell data-course="{{ request.query_params.get('course', '') }}" aria-labelledby="review-page-title">
   <header>
-    <p class="eyebrow">Practice</p>
-    <h1 id="review-page-title">Review what is due.</h1>
+    <h1 id="review-page-title">Review</h1>
     <p class="quiet-copy" data-review-summary>{{ review.count }} remaining · 0 reviewed</p>
   </header>
   <article class="work-panel review-panel" data-review-panel aria-busy="false">
