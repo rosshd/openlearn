@@ -90,13 +90,15 @@ for (const picker of document.querySelectorAll("[data-folder-picker]")) {
   button.hidden = false;
   button.addEventListener("click", async () => {
     const initialValue = input.value;
+    const sourceKind = picker.closest("form")?.elements.source_kind;
+    const initialKind = sourceKind?.value;
     button.disabled = true;
     button.setAttribute("aria-busy", "true");
     status.hidden = false;
     status.textContent = "Choose a folder in the folder chooser.";
     try {
       const result = await requestJson("/api/sources/folder-picker", {method: "POST"});
-      if (result.path && !button.hidden && !input.disabled && input.value === initialValue) {
+      if (result.path && !button.hidden && !input.disabled && input.value === initialValue && sourceKind?.value === initialKind) {
         input.value = result.path;
         input.dispatchEvent(new Event("input", {bubbles: true}));
         input.dispatchEvent(new Event("change", {bubbles: true}));
@@ -166,6 +168,23 @@ if (createForm) {
     const file = createForm.elements.source_file;
     const value = createForm.elements.source_value;
     const browse = createForm.querySelector("[data-folder-browse]");
+    const fileButton = createForm.querySelector("[data-source-pick-file]");
+    const githubButton = createForm.querySelector("[data-source-github]");
+    createForm.querySelector("[data-source-kind-field]").hidden = true;
+    createForm.querySelector("[data-source-local-controls]").hidden = false;
+    createForm.querySelector("[data-source-file-field]").classList.add("sr-only");
+    file.tabIndex = -1;
+    createForm.querySelector("[data-source-folder-action]").append(browse);
+    browse.textContent = "Choose folder";
+    fileButton.addEventListener("click", () => file.click());
+    githubButton.addEventListener("click", () => {
+      file.value = "";
+      value.value = "";
+      kind.value = kind.value === "github" ? (createForm.dataset.creationMode === "course" ? "" : "file") : "github";
+      updateSourceFields();
+      saveCreationDraft();
+      if (kind.value === "github") value.focus();
+    });
     const suggestCourseName = () => {
       if (createForm.elements.title.value.trim()) return;
       const label = kind.value === "file" ? file.files[0]?.name?.replace(/\.[^.]+$/, "")
@@ -180,13 +199,14 @@ if (createForm) {
       if (valueLabel) valueLabel.textContent = kind.value === "github" ? "Public GitHub repository URL" : "Local folder path";
       value.placeholder = kind.value === "github" ? "https://github.com/owner/repository" : "/path/to/your/notes";
       const hasSource = Boolean(kind.value);
-      file.disabled = kind.value !== "file";
-      value.disabled = !hasSource || kind.value === "file";
-      browse.hidden = kind.value !== "folder";
+      file.disabled = false;
+      value.disabled = false;
+      browse.hidden = kind.value === "github";
+      githubButton.textContent = kind.value === "github" ? "Use file or folder" : "Use GitHub";
       if (browse.hidden) createForm.querySelector("[data-folder-picker-status]").hidden = true;
-      createForm.querySelector("[data-source-file-field]").hidden = file.disabled;
-      createForm.querySelector("[data-source-value-field]").hidden = value.disabled;
-      createForm.querySelector("[data-source-file-note]").hidden = file.disabled;
+      createForm.querySelector("[data-source-value-field]").hidden = false;
+      createForm.querySelector("[data-source-file-note]").hidden = kind.value === "github";
+      if (kind.value !== "github") value.placeholder = "Or paste a folder path";
       const selected = kind.value === "file" ? file.files[0]?.name || ""
         : hasSource ? value.value.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || "" : "";
       createForm.querySelector("[data-source-actions]").hidden = !selected;
@@ -205,8 +225,24 @@ if (createForm) {
       }
     };
     kind.addEventListener("change", updateSourceFields);
-    file.addEventListener("change", () => { suggestCourseName(); updateSourceFields(); });
-    value.addEventListener("input", updateSourceFields);
+    file.addEventListener("change", () => {
+      if (!file.files.length) return;
+      kind.value = "file";
+      value.value = "";
+      suggestCourseName();
+      updateSourceFields();
+      saveCreationDraft();
+    });
+    value.addEventListener("input", () => {
+      if (kind.value !== "github") {
+        if (value.value.trim()) {
+          kind.value = "folder";
+          file.value = "";
+        } else if (kind.value === "folder") kind.value = createForm.dataset.creationMode === "course" ? "" : "file";
+      }
+      updateSourceFields();
+      saveCreationDraft();
+    });
     value.addEventListener("change", suggestCourseName);
     createForm.querySelector("[data-source-change]").addEventListener("click", () => {
       if (kind.value === "file") file.click();
@@ -216,10 +252,10 @@ if (createForm) {
     createForm.querySelector("[data-source-remove]").addEventListener("click", () => {
       file.value = "";
       value.value = "";
-      if (createForm.dataset.creationMode === "course") kind.value = "";
+      kind.value = createForm.dataset.creationMode === "course" ? "" : "file";
       updateSourceFields();
       saveCreationDraft();
-      kind.focus();
+      fileButton.focus();
     });
     updateSourceFields();
     if (kind.value && createForm.querySelector("[data-creation-sources]")) createForm.querySelector("[data-creation-sources]").open = true;

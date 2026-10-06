@@ -2143,10 +2143,10 @@ def test_source_creation_user_entrypoints_navigation_drafts_and_consent(tmp_path
                     page.get_by_label("Your goal", exact=True).fill("Learn equal parts")
                     if link == "Custom course":
                         assert page.locator("[data-creation-sources]").get_attribute("open") is not None
-                    page.get_by_label("Source type", exact=True).select_option("github")
+                    page.get_by_role("button", name="Use GitHub", exact=True).click()
                     assert page.get_by_label("Public GitHub repository URL", exact=True).is_visible()
-                    assert page.get_by_label("Source file", exact=True).is_hidden()
-                    page.get_by_label("Source type", exact=True).select_option("folder")
+                    assert page.get_by_label("Source type", exact=True).is_hidden()
+                    page.get_by_role("button", name="Use file or folder", exact=True).click()
                     page.get_by_label("Local folder path", exact=True).fill("/synthetic/missing-folder")
                     for theme in ("light", "dark"):
                         page.locator("html").evaluate("(root, theme) => root.dataset.theme = theme", theme)
@@ -2170,7 +2170,6 @@ def test_source_creation_user_entrypoints_navigation_drafts_and_consent(tmp_path
                 # Direct navigation restores the Quick Learn draft independently of source-course input.
                 page.goto(f"{app_url}/quick-learn")
                 assert page.get_by_label("Course name", exact=True).input_value() == "Synthetic Quick Learn"
-                page.get_by_label("Source type", exact=True).select_option("file")
                 page.get_by_label("Source file", exact=True).set_input_files(
                     {"name": "synthetic.txt", "mimeType": "text/plain", "buffer": b"OPENAI_API_KEY=sk-abcdefghijklmnopqrstuv"})
                 page.get_by_role("button", name="Create Quick Learn").click()
@@ -2219,10 +2218,9 @@ def test_source_creation_user_entrypoints_navigation_drafts_and_consent(tmp_path
                 playwright.expect(page.locator(".chat-exchange")).to_have_count(1)
                 # Custom creation uses the same importer, with no source by default.
                 page.goto(f"{app_url}/courses/new")
-                page.get_by_label("Source type", exact=True).select_option("")
+                page.get_by_role("button", name="Remove", exact=True).click()
                 assert page.locator("[data-multipart]").count() == 0
-                assert page.get_by_label("Source file", exact=True).is_disabled()
-                page.get_by_label("Source type", exact=True).select_option("file")
+                assert page.get_by_role("button", name="Choose file", exact=True).is_visible()
                 page.get_by_label("Source file", exact=True).set_input_files(
                     {"name": "custom-notes.md", "mimeType": "text/markdown", "buffer": b"Stacks remove the most recently added item first."})
                 page.get_by_role("button", name="Create course", exact=True).click()
@@ -2239,16 +2237,17 @@ def test_source_creation_user_entrypoints_navigation_drafts_and_consent(tmp_path
                 assert "/courses/new?sources=1#course-sources" in page.url
                 assert page.get_by_label("Course name", exact=True).input_value() == "Old source draft"
                 assert page.get_by_label("Local folder path", exact=True).input_value() == "/synthetic/notes"
-                page.get_by_label("Source type", exact=True).select_option("")
+                page.get_by_role("button", name="Remove", exact=True).click()
                 page.locator("#goal").press("Enter")
+                assert page.locator("#source-value").evaluate("e => e === document.activeElement")
+                page.locator("#source-value").press("Enter")
                 assert page.locator("#experience").evaluate("e => e === document.activeElement")
-                page.get_by_label("Source type", exact=True).select_option("file")
                 page.get_by_label("Source file", exact=True).set_input_files(
                     {"name": "rejected.txt", "mimeType": "text/plain", "buffer": b"OPENAI_API_KEY=sk-abcdefghijklmnopqrstuv"})
                 page.get_by_role("button", name="Create course", exact=True).click()
                 page.locator("[data-form-error]").wait_for(state="visible")
                 pending_id = page.locator('[name="submission_id"]').input_value()
-                page.get_by_label("Source type", exact=True).select_option("")
+                page.get_by_role("button", name="Remove", exact=True).click()
                 page.get_by_role("button", name="Create course", exact=True).click()
                 playwright.expect(page.locator("[data-form-error]")).to_contain_text("unfinished source import")
                 page.get_by_role("link", name="Start a new course", exact=True).click()
@@ -2262,7 +2261,7 @@ def test_source_creation_user_entrypoints_navigation_drafts_and_consent(tmp_path
                 upload_page.goto(bootstrap)
                 upload_page.goto(f"{app_url}/courses/from-source")
                 with upload_page.expect_file_chooser() as chooser:
-                    upload_page.get_by_label("Source file", exact=True).press("Enter")
+                    upload_page.get_by_role("button", name="Choose file", exact=True).press("Enter")
                 chooser.value.set_files({"name": "keyboard.md", "mimeType": "text/markdown", "buffer": b"Keyboard source."})
                 assert upload_page.locator("[data-source-selection]").inner_text() == "keyboard.md"
                 assert upload_page.get_by_label("Course name", exact=True).input_value() == "keyboard"
@@ -2272,6 +2271,13 @@ def test_source_creation_user_entrypoints_navigation_drafts_and_consent(tmp_path
                 chooser.value.set_files({"name": "second-file.txt", "mimeType": "text/plain", "buffer": b"Second source."})
                 assert upload_page.get_by_label("Course name", exact=True).input_value() == "Keep my course name"
                 assert upload_page.locator("[data-source-selection]").inner_text() == "second-file.txt"
+                upload_page.route("**/api/sources/folder-picker", lambda route: route.fulfill(json={"ok": True, "path": None}))
+                upload_page.get_by_role("button", name="Choose folder", exact=True).click()
+                upload_page.locator("[data-folder-picker-status]").wait_for(state="hidden")
+                assert upload_page.locator("[data-source-kind]").input_value() == "file"
+                assert upload_page.locator("[data-source-selection]").inner_text() == "second-file.txt"
+                assert upload_page.locator("#source-file").evaluate("e => e.files[0].name") == "second-file.txt"
+                upload_page.unroute("**/api/sources/folder-picker")
                 upload_page.get_by_role("button", name="Remove", exact=True).click()
                 assert upload_page.get_by_label("Source type", exact=True).input_value() == ""
                 assert upload_page.locator(".create-form").get_attribute("data-endpoint") == "/api/courses"
@@ -2279,7 +2285,6 @@ def test_source_creation_user_entrypoints_navigation_drafts_and_consent(tmp_path
                     upload_page.goto(f"{app_url}/{route}?new=1")
                     if route == "courses/new":
                         assert upload_page.locator("[data-creation-sources]").get_attribute("open") is not None
-                    upload_page.get_by_label("Source type", exact=True).select_option("folder")
                     responses = iter([
                         (200, {"ok": True, "path": "/synthetic/Linear algebra/"}),
                         (200, {"ok": True, "path": None}),
@@ -2290,17 +2295,17 @@ def test_source_creation_user_entrypoints_navigation_drafts_and_consent(tmp_path
                         code, body = next(responses)
                         request_route.fulfill(status=code, json=body)
                     upload_page.route("**/api/sources/folder-picker", choose_folder)
-                    upload_page.get_by_role("button", name="Browse…", exact=True).press("Enter")
+                    upload_page.get_by_role("button", name="Choose folder", exact=True).press("Enter")
                     playwright.expect(upload_page.get_by_label("Local folder path", exact=True)).to_have_value("/synthetic/Linear algebra/")
                     assert upload_page.get_by_label("Course name", exact=True).input_value() == "Linear algebra"
                     if route == "courses/new":
                         assert upload_page.locator("[data-source-selection]").inner_text() == "Linear algebra"
                     upload_page.get_by_label("Course name", exact=True).fill("My own name")
                     upload_page.get_by_label("Local folder path", exact=True).fill("/kept/path")
-                    upload_page.get_by_role("button", name="Browse…", exact=True).click()
+                    upload_page.get_by_role("button", name="Choose folder", exact=True).click()
                     upload_page.locator("[data-folder-picker-status]").wait_for(state="hidden")
                     assert upload_page.get_by_label("Local folder path", exact=True).input_value() == "/kept/path"
-                    upload_page.get_by_role("button", name="Browse…", exact=True).click()
+                    upload_page.get_by_role("button", name="Choose folder", exact=True).click()
                     playwright.expect(upload_page.locator("[data-folder-picker-status]")).to_have_text("Paste or type the path instead.")
                     upload_page.get_by_role("button", name="Change", exact=True).click()
                     playwright.expect(upload_page.get_by_label("Local folder path", exact=True)).to_have_value("/synthetic/Changed notes/")
@@ -2309,7 +2314,7 @@ def test_source_creation_user_entrypoints_navigation_drafts_and_consent(tmp_path
                     assert upload_page.get_by_label("Local folder path", exact=True).input_value() == "/synthetic/Changed notes/"
                     assert upload_page.get_by_label("Course name", exact=True).input_value() == "My own name"
                     upload_page.get_by_role("button", name="Remove", exact=True).click()
-                    assert upload_page.get_by_label("Source type", exact=True).input_value() == ("" if route == "courses/new" else "folder")
+                    assert upload_page.get_by_label("Source type", exact=True).input_value() == ("" if route == "courses/new" else "file")
                     upload_page.unroute("**/api/sources/folder-picker")
                 fresh.close()
                 # The unified form also imports without JavaScript.

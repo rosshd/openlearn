@@ -560,6 +560,12 @@ h2 { font-size: var(--type-section); line-height: 1.25; letter-spacing: -0.025em
 .folder-path-row input { min-width: 0; }
 .folder-path-row .source-browse { min-height: 2.75rem; padding: 0.6rem 0.7rem; border-radius: var(--radius); background: var(--surface-raised); color: var(--graphite-soft); font-size: 0.9rem; font-weight: 500; box-shadow: none; transform: none; }
 .folder-picker-status { grid-column: 1 / -1; }
+.creation-source-fields .source-local-controls, .creation-source-fields [data-source-value-field] { grid-column: 1 / -1; }
+.source-local-controls { display: grid; gap: 0.5rem; }
+.source-local-label { color: var(--library-normal); font-size: 0.9rem; font-weight: 500; }
+.source-pick-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
+.creation-panel .source-pick-actions .source-browse { min-height: 2.75rem; padding: 0.6rem 0.8rem; border-radius: var(--radius); background: var(--surface-raised); color: var(--library-normal); font-size: 0.9rem; font-weight: 500; box-shadow: none; transform: none; }
+.creation-panel .source-pick-actions .quiet-link { color: var(--library-muted); font-size: 0.82rem; font-weight: 500; }
 .source-selection-actions { display: flex; gap: 0.5rem; }
 .creation-panel .source-selection-actions .quiet-link { padding: 0.25rem 0.4rem; border: 0; background: transparent; color: var(--library-muted); font-size: 0.82rem; font-weight: 500; box-shadow: none; transform: none; }
 .creation-panel .field-note, .creation-panel .optional { color: var(--library-muted); font-size: 0.82rem; }

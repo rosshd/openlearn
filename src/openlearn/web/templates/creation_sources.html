@@ -1,7 +1,7 @@
 <fieldset class="source-choice creation-source-fields">
   <legend class="sr-only">{{ 'Your source' if quick else 'Optional source' }}</legend>
   <div class="creation-source-grid">
-    <div class="form-field">
+    <div class="form-field" data-source-kind-field>
       <label for="source-kind">Source type</label>
       <select id="source-kind" name="source_kind" data-source-kind>
         {% if not quick %}<option value=""{% if not source_kind %} selected{% endif %}>No source</option>{% endif %}
@@ -9,6 +9,14 @@
         <option value="{{ kind }}"{% if source_kind == kind %} selected{% endif %}>{{ label }}</option>
         {% endfor %}
       </select>
+    </div>
+    <div class="source-local-controls" data-source-local-controls hidden>
+      <span class="source-local-label">File or folder</span>
+      <div class="source-pick-actions">
+        <button type="button" class="source-browse" data-source-pick-file>Choose file</button>
+        <span data-source-folder-action></span>
+        <button type="button" class="quiet-link" data-source-github>Use GitHub</button>
+      </div>
     </div>
     <div class="form-field" data-source-file-field>
       <label for="source-file">Source file</label>
