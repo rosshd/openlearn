@@ -16,7 +16,7 @@ from openlearn.web.app import PlaceholderServices
 
 
 STATIC = Path(__file__).resolve().parents[1] / "src/openlearn/web/static"
-ARTIFACTS = Path(__file__).resolve().parents[1] / ".artifacts/review-feedback"
+ARTIFACTS = Path(__file__).resolve().parents[1] / ".artifacts/review-rapid"
 ANSWER = "An outlier can be a valid observation. Noise obscures the signal."
 QUESTION = "How does an outlier differ from noise, and can an outlier be valid?"
 pytestmark = pytest.mark.skipif(
@@ -167,7 +167,7 @@ def test_question_reveal_keyboard_safe_sources_and_semantic_completion(review_pa
     assert ANSWER not in review_page.content()
     assert "INITIAL SOURCE MUST BE OMITTED" not in review_page.content()
     expect(review_page.locator("[data-review-grade]")).to_have_count(0)
-    expect(review_page.get_by_role("button", name="Show answer and explanation", exact=True)).to_have_attribute("aria-keyshortcuts", "Space")
+    expect(review_page.get_by_role("button", name="Show answer", exact=True)).to_have_attribute("aria-keyshortcuts", "Space")
     review_page.keyboard.press("Enter")
     assert app.calls == []  # No global tutor navigation on this page.
     review_page.keyboard.press("Space")
@@ -208,7 +208,7 @@ def test_mobile_desktop_layout_and_long_content(review_page, width):
     review_page.set_viewport_size({"width": width, "height": 1000})
     app = ReviewBrowser(review_page, [card(question=QUESTION + " LongWord" * 50, course="Course" * 25)])
     app.open()
-    review_page.get_by_role("button", name="Show answer and explanation", exact=True).click()
+    review_page.get_by_role("button", name="Show answer", exact=True).click()
     expect(review_page.locator("[data-review-answer]")).to_be_visible()
     assert review_page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
     dimensions = review_page.locator("[data-review-grade]").evaluate_all("buttons => buttons.map(b => ({width:b.offsetWidth,height:b.offsetHeight,left:b.offsetLeft,top:b.offsetTop}))")
@@ -228,7 +228,7 @@ def test_native_button_keys_and_editable_shortcuts(review_page):
     review_page.get_by_role("textbox", name="notes").fill("Space")
     review_page.keyboard.press("Space")
     assert app.calls == []
-    review_page.get_by_role("button", name="Show answer and explanation", exact=True).focus()
+    review_page.get_by_role("button", name="Show answer", exact=True).focus()
     review_page.keyboard.press("Enter")
     expect(review_page.locator("[data-review-answer]")).to_be_visible()
     review_page.locator("[data-review-grade='hard']").focus()
@@ -269,7 +269,7 @@ def test_uncertain_receipt_retries_exact_payload_and_locks_other_rating(review_p
 
     app = ReviewBrowser(review_page, [card()])
     app.open()
-    review_page.get_by_role("button", name="Show answer and explanation", exact=True).click()
+    review_page.get_by_role("button", name="Show answer", exact=True).click()
     app.grade_failure = {"ok": True, "state": "saved"}  # HTTP success is not a receipt.
     review_page.locator("[data-review-grade='easy']").click()
     expect(review_page.locator("[data-review-status]")).to_have_text("Could not confirm this rating was saved.")
@@ -290,7 +290,7 @@ def test_single_flight_reveal_save_and_question_after_advancement(review_page):
 
     app = ReviewBrowser(review_page, [card(), card("Signal")])
     app.open()
-    review_page.get_by_role("button", name="Show answer and explanation", exact=True).dblclick()
+    review_page.get_by_role("button", name="Show answer", exact=True).dblclick()
     expect(review_page.locator("[data-review-answer]")).to_be_visible()
     assert len(app.posts("/reveal")) == 1
     app.grade_hold = True
@@ -310,7 +310,7 @@ def test_stale_occurrence_refresh_never_reapplies_rating(review_page):
 
     app = ReviewBrowser(review_page, [card()])
     app.open()
-    review_page.get_by_role("button", name="Show answer and explanation", exact=True).click()
+    review_page.get_by_role("button", name="Show answer", exact=True).click()
     app.grade_failure = {"ok": False, "state": "conflict", "error": "Occurrence changed."}
     review_page.locator("[data-review-grade='good']").click()
     expect(review_page.locator("[data-review-status]")).to_have_text("This card changed in another tab.")
@@ -326,7 +326,7 @@ def test_again_wait_reload_clock_reconciliation_and_skipped_cards(review_page):
 
     app = ReviewBrowser(review_page, [card()])
     app.open()
-    review_page.get_by_role("button", name="Show answer and explanation", exact=True).click()
+    review_page.get_by_role("button", name="Show answer", exact=True).click()
     app.grade_item = card(state="waiting", relearn_at=timestamp(60), review_revision="occurrence-2")
     review_page.locator("[data-review-grade='again']").click()
     expect(review_page.get_by_role("heading", name="Your next card returns soon")).to_be_focused()
@@ -370,7 +370,7 @@ def test_reveal_failure_retry_and_initially_empty_are_distinct(review_page):
     app.items = [card()]
     review_page.reload()
     app.reveal_failure = {"ok": False, "error": "Local storage unavailable."}
-    review_page.get_by_role("button", name="Show answer and explanation", exact=True).click()
+    review_page.get_by_role("button", name="Show answer", exact=True).click()
     expect(review_page.locator("[data-review-status]")).to_have_text("Could not show this answer.")
     assert app.posts("") == []
     app.reveal_failure = None
@@ -388,7 +388,7 @@ def test_typical_card_question_and_answer_screenshots(review_page, width):
     review_page.evaluate("setTheme('dark')")
     ARTIFACTS.mkdir(parents=True, exist_ok=True)
     review_page.screenshot(path=str(ARTIFACTS / f"review-question-typical-{width}.png"), full_page=True)
-    review_page.get_by_role("button", name="Show answer and explanation", exact=True).click()
+    review_page.get_by_role("button", name="Show answer", exact=True).click()
     expect(review_page.locator("[data-review-answer]")).to_be_visible()
     assert review_page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
     review_page.screenshot(path=str(ARTIFACTS / f"review-revealed-typical-{width}.png"), full_page=True)
@@ -452,10 +452,12 @@ def test_long_revealed_card_keeps_actions_visible_and_text_faithful(review_page,
     app.answer, app.explanation = LONG_ANSWER, LONG_EXPLANATION
     app.open()
     review_page.evaluate("theme => setTheme(theme)", theme)
-    review_page.get_by_role("button", name="Show answer and explanation", exact=True).click()
+    review_page.get_by_role("button", name="Show answer", exact=True).click()
     expect(review_page.locator("[data-review-answer]")).to_be_focused()
     footer = review_page.locator("[data-review-actions]")
     assert footer.evaluate("element => getComputedStyle(element).position") == "sticky"
+    assert footer.bounding_box()["height"] < (100 if width == 1280 else 200)
+    expect(review_page.locator("[data-review-prose='explanation']")).not_to_be_visible()
     for control in footer.locator("button").all():
         bounds = control.bounding_box()
         assert bounds["height"] >= 44
@@ -464,6 +466,9 @@ def test_long_revealed_card_keeps_actions_visible_and_text_faithful(review_page,
     title_bounds = review_page.locator("[data-review-answer]").bounding_box()
     header_bounds = review_page.locator(".site-header").bounding_box()
     assert title_bounds["y"] >= header_bounds["y"] + header_bounds["height"]
+    session_bounds = review_page.locator("[data-review-session]").bounding_box()
+    assert title_bounds["y"] >= session_bounds["y"] + session_bounds["height"]
+    expect(review_page.locator("[data-review-summary]")).to_be_in_viewport()
     assert title_bounds["y"] + title_bounds["height"] <= footer.bounding_box()["y"]
     assert review_page.locator("[data-review-prose='answer']").text_content() == LONG_ANSWER
     assert review_page.locator("[data-review-prose='explanation']").text_content() == LONG_EXPLANATION
@@ -485,10 +490,20 @@ def test_long_revealed_card_keeps_actions_visible_and_text_faithful(review_page,
     assert review_page.locator(".review-course").evaluate("p => getComputedStyle(p).textTransform") == "none"
     assert review_page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
     ARTIFACTS.mkdir(parents=True, exist_ok=True)
-    review_page.screenshot(path=str(ARTIFACTS / f"long-reveal-{theme}-{width}x{height}.png"))
+    review_page.screenshot(path=str(ARTIFACTS / f"long-collapsed-{theme}-{width}x{height}.png"))
+    review_page.locator("[data-review-explanation] > summary").click()
+    expect(review_page.locator("[data-review-explanation]")).to_have_attribute("open", "")
+    expect(review_page.locator("[data-review-explanation] > summary")).to_have_text("Hide explanation")
+    review_page.screenshot(path=str(ARTIFACTS / f"long-expanded-{theme}-{width}x{height}.png"))
     review_page.locator(".review-explanation").last.evaluate("p => p.scrollIntoView({block:'end'})")
     last = review_page.locator(".review-explanation").last.bounding_box()
     assert last["y"] + last["height"] <= footer.bounding_box()["y"]
+    session_bounds = review_page.locator("[data-review-session]").bounding_box()
+    assert last["y"] >= session_bounds["y"] + session_bounds["height"]
+    expect(review_page.locator("[data-review-summary]")).to_be_in_viewport()
+    expect(review_page.locator("[data-review-summary]")).to_have_text("1 remaining · 0 reviewed")
+    assert review_page.locator("[data-review-summary]").count() == 1
+    review_page.evaluate("() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
     review_page.screenshot(path=str(ARTIFACTS / f"long-final-sentence-{theme}-{width}x{height}.png"))
     assert app.errors == app.unexpected == []
 
@@ -506,9 +521,11 @@ def test_saved_paragraphs_preserve_every_character_and_remain_plain_text(review_
     app = ReviewBrowser(review_page, [card()])
     app.answer = app.explanation = text
     app.open()
-    review_page.get_by_role("button", name="Show answer and explanation", exact=True).click()
+    review_page.get_by_role("button", name="Show answer", exact=True).click()
     expect(review_page.locator("[data-review-answer]")).to_be_focused()
     assert review_page.locator("[data-review-prose='answer']").text_content() == text
+    review_page.locator("[data-review-explanation] > summary").click()
+    expect(review_page.locator(".review-explanation").first).to_be_visible()
     assert review_page.locator("[data-review-prose='explanation']").text_content() == text
     assert review_page.locator(".review-answer img, .review-answer script, .review-answer pre, .review-answer code").count() == 0
     assert app.errors == app.unexpected == []
@@ -521,7 +538,7 @@ def test_height_resize_and_enlarged_text_use_ordinary_flow_without_stale_clearan
     app = ReviewBrowser(review_page, [card(question=LONG_QUESTION, course=LONG_COURSE)])
     app.answer, app.explanation = LONG_ANSWER, LONG_EXPLANATION
     app.open()
-    review_page.get_by_role("button", name="Show answer and explanation", exact=True).click()
+    review_page.get_by_role("button", name="Show answer", exact=True).click()
     footer = review_page.locator("[data-review-actions]")
     assert footer.evaluate("element => getComputedStyle(element).position") == "sticky"
     review_page.set_viewport_size({"width": 375, "height": 430})
@@ -548,7 +565,7 @@ def test_320px_short_screen_has_no_nested_scroll_or_unreachable_controls(review_
     app = ReviewBrowser(review_page, [card(question=LONG_QUESTION, course=LONG_COURSE)])
     app.answer, app.explanation = LONG_ANSWER, LONG_EXPLANATION
     app.open()
-    review_page.get_by_role("button", name="Show answer and explanation", exact=True).click()
+    review_page.get_by_role("button", name="Show answer", exact=True).click()
     assert review_page.locator("[data-review-actions]").evaluate("element => getComputedStyle(element).position") == "static"
     assert review_page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
     assert review_page.locator("[data-review-panel]").evaluate("panel => !['auto','scroll'].includes(getComputedStyle(panel).overflowY)")
@@ -571,6 +588,13 @@ def test_concise_card_layout_and_keyboard_skip_stay_usable(review_page, width, h
     review_page.locator("[data-review-question]").focus()
     review_page.keyboard.press("Space")
     expect(review_page.locator("[data-review-answer]")).to_be_focused()
+    if width == 1280:
+        expect(review_page.locator("[data-review-topic]")).to_be_in_viewport(ratio=1)
+        expect(review_page.locator("[data-review-question]")).to_be_in_viewport(ratio=1)
+        topic = review_page.locator("[data-review-topic]").bounding_box()
+        bar = review_page.locator("[data-review-session]").bounding_box()
+        assert topic["y"] >= bar["y"] + bar["height"]
+        assert review_page.evaluate("window.scrollY") == 0
     review_page.screenshot(path=str(ARTIFACTS / f"concise-reveal-{theme}-{width}x{height}.png"))
     skip = review_page.get_by_role("button", name="Skip for now", exact=True)
     skip.focus()
@@ -708,7 +732,7 @@ def test_uncertain_rating_retry_survives_expiry_with_exact_payload_and_locked_ac
     app = ReviewBrowser(review_page, [card()])
     app.grade_failure = {"ok": False, "error": "PRIVATE ambiguous response"}
     app.open()
-    review_page.get_by_role("button", name="Show answer and explanation", exact=True).click()
+    review_page.get_by_role("button", name="Show answer", exact=True).click()
     review_page.locator("[data-review-grade='good']").click()
     retry = review_page.get_by_role("button", name="Retry saving", exact=True)
     expect(retry).to_be_enabled()
@@ -741,7 +765,7 @@ def test_stale_refresh_failure_reuses_one_recovery_and_dismiss_restores_it(revie
     app.reveal_failure = {"ok": False, "state": "conflict", "error": "PRIVATE stale"}
     app.session_failure = {"ok": False, "error": "PRIVATE refresh"}
     app.open()
-    review_page.get_by_role("button", name="Show answer and explanation", exact=True).click()
+    review_page.get_by_role("button", name="Show answer", exact=True).click()
     expect(review_page.get_by_role("button", name="Refresh review", exact=True)).to_be_enabled()
     review_page.get_by_role("button", name="Refresh review", exact=True).click()
     expect(review_page.get_by_role("button", name="Retry refresh", exact=True)).to_be_enabled()
@@ -791,4 +815,125 @@ def test_preparation_notice_and_expired_recovery_viewports(review_page, width, h
     expect(toast).to_have_count(0)
     review_page.screenshot(path=str(ARTIFACTS / f"expired-recovery-{theme}-{width}x{height}.png"))
     expect(review_page.get_by_role("button", name="Try again", exact=True)).to_be_enabled()
+    assert app.errors == app.unexpected == []
+
+
+def test_native_explanation_keyboard_toggle_is_local_and_resets_per_card_and_reload(review_page):
+    from playwright.sync_api import expect
+
+    app = ReviewBrowser(review_page, [card(), card("Rare events")])
+    app.open()
+    review_page.get_by_role("button", name="Show answer", exact=True).click()
+    details = review_page.locator("[data-review-explanation]")
+    toggle = details.locator("summary")
+    expect(toggle).to_have_text("Show explanation")
+    assert not details.evaluate("element => element.open")
+    expect(review_page.locator("[data-review-prose='explanation']")).not_to_be_visible()
+    calls = deepcopy(app.calls)
+    summary = review_page.locator("[data-review-summary]").text_content()
+    toggle.focus()
+    review_page.keyboard.press("Space")
+    expect(toggle).to_have_text("Hide explanation")
+    expect(review_page.locator("[data-review-prose='explanation']")).to_be_visible()
+    expect(toggle).to_be_focused()
+    assert toggle.evaluate("element => getComputedStyle(element).outlineStyle") != "none"
+    review_page.keyboard.press("1")
+    review_page.keyboard.press("4")
+    review_page.keyboard.press("Enter")
+    expect(toggle).to_have_text("Show explanation")
+    assert not details.evaluate("element => element.open")
+    assert app.calls == calls
+    assert review_page.locator("[data-review-summary]").text_content() == summary
+    review_page.get_by_role("button", name="Skip for now", exact=True).click()
+    expect(review_page.get_by_role("heading", name="Rare events", exact=True)).to_be_visible()
+    review_page.get_by_role("button", name="Show answer", exact=True).click()
+    assert not details.evaluate("element => element.open")
+    toggle.click()
+    expect(toggle).to_have_text("Hide explanation")
+    review_page.reload()
+    review_page.get_by_role("button", name="Show answer", exact=True).click()
+    expect(toggle).to_have_text("Show explanation")
+    assert not details.evaluate("element => element.open")
+    assert app.posts("") == []
+    assert app.errors == app.unexpected == []
+
+
+def test_missing_explanation_omits_disclosure_and_has_accurate_announcement(review_page):
+    from playwright.sync_api import expect
+
+    app = ReviewBrowser(review_page, [card()])
+    app.explanation = ""
+    app.open()
+    review_page.get_by_role("button", name="Show answer", exact=True).click()
+    expect(review_page.locator("[data-review-answer]")).to_have_text(ANSWER)
+    expect(review_page.locator("[data-review-explanation]")).to_have_count(0)
+    expect(review_page.locator("[data-live-region]")).to_have_text("Answer revealed. Choose a rating.")
+    review_page.locator("[data-review-grade='good']").click()
+    expect(review_page.get_by_role("heading", name="Review complete")).to_be_visible()
+    expect(review_page.locator("[data-review-summary]")).to_have_text("0 remaining · 1 reviewed")
+    assert app.errors == app.unexpected == []
+
+
+def test_session_height_resize_and_large_bar_flow_preserve_focus_clearance(review_page):
+    from playwright.sync_api import expect
+
+    review_page.set_viewport_size({"width": 375, "height": 812})
+    app = ReviewBrowser(review_page, [card(question=LONG_QUESTION, course=LONG_COURSE)])
+    app.answer, app.explanation = LONG_ANSWER, LONG_EXPLANATION
+    app.open()
+    review_page.get_by_role("button", name="Show answer", exact=True).click()
+    session = review_page.locator("[data-review-session]")
+    assert session.evaluate("element => getComputedStyle(element).position") == "sticky"
+    review_page.set_viewport_size({"width": 320, "height": 480})
+    review_page.wait_for_function("getComputedStyle(document.querySelector('[data-review-session]')).position === 'static'")
+    review_page.set_viewport_size({"width": 375, "height": 812})
+    review_page.wait_for_function("getComputedStyle(document.querySelector('[data-review-session]')).position === 'sticky'")
+    review_page.evaluate("document.documentElement.style.fontSize='52px'")
+    review_page.wait_for_function("getComputedStyle(document.querySelector('[data-review-session]')).position === 'static'")
+    assert review_page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    toggle = review_page.locator("[data-review-explanation] > summary")
+    toggle.scroll_into_view_if_needed()
+    toggle.focus()
+    review_page.keyboard.press("Enter")
+    expect(toggle).to_have_text("Hide explanation")
+    review_page.locator(".review-explanation").last.evaluate("p => p.scrollIntoView({block:'end'})")
+    review_page.screenshot(path=str(ARTIFACTS / "large-session-expanded-375x812.png"))
+    expect(review_page.locator(".review-explanation").last).to_be_in_viewport()
+    assert app.posts("") == []
+    assert app.errors == app.unexpected == []
+
+
+def test_uncertain_save_recovery_focus_clears_session_and_dock_with_optional_explanation(review_page):
+    from playwright.sync_api import expect
+
+    review_page.set_viewport_size({"width": 375, "height": 812})
+    review_page.clock.install()
+    app = ReviewBrowser(review_page, [card(question=LONG_QUESTION, course=LONG_COURSE)])
+    app.answer, app.explanation = LONG_ANSWER, LONG_EXPLANATION
+    app.grade_failure = {"ok": False, "error": "uncertain"}
+    app.open()
+    review_page.get_by_role("button", name="Show answer", exact=True).click()
+    review_page.locator("[data-review-grade='good']").click()
+    retry = review_page.get_by_role("button", name="Retry saving", exact=True)
+    expect(retry).to_be_focused()
+    review_page.clock.run_for(10000)
+    review_page.screenshot(path=str(ARTIFACTS / "uncertain-recovery-375x812.png"))
+    bounds = retry.bounding_box()
+    bar = review_page.locator("[data-review-session]").bounding_box()
+    dock = review_page.locator("[data-review-actions]").bounding_box()
+    assert bounds["y"] >= bar["y"] + bar["height"]
+    assert bounds["y"] + bounds["height"] <= dock["y"]
+    original = deepcopy(app.posts("")[0])
+    toggle = review_page.locator("[data-review-explanation] > summary")
+    toggle.focus()
+    review_page.keyboard.press("Enter")
+    expect(toggle).to_have_text("Hide explanation")
+    review_page.keyboard.press("1")
+    assert app.posts("") == [original]
+    for control in review_page.locator("[data-review-actions] button").all():
+        expect(control).to_be_disabled()
+    app.grade_failure = None
+    retry.click()
+    expect(review_page.get_by_role("heading", name="Review complete")).to_be_visible()
+    assert app.posts("") == [original, original]
     assert app.errors == app.unexpected == []

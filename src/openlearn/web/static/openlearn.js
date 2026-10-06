@@ -2162,6 +2162,7 @@ function initializeReview() {
   const shell = document.querySelector("[data-review-shell]");
   if (!shell) return;
   const panel = shell.querySelector("[data-review-panel]");
+  const session = shell.querySelector("[data-review-session]");
   const summary = shell.querySelector("[data-review-summary]");
   const snapshot = JSON.parse(shell.querySelector("[data-review-snapshot]").textContent);
   let items = snapshot.items;
@@ -2213,7 +2214,8 @@ function initializeReview() {
     return element;
   }
   function positionNotice() {
-    const bottom = document.querySelector(".site-header")?.getBoundingClientRect().bottom || 0;
+    const bottom = Math.max(document.querySelector(".site-header")?.getBoundingClientRect().bottom || 0,
+      session.getBoundingClientRect().bottom);
     shell.style.setProperty("--review-notice-top", `${Math.max(16, bottom + 8)}px`);
   }
   function clearNotice() {
@@ -2335,10 +2337,24 @@ function initializeReview() {
     }
     showNotice(message);
   }
-  function reviewHeaderHeight() {
+  function navigationHeight() {
     const header = document.querySelector(".site-header");
     return header && ["sticky", "fixed"].includes(getComputedStyle(header).position) ? header.offsetHeight : 0;
   }
+  function updateSession() {
+    const navHeight = navigationHeight();
+    session.style.top = `${navHeight}px`;
+    session.classList.toggle("review-session--flow", window.innerHeight < 576
+      || navHeight + session.offsetHeight > window.innerHeight * 0.22);
+    panel.style.setProperty("--review-header-offset", `${reviewHeaderHeight() + 16}px`);
+    positionNotice();
+  }
+  function reviewHeaderHeight() {
+    return navigationHeight() + (getComputedStyle(session).position === "sticky" ? session.offsetHeight : 0);
+  }
+  new ResizeObserver(() => { updateSession(); updateActionDock?.(); }).observe(session);
+  window.addEventListener("resize", updateSession);
+  updateSession();
   function clearActionDock() {
     dockObserver?.disconnect();
     dockObserver = null;
@@ -2490,11 +2506,11 @@ function initializeReview() {
     }
     const area = node("div", undefined, "review-recovery");
     area.dataset.reviewRecovery = "";
-    const control = button(mode === "preparation" ? "Prepare card" : "Show answer and explanation", mode === "preparation" ? prepare : reveal, "primary-action");
+    const control = button(mode === "preparation" ? "Prepare card" : "Show answer", mode === "preparation" ? prepare : reveal, "primary-action");
     control.dataset.reviewPrimary = "";
     if (mode === "question") {
       control.setAttribute("aria-keyshortcuts", "Space");
-      control.title = "Show answer and explanation (Space)";
+      control.title = "Show answer (Space)";
     }
     area.append(control);
     panel.append(area);
@@ -2538,7 +2554,17 @@ function initializeReview() {
     const answer = node("section", undefined, "review-answer");
     answer.setAttribute("aria-label", "Answer and explanation");
     appendProse(answer, revealed.answer, "review-answer-text", "answer");
-    if (revealed.explanation) appendProse(answer, revealed.explanation, "review-explanation", "explanation");
+    if (revealed.explanation) {
+      const disclosure = node("details", undefined, "review-explanation-disclosure");
+      disclosure.dataset.reviewExplanation = "";
+      const toggle = node("summary", "Show explanation");
+      disclosure.append(toggle);
+      appendProse(disclosure, revealed.explanation, "review-explanation", "explanation");
+      disclosure.addEventListener("toggle", () => {
+        toggle.textContent = disclosure.open ? "Hide explanation" : "Show explanation";
+      });
+      answer.append(disclosure);
+    }
     const target = answer.querySelector(".review-answer-text");
     target.tabIndex = -1;
     target.dataset.reviewAnswer = "";
@@ -2558,15 +2584,15 @@ function initializeReview() {
     }
     panel.append(answer);
     addSkip(ratings);
-    focusHeading(target, "start");
-    announce("Answer and explanation revealed. Choose a rating.");
+    focusHeading(target);
+    announce(revealed.explanation ? "Answer revealed. Optional explanation is collapsed. Choose a rating." : "Answer revealed. Choose a rating.");
   }
   async function reveal() {
     if (busy || mode !== "question") return;
     const id = ++operation;
     const identity = itemKey(current);
     clearFeedback();
-    setPrimaryLabel("Show answer and explanation");
+    setPrimaryLabel("Show answer");
     lock(true);
     try {
       const result = await post("/api/review/reveal", payload());

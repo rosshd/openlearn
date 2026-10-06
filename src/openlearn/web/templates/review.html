@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
 <section class="review-shell" data-review-shell data-course="{{ request.query_params.get('course', '') }}" aria-labelledby="review-page-title">
-  <header>
+  <header class="review-session" data-review-session>
     <h1 id="review-page-title">Review</h1>
     <p class="quiet-copy" data-review-summary>{{ review.count }} remaining · 0 reviewed</p>
   </header>
