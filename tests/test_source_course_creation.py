@@ -95,6 +95,29 @@ def test_source_replay_through_plain_creation_keeps_source_consent(client):
     assert "operation_id" not in replay.json()
 
 
+def test_unfinished_import_cannot_report_source_free_creation_success(client, monkeypatch):
+    monkeypatch.setattr(tutor_service, "start_turn", lambda *args, **kwargs: pytest.fail("Pending import started tutoring"))
+    data = payload("course")
+    rejected = post(client, data, {"source_file": ("keys.txt", b"OPENAI_API_KEY=sk-abcdefghijklmnopqrstuv")}, path="/courses/new")
+    assert rejected.status_code == 422
+    before = cli.topic_path("synthetic-fractions").read_bytes()
+    token = client.get("/").cookies["openlearn_csrf"]
+    conflict = client.post("/api/courses", json={**data, "source_kind": ""}, headers={"X-CSRF-Token": token})
+    assert conflict.status_code == 409
+    assert conflict.json()["state"] == "source_required"
+    assert "focus_url" not in conflict.json()
+    plain = post(client, {**data, "source_kind": ""}, json=False, path="/courses/new")
+    assert plain.status_code == 422
+    assert "unfinished source import" in plain.text
+    assert 'data-creation-reset hidden' not in plain.text
+    assert '?new=1' in plain.text
+    assert cli.topic_path("synthetic-fractions").read_bytes() == before
+    corrected = post(client, data, {"source_file": ("notes.md", b"Two halves make a whole.")}, path="/courses/new")
+    assert corrected.status_code == 200
+    assert corrected.json()["created"] is False
+    assert len(source_imports.list_course_sources("synthetic-fractions")) == 1
+
+
 @pytest.mark.parametrize("mode", ["course", "quick"])
 def test_source_creation_imports_before_any_tutor_call_and_replays(client, monkeypatch, mode):
     def forbidden(*args, **kwargs):

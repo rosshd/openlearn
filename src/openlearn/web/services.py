@@ -1350,6 +1350,12 @@ class OpenLearnWebServices:
         if not result.get("ok"):
             return result
         slug = str(result["slug"])
+        if cli.read_topic(slug).metadata.get("web_source_pending"):
+            return {
+                "ok": False,
+                "state": "source_required",
+                "error": "This saved draft has an unfinished source import. Choose a source to finish it, or start a new course.",
+            }
         initialization_id = _course_initialization_id(request.submission_id)
         if self.course_entry_mode(application.course(slug).card.template_id) == "interview_prep":
             return {**result, "state": "placement_recommended"}

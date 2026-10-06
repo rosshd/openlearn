@@ -2236,6 +2236,24 @@ def test_source_creation_user_entrypoints_navigation_drafts_and_consent(tmp_path
                 assert "/courses/new?sources=1#course-sources" in page.url
                 assert page.get_by_label("Course name", exact=True).input_value() == "Old source draft"
                 assert page.get_by_label("Local folder path", exact=True).input_value() == "/synthetic/notes"
+                page.get_by_label("Source type", exact=True).select_option("")
+                page.locator("#goal").press("Enter")
+                assert page.locator("#experience").evaluate("e => e === document.activeElement")
+                page.get_by_label("Source type", exact=True).select_option("file")
+                page.get_by_label("Source file", exact=True).set_input_files(
+                    {"name": "rejected.txt", "mimeType": "text/plain", "buffer": b"OPENAI_API_KEY=sk-abcdefghijklmnopqrstuv"})
+                page.get_by_role("button", name="Create course", exact=True).click()
+                page.locator("[data-form-error]").wait_for(state="visible")
+                pending_id = page.locator('[name="submission_id"]').input_value()
+                page.get_by_label("Source type", exact=True).select_option("")
+                page.get_by_role("button", name="Create course", exact=True).click()
+                playwright.expect(page.locator("[data-form-error]")).to_contain_text("unfinished source import")
+                page.get_by_role("link", name="Start a new course", exact=True).click()
+                assert page.get_by_label("Course name", exact=True).input_value() == ""
+                assert page.locator('[name="submission_id"]').input_value() != pending_id
+                page.get_by_label("Course name", exact=True).fill("New draft after unfinished import")
+                page.reload()
+                assert page.get_by_label("Course name", exact=True).input_value() == "New draft after unfinished import"
                 fresh = browser.new_context()
                 upload_page = fresh.new_page()
                 upload_page.goto(bootstrap)

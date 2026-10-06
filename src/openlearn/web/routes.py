@@ -401,6 +401,8 @@ async def create_course(request: Request) -> JSONResponse:
         return _creation_provider_error(request, provider_status)
     result = public_mapping(await _call(request, "create_course", payload))
     if not result.get("ok", False):
+        if result.get("state") == "source_required":
+            return _json_error(str(result["error"]), 409, state="source_required")
         return _json_error(str(result.get("error") or "Course creation failed."), 422)
     if result.get("slug"):
         if result.get("state") == "source_ready":
@@ -482,6 +484,7 @@ async def create_course_form(request: Request) -> Any:
                 course_templates=templates,
                 selected_template=None,
                 create_error=str(result.get("error") or "Course creation failed."),
+                creation_conflict=result.get("state") == "source_required",
                 creation_input=payload.model_dump(), submission_id=payload.submission_id,
                 provider=public_mapping(await _call(request, "provider_status")),
                 page_title="Start a course",

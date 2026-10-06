@@ -569,6 +569,7 @@ h2 { font-size: var(--type-section); line-height: 1.25; letter-spacing: -0.025em
 .creation-actions .primary-action { min-height: 2.75rem; padding: 0.65rem 0.9rem; border-color: var(--library-action); background: var(--library-action); color: var(--action-ink); font-size: 0.94rem; font-weight: 600; box-shadow: none; transform: none; }
 .creation-actions .primary-action:hover { background: color-mix(in srgb, var(--library-action) 94%, var(--canvas)); box-shadow: none; transform: none; }
 .creation-actions .quiet-link { color: var(--library-muted); font-size: 0.9rem; font-weight: 500; }
+.creation-reset { justify-self: start; color: var(--library-normal); font-size: 0.9rem; font-weight: 500; }
 @media (max-width: 600px) {
   .creation-panel { padding: 1rem; }
   .creation-source-grid { grid-template-columns: minmax(0, 1fr); }

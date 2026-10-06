@@ -109,6 +109,12 @@ function saveCreationDraft() {
 }
 if (createForm) {
   try {
+    const creationUrl = new URL(location.href);
+    if (creationUrl.searchParams.get("new") === "1") {
+      sessionStorage.removeItem(creationDraftKey);
+      creationUrl.searchParams.delete("new");
+      history.replaceState(history.state, "", creationUrl);
+    }
     const legacySourceDraft = createForm.dataset.creationMode === "course" && new URLSearchParams(location.search).get("sources") === "1"
       ? sessionStorage.getItem(`openlearn-course-draft:${appRoot}:${appRoot}/courses/from-source`) : null;
     const draft = JSON.parse(sessionStorage.getItem(creationDraftKey) || legacySourceDraft || "null");
@@ -252,7 +258,9 @@ for (const form of document.querySelectorAll("[data-json-form]")) {
     const submit = form.querySelector('[type="submit"]');
     const errorBox = form.querySelector("[data-form-error]");
     const status = form.querySelector("[data-form-status]");
+    const creationReset = form.querySelector("[data-creation-reset]");
     if (errorBox) errorBox.hidden = true;
+    if (creationReset) creationReset.hidden = true;
     submit.disabled = true;
     submit.setAttribute("aria-busy", "true");
     if (status) status.textContent = form.hasAttribute("data-multipart") ? "Saving course and screening the source…" : form.dataset.endpoint === "/api/setup" ? "Testing connection…" : "Saving course and preparing the first lesson…";
@@ -287,6 +295,7 @@ for (const form of document.querySelectorAll("[data-json-form]")) {
       const destination = result.setup_url || result.placement_url || result.initialization_url || result.focus_url || result.redirect || form.dataset.successUrl;
       if (destination) window.location.assign(appUrl(destination));
     } catch (error) {
+      if (creationReset) creationReset.hidden = error.payload?.state !== "source_required";
       if (form.elements.api_key && !error.payload?.retain_secret) form.elements.api_key.value = "";
       if (form === createForm && error.payload?.state === "setup_required") {
         if (openProviderSetup(error.message, () => createForm.requestSubmit())) {
@@ -309,8 +318,6 @@ for (const form of document.querySelectorAll("[data-json-form]")) {
 }
 
 for (const form of document.querySelectorAll("[data-enter-flow]")) {
-  const fields = [...form.querySelectorAll('input:not([type="hidden"]):not([type="file"]), textarea')]
-    .filter((field) => !field.disabled);
   form.addEventListener("keydown", (event) => {
     if (
       event.key !== "Enter"
@@ -320,6 +327,8 @@ for (const form of document.querySelectorAll("[data-enter-flow]")) {
       || event.metaKey
       || event.isComposing
     ) return;
+    const fields = [...form.querySelectorAll('input:not([type="hidden"]):not([type="file"]), textarea')]
+      .filter((field) => !field.disabled);
     const index = fields.indexOf(event.target);
     if (index < 0) return;
     event.preventDefault();
