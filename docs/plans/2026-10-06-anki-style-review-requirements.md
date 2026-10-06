@@ -141,6 +141,7 @@ Legacy items show Prepare this review card and This concept needs a question and
 The Prepare card action states that it uses the configured AI provider.
 Page load must never start provider work.
 Preparation considers only bounded saved course notes, imported text, and tutor teaching content, excluding learner answers and unrelated courses.
+Select passages relevant to the due concept before applying source-window and total-input limits, so long notes or older unrelated lessons cannot crowd out the available supporting material.
 Require supporting excerpts that can be verified against the selected source text.
 Use existing provider configuration precedence and one bounded generation attempt, without an extra judge call.
 Persist successful content before presenting its question; never generate a fresh variant on reload.
