@@ -20,7 +20,7 @@ def _picker_command() -> list[str]:
     if sys.platform == "darwin":
         return [
             "/usr/bin/osascript", "-e",
-            'try\nreturn POSIX path of (choose folder with prompt "Choose a source folder for openlearn")'
+            'activate\ntry\nreturn POSIX path of (choose folder with prompt "Choose a source folder for openlearn")'
             '\non error number -128\nreturn ""\nend try',
         ]
     if sys.platform == "win32":

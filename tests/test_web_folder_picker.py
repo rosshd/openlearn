@@ -22,6 +22,7 @@ def test_native_selection_preserves_spaces_and_only_returns_a_folder(tmp_path: P
     monkeypatch.setattr(folder_picker.subprocess, "run", run)
     assert folder_picker.pick_folder() == str(folder) + "/"
     assert calls[0][0][0] == "/usr/bin/osascript"
+    assert calls[0][0][-1].startswith("activate\n")
     assert calls[0][1]["timeout"] == 120
     assert "shell" not in calls[0][1]
 
