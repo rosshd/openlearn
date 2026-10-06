@@ -1,0 +1,5 @@
+<div class="folder-path-row" data-folder-picker>
+  <input id="{{ folder_input_id }}" name="{{ folder_input_name }}" maxlength="{{ folder_input_maxlength or 2048 }}" value="{{ folder_input_value or '' }}"{% if folder_input_required %} required{% endif %} placeholder="/path/to/your/notes">
+  <button class="source-browse" type="button" data-folder-browse hidden>Browse…</button>
+  <p class="field-note folder-picker-status" role="status" aria-live="polite" data-folder-picker-status hidden></p>
+</div>

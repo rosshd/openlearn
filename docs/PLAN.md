@@ -20,7 +20,7 @@ The tutor must remain useful across subjects without assuming every course is ac
 
 - Local course files and learner state remain the source of truth.
 - Users bring their own hosted provider key or use a configured local endpoint.
-- The web creation UI prioritizes own topics, source courses, and Quick Learn imports.
+- The web creation UI offers custom courses with optional sources and source-required Quick Learn imports.
 - Built-in catalog, starter tiles, curated recommendations, and template defaults are hidden.
 - Existing saved courses, including Technical Interview Prep, remain resumable.
 - Lessons teach one focused idea and keep checks optional for refreshers.

@@ -12,6 +12,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
+from openlearn.constants import QUICK_LEARN_MAX_FILE_BYTES
+
 from .routes import router
 from .security import BrowserSecurity, LocalSecurityMiddleware
 
@@ -280,6 +282,7 @@ def create_app(
         loader=FileSystemLoader(str(package_dir / "templates")),
         autoescape=select_autoescape(("html", "xml"), default_for_string=True),
     )
+    template_environment.globals["source_file_limit_kb"] = QUICK_LEARN_MAX_FILE_BYTES // 1000
     templates = Jinja2Templates(env=template_environment)
     app = FastAPI(
         title="openlearn",

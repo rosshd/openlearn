@@ -31,19 +31,22 @@ def payload(mode="quick", **changes):
             "submission_id": str(uuid4()), "mode": mode, "source_kind": "file", **changes}
 
 
-def post(client, data, files=None, *, json=True):
+def post(client, data, files=None, *, json=True, path="/courses/from-source"):
     token = client.get("/").cookies["openlearn_csrf"]
-    return client.post("/courses/from-source", data=data, files=files,
+    return client.post(path, data=data, files=files,
                        headers={"X-CSRF-Token": token, "Accept": "application/json" if json else "text/html"},
                        follow_redirects=False)
 
 
-def test_dashboard_and_direct_entrypoints_have_real_source_forms(client):
+def test_creation_entrypoints_share_one_optional_source_workflow(client):
     dashboard = client.get("/").text
-    assert 'href="http://testserver/courses/from-source"' in dashboard
-    assert "Source course" in dashboard
-    for path, mode, title in [("/courses/from-source", "course", "Build a course from your sources."),
-                              ("/quick-learn", "quick", "Learn from one source now.")]:
+    assert 'href="http://testserver/courses/from-source"' not in dashboard
+    assert "Source course" not in dashboard
+    legacy = client.get("/courses/from-source", follow_redirects=False)
+    assert legacy.status_code == 303
+    assert legacy.headers["location"].endswith("/courses/new?sources=1#course-sources")
+    for path, mode, title in [("/courses/new", "course", "Custom course"),
+                              ("/quick-learn", "quick", "Quick Learn")]:
         response = client.get(path)
         assert response.status_code == 200
         assert title in response.text
@@ -52,6 +55,67 @@ def test_dashboard_and_direct_entrypoints_have_real_source_forms(client):
         assert 'value="folder"' in response.text and 'value="github"' in response.text
         assert "Starter courses" not in response.text
         assert 'enctype="multipart/form-data"' in response.text
+        assert ('value="" selected>No source' in response.text) == (mode == "course")
+        assert ('id="course-sources"' in response.text) == (mode == "course")
+
+
+def test_custom_course_optional_source_uses_bounded_import_without_tutor_work(client, monkeypatch):
+    monkeypatch.setattr(tutor_service, "start_turn", lambda *args, **kwargs: pytest.fail("Source import started tutoring"))
+    data = payload("course")
+    files = {"source_file": ("lesson.md", b"Two halves make a whole.")}
+    result = post(client, data, files, path="/courses/new")
+    assert result.status_code == 200
+    slug = result.json()["slug"]
+    assert result.json()["state"] == "source_ready"
+    assert cli.read_topic(slug).metadata["web_source_mode"] == "course"
+    assert len(source_imports.list_course_sources(slug)) == 1
+    assert post(client, data, files, path="/courses/new").json()["created"] is False
+
+
+def test_custom_creation_without_source_and_html_validation_keep_input(client):
+    data = payload("course", source_kind="")
+    invalid = post(client, {**data, "goal": ""}, json=False, path="/courses/new")
+    assert invalid.status_code == 422
+    assert data["title"] in invalid.text and data["experience"] in invalid.text
+    assert data["submission_id"] in invalid.text
+    created = post(client, data, json=False, path="/courses/new")
+    assert created.status_code == 303
+    assert "/initializing/" in created.headers["location"]
+    assert not cli.read_topic("synthetic-fractions").metadata.get("web_source_start")
+
+
+def test_source_replay_through_plain_creation_keeps_source_consent(client):
+    data = payload("course")
+    created = post(client, data, {"source_file": ("lesson.md", b"Two halves make a whole.")})
+    token = client.get("/").cookies["openlearn_csrf"]
+    replay = client.post("/api/courses", json=data, headers={"X-CSRF-Token": token})
+    assert replay.status_code == 200
+    assert replay.json()["slug"] == created.json()["slug"]
+    assert replay.json()["focus_url"].endswith("?tool=chat")
+    assert "operation_id" not in replay.json()
+
+
+def test_unfinished_import_cannot_report_source_free_creation_success(client, monkeypatch):
+    monkeypatch.setattr(tutor_service, "start_turn", lambda *args, **kwargs: pytest.fail("Pending import started tutoring"))
+    data = payload("course")
+    rejected = post(client, data, {"source_file": ("keys.txt", b"OPENAI_API_KEY=sk-abcdefghijklmnopqrstuv")}, path="/courses/new")
+    assert rejected.status_code == 422
+    before = cli.topic_path("synthetic-fractions").read_bytes()
+    token = client.get("/").cookies["openlearn_csrf"]
+    conflict = client.post("/api/courses", json={**data, "source_kind": ""}, headers={"X-CSRF-Token": token})
+    assert conflict.status_code == 409
+    assert conflict.json()["state"] == "source_required"
+    assert "focus_url" not in conflict.json()
+    plain = post(client, {**data, "source_kind": ""}, json=False, path="/courses/new")
+    assert plain.status_code == 422
+    assert "unfinished source import" in plain.text
+    assert 'data-creation-reset hidden' not in plain.text
+    assert '?new=1' in plain.text
+    assert cli.topic_path("synthetic-fractions").read_bytes() == before
+    corrected = post(client, data, {"source_file": ("notes.md", b"Two halves make a whole.")}, path="/courses/new")
+    assert corrected.status_code == 200
+    assert corrected.json()["created"] is False
+    assert len(source_imports.list_course_sources("synthetic-fractions")) == 1
 
 
 @pytest.mark.parametrize("mode", ["course", "quick"])
@@ -115,7 +179,7 @@ def test_folder_and_github_use_existing_bounded_imports(client, tmp_path, monkey
     folder = tmp_path / "synthetic-source"
     folder.mkdir()
     (folder / "lesson.md").write_text("Fractions are equal parts of a whole.")
-    response = post(client, payload("course", source_kind="folder", source_value=str(folder)))
+    response = post(client, payload("course", source_kind="folder", source_value=str(folder)), path="/courses/new")
     assert response.status_code == 200, response.text
     assert source_imports.list_course_sources(response.json()["slug"])
     # A GitHub pages URL must retain the existing repository-only rejection.
@@ -137,8 +201,9 @@ def test_folder_and_github_use_existing_bounded_imports(client, tmp_path, monkey
     assert seen == ["https://github.com/example/synthetic-course"]
 
 
-def test_no_javascript_file_submission_reaches_saved_source_course(client):
-    response = post(client, payload(), {"source_file": ("lesson.md", b"One half is an equal part.")}, json=False)
+@pytest.mark.parametrize("path", ["/courses/new", "/courses/from-source"])
+def test_no_javascript_file_submission_reaches_saved_source_course(client, path):
+    response = post(client, payload("course"), {"source_file": ("lesson.md", b"One half is an equal part.")}, json=False, path=path)
     assert response.status_code == 303
     assert response.headers["location"].endswith("?tool=chat")
     assert client.get(response.headers["location"]).status_code == 200

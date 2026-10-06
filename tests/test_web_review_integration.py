@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
+import re
 from urllib.parse import urlsplit
 
 from fastapi.testclient import TestClient
@@ -25,6 +27,30 @@ NOTES = "Outliers can be valid observations. Noise obscures a signal."
 QUESTION = "Can an outlier be a valid observation, and how does it differ from noise?"
 ANSWER = "An outlier can be valid. Noise is unwanted variation that obscures a signal."
 EXPLANATION = "Being unusual alone does not make an observation noise."
+LONG_QUESTION = (
+    "According to the supplied course materials, what distinguishes noise from outliers, "
+    "and how can an unusual measurement still be valid rather than being an error "
+    "that should automatically be removed from the data?"
+)
+LONG_ANSWER = (
+    "Noise is the random component of a measurement error, the unpredictable scatter "
+    "around a value. An outlier is an unusual value that may be valid and can be "
+    "interesting to investigate. Noise objects can be outliers, but noise objects are "
+    "not always outliers and outliers are not always noise objects. An observation "
+    "should therefore be investigated in context before being removed, even when it "
+    "lies far from the overall pattern of the data."
+)
+LONG_EXPLANATION = (
+    "Noise is random variation mixed into a measurement, so repeated readings can "
+    "scatter even when the underlying quantity stays constant. For example, readings "
+    "of the same 1 g standard might be 1.015 g, 0.990 g, and 1.013 g. Only the "
+    "readings vary, not the true value. An outlier, by contrast, may represent a real "
+    "rare event such as unusually high sales during a holiday rush. Being unusual "
+    "alone does not establish that the observation is noise or a measurement error. "
+    "The distinction depends on what generated the data and whether the unusual "
+    "observation carries useful information. This final sentence must remain readable "
+    "above the review controls."
+)
 
 
 @pytest.fixture
@@ -195,5 +221,113 @@ def test_real_service_two_tabs_cannot_rate_same_occurrence(review_fixture):
         assert cli.read_topic("review-integration").metadata["review_due"][0]["due"] == "2026-10-10"
         second.get_by_role("button", name="Refresh review", exact=True).click()
         second.get_by_role("heading", name="Review complete", exact=True).wait_for()
+        context.close()
+        browser.close()
+
+
+@pytest.mark.parametrize("width,height", [(1280, 800), (375, 812)])
+@pytest.mark.parametrize("theme", ["light", "dark"])
+def test_saved_long_card_readable_and_ratable_without_rewrite(review_fixture, width, height, theme):
+    playwright = pytest.importorskip("playwright.sync_api")
+    client, _clock, generations = review_fixture
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch()
+        context = browser.new_context(viewport={"width": width, "height": height}, reduced_motion="reduce")
+        bridge(context, client)
+        page = context.new_page()
+        page.goto("http://127.0.0.1/review?course=review-integration")
+        page.get_by_role("button", name="Prepare card", exact=True).click()
+        page.get_by_role("button", name="Show answer and explanation", exact=True).wait_for()
+        topic = cli.read_topic("review-integration")
+        saved = topic.metadata["review_due"][0]["review_card"]
+        saved.update(question=LONG_QUESTION, answer=LONG_ANSWER, explanation=LONG_EXPLANATION)
+        before = deepcopy(saved)
+        cli.write_topic(topic.path, topic.metadata, topic.body)
+        page.reload()
+        page.evaluate("theme => setTheme(theme)", theme)
+        assert LONG_ANSWER not in page.content()
+        page.get_by_role("button", name="Show answer and explanation", exact=True).click()
+        page.locator("[data-review-answer]").wait_for()
+        assert page.locator("[data-review-question]").inner_text() == LONG_QUESTION
+        for selector, expected in ((".review-answer-text", LONG_ANSWER), (".review-explanation", LONG_EXPLANATION)):
+            visible = " ".join(page.locator(selector).all_text_contents())
+            assert re.sub(r"\s+", " ", visible).strip() == expected
+        for control in [*page.locator("[data-review-grade]").all(), page.get_by_role("button", name="Skip for now", exact=True)]:
+            rect = control.bounding_box()
+            assert rect and rect["y"] >= 0 and rect["y"] + rect["height"] <= height
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+        screenshots = Path(__file__).resolve().parents[1] / ".artifacts" / "review-readability"
+        screenshots.mkdir(parents=True, exist_ok=True)
+        page.screenshot(path=str(screenshots / f"saved-long-{theme}-{width}.png"))
+        last = page.locator(".review-explanation").last
+        last.evaluate("node => node.scrollIntoView({block: 'end'})")
+        rect = last.bounding_box()
+        rating = page.locator("[data-review-grade]").first.bounding_box()
+        assert rect and rating and rect["y"] >= 0
+        assert rect["y"] + rect["height"] <= rating["y"]
+        assert cli.read_topic("review-integration").metadata["review_due"][0]["review_card"] == before
+        assert len(generations) == 1
+        page.locator("[data-review-grade='good']").click()
+        page.get_by_role("heading", name="Review complete", exact=True).wait_for()
+        assert cli.read_topic("review-integration").metadata["review_due"][0]["review_card"] == before
+        assert len(generations) == 1
+        context.close()
+        browser.close()
+
+
+@pytest.mark.parametrize("width,height", [(1280, 800), (375, 812)])
+def test_preparation_failure_notice_expires_but_exact_recovery_remains(review_fixture, monkeypatch, width, height):
+    playwright = pytest.importorskip("playwright.sync_api")
+    client, _clock, generations = review_fixture
+    original_generate = cli.call_openai
+    attempts = []
+
+    def generate(*args, **kwargs):
+        attempts.append((args, kwargs))
+        return "{}" if len(attempts) == 1 else original_generate(*args, **kwargs)
+
+    monkeypatch.setattr(cli, "call_openai", generate)
+    before = deepcopy(cli.read_topic("review-integration").metadata)
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch()
+        context = browser.new_context(viewport={"width": width, "height": height}, reduced_motion="reduce")
+        bridge(context, client)
+        page = context.new_page()
+        page.clock.install()
+        page.goto("http://127.0.0.1/review?course=review-integration")
+        page.get_by_role("button", name="Prepare card", exact=True).click()
+        retry = page.get_by_role("button", name="Try again", exact=True)
+        retry.wait_for()
+        toast = page.locator("[data-review-toast]")
+        toast.wait_for()
+        assert page.locator("[data-review-message]").count() == 0
+        assert page.get_by_role("heading", name="Could not prepare this card", exact=True).count() == 0
+        assert page.get_by_role("button", name="Prepare card", exact=True).count() == 0
+        assert page.get_by_role("link", name="Open course", exact=True).count() == 0
+        recovery_text = page.locator("[data-review-recovery]").inner_text()
+        assert recovery_text.strip()
+        assert cli.read_topic("review-integration").metadata == before
+        assert len(attempts) == 1
+        screenshots = Path(__file__).resolve().parents[1] / ".artifacts" / "review-feedback"
+        screenshots.mkdir(parents=True, exist_ok=True)
+        page.screenshot(path=str(screenshots / f"preparation-failure-{width}.png"))
+        page.clock.fast_forward(10_000)
+        assert not toast.is_visible()
+        assert page.locator("[data-review-recovery]").inner_text() == recovery_text
+        assert retry.is_visible() and retry.is_enabled()
+        assert cli.read_topic("review-integration").metadata == before
+        retry.click()
+        page.get_by_role("button", name="Show answer and explanation", exact=True).wait_for()
+        assert len(attempts) == 2 and len(generations) == 1
+        assert not page.locator("[data-review-status]").is_visible()
+        assert not toast.is_visible()
+        page.get_by_role("button", name="Show answer and explanation", exact=True).click()
+        page.locator("[data-review-answer]").wait_for()
+        assert page.get_by_role("heading", name="Answer", exact=True).count() == 0
+        assert page.get_by_role("heading", name="Explanation", exact=True).count() == 0
+        assert ANSWER in page.locator("[data-review-panel]").inner_text()
+        page.locator("[data-review-grade='good']").click()
+        page.get_by_role("heading", name="Review complete", exact=True).wait_for()
+        assert len(attempts) == 2
         context.close()
         browser.close()

@@ -60,6 +60,36 @@ def csrf(client: TestClient, path: str = "/") -> str:
     return response.cookies["openlearn_csrf"]
 
 
+def test_folder_picker_requires_authentication_and_csrf_and_only_selects(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    from openlearn.web import folder_picker
+
+    calls = []
+    monkeypatch.setattr(folder_picker, "pick_folder", lambda: calls.append(1) or str(tmp_path))
+    with TestClient(create_app(PlaceholderServices()), base_url="http://127.0.0.1") as unauthenticated:
+        assert unauthenticated.post("/api/sources/folder-picker").status_code == 401
+    token = csrf(client)
+    assert client.get("/api/sources/folder-picker").status_code == 405
+    assert client.post("/api/sources/folder-picker", headers={"X-CSRF-Token": "invalid"}).status_code == 403
+    assert client.post("/api/sources/folder-picker", headers={"X-CSRF-Token": token, "Origin": "https://other.example"}).status_code == 403
+    assert not calls
+    response = client.post("/api/sources/folder-picker", headers={"X-CSRF-Token": token})
+    assert response.json() == {"ok": True, "path": str(tmp_path)}
+    assert calls == [1]
+    assert not list((tmp_path / "learning-topics").glob("*.md"))
+    monkeypatch.setattr(folder_picker, "pick_folder", lambda: None)
+    assert client.post("/api/sources/folder-picker", headers={"X-CSRF-Token": token}).json()["path"] is None
+
+    def unavailable() -> None:
+        raise folder_picker.FolderPickerError("Paste or type the path instead.")
+
+    monkeypatch.setattr(folder_picker, "pick_folder", unavailable)
+    response = client.post("/api/sources/folder-picker", headers={"X-CSRF-Token": token})
+    assert response.status_code == 503
+    assert response.json()["error"] == "Paste or type the path instead."
+
+
 def confidence_ratings(focus: str = "coding", **overrides: int) -> dict[str, int]:
     ratings = {
         topic_id: 3
@@ -1256,7 +1286,7 @@ def test_unknown_follow_up_status_uses_stable_not_found_envelope(
     }
 
 
-def test_empty_dashboard_offers_custom_source_and_quick_learn_creation(
+def test_empty_dashboard_offers_custom_and_quick_learn_creation(
     client: TestClient,
 ) -> None:
     response = client.get("/dashboard")
@@ -1267,7 +1297,7 @@ def test_empty_dashboard_offers_custom_source_and_quick_learn_creation(
     assert "Custom course" in response.text
     assert "Computer Networking" not in response.text
     assert "Starter course" not in response.text
-    assert "Source course" in response.text
+    assert "Source course" not in response.text
     assert "Quick Learn" in response.text
     assert "Choose a starting point" not in response.text
     assert 'data-empty-course-library' in response.text
@@ -1582,7 +1612,7 @@ def test_creation_hides_catalog_and_ignores_old_template_links(
     assert 'data-template-choice' not in page.text
     old_link = client.get("/courses/new?template=technical-interview-prep")
     assert 'name="template_id" value=""' in old_link.text
-    assert 'placeholder="A topic you want to understand" value=""' in old_link.text
+    assert 'placeholder="e.g. Linear algebra" value=""' in old_link.text
 
 
 def test_data_page_is_read_only_and_data_mutations_require_csrf(client: TestClient) -> None:

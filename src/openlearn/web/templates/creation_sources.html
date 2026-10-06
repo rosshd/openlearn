@@ -1,0 +1,37 @@
+<fieldset class="source-choice creation-source-fields">
+  <legend class="sr-only">{{ 'Your source' if quick else 'Optional source' }}</legend>
+  <div class="creation-source-grid">
+    <div class="form-field" data-source-kind-field>
+      <label for="source-kind">Source type</label>
+      <select id="source-kind" name="source_kind" data-source-kind>
+        {% if not quick %}<option value=""{% if not source_kind %} selected{% endif %}>No source</option>{% endif %}
+        {% for kind, label in [('file', 'File'), ('folder', 'Local folder'), ('github', 'GitHub repository')] %}
+        <option value="{{ kind }}"{% if source_kind == kind %} selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="source-local-controls" data-source-local-controls hidden>
+      <span class="source-local-label">File or folder</span>
+      <div class="source-pick-actions">
+        <button type="button" class="source-browse" data-source-pick-file>Choose file</button>
+        <span data-source-folder-action></span>
+        <button type="button" class="quiet-link" data-source-github>Use GitHub</button>
+      </div>
+      {% if quick %}<p class="field-note" data-source-selection aria-live="polite"></p>{% endif %}
+    </div>
+    <div class="form-field" data-source-file-field>
+      <label for="source-file">Source file</label>
+      <input id="source-file" name="source_file" type="file" aria-describedby="source-file-note">
+    </div>
+    <div class="form-field" data-source-value-field>
+      <label for="source-value" data-source-value-label>Local folder path or public GitHub repository URL</label>
+      {% with folder_input_id="source-value", folder_input_name="source_value", folder_input_value=values.get('source_value'), folder_input_required=false %}{% include "folder_path.html" %}{% endwith %}
+    </div>
+  </div>
+  <p class="field-note" id="source-file-note" data-source-file-note>PDF, Word (.docx), text, or code · Up to {{ source_file_limit_kb }} KB. Files must be selected again after reloading.</p>
+  <div class="source-selection-actions" data-source-actions hidden>
+    <button class="quiet-link" type="button" data-source-change>Change</button>
+    <button class="quiet-link" type="button" data-source-remove>Remove</button>
+  </div>
+  <noscript><p class="field-note">Choose a source type, then use its file or path field. Without JavaScript, re-enter details after leaving this page.</p></noscript>
+</fieldset>
