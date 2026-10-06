@@ -2171,6 +2171,14 @@ function initializeReview() {
   let busy = false;
   let operation = 0;
   let timer = null;
+  let dockObserver = null;
+  let updateActionDock = null;
+  let notice = null;
+  let noticeTimer = null;
+  let noticeFadeTimer = null;
+  let noticeRemaining = 0;
+  let noticeStartedAt = 0;
+  let lockedFocus = null;
   const skipped = new Set();
   const receipts = new Set();
   const reviewedCards = new Set();
@@ -2201,13 +2209,195 @@ function initializeReview() {
     element.addEventListener("click", action);
     return element;
   }
-  function focusHeading(element) { element?.focus(); }
+  function positionNotice() {
+    const bottom = document.querySelector(".site-header")?.getBoundingClientRect().bottom || 0;
+    shell.style.setProperty("--review-notice-top", `${Math.max(16, bottom + 8)}px`);
+  }
+  function clearNotice() {
+    clearTimeout(noticeTimer);
+    clearTimeout(noticeFadeTimer);
+    noticeTimer = noticeFadeTimer = null;
+    notice?.remove();
+    notice = null;
+    noticeRemaining = 0;
+  }
+  function pauseNotice() {
+    if (!notice) return;
+    if (noticeTimer !== null) noticeRemaining = Math.max(0, noticeRemaining - (performance.now() - noticeStartedAt));
+    clearTimeout(noticeTimer);
+    clearTimeout(noticeFadeTimer);
+    noticeTimer = noticeFadeTimer = null;
+    notice.classList.remove("is-leaving");
+  }
+  function resumeNotice() {
+    if (!notice || document.hidden || notice.matches(":hover") || notice.contains(document.activeElement) || noticeTimer !== null) return;
+    noticeStartedAt = performance.now();
+    noticeTimer = setTimeout(() => {
+      noticeTimer = null;
+      noticeRemaining = 0;
+      if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) clearNotice();
+      else {
+        notice.classList.add("is-leaving");
+        noticeFadeTimer = setTimeout(clearNotice, 160);
+      }
+    }, noticeRemaining);
+  }
+  function showNotice(message) {
+    if (notice?.dataset.message !== message) {
+      clearNotice();
+      notice = node("aside", undefined, "review-toast");
+      notice.dataset.reviewToast = "";
+      notice.dataset.message = message;
+      notice.setAttribute("role", "alert");
+      const icon = node("span", "!", "review-toast-icon");
+      icon.setAttribute("aria-hidden", "true");
+      const close = button("×", () => {
+        const restore = notice?.contains(document.activeElement);
+        clearNotice();
+        if (restore) {
+          const target = panel.querySelector("[data-review-retry]:not(:disabled)")
+            || panel.querySelector("[data-review-primary]:not(:disabled)")
+            || panel.querySelector("[data-review-grade]:not(:disabled), .review-footer button:not(:disabled)")
+            || panel.querySelector("[data-review-topic]");
+          focusHeading(target);
+        }
+      }, "quiet-action review-toast-dismiss");
+      close.setAttribute("aria-label", "Dismiss notification");
+      notice.append(icon, node("p", message), close);
+      notice.addEventListener("pointerenter", pauseNotice);
+      notice.addEventListener("pointerleave", resumeNotice);
+      notice.addEventListener("focusin", pauseNotice);
+      notice.addEventListener("focusout", () => queueMicrotask(resumeNotice));
+      shell.append(notice);
+    } else pauseNotice();
+    noticeRemaining = 8000;
+    positionNotice();
+    resumeNotice();
+  }
+  window.addEventListener("scroll", positionNotice, {passive: true});
+  window.addEventListener("resize", positionNotice);
+  document.addEventListener("visibilitychange", () => document.hidden ? pauseNotice() : resumeNotice());
+  function clearFeedback() {
+    clearNotice();
+    const area = panel.querySelector("[data-review-recovery]");
+    area?.querySelector("[data-review-open-course]")?.remove();
+    const status = area?.querySelector("[data-review-status]");
+    if (status) { status.textContent = ""; status.hidden = true; }
+  }
+  function setPrimaryLabel(label) {
+    const control = panel.querySelector("[data-review-primary]");
+    if (!control) return;
+    control.textContent = label;
+    control.setAttribute("aria-label", label);
+    control.title = mode === "question" ? `${label} (Space)` : label;
+  }
+  function setRecovery(message, retry, label, {primary = false, missingSource = false} = {}) {
+    let area = panel.querySelector("[data-review-recovery]");
+    if (!area) {
+      area = node("div", undefined, "review-recovery");
+      area.dataset.reviewRecovery = "";
+      const footer = panel.querySelector(".review-footer");
+      if (footer) panel.insertBefore(area, footer);
+      else panel.append(area);
+    }
+    let status = area.querySelector("[data-review-status]");
+    if (!status) {
+      status = node("p", undefined, "review-status");
+      status.dataset.reviewStatus = "";
+      status.id = "review-action-status";
+      area.append(status);
+    }
+    status.hidden = false;
+    status.textContent = message;
+    let control;
+    if (primary) {
+      setPrimaryLabel(label);
+      control = area.querySelector("[data-review-primary]");
+    } else {
+      control = area.querySelector("[data-review-retry]");
+      if (!control) {
+        control = button(label, () => { if (!busy) retry(); });
+        control.dataset.reviewRetry = "";
+        area.append(control);
+      }
+      control.textContent = label;
+    }
+    control?.setAttribute("aria-describedby", status.id);
+    area.querySelector("[data-review-open-course]")?.remove();
+    if (missingSource) {
+      const link = node("a", "Open course", "quiet-link");
+      link.dataset.reviewOpenCourse = "";
+      link.href = appUrl(`/courses/${encodeURIComponent(current.slug)}`);
+      area.append(link);
+    }
+    showNotice(message);
+  }
+  function reviewHeaderHeight() {
+    const header = document.querySelector(".site-header");
+    return header && ["sticky", "fixed"].includes(getComputedStyle(header).position) ? header.offsetHeight : 0;
+  }
+  function clearActionDock() {
+    dockObserver?.disconnect();
+    dockObserver = null;
+    updateActionDock = null;
+    panel.style.setProperty("--review-dock-height", "0px");
+    panel.style.setProperty("--review-header-offset", `${reviewHeaderHeight() + 16}px`);
+  }
+  function configureActionDock(footer) {
+    const update = () => {
+      if (!panel.contains(footer)) return;
+      const headerHeight = reviewHeaderHeight();
+      const dockHeight = footer.offsetHeight;
+      footer.classList.toggle("review-footer--flow", dockHeight > window.innerHeight * 0.34
+        || window.innerHeight - headerHeight - dockHeight < 230);
+      const sticky = getComputedStyle(footer).position === "sticky";
+      panel.style.setProperty("--review-dock-height", `${sticky ? dockHeight : 0}px`);
+      panel.style.setProperty("--review-header-offset", `${headerHeight + 16}px`);
+    };
+    updateActionDock = update;
+    dockObserver?.disconnect();
+    dockObserver = new ResizeObserver(update);
+    dockObserver.observe(footer);
+    dockObserver.observe(document.documentElement);
+    update();
+  }
+  window.addEventListener("resize", () => updateActionDock?.());
+  function focusHeading(element, block = "nearest") {
+    element?.focus({preventScroll: true});
+    element?.scrollIntoView({block});
+  }
+  function appendProse(container, text, className, kind) {
+    const prose = node("div", undefined, "review-prose");
+    prose.dataset.reviewProse = kind;
+    prose.setAttribute("role", "group");
+    prose.setAttribute("aria-label", kind === "answer" ? "Answer" : "Explanation");
+    // Keep original characters and line boundaries; only wrap reliable prose.
+    for (const part of (text || "").split(/(\r?\n[ \t]*\r?\n(?:[ \t]*\r?\n)*)/)) {
+      if (!part) continue;
+      if (!part.trim()) { prose.append(document.createTextNode(part)); continue; }
+      const structured = /[\r\n`{}[\]\\=<>_^]|\b(?:e\.g|i\.e|Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|vs|etc|approx|Fig|Eq|Corp|Inc)\./i.test(part);
+      let start = 0;
+      if (!structured && part.split(/\s+/).length > 45) {
+        // Boundaries require an ordinary long word, punctuation, and a new
+        // capitalized sentence. Ambiguous abbreviations/formulas stay intact.
+        for (const match of part.matchAll(/[a-z]{4,}[.!?](?:["'])?(\s+)(?=[A-Z])/g)) {
+          const separatorStart = match.index + match[0].length - match[1].length;
+          if (part.slice(start, separatorStart).split(/\s+/).length < 20) continue;
+          prose.append(node("p", part.slice(start, separatorStart), className), document.createTextNode(match[1]));
+          start = separatorStart + match[1].length;
+        }
+      }
+      if (start < part.length) prose.append(node("p", part.slice(start), className));
+    }
+    container.append(prose);
+  }
   function updateSummary() {
     const returns = items.filter(waiting).length;
     const skippedCount = items.filter((item) => skipped.has(itemKey(item))).length;
     summary.textContent = `${items.length} remaining · ${receipts.size} reviewed${returns ? ` · ${returns} returns soon` : ""}${skippedCount ? ` · ${skippedCount} skipped` : ""}`;
   }
   function lock(value) {
+    if (value) lockedFocus = panel.contains(document.activeElement) ? document.activeElement : null;
     busy = value;
     panel.setAttribute("aria-busy", String(value));
     for (const control of panel.querySelectorAll("button, summary")) {
@@ -2218,6 +2408,11 @@ function initializeReview() {
     for (const link of panel.querySelectorAll("a")) {
       if (value) link.setAttribute("aria-disabled", "true");
       else link.removeAttribute("aria-disabled");
+    }
+    if (!value && lockedFocus && document.activeElement === document.body) {
+      const target = lockedFocus.isConnected && !lockedFocus.disabled
+        ? lockedFocus : panel.querySelector("[data-review-retry]:not(:disabled)");
+      target?.focus({preventScroll: true});
     }
   }
   panel.addEventListener("click", (event) => {
@@ -2243,8 +2438,12 @@ function initializeReview() {
     return result;
   }
   function conflict(error) { return error.payload?.state === "conflict"; }
-  function addSkip() {
-    const footer = node("div", undefined, "review-footer");
+  function addSkip(ratings = null) {
+    const footer = node("footer", undefined, ratings ? "review-footer review-footer--ratings" : "review-footer");
+    if (ratings) {
+      footer.dataset.reviewActions = "";
+      footer.append(ratings);
+    }
     footer.append(button("Skip for now", () => {
       if (busy || pending) return;
       skipped.add(itemKey(current));
@@ -2252,59 +2451,61 @@ function initializeReview() {
       announce("Skipped for this session. This review remains due.");
     }, "quiet-action"));
     panel.append(footer);
+    if (ratings) configureActionDock(footer);
   }
   function showConflict() {
     mode = "conflict";
     pending = null;
+    clearFeedback();
+    clearActionDock();
     panel.replaceChildren();
-    const title = heading("This card changed in another tab");
-    panel.append(title, node("p", "Refresh the review to continue from its current schedule."),
-      button("Refresh review", () => refresh(true)));
-    focusHeading(title);
-    announce("This card changed in another tab. Refresh the review.");
-  }
-  function errorMessage(titleText, detail, retry, retryLabel) {
-    panel.querySelector("[data-review-message]")?.remove();
-    const message = node("div", undefined, "review-message");
-    message.dataset.reviewMessage = "";
-    const title = heading(titleText, "h3");
-    message.append(title, node("p", detail), button(retryLabel, retry));
-    panel.append(message);
-    focusHeading(title);
-    announce(titleText);
+    const title = heading(current?.concept || "Review");
+    title.dataset.reviewTopic = "";
+    panel.append(title);
+    setRecovery("This card changed in another tab.", () => refresh(true), "Refresh review");
+    panel.querySelector("[data-review-retry]").dataset.reviewRefresh = "";
   }
   function showCard(focus = false) {
     clearTimeout(timer);
+    clearFeedback();
+    clearActionDock();
     mode = current.state === "needs_preparation" ? "preparation" : "question";
     revealed = null;
     pending = null;
     panel.replaceChildren();
-    panel.append(node("p", current.course, "eyebrow"), node("p", current.concept, "review-context"));
-    const title = heading(mode === "preparation" ? "Prepare this review card" : current.question);
-    title.dataset.reviewQuestion = "";
-    panel.append(title);
-    if (mode === "preparation") {
-      panel.append(node("p", "This concept needs a question and reference answer before you can review it."),
-        node("p", "Preparation uses your configured AI provider and saved course material.", "quiet-copy"),
-        button("Prepare card", prepare, "primary-action"));
-    } else {
-      const control = button("Show answer and explanation", reveal, "primary-action");
-      control.setAttribute("aria-label", "Show answer and explanation");
+    const title = heading(current.concept);
+    title.className = "review-topic";
+    title.dataset.reviewTopic = "";
+    panel.append(node("p", current.course, "review-course"), title);
+    let question = null;
+    if (mode === "preparation") panel.append(node("p", "Create a review question from your course material."));
+    else {
+      question = node("p", current.question, "review-question");
+      question.tabIndex = -1;
+      question.dataset.reviewQuestion = "";
+      panel.append(question);
+    }
+    const area = node("div", undefined, "review-recovery");
+    area.dataset.reviewRecovery = "";
+    const control = button(mode === "preparation" ? "Prepare card" : "Show answer and explanation", mode === "preparation" ? prepare : reveal, "primary-action");
+    control.dataset.reviewPrimary = "";
+    if (mode === "question") {
       control.setAttribute("aria-keyshortcuts", "Space");
       control.title = "Show answer and explanation (Space)";
-      panel.append(control);
     }
+    area.append(control);
+    panel.append(area);
     addSkip();
     updateSummary();
-    if (focus) focusHeading(title);
+    if (focus) focusHeading(question || title);
   }
   async function prepare() {
     if (busy) return;
     const id = ++operation;
     const identity = itemKey(current);
+    clearFeedback();
+    setPrimaryLabel("Preparing…");
     lock(true);
-    const status = node("p", "Preparing question and answer…", "quiet-copy");
-    panel.append(status);
     announce("Preparing question and answer.");
     try {
       const result = await post("/api/review/prepare", {
@@ -2318,32 +2519,26 @@ function initializeReview() {
       announce("Review card prepared. Recall the answer before revealing it.");
     } catch (error) {
       if (id !== operation) return;
-      status.remove();
       if (conflict(error)) showConflict();
       else {
-        const needsSource = error.payload?.state === "needs_source";
-        errorMessage(needsSource ? "More course material is needed" : "Could not prepare this card",
-          `${error.message} This item remains due.`, prepare, "Retry preparation");
-        const link = node("a", "Open course", "quiet-link");
-        link.href = appUrl(`/courses/${encodeURIComponent(current.slug)}`);
-        panel.querySelector("[data-review-message]").append(link);
+        const needsSource = error.payload?.state === "needs_source" || error.payload?.code === "missing_source";
+        setRecovery(needsSource ? "More course material is needed." : "Could not prepare this card.",
+          prepare, "Try again", {primary: true, missingSource: needsSource});
       }
     } finally { if (id === operation) lock(false); }
   }
   function showAnswer() {
     mode = "revealed";
-    panel.querySelector("[data-review-message]")?.remove();
-    panel.querySelector(".primary-action")?.remove();
+    clearFeedback();
+    panel.querySelector("[data-review-recovery]")?.remove();
     panel.querySelector(".review-footer")?.remove();
     const answer = node("section", undefined, "review-answer");
-    const title = heading("Answer", "h3");
-    title.dataset.reviewAnswer = "";
-    answer.append(title);
-    for (const [text, className] of [[revealed.answer, "review-answer-text"], [revealed.explanation, "review-explanation"]]) {
-      for (const paragraph of (text || "").split(/\n\s*\n/).filter((value) => value.trim())) {
-        answer.append(node("p", paragraph, className));
-      }
-    }
+    answer.setAttribute("aria-label", "Answer and explanation");
+    appendProse(answer, revealed.answer, "review-answer-text", "answer");
+    if (revealed.explanation) appendProse(answer, revealed.explanation, "review-explanation", "explanation");
+    const target = answer.querySelector(".review-answer-text");
+    target.tabIndex = -1;
+    target.dataset.reviewAnswer = "";
     const ratings = node("div", undefined, "review-ratings");
     for (const result of results) {
       const preview = revealed.ratings.find((rating) => rating.result === result);
@@ -2358,16 +2553,17 @@ function initializeReview() {
         node("span", preview.interval, "review-rating-interval"));
       ratings.append(control);
     }
-    answer.append(ratings);
     panel.append(answer);
-    addSkip();
-    focusHeading(title);
+    addSkip(ratings);
+    focusHeading(target, "start");
     announce("Answer and explanation revealed. Choose a rating.");
   }
   async function reveal() {
     if (busy || mode !== "question") return;
     const id = ++operation;
     const identity = itemKey(current);
+    clearFeedback();
+    setPrimaryLabel("Show answer and explanation");
     lock(true);
     try {
       const result = await post("/api/review/reveal", payload());
@@ -2381,7 +2577,7 @@ function initializeReview() {
     } catch (error) {
       if (id !== operation) return;
       if (conflict(error)) showConflict();
-      else errorMessage("Could not reveal this answer", error.message, reveal, "Retry reveal");
+      else setRecovery("Could not show this answer.", reveal, "Try again", {primary: true});
     } finally { if (id === operation) lock(false); }
   }
   async function grade(result) {
@@ -2390,8 +2586,8 @@ function initializeReview() {
     const submitted = pending;
     const previous = current;
     const id = ++operation;
+    clearFeedback();
     lock(true);
-    panel.querySelector("[data-review-message]")?.remove();
     announce("Saving your review rating.");
     try {
       const receipt = await post("/api/review", submitted);
@@ -2411,25 +2607,28 @@ function initializeReview() {
       if (conflict(error)) showConflict();
       else {
         mode = "uncertain";
-        errorMessage("Could not confirm this rating was saved",
-          `Your ${submitted.result[0].toUpperCase() + submitted.result.slice(1)} rating is kept for retry.`,
-          () => grade(submitted.result), "Retry saving");
+        setRecovery("Could not confirm this rating was saved.", () => grade(submitted.result), "Retry saving");
       }
     } finally {
       if (id === operation) {
         lock(false);
         if (pending) {
           for (const control of panel.querySelectorAll("[data-review-grade], .review-footer button")) control.disabled = true;
+          if (document.activeElement === document.body || document.activeElement.matches?.("[data-review-grade]")) {
+            focusHeading(panel.querySelector("[data-review-retry]"));
+          }
         }
       }
     }
   }
   function showNext(focus = false) {
     clearTimeout(timer);
+    clearFeedback();
     updateSummary();
     current = items.find((item) => !skipped.has(itemKey(item)) && !waiting(item));
     if (current) { showCard(focus); return; }
     mode = "rest";
+    clearActionDock();
     panel.replaceChildren();
     const waitingItems = items.filter(waiting);
     let title;
@@ -2472,6 +2671,7 @@ function initializeReview() {
     if (busy || pending) return;
     clearTimeout(timer);
     const id = ++operation;
+    clearFeedback();
     lock(true);
     try {
       const next = await requestJson(sessionUrl());
@@ -2482,7 +2682,7 @@ function initializeReview() {
       if (Number.isFinite(offset)) clockOffset = offset;
       showNext(focus);
     } catch (error) {
-      if (id === operation) errorMessage("Could not refresh your review", error.message, () => refresh(true), "Retry refresh");
+      if (id === operation) setRecovery(mode === "conflict" ? "This card changed. Refresh could not be completed." : "Could not refresh this review.", () => refresh(true), "Retry refresh");
     } finally { if (id === operation) lock(false); }
   }
   document.addEventListener("keydown", (event) => {
