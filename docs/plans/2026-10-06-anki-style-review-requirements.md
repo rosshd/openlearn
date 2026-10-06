@@ -201,6 +201,8 @@ Small mechanical additions are allowed with an immediate parent and peer message
 - POST /api/review/prepare accepts slug, concept, and review_revision; success returns ok=true and the question-only item.
 - POST /api/review/reveal accepts slug, concept, card_id, content_version, and review_revision; success returns ok=true, answer, explanation, sources, reveal_token, and ratings.
 - Each source has label and excerpt; each rating has result, label, interval, and the authoritative next_due or relearn_at.
+- Again previews a one-minute duration with interval_seconds=60 and relearn_at=null; its absolute return time is computed when the rating commits.
+- Correct-rating next_due values are bound to the reveal receipt and remain authoritative at commit.
 - POST /api/review accepts slug, concept, card_id, content_version, review_revision, reveal_token, result, and submission_id; result is again, hard, good, or easy.
 - Rating success returns ok=true, state=committed, submission_id, next_due, relearn_at, and the surviving question-only item or null.
 - Same-ID same-input rating replay returns the original receipt; changed input or stale occurrence returns HTTP 409 with state=conflict and safe error text.
@@ -208,6 +210,7 @@ Small mechanical additions are allowed with an immediate parent and peer message
 - All endpoints reuse existing CSRF, namespace, slug validation, safe public mapping, and service-threadpool conventions.
 - Server reveal receipts gate rating for the current version/occurrence and bind the preview to its eventual committed schedule.
 - Card/occurrence identities and rating receipts live within the existing local learner storage boundary and survive normalization and reload.
+- Browser dashboard and progress projections include outstanding relearning cards, so leaving to courses never hides the review entry needed to resume.
 
 ## Worker prompts and order
 
