@@ -273,3 +273,61 @@ def test_saved_long_card_readable_and_ratable_without_rewrite(review_fixture, wi
         assert len(generations) == 1
         context.close()
         browser.close()
+
+
+@pytest.mark.parametrize("width,height", [(1280, 800), (375, 812)])
+def test_preparation_failure_notice_expires_but_exact_recovery_remains(review_fixture, monkeypatch, width, height):
+    playwright = pytest.importorskip("playwright.sync_api")
+    client, _clock, generations = review_fixture
+    original_generate = cli.call_openai
+    attempts = []
+
+    def generate(*args, **kwargs):
+        attempts.append((args, kwargs))
+        return "{}" if len(attempts) == 1 else original_generate(*args, **kwargs)
+
+    monkeypatch.setattr(cli, "call_openai", generate)
+    before = deepcopy(cli.read_topic("review-integration").metadata)
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch()
+        context = browser.new_context(viewport={"width": width, "height": height}, reduced_motion="reduce")
+        bridge(context, client)
+        page = context.new_page()
+        page.clock.install()
+        page.goto("http://127.0.0.1/review?course=review-integration")
+        page.get_by_role("button", name="Prepare card", exact=True).click()
+        retry = page.get_by_role("button", name="Try again", exact=True)
+        retry.wait_for()
+        toast = page.locator("[data-review-toast]")
+        toast.wait_for()
+        assert page.locator("[data-review-message]").count() == 0
+        assert page.get_by_role("heading", name="Could not prepare this card", exact=True).count() == 0
+        assert page.get_by_role("button", name="Prepare card", exact=True).count() == 0
+        assert page.get_by_role("link", name="Open course", exact=True).count() == 0
+        recovery_text = page.locator("[data-review-recovery]").inner_text()
+        assert recovery_text.strip()
+        assert cli.read_topic("review-integration").metadata == before
+        assert len(attempts) == 1
+        screenshots = Path(__file__).resolve().parents[1] / ".artifacts" / "review-feedback"
+        screenshots.mkdir(parents=True, exist_ok=True)
+        page.screenshot(path=str(screenshots / f"preparation-failure-{width}.png"))
+        page.clock.fast_forward(10_000)
+        assert not toast.is_visible()
+        assert page.locator("[data-review-recovery]").inner_text() == recovery_text
+        assert retry.is_visible() and retry.is_enabled()
+        assert cli.read_topic("review-integration").metadata == before
+        retry.click()
+        page.get_by_role("button", name="Show answer and explanation", exact=True).wait_for()
+        assert len(attempts) == 2 and len(generations) == 1
+        assert not page.locator("[data-review-status]").is_visible()
+        assert not toast.is_visible()
+        page.get_by_role("button", name="Show answer and explanation", exact=True).click()
+        page.locator("[data-review-answer]").wait_for()
+        assert page.get_by_role("heading", name="Answer", exact=True).count() == 0
+        assert page.get_by_role("heading", name="Explanation", exact=True).count() == 0
+        assert ANSWER in page.locator("[data-review-panel]").inner_text()
+        page.locator("[data-review-grade='good']").click()
+        page.get_by_role("heading", name="Review complete", exact=True).wait_for()
+        assert len(attempts) == 2
+        context.close()
+        browser.close()
