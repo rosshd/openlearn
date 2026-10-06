@@ -1303,6 +1303,7 @@ document.addEventListener("keydown", (event) => {
     || event.ctrlKey
     || event.isComposing
     || turnForm
+    || document.querySelector("[data-review-shell]")
     || focusShell?.dataset.toolActive
     || document.querySelector(".drawer:not([hidden])")
     || event.target.closest?.("button, a, input, textarea, select")
@@ -1976,29 +1977,349 @@ for (const button of document.querySelectorAll("[data-placement-action]")) {
   }));
 }
 
-for (const button of document.querySelectorAll("[data-review-grade]")) {
-  button.addEventListener("click", async () => {
-    const item = button.closest("[data-review-item]");
-    if (!item) return;
-    for (const control of item.querySelectorAll("button")) control.disabled = true;
+function initializeReview() {
+  const shell = document.querySelector("[data-review-shell]");
+  if (!shell) return;
+  const panel = shell.querySelector("[data-review-panel]");
+  const summary = shell.querySelector("[data-review-summary]");
+  const snapshot = JSON.parse(shell.querySelector("[data-review-snapshot]").textContent);
+  let items = snapshot.items;
+  let clockOffset = Date.parse(snapshot.server_time) - Date.now();
+  if (!Number.isFinite(clockOffset)) clockOffset = 0;
+  let current = null;
+  let mode = "question";
+  let revealed = null;
+  let pending = null;
+  let busy = false;
+  let operation = 0;
+  let timer = null;
+  const skipped = new Set();
+  const receipts = new Set();
+  const reviewedCards = new Set();
+  const hadItems = items.length > 0;
+  const meanings = {
+    again: "Forgotten or incorrect", hard: "Correct with difficulty",
+    good: "Correct with effort", easy: "Correct with little effort",
+  };
+  const results = ["again", "hard", "good", "easy"];
+  const itemKey = (item) => JSON.stringify([item.slug, item.concept]);
+  const now = () => Date.now() + clockOffset;
+  const waiting = (item) => item.relearn_at && Date.parse(item.relearn_at) > now();
+  const sessionUrl = () => `/api/review/session${shell.dataset.course ? `?course=${encodeURIComponent(shell.dataset.course)}` : ""}`;
+  function node(tag, text, className) {
+    const element = document.createElement(tag);
+    if (text !== undefined) element.textContent = text;
+    if (className) element.className = className;
+    return element;
+  }
+  function heading(text, tag = "h2") {
+    const element = node(tag, text);
+    element.tabIndex = -1;
+    return element;
+  }
+  function button(text, action, className = "secondary-action") {
+    const element = node("button", text, className);
+    element.type = "button";
+    element.addEventListener("click", action);
+    return element;
+  }
+  function focusHeading(element) { element?.focus(); }
+  function updateSummary() {
+    const returns = items.filter(waiting).length;
+    const skippedCount = items.filter((item) => skipped.has(itemKey(item))).length;
+    summary.textContent = `${items.length} remaining · ${receipts.size} reviewed${returns ? ` · ${returns} returns soon` : ""}${skippedCount ? ` · ${skippedCount} skipped` : ""}`;
+  }
+  function lock(value) {
+    busy = value;
+    panel.setAttribute("aria-busy", String(value));
+    for (const control of panel.querySelectorAll("button, summary")) {
+      if (control.tagName === "BUTTON") control.disabled = value;
+      else if (value) control.setAttribute("aria-disabled", "true");
+      else control.removeAttribute("aria-disabled");
+    }
+    for (const link of panel.querySelectorAll("a")) {
+      if (value) link.setAttribute("aria-disabled", "true");
+      else link.removeAttribute("aria-disabled");
+    }
+  }
+  panel.addEventListener("click", (event) => {
+    if (busy && event.target.closest("a, summary")) event.preventDefault();
+  });
+  function replaceItem(item, previous = current) {
+    items = items.filter((value) => itemKey(value) !== itemKey(previous));
+    if (item) items.push(item);
+  }
+  function payload() {
+    return {
+      slug: current.slug, concept: current.concept, card_id: current.card_id,
+      content_version: current.content_version, review_revision: current.review_revision,
+    };
+  }
+  async function post(url, body) {
+    const result = await requestJson(url, {method: "POST", body: JSON.stringify(body)});
+    if (result.ok !== true) {
+      const error = new Error(result.error || "The review operation could not be completed.");
+      error.payload = result;
+      throw error;
+    }
+    return result;
+  }
+  function conflict(error) { return error.payload?.state === "conflict"; }
+  function addSkip() {
+    const footer = node("div", undefined, "review-footer");
+    footer.append(button("Skip for now", () => {
+      if (busy || pending) return;
+      skipped.add(itemKey(current));
+      showNext(true);
+      announce("Skipped for this session. This review remains due.");
+    }, "quiet-action"));
+    panel.append(footer);
+  }
+  function showConflict() {
+    mode = "conflict";
+    pending = null;
+    panel.replaceChildren();
+    const title = heading("This card changed in another tab");
+    panel.append(title, node("p", "Refresh the review to continue from its current schedule."),
+      button("Refresh review", () => refresh(true)));
+    focusHeading(title);
+    announce("This card changed in another tab. Refresh the review.");
+  }
+  function errorMessage(titleText, detail, retry, retryLabel) {
+    panel.querySelector("[data-review-message]")?.remove();
+    const message = node("div", undefined, "review-message");
+    message.dataset.reviewMessage = "";
+    const title = heading(titleText, "h3");
+    message.append(title, node("p", detail), button(retryLabel, retry));
+    panel.append(message);
+    focusHeading(title);
+    announce(titleText);
+  }
+  function showCard(focus = false) {
+    clearTimeout(timer);
+    mode = current.state === "needs_preparation" ? "preparation" : "question";
+    revealed = null;
+    pending = null;
+    panel.replaceChildren();
+    panel.append(node("p", current.course, "eyebrow"), node("p", current.concept, "review-context"));
+    const title = heading(mode === "preparation" ? "Prepare this review card" : current.question);
+    title.dataset.reviewQuestion = "";
+    panel.append(title);
+    if (mode === "preparation") {
+      panel.append(node("p", "This concept needs a question and reference answer before you can review it."),
+        node("p", "Preparation uses your configured AI provider and saved course material.", "quiet-copy"),
+        button("Prepare card", prepare, "primary-action"));
+    } else {
+      panel.append(button("Show Answer", reveal, "primary-action"), node("p", "Space to show answer", "review-hint"));
+    }
+    addSkip();
+    updateSummary();
+    if (focus) focusHeading(title);
+  }
+  async function prepare() {
+    if (busy) return;
+    const id = ++operation;
+    const identity = itemKey(current);
+    lock(true);
+    const status = node("p", "Preparing question and answer…", "quiet-copy");
+    panel.append(status);
+    announce("Preparing question and answer.");
     try {
-      await requestJson("/api/review", {
-        method: "POST",
-        body: JSON.stringify({
-          slug: item.dataset.slug,
-          concept: item.dataset.concept,
-          due: item.dataset.due,
-          result: button.dataset.reviewGrade,
-        }),
+      const result = await post("/api/review/prepare", {
+        slug: current.slug, concept: current.concept, review_revision: current.review_revision,
       });
-      item.remove();
-      announce("Review result saved and the schedule was updated.");
+      if (id !== operation || identity !== itemKey(current)) return;
+      if (!result.item?.question || result.item.state !== "question") throw new Error("The prepared card could not be confirmed.");
+      replaceItem(result.item);
+      current = result.item;
+      showCard(true);
+      announce("Review card prepared. Recall the answer before revealing it.");
     } catch (error) {
-      announce(error.message);
-      for (const control of item.querySelectorAll("button")) control.disabled = false;
+      if (id !== operation) return;
+      status.remove();
+      if (conflict(error)) showConflict();
+      else {
+        const needsSource = error.payload?.state === "needs_source";
+        errorMessage(needsSource ? "More course material is needed" : "Could not prepare this card",
+          `${error.message} This item remains due.`, prepare, "Retry preparation");
+        const link = node("a", "Open course", "quiet-link");
+        link.href = appUrl(`/courses/${encodeURIComponent(current.slug)}`);
+        panel.querySelector("[data-review-message]").append(link);
+      }
+    } finally { if (id === operation) lock(false); }
+  }
+  function showAnswer() {
+    mode = "revealed";
+    panel.querySelector("[data-review-message]")?.remove();
+    panel.querySelector(".primary-action")?.remove();
+    panel.querySelector(".review-hint")?.remove();
+    panel.querySelector(".review-footer")?.remove();
+    const answer = node("section", undefined, "review-answer");
+    const title = heading("Reference answer", "h3");
+    title.dataset.reviewAnswer = "";
+    answer.append(title, node("p", revealed.answer, "review-answer-text"),
+      node("h3", "Check your recall"), node("p", revealed.explanation, "review-explanation"));
+    if (revealed.sources?.length) {
+      const sources = node("details", undefined, "review-sources");
+      sources.append(node("summary", "Source"));
+      for (const source of revealed.sources) {
+        sources.append(node("p", source.label, "quiet-copy"), node("p", source.excerpt, "review-source-excerpt"));
+      }
+      answer.append(sources);
+    }
+    answer.append(node("p", "Rate what you recalled before revealing the answer.", "quiet-copy"));
+    const ratings = node("div", undefined, "review-ratings");
+    for (const result of results) {
+      const preview = revealed.ratings.find((rating) => rating.result === result);
+      const control = button("", () => grade(result), "secondary-action review-rating");
+      control.dataset.reviewGrade = result;
+      control.append(node("span", preview.label, "review-rating-label"),
+        node("span", preview.interval, "review-rating-interval"),
+        node("span", meanings[result], "review-rating-meaning"));
+      ratings.append(control);
+    }
+    answer.append(ratings, node("p", "1 Again · 2 Hard · 3 Good · 4 Easy", "review-hint"));
+    panel.append(answer);
+    addSkip();
+    focusHeading(title);
+    announce("Reference answer revealed. Compare your recall, then choose a rating.");
+  }
+  async function reveal() {
+    if (busy || mode !== "question") return;
+    const id = ++operation;
+    const identity = itemKey(current);
+    lock(true);
+    try {
+      const result = await post("/api/review/reveal", payload());
+      if (id !== operation || identity !== itemKey(current)) return;
+      if (!result.answer || !result.reveal_token || !Array.isArray(result.ratings)
+        || !results.every((value) => result.ratings.some((rating) => rating.result === value && rating.interval && rating.label))) {
+        throw new Error("The reference answer or review intervals could not be loaded.");
+      }
+      revealed = result;
+      showAnswer();
+    } catch (error) {
+      if (id !== operation) return;
+      if (conflict(error)) showConflict();
+      else errorMessage("Could not reveal this answer", error.message, reveal, "Retry reveal");
+    } finally { if (id === operation) lock(false); }
+  }
+  async function grade(result) {
+    if (busy || (mode !== "revealed" && mode !== "uncertain")) return;
+    if (!pending) pending = {...payload(), reveal_token: revealed.reveal_token, result, submission_id: crypto.randomUUID()};
+    const submitted = pending;
+    const previous = current;
+    const id = ++operation;
+    lock(true);
+    panel.querySelector("[data-review-message]")?.remove();
+    announce("Saving your review rating.");
+    try {
+      const receipt = await post("/api/review", submitted);
+      if (id !== operation || pending !== submitted) return;
+      if (receipt.state !== "committed" || receipt.submission_id !== submitted.submission_id) {
+        throw new Error("The server did not confirm a committed rating.");
+      }
+      receipts.add(receipt.submission_id);
+      reviewedCards.add(itemKey(previous));
+      replaceItem(receipt.item, previous);
+      pending = null;
+      current = null;
+      showNext(true);
+      announce("Review rating saved and schedule updated.");
+    } catch (error) {
+      if (id !== operation || pending !== submitted) return;
+      if (conflict(error)) showConflict();
+      else {
+        mode = "uncertain";
+        errorMessage("Could not confirm this rating was saved",
+          `Your ${submitted.result[0].toUpperCase() + submitted.result.slice(1)} rating is kept for retry.`,
+          () => grade(submitted.result), "Retry saving");
+      }
+    } finally {
+      if (id === operation) {
+        lock(false);
+        if (pending) {
+          for (const control of panel.querySelectorAll("[data-review-grade], .review-footer button")) control.disabled = true;
+        }
+      }
+    }
+  }
+  function showNext(focus = false) {
+    clearTimeout(timer);
+    updateSummary();
+    current = items.find((item) => !skipped.has(itemKey(item)) && !waiting(item));
+    if (current) { showCard(focus); return; }
+    mode = "rest";
+    panel.replaceChildren();
+    const waitingItems = items.filter(waiting);
+    let title;
+    if (waitingItems.length) {
+      title = heading("Your next card returns soon");
+      const at = Math.min(...waitingItems.map((item) => Date.parse(item.relearn_at)));
+      const time = node("time", new Date(at).toLocaleTimeString([], {hour: "numeric", minute: "2-digit", second: "2-digit"}));
+      time.dateTime = new Date(at).toISOString();
+      const line = node("p", "Next review at ");
+      line.append(time);
+      const countdown = node("p", "", "review-countdown");
+      countdown.dataset.reviewCountdown = "";
+      panel.append(title, line, countdown, node("p", "You can leave and resume later.", "quiet-copy"));
+      const tick = () => {
+        if (mode !== "rest") return;
+        const seconds = Math.max(0, Math.ceil((at - now()) / 1000));
+        countdown.textContent = seconds ? `Returns in ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}` : "Checking which cards are ready…";
+        if (seconds) timer = setTimeout(tick, 1000);
+        else refresh(true);
+      };
+      tick();
+    } else if (items.length) {
+      title = heading("Reviews remain due");
+      panel.append(title, node("p", "You skipped these cards for now. Their review schedules have not changed."));
+    } else {
+      title = heading(hadItems || reviewedCards.size ? "Review complete" : "Nothing is due");
+      panel.append(title, node("p", reviewedCards.size ? `${reviewedCards.size} distinct card${reviewedCards.size === 1 ? "" : "s"} reviewed. Come back when more are due.` : "Keep learning and your review tray will update."));
+    }
+    if (items.some((item) => skipped.has(itemKey(item)))) {
+      if (waitingItems.length) panel.append(node("p", "Skipped reviews also remain due.", "quiet-copy"));
+      panel.append(button("Try skipped cards again", () => {
+        if (busy) return;
+        skipped.clear();
+        showNext(true);
+      }));
+    }
+    if (focus) focusHeading(title);
+  }
+  async function refresh(focus = false) {
+    if (busy || pending) return;
+    clearTimeout(timer);
+    const id = ++operation;
+    lock(true);
+    try {
+      const next = await requestJson(sessionUrl());
+      if (id !== operation) return;
+      if (!Array.isArray(next.items)) throw new Error("The review queue could not be confirmed.");
+      items = next.items;
+      const offset = Date.parse(next.server_time) - Date.now();
+      if (Number.isFinite(offset)) clockOffset = offset;
+      showNext(focus);
+    } catch (error) {
+      if (id === operation) errorMessage("Could not refresh your review", error.message, () => refresh(true), "Retry refresh");
+    } finally { if (id === operation) lock(false); }
+  }
+  document.addEventListener("keydown", (event) => {
+    if (event.defaultPrevented || event.repeat || event.isComposing || event.ctrlKey || event.altKey || event.metaKey || event.shiftKey
+      || event.target.closest?.("button, a, input, textarea, select, summary, [contenteditable]:not([contenteditable='false']), [role='button']") || busy) return;
+    if (event.code === "Space" && mode === "question") { event.preventDefault(); reveal(); }
+    else if (mode === "revealed" && results[Number(event.key) - 1]) {
+      event.preventDefault();
+      grade(results[Number(event.key) - 1]);
     }
   });
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && mode === "rest") refresh(true);
+  });
+  showNext();
 }
+initializeReview();
 
 const dataManagement = document.querySelector("[data-data-management]");
 const dataStatus = dataManagement?.querySelector("[data-data-status]");

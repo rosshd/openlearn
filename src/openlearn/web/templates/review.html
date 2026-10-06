@@ -1,14 +1,24 @@
 {% extends "base.html" %}
 {% block content %}
-<section class="dashboard-shell" aria-labelledby="review-page-title">
-  <p class="eyebrow">Practice</p><h1 id="review-page-title">Review what is due.</h1>
-  <p>{{ review.count }} concept{{ '' if review.count == 1 else 's' }} ready for retrieval practice.</p>
-  {% for item in review['items'] %}
-  <article class="work-panel" data-review-item data-slug="{{ item.slug }}" data-concept="{{ item.concept }}" data-due="{{ item.due }}">
-    <p class="eyebrow">{{ item.course }}</p><h2>{{ item.concept }}</h2>
-    <p>Recall and explain this concept without looking at your notes, then grade the retrieval.</p>
-    <div class="form-footer">{% for result in ['easy', 'hard', 'missed'] %}<button type="button" data-review-grade="{{ result }}">{{ result|title }}</button>{% endfor %}</div>
+<section class="review-shell" data-review-shell data-course="{{ request.query_params.get('course', '') }}" aria-labelledby="review-page-title">
+  <header>
+    <p class="eyebrow">Practice</p>
+    <h1 id="review-page-title">Review what is due.</h1>
+    <p class="quiet-copy" data-review-summary>{{ review.count }} remaining · 0 reviewed</p>
+  </header>
+  <article class="work-panel review-panel" data-review-panel aria-busy="false">
+    <p>Loading your review cards…</p>
+    <noscript>Enable JavaScript to reveal answers and save review ratings.</noscript>
   </article>
-  {% else %}<p class="quiet-copy">Nothing is due. Keep learning and the review tray will update automatically.</p>{% endfor %}
+  <a class="quiet-link review-back" href="{{ url_for('dashboard') }}">Back to courses</a>
+  <script type="application/json" data-review-snapshot>
+    {"server_time": {{ review.get('server_time', '')|tojson }}, "items": [
+    {% for item in review['items'] %}
+      {"slug": {{ item.slug|tojson }}, "course": {{ item.course|tojson }}, "concept": {{ item.concept|tojson }}, "due": {{ item.due|tojson }},
+       "card_id": {{ item.get('card_id', '')|tojson }}, "content_version": {{ item.get('content_version', 0)|tojson }},
+       "review_revision": {{ item.get('review_revision', '')|tojson }}, "state": {{ item.get('state', 'needs_preparation')|tojson }},
+       "question": {{ item.get('question', '')|tojson }}, "relearn_at": {{ item.get('relearn_at')|tojson }}}{% if not loop.last %},{% endif %}
+    {% endfor %}]}
+  </script>
 </section>
 {% endblock %}
