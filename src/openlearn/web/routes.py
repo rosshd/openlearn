@@ -295,8 +295,10 @@ async def new_course(request: Request) -> Any:
             request,
             course_templates=[],
             selected_template=None,
+            mode="course",
+            creation_input={"source_kind": "file" if request.query_params.get("sources") == "1" else ""},
             provider=public_mapping(await _call(request, "provider_status")),
-            page_title="Start a course",
+            page_title="Custom course",
         ),
     )
 
@@ -401,6 +403,9 @@ async def create_course(request: Request) -> JSONResponse:
     if not result.get("ok", False):
         return _json_error(str(result.get("error") or "Course creation failed."), 422)
     if result.get("slug"):
+        if result.get("state") == "source_ready":
+            result["focus_url"] = str(request.url_for("focus", slug=result["slug"]).include_query_params(tool="chat"))
+            return JSONResponse(result)
         if result.get("state") == "placement_recommended":
             placement_url = request.url_for("placement", slug=result["slug"])
             result["placement_url"] = str(placement_url)
@@ -426,6 +431,10 @@ async def create_course(request: Request) -> JSONResponse:
 
 @router.post("/courses/new", name="create_course_form")
 async def create_course_form(request: Request) -> Any:
+    form = await request.form()
+    values = {key: value for key, value in form.items() if isinstance(value, str)}
+    if values.get("source_kind"):
+        return await _create_source_course(request, form, mode="course")
     templates = await _call(request, "course_templates")
     try:
         payload = await _form_payload(request, CourseCreateRequest)
@@ -437,6 +446,8 @@ async def create_course_form(request: Request) -> Any:
                 request,
                 course_templates=templates,
                 selected_template=None,
+                creation_input=values,
+                submission_id=values.get("submission_id") or str(uuid4()),
                 create_error=str(error),
                 page_title="Start a course",
             ),
@@ -487,17 +498,20 @@ async def create_course_form(request: Request) -> Any:
 def _source_creation_page(request: Request, *, mode: str, values: dict[str, Any] | None = None,
                           error: str = "", status: int = 200) -> Any:
     return _templates(request).TemplateResponse(
-        request, "source_course_create.html",
+        request, "course_create.html",
         _context(request, mode=mode, creation_input=values or {}, create_error=error,
                  submission_id=(values or {}).get("submission_id") or str(uuid4()),
-                 page_title="Quick Learn" if mode == "quick" else "Source course"),
+                 page_title="Quick Learn" if mode == "quick" else "Custom course"),
         status_code=status,
     )
 
 
 @router.get("/courses/from-source", response_class=HTMLResponse, name="source_course")
 async def source_course(request: Request) -> Any:
-    return _source_creation_page(request, mode="course")
+    return RedirectResponse(
+        str(request.url_for("new_course").include_query_params(sources="1")) + "#course-sources",
+        status_code=303,
+    )
 
 
 @router.get("/quick-learn", response_class=HTMLResponse, name="quick_learn")
@@ -508,7 +522,13 @@ async def quick_learn(request: Request) -> Any:
 @router.post("/courses/from-source", name="create_source_course_form")
 async def create_source_course_form(request: Request) -> Any:
     form = await request.form()
+    return await _create_source_course(request, form)
+
+
+async def _create_source_course(request: Request, form: Any, *, mode: str | None = None) -> Any:
     values = {key: value for key, value in form.items() if isinstance(value, str)}
+    if mode is not None:
+        values["mode"] = mode
     json_response = "application/json" in request.headers.get("accept", "")
     temporary: Path | None = None
     upload = form.get("source_file")

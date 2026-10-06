@@ -109,7 +109,9 @@ function saveCreationDraft() {
 }
 if (createForm) {
   try {
-    const draft = JSON.parse(sessionStorage.getItem(creationDraftKey) || "null");
+    const legacySourceDraft = createForm.dataset.creationMode === "course" && new URLSearchParams(location.search).get("sources") === "1"
+      ? sessionStorage.getItem(`openlearn-course-draft:${appRoot}:${appRoot}/courses/from-source`) : null;
+    const draft = JSON.parse(sessionStorage.getItem(creationDraftKey) || legacySourceDraft || "null");
     if (draft && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(draft.submission_id)) {
       const retired = Object.hasOwn(retiredCreationDefaults, draft.template_id) ? retiredCreationDefaults[draft.template_id] : null;
       for (const [name, limit] of Object.entries(creationDraftFields)) {
@@ -117,7 +119,7 @@ if (createForm) {
           createForm.elements[name].value = retired && draft[name] === retired[name] ? "" : draft[name];
         }
       }
-      if (retired) saveCreationDraft();
+      if (retired || legacySourceDraft) saveCreationDraft();
     }
   } catch (_error) { /* optional */ }
   createForm.addEventListener("input", saveCreationDraft);
@@ -130,17 +132,29 @@ if (createForm) {
       const valueLabel = createForm.querySelector("[data-source-value-label]");
       if (valueLabel) valueLabel.textContent = kind.value === "github" ? "Public GitHub repository URL" : "Local folder path";
       value.placeholder = kind.value === "github" ? "https://github.com/owner/repository" : "/path/to/your/notes";
+      const hasSource = Boolean(kind.value);
       file.disabled = kind.value !== "file";
-      value.disabled = kind.value === "file";
-      file.hidden = file.disabled;
-      value.hidden = value.disabled;
-      createForm.querySelector('[for="source-file"]').hidden = file.disabled;
-      createForm.querySelector('[for="source-value"]').hidden = value.disabled;
+      value.disabled = !hasSource || kind.value === "file";
+      createForm.querySelector("[data-source-file-field]").hidden = file.disabled;
+      createForm.querySelector("[data-source-value-field]").hidden = value.disabled;
       createForm.querySelector("[data-source-file-note]").hidden = file.disabled;
+      if (createForm.dataset.creationMode === "course") {
+        createForm.dataset.endpoint = hasSource ? "/courses/from-source" : "/api/courses";
+        createForm.toggleAttribute("data-multipart", hasSource);
+        const selection = createForm.querySelector("[data-source-selection]");
+        selection.textContent = kind.value === "file" ? file.files[0]?.name || "Choose a file" : hasSource ? kind.selectedOptions[0].textContent : "";
+        const status = createForm.querySelector("[data-form-status]");
+        if (createForm.querySelector("[data-form-error]").hidden && !createForm.dataset.submitting) {
+          status.textContent = hasSource ? "Your sources stay local until you review and approve a tutor request." : "You can add sources later, too.";
+        }
+      }
     };
     kind.addEventListener("change", updateSourceFields);
+    createForm.elements.source_file.addEventListener("change", updateSourceFields);
     updateSourceFields();
+    if (kind.value && createForm.querySelector("[data-creation-sources]")) createForm.querySelector("[data-creation-sources]").open = true;
   }
+  if (createForm.elements.experience?.value && createForm.querySelector("[data-creation-experience]")) createForm.querySelector("[data-creation-experience]").open = true;
 }
 
 const providerDialog = document.querySelector("[data-provider-setup-dialog]");
@@ -262,7 +276,12 @@ for (const form of document.querySelectorAll("[data-json-form]")) {
         return;
       }
       if (form === createForm) {
-        try { sessionStorage.removeItem(creationDraftKey); } catch (_error) { /* optional */ }
+        try {
+          sessionStorage.removeItem(creationDraftKey);
+          if (new URLSearchParams(location.search).get("sources") === "1") {
+            sessionStorage.removeItem(`openlearn-course-draft:${appRoot}:${appRoot}/courses/from-source`);
+          }
+        } catch (_error) { /* optional */ }
       }
       announce("Saved successfully.");
       const destination = result.setup_url || result.placement_url || result.initialization_url || result.focus_url || result.redirect || form.dataset.successUrl;
@@ -290,7 +309,7 @@ for (const form of document.querySelectorAll("[data-json-form]")) {
 }
 
 for (const form of document.querySelectorAll("[data-enter-flow]")) {
-  const fields = [...form.querySelectorAll('input:not([type="hidden"]), textarea')]
+  const fields = [...form.querySelectorAll('input:not([type="hidden"]):not([type="file"]), textarea')]
     .filter((field) => !field.disabled);
   form.addEventListener("keydown", (event) => {
     if (
@@ -304,7 +323,12 @@ for (const form of document.querySelectorAll("[data-enter-flow]")) {
     const index = fields.indexOf(event.target);
     if (index < 0) return;
     event.preventDefault();
-    if (index < fields.length - 1) fields[index + 1].focus();
+    if (index < fields.length - 1) {
+      const next = fields[index + 1];
+      const disclosure = next.closest("details");
+      if (disclosure) disclosure.open = true;
+      next.focus();
+    }
     else form.requestSubmit();
   });
 }

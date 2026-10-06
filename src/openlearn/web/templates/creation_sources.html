@@ -1,0 +1,24 @@
+<fieldset class="source-choice creation-source-fields">
+  <legend class="sr-only">{{ 'Your source' if quick else 'Optional sources' }}</legend>
+  <div class="creation-source-grid">
+    <div class="form-field">
+      <label for="source-kind">Source type</label>
+      <select id="source-kind" name="source_kind" data-source-kind>
+        {% if not quick %}<option value=""{% if not source_kind %} selected{% endif %}>No sources</option>{% endif %}
+        {% for kind, label in [('file', 'File'), ('folder', 'Local folder'), ('github', 'GitHub repository')] %}
+        <option value="{{ kind }}"{% if source_kind == kind %} selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="form-field" data-source-file-field>
+      <label for="source-file">Source file</label>
+      <input id="source-file" name="source_file" type="file" aria-describedby="source-file-note">
+    </div>
+    <div class="form-field" data-source-value-field>
+      <label for="source-value" data-source-value-label>Local folder path or public GitHub repository URL</label>
+      <input id="source-value" name="source_value" maxlength="2048" value="{{ values.get('source_value') or '' }}" placeholder="/path/to/notes or https://github.com/owner/repository">
+    </div>
+  </div>
+  <p class="field-note" id="source-file-note" data-source-file-note>After leaving or reloading this page, choose the file again. Your other input is kept.</p>
+  <noscript><p class="field-note">Choose a source type, then use its file or path field. Without JavaScript, re-enter details after leaving this page.</p></noscript>
+</fieldset>

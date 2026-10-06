@@ -1,33 +1,50 @@
 {% extends "base.html" %}
 {% block content %}
-<section class="create-shell" aria-labelledby="create-title">
-  <div class="section-heading">
-    <div><p class="eyebrow">Own topic</p><h1 id="create-title">What do you want to understand?</h1></div>
-    <a class="quiet-link" href="{{ url_for('dashboard') }}">Back to dashboard</a>
-  </div>
+{% set quick = mode == 'quick' %}
+{% set values = creation_input or {} %}
+{% set source_kind = values.get('source_kind', 'file' if quick else '') %}
+<section class="create-shell course-creation-shell" aria-labelledby="create-title">
+  <header class="section-heading creation-heading">
+    <div>
+      <h1 id="create-title">{{ 'Quick Learn' if quick else 'Custom course' }}</h1>
+      <p class="creation-description">{{ 'Create a focused course from one source.' if quick else 'Learn a topic, with optional sources.' }}</p>
+    </div>
+    <a class="quiet-link" href="{{ url_for('dashboard') }}">Back to courses</a>
+  </header>
 
   {% if create_error %}<div class="error-summary" role="alert" tabindex="-1">{{ create_error }}</div>{% endif %}
-  <form class="work-panel form-stack create-form" id="custom-course" method="post" action="{{ url_for('create_course_form') }}" data-json-form data-enter-flow data-endpoint="/api/courses" data-provider-recovery-message="{{ provider_recovery_message or '' }}" novalidate>
+  <form class="form-stack create-form creation-panel" id="{{ 'quick-learn' if quick else 'custom-course' }}" method="post" enctype="multipart/form-data" action="{{ url_for('create_source_course_form') if quick else url_for('create_course_form') }}" data-json-form{% if quick %} data-multipart{% else %} data-enter-flow{% endif %} data-endpoint="{{ '/courses/from-source' if quick else '/api/courses' }}" data-creation-mode="{{ 'quick' if quick else 'course' }}" data-provider-recovery-message="{{ provider_recovery_message or '' }}" novalidate>
     <input type="hidden" name="submission_id" data-uuid value="{{ submission_id }}">
-    <input type="hidden" name="template_id" value="{{ creation_input.template_id or '' if creation_input else '' }}">
+    <input type="hidden" name="template_id" value="{{ values.get('template_id') or '' }}">
+    <input type="hidden" name="mode" value="{{ 'quick' if quick else 'course' }}">
     <div class="error-summary" role="alert" tabindex="-1" data-form-error hidden></div>
+    {% if quick %}{% include "creation_sources.html" %}{% endif %}
     <div class="form-field">
       <label for="course-title">Course name</label>
-      <input id="course-title" name="title" maxlength="160" required placeholder="A topic you want to understand" value="{{ creation_input.title if creation_input else '' }}">
+      <input id="course-title" name="title" maxlength="160" required placeholder="e.g. Linear algebra" value="{{ values.get('title') or '' }}">
     </div>
     <div class="form-field">
       <label for="goal">Your goal</label>
-      <textarea id="goal" name="goal" rows="4" maxlength="4000" required placeholder="What should you be able to do when this course is working?">{{ creation_input.goal if creation_input else '' }}</textarea>
+      <textarea id="goal" name="goal" rows="2" maxlength="4000" required placeholder="What would you like to understand or be able to do?">{{ values.get('goal') or '' }}</textarea>
     </div>
-    <div class="form-field">
-      <label for="experience">What have you tried already? <span class="optional">Optional</span></label>
-      <textarea id="experience" name="experience" rows="3" maxlength="4000" placeholder="A few words is enough. This guides the first example, but does not count as mastery.">{{ creation_input.experience if creation_input else '' }}</textarea>
+    {% if not quick %}
+    <details class="creation-disclosure" id="course-sources" data-creation-sources{% if source_kind %} open{% endif %}>
+      <summary>Sources <span class="optional">Optional</span><span class="source-selection" data-source-selection></span></summary>
+      {% include "creation_sources.html" %}
+    </details>
+    {% endif %}
+    <details class="creation-disclosure" data-creation-experience{% if values.get('experience') %} open{% endif %}>
+      <summary>Prior experience <span class="optional">Optional</span></summary>
+      <div class="form-field">
+        <label for="experience">What have you tried already?</label>
+        <textarea id="experience" name="experience" rows="2" maxlength="4000" placeholder="A few words about what you know so far.">{{ values.get('experience') or '' }}</textarea>
+      </div>
+    </details>
+    <p class="field-note creation-status" role="status" aria-live="polite" aria-atomic="true" data-form-status>{{ 'Your source stays local until you review and approve a tutor request.' if quick or source_kind else 'You can add sources later, too.' }}</p>
+    <div class="creation-actions">
+      <button class="primary-action" type="submit">{{ 'Create Quick Learn' if quick else 'Create course' }} <span aria-hidden="true">→</span></button>
+      <a class="quiet-link" href="{{ url_for('dashboard') }}">Cancel</a>
     </div>
-    <div class="form-footer">
-      <p class="field-note" role="status" aria-live="polite" aria-atomic="true" data-form-status>One short prompt, then teaching starts.</p>
-      <button class="primary-action" type="submit">Build the first lesson <span aria-hidden="true">→</span></button>
-    </div>
-    <a class="quiet-link" href="{{ url_for('dashboard') }}">Cancel</a>
   </form>
 </section>
 {% with provider_recovery_cancel_label="Cancel and return to course" %}{% include "provider_recovery.html" %}{% endwith %}

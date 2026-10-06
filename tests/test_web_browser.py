@@ -1509,11 +1509,16 @@ def test_real_browser_course_library_preview_history_responsive_and_no_js(
                 assert page.locator(".course-library-dashboard h1").evaluate(
                     "heading => parseFloat(getComputedStyle(heading).fontSize) <= 32"
                 )
-                for width, font_size in ((1440, "100%"), (1024, "100%"), (760, "100%"),
+                for width, font_size in ((1920, "100%"), (1440, "100%"), (1024, "100%"), (760, "100%"),
                                          (390, "100%"), (320, "100%"), (320, "150%")):
                     page.set_viewport_size({"width": width, "height": 900})
                     page.locator("html").evaluate("(root, size) => root.style.fontSize = size", font_size)
                     _assert_no_page_overflow(page)
+                    if width >= 1024:
+                        right_edge = workspace.bounding_box()["x"] + workspace.bounding_box()["width"]
+                        for aligned in (outline, manage):
+                            bounds = aligned.bounding_box()
+                            assert abs(bounds["x"] + bounds["width"] - right_edge) <= 1
                     header_title = document_bounds(page.locator("#dashboard-title"))
                     new_trigger = document_bounds(new_course.locator("summary"))
                     assert new_trigger["x"] >= header_title["x"] + header_title["width"]
@@ -2112,7 +2117,7 @@ def test_source_creation_user_entrypoints_navigation_drafts_and_consent(tmp_path
                     status=428, content_type="application/json",
                     body=json.dumps({"error": "Connect your tutor to begin.", "state": "setup_required"}),
                 ))
-                page.get_by_role("button", name="Build the first lesson").click()
+                page.get_by_role("button", name="Create course", exact=True).click()
                 page.locator("[data-provider-setup-dialog]").wait_for(state="visible")
                 for width, height in ((390, 844), (768, 1024), (1280, 800), (1600, 1000)):
                     page.set_viewport_size({"width": width, "height": height})
@@ -2123,31 +2128,42 @@ def test_source_creation_user_entrypoints_navigation_drafts_and_consent(tmp_path
                 assert page.get_by_label("Course name", exact=True).input_value() == "Kept own draft"
                 assert page.get_by_label("Your goal", exact=True).input_value() == "Learn stacks"
                 page.unroute("**/api/courses")
-                page.get_by_role("link", name="Back to dashboard").click()
-                for link, route, heading in [("Source course", "courses/from-source", "Build a course from your sources."),
-                                             ("Quick Learn", "quick-learn", "Learn from one source now.")]:
+                page.get_by_role("link", name="Back to courses").click()
+                for link, route, heading in [("Custom course", "courses/new", "Custom course"),
+                                             ("Quick Learn", "quick-learn", "Quick Learn")]:
                     page.locator(".new-course-menu summary").click()
                     page.locator(".new-course-menu").get_by_role("link", name=link).click()
-                    assert page.url == f"{app_url}/{route}"
+                    assert page.url.split("#")[0] == f"{app_url}/{route}"
                     assert page.get_by_role("heading", name=heading).is_visible()
                     page.get_by_label("Course name", exact=True).fill(f"Synthetic {link}")
                     page.get_by_label("Your goal", exact=True).fill("Learn equal parts")
+                    if link == "Custom course":
+                        assert not page.locator("[data-creation-sources]").get_attribute("open")
+                        page.locator("[data-creation-sources] summary").click()
                     page.get_by_label("Source type", exact=True).select_option("github")
                     assert page.get_by_label("Public GitHub repository URL", exact=True).is_visible()
                     assert page.get_by_label("Source file", exact=True).is_hidden()
                     page.get_by_label("Source type", exact=True).select_option("folder")
                     page.get_by_label("Local folder path", exact=True).fill("/synthetic/missing-folder")
+                    for theme in ("light", "dark"):
+                        page.locator("html").evaluate("(root, theme) => root.dataset.theme = theme", theme)
+                        for width, height in ((320, 720), (390, 844), (768, 1024), (1280, 800)):
+                            page.set_viewport_size({"width": width, "height": height})
+                            _assert_no_page_overflow(page)
+                            assert page.locator(".creation-panel").bounding_box()["width"] <= 672
+                            assert page.locator("#create-title").evaluate("e => parseFloat(getComputedStyle(e).fontSize)") <= 32
+                    page.set_viewport_size({"width": 1280, "height": 800})
                     page.get_by_role("link", name="Cancel", exact=True).click()
                     page.go_back()
                     assert page.get_by_label("Course name", exact=True).input_value() == f"Synthetic {link}"
-                    page.get_by_role("link", name="Back to dashboard").click()
+                    page.get_by_role("link", name="Back to courses").click()
                     page.locator(".new-course-menu summary").click()
                     page.locator(".new-course-menu").get_by_role("link", name=link).click()
                     assert page.get_by_label("Your goal", exact=True).input_value() == "Learn equal parts"
                     assert page.get_by_label("Source type", exact=True).input_value() == "folder"
                     page.reload()
                     assert page.get_by_label("Local folder path", exact=True).input_value() == "/synthetic/missing-folder"
-                    page.get_by_role("link", name="Back to dashboard").click()
+                    page.get_by_role("link", name="Back to courses").click()
                 # Direct navigation restores the Quick Learn draft independently of source-course input.
                 page.goto(f"{app_url}/quick-learn")
                 assert page.get_by_label("Course name", exact=True).input_value() == "Synthetic Quick Learn"
@@ -2198,6 +2214,52 @@ def test_source_creation_user_entrypoints_navigation_drafts_and_consent(tmp_path
                 assert "Source excerpts provided:" in page.locator(".chat-exchange").inner_text()
                 page.reload()
                 playwright.expect(page.locator(".chat-exchange")).to_have_count(1)
+                # Custom creation uses the same importer, with no source by default.
+                page.goto(f"{app_url}/courses/new")
+                page.get_by_label("Source type", exact=True).select_option("")
+                assert page.locator("[data-multipart]").count() == 0
+                assert page.get_by_label("Source file", exact=True).is_disabled()
+                page.get_by_label("Source type", exact=True).select_option("file")
+                page.get_by_label("Source file", exact=True).set_input_files(
+                    {"name": "custom-notes.md", "mimeType": "text/markdown", "buffer": b"Stacks remove the most recently added item first."})
+                page.get_by_role("button", name="Create course", exact=True).click()
+                page.wait_for_url("**/courses/synthetic-custom-course?tool=chat")
+                assert page.locator("[data-source-mode]").is_checked()
+                assert page.locator(".chat-exchange").count() == 0
+                # A saved draft from the retired source page migrates to the custom form.
+                page.evaluate(r"""draft => {
+                  const root = document.querySelector('meta[name="openlearn-root"]').content.replace(/\/$/, '');
+                  sessionStorage.setItem(`openlearn-course-draft:${root}:${root}/courses/from-source`, JSON.stringify(draft));
+                }""", {"title": "Old source draft", "goal": "Keep my goal", "experience": "Prior notes",
+                       "submission_id": str(uuid4()), "source_kind": "folder", "source_value": "/synthetic/notes"})
+                page.goto(f"{app_url}/courses/from-source")
+                assert "/courses/new?sources=1#course-sources" in page.url
+                assert page.get_by_label("Course name", exact=True).input_value() == "Old source draft"
+                assert page.get_by_label("Local folder path", exact=True).input_value() == "/synthetic/notes"
+                fresh = browser.new_context()
+                upload_page = fresh.new_page()
+                upload_page.goto(bootstrap)
+                upload_page.goto(f"{app_url}/courses/from-source")
+                with upload_page.expect_file_chooser() as chooser:
+                    upload_page.get_by_label("Source file", exact=True).press("Enter")
+                chooser.value.set_files({"name": "keyboard.md", "mimeType": "text/markdown", "buffer": b"Keyboard source."})
+                assert upload_page.locator("[data-source-selection]").inner_text() == "keyboard.md"
+                fresh.close()
+                # The unified form also imports without JavaScript.
+                native = browser.new_context(java_script_enabled=False)
+                plain = native.new_page()
+                plain.goto(bootstrap)
+                plain.goto(f"{app_url}/courses/new")
+                plain.get_by_label("Course name", exact=True).fill("No JavaScript source")
+                plain.get_by_label("Your goal", exact=True).fill("Learn fractions")
+                plain.locator("[data-creation-sources] summary").click()
+                plain.get_by_label("Source type", exact=True).select_option("file")
+                plain.get_by_label("Source file", exact=True).set_input_files(
+                    {"name": "native.md", "mimeType": "text/markdown", "buffer": b"A half is one of two equal parts."})
+                plain.get_by_role("button", name="Create course", exact=True).click()
+                assert plain.url.endswith("/courses/no-javascript-source?tool=chat")
+                assert plain.locator("[data-source-mode]").is_checked()
+                native.close()
                 assert not errors
                 browser.close()
         finally:

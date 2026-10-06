@@ -1256,7 +1256,7 @@ def test_unknown_follow_up_status_uses_stable_not_found_envelope(
     }
 
 
-def test_empty_dashboard_offers_custom_source_and_quick_learn_creation(
+def test_empty_dashboard_offers_custom_and_quick_learn_creation(
     client: TestClient,
 ) -> None:
     response = client.get("/dashboard")
@@ -1267,7 +1267,7 @@ def test_empty_dashboard_offers_custom_source_and_quick_learn_creation(
     assert "Custom course" in response.text
     assert "Computer Networking" not in response.text
     assert "Starter course" not in response.text
-    assert "Source course" in response.text
+    assert "Source course" not in response.text
     assert "Quick Learn" in response.text
     assert "Choose a starting point" not in response.text
     assert 'data-empty-course-library' in response.text
@@ -1582,7 +1582,7 @@ def test_creation_hides_catalog_and_ignores_old_template_links(
     assert 'data-template-choice' not in page.text
     old_link = client.get("/courses/new?template=technical-interview-prep")
     assert 'name="template_id" value=""' in old_link.text
-    assert 'placeholder="A topic you want to understand" value=""' in old_link.text
+    assert 'placeholder="e.g. Linear algebra" value=""' in old_link.text
 
 
 def test_data_page_is_read_only_and_data_mutations_require_csrf(client: TestClient) -> None:
