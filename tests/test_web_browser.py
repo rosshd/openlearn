@@ -2318,6 +2318,34 @@ def test_source_creation_user_entrypoints_navigation_drafts_and_consent(tmp_path
                     upload_page.get_by_role("button", name="Remove", exact=True).click()
                     assert upload_page.get_by_label("Source type", exact=True).input_value() == ("" if route == "courses/new" else "file")
                     upload_page.unroute("**/api/sources/folder-picker")
+                # A delayed native response must never replace a newer file or undo Remove.
+                for target in ("courses/new", "quick-learn"):
+                    upload_page.goto(f"{app_url}/{target}?new=1")
+                    upload_page.locator("#source-file").set_input_files(
+                        {"name": "first.txt", "mimeType": "text/plain", "buffer": b"First source."})
+                    pending = []
+                    upload_page.route("**/api/sources/folder-picker", lambda request_route: pending.append(request_route))
+                    upload_page.get_by_role("button", name="Choose folder", exact=True).click()
+                    playwright.expect(upload_page.get_by_role("button", name="Choose folder", exact=True)).to_be_disabled()
+                    upload_page.locator("#source-file").set_input_files(
+                        {"name": "newer.txt", "mimeType": "text/plain", "buffer": b"Newer source."})
+                    assert len(pending) == 1
+                    pending.pop().fulfill(json={"ok": True, "path": "/synthetic/stale-folder"})
+                    playwright.expect(upload_page.get_by_role("button", name="Choose folder", exact=True)).to_be_enabled()
+                    assert upload_page.locator("[data-source-kind]").input_value() == "file"
+                    assert upload_page.locator("#source-file").evaluate("e => e.files[0].name") == "newer.txt"
+                    assert upload_page.locator("[data-source-selection]").inner_text() == "newer.txt"
+                    assert upload_page.locator("#source-value").input_value() == ""
+                    upload_page.get_by_role("button", name="Choose folder", exact=True).click()
+                    playwright.expect(upload_page.get_by_role("button", name="Choose folder", exact=True)).to_be_disabled()
+                    upload_page.get_by_role("button", name="Remove", exact=True).click()
+                    assert len(pending) == 1
+                    pending.pop().fulfill(json={"ok": True, "path": "/synthetic/stale-folder"})
+                    playwright.expect(upload_page.get_by_role("button", name="Choose folder", exact=True)).to_be_enabled()
+                    assert upload_page.locator("[data-source-kind]").input_value() == ("" if target == "courses/new" else "file")
+                    assert upload_page.locator("#source-file").evaluate("e => e.files.length") == 0
+                    assert upload_page.locator("#source-value").input_value() == ""
+                    upload_page.unroute("**/api/sources/folder-picker")
                 fresh.close()
                 # The unified form also imports without JavaScript.
                 native = browser.new_context(java_script_enabled=False)

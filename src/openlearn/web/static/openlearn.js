@@ -92,13 +92,15 @@ for (const picker of document.querySelectorAll("[data-folder-picker]")) {
     const initialValue = input.value;
     const sourceKind = picker.closest("form")?.elements.source_kind;
     const initialKind = sourceKind?.value;
+    const sourceFile = picker.closest("form")?.elements.source_file;
+    const initialFile = sourceFile?.files[0];
     button.disabled = true;
     button.setAttribute("aria-busy", "true");
     status.hidden = false;
     status.textContent = "Choose a folder in the folder chooser.";
     try {
       const result = await requestJson("/api/sources/folder-picker", {method: "POST"});
-      if (result.path && !button.hidden && !input.disabled && input.value === initialValue && sourceKind?.value === initialKind) {
+      if (result.path && !button.hidden && !input.disabled && input.value === initialValue && sourceKind?.value === initialKind && sourceFile?.files[0] === initialFile) {
         input.value = result.path;
         input.dispatchEvent(new Event("input", {bubbles: true}));
         input.dispatchEvent(new Event("change", {bubbles: true}));
