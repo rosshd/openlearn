@@ -1014,3 +1014,35 @@ def test_enlarged_notice_resize_and_cleanup_remove_recovery_clearance(review_pag
     expect(review_page.get_by_role("heading", name="Review complete")).to_be_visible()
     assert app.posts("") == [original, original]
     assert app.errors == app.unexpected == []
+
+
+@pytest.mark.parametrize("font_size", [16, 29, 32])
+def test_visible_save_notice_allows_scrolling_back_to_answer(review_page, font_size):
+    from playwright.sync_api import expect
+
+    review_page.set_viewport_size({"width": 375, "height": 812})
+    review_page.clock.install()
+    app = ReviewBrowser(review_page, [card(question=LONG_QUESTION, course=LONG_COURSE)])
+    app.answer, app.explanation = LONG_ANSWER, LONG_EXPLANATION
+    app.grade_failure = {"ok": False, "error": "uncertain"}
+    app.open()
+    review_page.clock.pause_at(datetime.now(timezone.utc) + timedelta(seconds=1))
+    review_page.evaluate("size => document.documentElement.style.fontSize = `${size}px`", font_size)
+    review_page.get_by_role("button", name="Show answer", exact=True).click()
+    review_page.locator("[data-review-explanation] > summary").click()
+    review_page.locator("[data-review-grade='good']").click()
+    retry = review_page.get_by_role("button", name="Retry saving", exact=True)
+    expect(retry).to_be_focused()
+    original = deepcopy(app.posts("")[0])
+    initial_scroll = review_page.evaluate("window.scrollY")
+    assert initial_scroll > 0
+    review_page.mouse.wheel(0, -500)
+    review_page.clock.run_for(100)
+    review_page.wait_for_function("initial => window.scrollY < initial", arg=initial_scroll, timeout=2000)
+    review_page.evaluate("window.scrollTo(0, 0)")
+    review_page.clock.run_for(100)
+    assert review_page.evaluate("window.scrollY") == 0
+    expect(review_page.locator("[data-review-toast]")).to_be_visible()
+    expect(retry).to_be_focused()
+    assert app.posts("") == [original]
+    assert app.errors == app.unexpected == []

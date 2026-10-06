@@ -2213,14 +2213,14 @@ function initializeReview() {
     element.addEventListener("click", action);
     return element;
   }
-  function positionNotice() {
+  function positionNotice(ensureRecovery = false) {
     const bottom = Math.max(document.querySelector(".site-header")?.getBoundingClientRect().bottom || 0,
       session.getBoundingClientRect().bottom);
     shell.style.setProperty("--review-notice-top", `${Math.max(16, bottom + 8)}px`);
     const bounds = notice?.getBoundingClientRect();
     panel.style.setProperty("--review-notice-clearance", `${bounds ? bounds.bottom + 16 : 0}px`);
     const active = document.activeElement;
-    if (!bounds || !active?.matches("[data-review-recovery] button:not(:disabled)")) return;
+    if (ensureRecovery !== true || !bounds || !active?.matches("[data-review-recovery] button:not(:disabled)")) return;
     const target = active.getBoundingClientRect();
     if (target.top < 0 || target.bottom > window.innerHeight
       || (target.left < bounds.right && target.right > bounds.left
@@ -2287,11 +2287,11 @@ function initializeReview() {
       shell.append(notice);
     } else pauseNotice();
     noticeRemaining = 8000;
-    positionNotice();
+    positionNotice(true);
     resumeNotice();
   }
   window.addEventListener("scroll", positionNotice, {passive: true});
-  window.addEventListener("resize", positionNotice);
+  window.addEventListener("resize", () => positionNotice(true));
   document.addEventListener("visibilitychange", () => document.hidden ? pauseNotice() : resumeNotice());
   function clearFeedback() {
     clearNotice();
@@ -2358,7 +2358,7 @@ function initializeReview() {
     session.classList.toggle("review-session--flow", window.innerHeight < 576
       || navHeight + session.offsetHeight > window.innerHeight * 0.22);
     panel.style.setProperty("--review-header-offset", `${reviewHeaderHeight() + 16}px`);
-    positionNotice();
+    positionNotice(true);
   }
   function reviewHeaderHeight() {
     return navigationHeight() + (getComputedStyle(session).position === "sticky" ? session.offsetHeight : 0);
@@ -2444,7 +2444,7 @@ function initializeReview() {
         ? lockedFocus : panel.querySelector("[data-review-retry]:not(:disabled)");
       target?.focus({preventScroll: true});
     }
-    if (!value) positionNotice();
+    if (!value) positionNotice(true);
   }
   panel.addEventListener("click", (event) => {
     if (busy && event.target.closest("a, summary")) event.preventDefault();
