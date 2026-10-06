@@ -2110,7 +2110,11 @@ function initializeReview() {
         node("p", "Preparation uses your configured AI provider and saved course material.", "quiet-copy"),
         button("Prepare card", prepare, "primary-action"));
     } else {
-      panel.append(button("Show Answer", reveal, "primary-action"), node("p", "Space to show answer", "review-hint"));
+      const control = button("Show answer and explanation", reveal, "primary-action");
+      control.setAttribute("aria-label", "Show answer and explanation");
+      control.setAttribute("aria-keyshortcuts", "Space");
+      control.title = "Show answer and explanation (Space)";
+      panel.append(control);
     }
     addSkip();
     updateSummary();
@@ -2152,37 +2156,35 @@ function initializeReview() {
     mode = "revealed";
     panel.querySelector("[data-review-message]")?.remove();
     panel.querySelector(".primary-action")?.remove();
-    panel.querySelector(".review-hint")?.remove();
     panel.querySelector(".review-footer")?.remove();
     const answer = node("section", undefined, "review-answer");
-    const title = heading("Reference answer", "h3");
+    const title = heading("Answer", "h3");
     title.dataset.reviewAnswer = "";
-    answer.append(title, node("p", revealed.answer, "review-answer-text"),
-      node("h3", "Check your recall"), node("p", revealed.explanation, "review-explanation"));
-    if (revealed.sources?.length) {
-      const sources = node("details", undefined, "review-sources");
-      sources.append(node("summary", "Source"));
-      for (const source of revealed.sources) {
-        sources.append(node("p", source.label, "quiet-copy"), node("p", source.excerpt, "review-source-excerpt"));
+    answer.append(title);
+    for (const [text, className] of [[revealed.answer, "review-answer-text"], [revealed.explanation, "review-explanation"]]) {
+      for (const paragraph of (text || "").split(/\n\s*\n/).filter((value) => value.trim())) {
+        answer.append(node("p", paragraph, className));
       }
-      answer.append(sources);
     }
-    answer.append(node("p", "Rate what you recalled before revealing the answer.", "quiet-copy"));
     const ratings = node("div", undefined, "review-ratings");
     for (const result of results) {
       const preview = revealed.ratings.find((rating) => rating.result === result);
       const control = button("", () => grade(result), "secondary-action review-rating");
       control.dataset.reviewGrade = result;
+      const shortcut = String(results.indexOf(result) + 1);
+      const description = `${preview.label}, ${preview.interval}. ${meanings[result]}. Shortcut ${shortcut}.`;
+      control.setAttribute("aria-label", description);
+      control.setAttribute("aria-keyshortcuts", shortcut);
+      control.title = description;
       control.append(node("span", preview.label, "review-rating-label"),
-        node("span", preview.interval, "review-rating-interval"),
-        node("span", meanings[result], "review-rating-meaning"));
+        node("span", preview.interval, "review-rating-interval"));
       ratings.append(control);
     }
-    answer.append(ratings, node("p", "1 Again · 2 Hard · 3 Good · 4 Easy", "review-hint"));
+    answer.append(ratings);
     panel.append(answer);
     addSkip();
     focusHeading(title);
-    announce("Reference answer revealed. Compare your recall, then choose a rating.");
+    announce("Answer and explanation revealed. Choose a rating.");
   }
   async function reveal() {
     if (busy || mode !== "question") return;

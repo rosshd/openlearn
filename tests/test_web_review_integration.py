@@ -24,6 +24,7 @@ pytestmark = pytest.mark.skipif(
 NOTES = "Outliers can be valid observations. Noise obscures a signal."
 QUESTION = "Can an outlier be a valid observation, and how does it differ from noise?"
 ANSWER = "An outlier can be valid. Noise is unwanted variation that obscures a signal."
+EXPLANATION = "Being unusual alone does not make an observation noise."
 
 
 @pytest.fixture
@@ -55,7 +56,7 @@ def review_fixture(tmp_path, monkeypatch):
         generations.append((args, kwargs))
         return json.dumps({
             "question": QUESTION, "answer": ANSWER,
-            "explanation": "Check that you allowed valid outliers and distinguished noise.",
+            "explanation": EXPLANATION,
             "sources": [{"label": "Course notes", "excerpt": NOTES}],
         })
 
@@ -96,7 +97,8 @@ def bridge(context, client):
 
 
 @pytest.mark.parametrize("width", [1280, 375])
-def test_real_service_preparation_offline_relearning_and_completion(review_fixture, width):
+@pytest.mark.parametrize("legacy", [False, True])
+def test_real_service_preparation_offline_relearning_and_completion(review_fixture, width, legacy):
     playwright = pytest.importorskip("playwright.sync_api")
     client, clock, generations = review_fixture
     with playwright.sync_playwright() as runtime:
@@ -118,13 +120,23 @@ def test_real_service_preparation_offline_relearning_and_completion(review_fixtu
         assert page.locator("[data-review-grade]").count() == 0
         assert client.get("/api/review/session?course=review-integration").json()["count"] == 1
 
+        if legacy:
+            topic = cli.read_topic("review-integration")
+            saved_card = topic.metadata["review_due"][0]["review_card"]
+            saved_card.pop("explanation_kind")
+            saved_card["explanation"] = "Check your recall against the answer before rating."
+            cli.write_topic(topic.path, topic.metadata, topic.body)
         page.reload()
-        page.get_by_role("button", name="Show Answer", exact=True).wait_for()
+        page.get_by_role("button", name="Show answer and explanation", exact=True).wait_for()
         assert len(generations) == 1
         page.locator("[data-review-question]").click()
         page.keyboard.press("Space")
         page.locator("[data-review-answer]").wait_for()
         assert ANSWER in page.locator("[data-review-panel]").inner_text()
+        assert (EXPLANATION in page.locator("[data-review-panel]").inner_text()) is not legacy
+        assert page.locator(".review-explanation").count() == (0 if legacy else 1)
+        assert "Check your recall" not in page.locator("[data-review-panel]").inner_text()
+        assert page.locator(".review-sources, .review-hint, .review-rating-meaning").count() == 0
         assert page.locator("[data-review-grade]").count() == 4
         assert cli.read_topic("review-integration").metadata["review_due"][0]["due"] == cli.today()
         assert page.evaluate(
@@ -132,7 +144,7 @@ def test_real_service_preparation_offline_relearning_and_completion(review_fixtu
         )
         screenshots = Path(__file__).resolve().parents[1] / ".artifacts" / "qa"
         screenshots.mkdir(parents=True, exist_ok=True)
-        page.screenshot(path=str(screenshots / f"review-answer-{width}.png"), full_page=True)
+        page.screenshot(path=str(screenshots / f"review-answer-{width}{'-legacy' if legacy else ''}.png"), full_page=True)
 
         page.keyboard.press("1")
         page.get_by_role("heading", name="Your next card returns soon").wait_for()
@@ -148,12 +160,14 @@ def test_real_service_preparation_offline_relearning_and_completion(review_fixtu
 
         clock[0] += timedelta(seconds=61)
         page.reload()
-        page.get_by_role("button", name="Show Answer", exact=True).click()
+        page.get_by_role("button", name="Show answer and explanation", exact=True).click()
         page.locator("[data-review-grade='good']").click()
         page.get_by_role("heading", name="Review complete", exact=True).wait_for()
         assert client.get("/api/review/session?course=review-integration").json()["count"] == 0
         topic = cli.read_topic("review-integration")
         assert topic.metadata["review_due"][0]["due"] == "2026-10-10"
+        if legacy:
+            assert topic.metadata["review_due"][0]["review_card"] == saved_card
         assert not topic.metadata.get("known")
         assert not errors
         context.close()
@@ -170,10 +184,10 @@ def test_real_service_two_tabs_cannot_rate_same_occurrence(review_fixture):
         first = context.new_page()
         first.goto("http://127.0.0.1/review?course=review-integration")
         first.get_by_role("button", name="Prepare card", exact=True).click()
-        first.get_by_role("button", name="Show Answer", exact=True).click()
+        first.get_by_role("button", name="Show answer and explanation", exact=True).click()
         second = context.new_page()
         second.goto("http://127.0.0.1/review?course=review-integration")
-        second.get_by_role("button", name="Show Answer", exact=True).click()
+        second.get_by_role("button", name="Show answer and explanation", exact=True).click()
         first.locator("[data-review-grade='good']").click()
         first.get_by_role("heading", name="Review complete", exact=True).wait_for()
         second.locator("[data-review-grade='easy']").click()

@@ -12,7 +12,7 @@ from openlearn.web.schemas import ReviewGradeRequest, ReviewPrepareRequest, Revi
 
 NOTES = "Outliers can be valid observations. Noise obscures the signal through unwanted variation."
 GENERATED = {"question": "How do outliers differ from noise?", "answer": NOTES,
-             "explanation": "Compare unusual valid observations with unwanted variation.",
+             "explanation": "Being unusual alone does not make an observation noise.",
              "sources": [{"label": "Course notes", "excerpt": NOTES}]}
 
 
@@ -35,8 +35,12 @@ def item():
     return review_cards.session(["review-course"])["items"][0]
 
 
-def prepare(monkeypatch):
-    monkeypatch.setattr(cli, "call_openai", lambda *args, **kwargs: json.dumps(GENERATED))
+def prepare(monkeypatch, calls=None):
+    def generate(*args, **kwargs):
+        if calls is not None:
+            calls.append((args, kwargs))
+        return json.dumps(GENERATED)
+    monkeypatch.setattr(cli, "call_openai", generate)
     current = item()
     result = review_cards.prepare(ReviewPrepareRequest(**current))
     assert result["ok"]
@@ -63,19 +67,48 @@ def test_explicit_preparation_source_validation_and_offline_reload(home, monkeyp
     assert current["state"] == "needs_preparation"
     assert current["card_id"] == ""
     assert "answer" not in json.dumps(current)
-    saved = prepare(monkeypatch)
+    calls = []
+    saved = prepare(monkeypatch, calls)
+    assert "conceptual rationale or example in clear plain paragraphs" in calls[0][0][1]
+    assert "no self-rating instructions or checklist" in calls[0][0][1]
     card = raw()["review_due"][0]["review_card"]
+    assert card["explanation_kind"] == "conceptual"
     assert card["slug"] == "review-course"
     assert card["concept"] == "outlier vs noise"
     monkeypatch.setattr(cli, "call_openai", lambda *args, **kwargs: pytest.fail("offline called provider"))
     assert item() == saved
     shown = reveal(saved)
     assert shown["answer"] == NOTES
+    assert shown["explanation"] == GENERATED["explanation"]
     assert raw()["review_due"][0]["due"] == "2020-01-01"
     assert "review_rating_receipts" not in raw()
     assert item() == saved
     assert "answer" not in json.dumps(item())
     assert review_cards.prepare(ReviewPrepareRequest(**saved))["item"] == saved
+
+
+@pytest.mark.parametrize("explanation_kind", [None, "recall_checklist"])
+def test_legacy_explanation_is_hidden_without_rewriting_saved_card(home, monkeypatch, explanation_kind):
+    from copy import deepcopy
+
+    prepare(monkeypatch)
+    topic = cli.read_topic("review-course")
+    saved = topic.metadata["review_due"][0]["review_card"]
+    saved["explanation"] = "Check whether your recall included a valid outlier."
+    if explanation_kind is None:
+        saved.pop("explanation_kind")
+    else:
+        saved["explanation_kind"] = explanation_kind
+    before = deepcopy(saved)
+    cli.write_topic(topic.path, topic.metadata, topic.body)
+    current = item()
+    monkeypatch.setattr(cli, "call_openai", lambda *args, **kwargs: pytest.fail("legacy card regenerated"))
+    shown = reveal(current)
+    assert shown["answer"] == before["answer"]
+    assert shown["explanation"] == ""
+    assert shown["sources"] == before["sources"]
+    assert raw()["review_due"][0]["review_card"] == before
+    assert item() == current
 
 
 @pytest.mark.parametrize("response", ["not json", "{}", json.dumps({**GENERATED,
