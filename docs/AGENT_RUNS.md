@@ -31,7 +31,46 @@ Do not combine unrelated issues in one branch.
 7. Inspect the complete diff and run `make check`.
 8. Record the exact tested HEAD, gate command, result, and any intentionally skipped coverage.
 
-The owner task stops after local verification unless the issue and current request authorize shipping or another external action.
+Standalone implementation stops after local verification unless shipping is requested.
+For factory work, Ross's standing low/medium-risk authorization covers permitted push, PR, CI monitoring, merge, and release verification steps.
+Restrictive issue permissions, an explicit CI/budget pause, and current user constraints take precedence over standing authorization.
+High-risk merge or activation requires Ross's explicit decision after review.
+
+## Parent and child branches
+
+Each delegated owner uses its own branch and worktree and opens its reviewed PR against the immediate parent's integration branch.
+Record the root task, immediate parent task, intended PR base, exact base SHA, and dependencies on the issue.
+The parent performs acceptance review and integrates child PRs with one writer per integration branch.
+Child checks prove the child candidate only; the parent verifies and independently reviews the combined candidate before submitting upward.
+The root owns `main` integration and release verification.
+Retire a merged source branch only after proving the content is preserved, no dependent PR or active owner needs it, and cleanup is authorized.
+Archive managed worktrees recoverably when available; a completed chat archive is not a process-termination mechanism.
+
+## Fresh-worktree setup and isolated QA
+
+Run `scripts/setup-worktree --browser` in the candidate worktree to create its own Python 3.11-3.13 environment and install development dependencies plus Chromium.
+This uses `uv`; it does not link or modify another checkout's virtual environment.
+Then run `make qa-smoke` for a fresh mock course, authenticated browser selection and reload, and server shutdown.
+The launcher uses a private fixture home and a provider-free environment, selects an available loopback port, and records candidate, PID, port, logs, journey, and cleanup evidence under `.artifacts/qa/`.
+It never uses the primary learner home or its running server.
+Fixtures are intentionally retained as private debugging evidence, not copied into source or committed.
+The server capability stays inside its private fixture and is excluded from handback evidence.
+The browser smoke is opt-in and separate from the canonical CLI gate.
+
+Native Codex local-environment setup/actions may point to `scripts/setup-worktree --browser` and `make qa-smoke`.
+Host UI activation remains manual until the supported configuration schema is verified; do not invent `.codex` TOML.
+
+After registering ownership on the issue, run `scripts/repo-workflow register <task-id> <issue-url>` from the linked worktree.
+For child work, add `--base <parent-branch>` to preserve the local dependency guard.
+The finish helper refuses registered active owners or children; separately verify remote PR dependencies before authorizing removal.
+Use `scripts/repo-workflow retire` only after that owner's work stops; it changes the local supplemental index, not GitHub state or files.
+The index lives in the shared Git directory and is not a second task queue.
+Capacity counts active registered owners and unresolved external work, not every historical worktree.
+Clean merged unregistered worktrees are settled; dirty, unmerged, missing, or invalid worktrees remain unresolved conservatively.
+Set `OPENLEARN_ACTIVE_LIMIT` only to the concurrency budget Ross approved.
+No inventory command deletes historical branches or files.
+Use `make worktree NAME=<task> BASE=<parent-branch>` to start a child from a committed parent candidate without changing the primary checkout.
+The default base is freshly fetched `origin/main`, not unpublished or dirty primary work.
 
 ## Canonical gate and evidence
 
@@ -39,7 +78,10 @@ The owner task stops after local verification unless the issue and current reque
 CI invokes that gate and also runs the repository's cross-platform, package, browser, and security jobs before the aggregate `test` check passes.
 
 `make review` is optional.
-It collects the diff and a fresh `make check` log under `.artifacts/review/`.
+It reuses a passing receipt only when candidate content, file modes, interpreter, installed dependencies, gate command, and relevant environment match, and the recorded log is intact.
+Source, dependency, environment, command, or log changes invalidate reuse.
+Otherwise it runs the gate once and collects the diff plus receipt under `.artifacts/review/`.
+Use `make review BASE=<parent-branch>` for a child PR.
 Its artifacts may support a review, but running it is not an independent review and does not approve a change.
 
 Run `git diff --check <base>...HEAD` before shipping.
@@ -53,7 +95,9 @@ The reviewer checks acceptance criteria, regressions, security and data boundari
 
 Record the reviewer identity, reviewed commit, disposition, and findings.
 A clean review applies only to that exact commit.
-Any change to HEAD invalidates the gate and review evidence.
+Any change to HEAD invalidates independent review evidence.
+Gate evidence may remain valid after a metadata-only commit when the content and environment binding is unchanged; record the current exact HEAD in the handoff.
+Integration changes the candidate and requires new parent gate evidence.
 If fixes are authorized, rerun focused checks and `make check`, then allow at most one targeted rereview of those fixes.
 
 ## Pull request and CI
@@ -78,7 +122,7 @@ Do not treat CI from an older commit as evidence for the current pull request.
 
 Merge only when all of these conditions hold:
 
-- The user explicitly authorized merge.
+- Standing low/medium factory authorization or the current request covers merge, and the issue does not restrict it.
 - Required CI passes on the exact reviewed head.
 - Review findings are resolved or accepted within the issue's risk and permissions.
 - The branch still contains only the issue's scope.
@@ -91,7 +135,7 @@ Clean the worktree or branch only when that cleanup is authorized.
 
 ## Risk and permissions
 
-Low and medium risk work may merge only when the issue authorizes the merge and all required evidence is current.
+Low and medium risk work may continue through allowed shipping steps when the issue permits them and all required evidence is current.
 High risk requires an explicit human decision after review and CI.
 Treat production actions, secrets, purchases, destructive cleanup, data mutation, and permission expansion as separate authorization boundaries.
 Prepare repository-host settings for review and change them only with explicit authorization.
