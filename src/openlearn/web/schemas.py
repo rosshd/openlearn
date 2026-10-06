@@ -130,10 +130,17 @@ class TutorSubmissionRequest(BaseModel):
     submission_id: str = Field(min_length=1, max_length=64)
     expected_revision: int = Field(ge=0)
     source_mode: bool = False
+    source_start: bool = False
     source_approval: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     source_lesson_id: str | None = Field(default=None, min_length=1, max_length=96)
     source_lesson_title: str | None = Field(default=None, min_length=1, max_length=160)
     source_lesson_revision: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def valid_source_start(self) -> TutorSubmissionRequest:
+        if self.source_start and (not self.source_mode or self.intent != "question"):
+            raise ValueError("Source startup requires source mode and question intent")
+        return self
 
     @field_validator("intent")
     @classmethod

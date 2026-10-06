@@ -440,6 +440,21 @@ def _without_check_section(value: str) -> str:
     return _CHECK_SECTION.sub("", value).strip()
 
 
+_AMBIGUOUS_SENTENCE_MARKERS = re.compile(
+    r"(?i)(?:\b(?:e\.g|i\.e|mr|mrs|ms|dr|prof|vs|etc)\.|\d\.\d)"
+)
+
+
+def _readable_prose_chunks(value: str) -> list[str]:
+    """Split legacy prose only when its sentence boundaries are unambiguous."""
+    if len(value) < 180 or _AMBIGUOUS_SENTENCE_MARKERS.search(value):
+        return []
+    sentences = re.split(r"(?<=[.!?])\s+(?=[A-Z])", value)
+    if len(sentences) < 3 or " ".join(sentences) != value:
+        return []
+    return [" ".join(sentences[index:index + 2]) for index in range(0, len(sentences), 2)]
+
+
 def _present_response(value: str) -> tuple[str, list[dict[str, object]]]:
     """Parse a small safe Markdown subset into explicit presentation blocks."""
     text = cli.strip_tutor_enter_advance_cue(cli.sanitize_model_output(value))
@@ -530,10 +545,44 @@ def _present_response(value: str) -> tuple[str, list[dict[str, object]]]:
                 parts[0]["text"] = re.sub(r"^[A-Za-z][A-Za-z ]{1,30}:\s*", "", parts[0]["text"])
         else:
             blocks.pop(0)
+    lesson_paragraphs = [block for block in blocks if block.get("kind") == "paragraph"]
+    if (
+        label == "Lesson"
+        and len(lesson_paragraphs) == 1
+        and not lesson_paragraphs[0].get("parts")
+    ):
+        chunks = _readable_prose_chunks(str(lesson_paragraphs[0].get("text") or ""))
+        if chunks:
+            paragraph_index = blocks.index(lesson_paragraphs[0])
+            blocks[paragraph_index:paragraph_index + 1] = [
+                {"kind": "prose_chunk", "text": chunk} for chunk in chunks
+            ]
+    structured_paragraphs = [block for block in blocks if block.get("kind") == "paragraph"]
+    has_raw_math_delimiter = any(
+        re.search(r"\\[\[\]()]+", str(block.get("text") or ""))
+        for block in structured_paragraphs
+    )
+    if (
+        label == "Lesson"
+        and len(structured_paragraphs) >= 2
+        and not has_raw_math_delimiter
+    ):
+        first_paragraph = True
+        for block in blocks:
+            if block.get("kind") != "paragraph":
+                continue
+            block_text = str(block.get("text") or "")
+            if block_text.casefold().startswith("for example,"):
+                example_text = block_text[len("For example,") :].strip()
+                block["kind"] = "example"
+                block["text"] = example_text[:1].upper() + example_text[1:]
+            elif first_paragraph:
+                block["kind"] = "takeaway"
+                first_paragraph = False
     visible_text = " ".join(
         str(block.get("text") or "")
         for block in blocks
-        if block.get("kind") == "paragraph"
+        if block.get("kind") in {"paragraph", "prose_chunk", "takeaway", "example"}
     )
     defines_invariant = re.search(
         r"(?is)\b(?:rule|condition)\b.{0,80}\b(?:stays?|remains?|must\s+(?:stay|"
@@ -1873,6 +1922,15 @@ class OpenLearnWebServices:
             projection = application.interview_learning(slug)
         except (cli.OpenLearnError, OSError, ValueError):
             projection = None
+        if projection is None:
+            try:
+                if cli.read_topic(slug).metadata.get("web_source_start"):
+                    return {
+                        "state": "conflict",
+                        "error": "Review and approve a fresh screened source request before retrying.",
+                    }
+            except (cli.OpenLearnError, OSError):
+                return {"state": "missing", "error": "Course initialization was not found."}
         try:
             if projection is not None:
                 operation = projection.operation
@@ -1984,6 +2042,11 @@ class OpenLearnWebServices:
         return {
             "slug": slug,
             "source_start": bool(topic.metadata.get("web_source_start")) and revision == 0,
+            "source_start_operation_id": (
+                initialization_id
+                if topic.metadata.get("web_source_start") and revision == 0
+                else None
+            ),
             "title": snapshot.card.title,
             "current_unit": move_title,
             "revision": revision,
@@ -2005,6 +2068,8 @@ class OpenLearnWebServices:
 
     @staticmethod
     def _source_request_text(request: TutorSubmissionRequest) -> str:
+        if request.source_start:
+            return COURSE_INITIALIZATION_PROMPT
         return {
             "skip": "Skip this for now and continue with a useful next move.",
             "next": "Continue to the next useful concept.",
@@ -2014,6 +2079,14 @@ class OpenLearnWebServices:
     def _preview_source_turn(self, slug: str, request: TutorSubmissionRequest) -> tuple[dict[str, object], str | None]:
         if not request.source_mode:
             return {"ok": False, "error": "Enable source mode for this request first."}, None
+        if request.source_start:
+            topic = cli.read_topic(slug)
+            initialization_id = _initialization_id_for_slug(slug)
+            if (not topic.metadata.get("web_source_start")
+                    or tutor_service.course_revision(slug) != 0
+                    or initialization_id is None
+                    or request.submission_id != initialization_id):
+                return {"ok": False, "error": "The first-lesson request changed. Refresh and review it again."}, None
         try:
             context = source_context.snapshot(
                 cli.read_topic(slug), self._source_request_text(request),
@@ -2023,6 +2096,7 @@ class OpenLearnWebServices:
         except cli.OpenLearnError as error:
             return {"ok": False, "error": str(error)}, None
         binding = repr((slug, request.intent, request.text, request.expected_revision,
+                        request.source_start,
                         request.source_lesson_id, request.source_lesson_title,
                         request.source_lesson_revision, context.revision, preview))
         return {"ok": True, "disclosure": source_context.CONSENT_TEXT + " The stored grading key is sent when needed but hidden in this learner preview.",
@@ -2032,7 +2106,26 @@ class OpenLearnWebServices:
     def preview_source_turn(self, slug: str, request: TutorSubmissionRequest) -> dict[str, object]:
         return self._preview_source_turn(slug, request)[0]
 
+    def committed_source_start_replay(
+        self, slug: str, request: TutorSubmissionRequest
+    ) -> dict[str, object] | None:
+        if not request.source_start:
+            return None
+        existing = tutor_service.operation_status(slug, request.submission_id)
+        if existing is None or existing.status != "committed":
+            return None
+        return {
+            "state": existing.status,
+            "submission_id": existing.submission_id,
+            "operation_id": existing.submission_id,
+            "message_kind": existing.message_kind,
+            "move": _move(existing.move),
+        }
+
     def submit_turn(self, slug: str, request: TutorSubmissionRequest) -> dict[str, object]:
+        replay = self.committed_source_start_replay(slug, request)
+        if replay is not None:
+            return replay
         source_preview = None
         if request.source_mode:
             result, source_preview = self._preview_source_turn(slug, request)
@@ -2046,7 +2139,7 @@ class OpenLearnWebServices:
             "next": "navigation",
             "practice": "navigation",
         }[request.intent]
-        text = request.text.strip()
+        text = COURSE_INITIALIZATION_PROMPT if request.source_start else request.text.strip()
         if request.intent == "skip":
             text = "Skip this for now and continue with a useful next move."
         elif request.intent == "next":
@@ -2089,7 +2182,7 @@ class OpenLearnWebServices:
                 model=config.configured_model(),
                 session_kind=(
                     cli.SIDE_CHAT_SESSION_KIND
-                    if request.intent in {"question", "stuck"}
+                    if request.intent in {"question", "stuck"} and not request.source_start
                     else "chat"
                 ),
                 progression_intent=progression_intent,

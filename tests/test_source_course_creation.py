@@ -1,21 +1,26 @@
 from __future__ import annotations
 
 from concurrent.futures import wait
+import time
 from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
 
-from openlearn import application, cli, source_imports, tutor_service
+from openlearn import application, cli, source_context, source_imports, tutor_service
 from openlearn.courses import CALIBRATION_STATE_KEY
 from openlearn.web.app import create_app
+from openlearn.web.schemas import TutorSubmissionRequest
+from openlearn.web.services import COURSE_INITIALIZATION_PROMPT, OpenLearnWebServices
 
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENLEARN_HOME", str(tmp_path / "home"))
     monkeypatch.setenv("OPENLEARN_MOCK", "1")
+    monkeypatch.setenv("OPENLEARN_BASE_URL", source_context.APPROVED_BASE_URL)
+    monkeypatch.setenv("OPENLEARN_MODEL", source_context.APPROVED_MODEL)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     cli.clear_config_cache()
     with TestClient(create_app(testing=True)) as client:
@@ -36,6 +41,15 @@ def post(client, data, files=None, *, json=True):
     return client.post("/courses/from-source", data=data, files=files,
                        headers={"X-CSRF-Token": token, "Accept": "application/json" if json else "text/html"},
                        follow_redirects=False)
+
+
+def completed_operation(slug, operation_id):
+    for _ in range(500):
+        operation = tutor_service.operation_status(slug, operation_id)
+        if operation is not None and operation.status in {"committed", "retryable_error"}:
+            return operation
+        time.sleep(0.01)
+    raise AssertionError(f"operation {operation_id} did not complete")
 
 
 def test_dashboard_and_direct_entrypoints_have_real_source_forms(client):
@@ -185,3 +199,103 @@ def test_source_course_dashboard_resumes_chat_without_a_plan_blocker(client, mon
     assert resumed.headers["location"].endswith(f"/courses/{slug}?tool=chat")
     assert cli.topic_path(slug).read_bytes() == before
     assert source_imports.list_course_sources(slug)
+
+
+def test_consented_source_start_commits_one_canonical_first_lesson(client, monkeypatch):
+    created = post(client, payload(), {"source_file": (
+        "fractions.md", b"A half is one of two equal parts. Two halves make a whole.",
+        "text/markdown")}).json()
+    slug = created["slug"]
+    service = OpenLearnWebServices()
+    operation_id = service.focus(slug)["source_start_operation_id"]
+    request = TutorSubmissionRequest(intent="question", text="Start my first lesson.",
+        submission_id=operation_id, expected_revision=0, source_mode=True, source_start=True)
+    preview = service.preview_source_turn(slug, request)
+    assert preview["ok"] is True, preview
+    assert COURSE_INITIALIZATION_PROMPT in preview["preview"]
+    request.source_approval = preview["approval"]
+    calls = []
+    lesson = ("**Lesson:** A half is one of two equal parts, so the whole is split "
+              "into two equal shares.\n\nFor example, cutting one sandwich into two "
+              "equal pieces makes each piece one half.")
+    def tutor(**kwargs):
+        calls.append(kwargs)
+        kwargs["output_func"](lesson)
+        return lesson
+    monkeypatch.setattr(cli, "call_openai_streaming", tutor)
+    started = service.submit_turn(slug, request)
+    assert started["operation_id"] == operation_id
+    assert completed_operation(slug, operation_id).status == "committed"
+    assert len(calls) == 1 and tutor_service.course_revision(slug) == 1
+    resumed = OpenLearnWebServices().focus(slug)
+    assert resumed["source_start"] is False
+    assert "two equal shares" in str(resumed["move"]["blocks"])
+    assert not cli.load_state(slug).get("mastery")
+    replay = service.submit_turn(slug, request)
+    assert replay["operation_id"] == operation_id
+    assert len(calls) == 1 and tutor_service.course_revision(slug) == 1
+
+    def provider_forbidden():
+        pytest.fail("A committed source-start replay must not check provider readiness")
+
+    monkeypatch.setattr(client.app.state.services, "ensure_provider_ready", provider_forbidden)
+    token = client.get("/").cookies["openlearn_csrf"]
+    endpoint_replay = client.post(
+        f"/api/courses/{slug}/turns",
+        headers={"x-csrf-token": token},
+        json=request.model_dump(mode="json"),
+    )
+    assert endpoint_replay.status_code == 202
+    assert endpoint_replay.json()["operation_id"] == operation_id
+    assert len(calls) == 1 and tutor_service.course_revision(slug) == 1
+
+
+def test_source_course_focus_offers_canonical_screened_start(client):
+    created = post(client, payload(), {"source_file": (
+        "fractions.md", b"A half is one of two equal parts.")}).json()
+
+    page = client.get(f"/courses/{created['slug']}")
+
+    assert page.status_code == 200
+    assert 'data-source-start' in page.text
+    assert 'data-source-start-operation-id=' in page.text
+    assert "Start first lesson" in page.text
+    assert "Ask for your first source lesson in Chat" not in page.text
+
+
+@pytest.mark.parametrize("change", ["request", "revision", "source"])
+def test_source_start_rejects_stale_consent_before_generation(client, monkeypatch, change):
+    created = post(client, payload(), {"source_file": (
+        "fractions.md", b"Two halves make a whole.")}).json()
+    slug = created["slug"]
+    service = OpenLearnWebServices()
+    operation_id = service.focus(slug)["source_start_operation_id"]
+    request = TutorSubmissionRequest(intent="question", text="Start my first lesson.",
+        submission_id=operation_id, expected_revision=0, source_mode=True, source_start=True)
+    request.source_approval = service.preview_source_turn(slug, request)["approval"]
+    if change == "request":
+        request.text = "Start a changed lesson."
+    elif change == "revision":
+        request.expected_revision = 1
+    else:
+        record = source_imports.list_course_sources(slug)[0]
+        (cli.topic_context_dir(slug) / record.context_file).write_text(
+            "Changed source", encoding="utf-8")
+    monkeypatch.setattr(tutor_service, "start_turn",
+        lambda *_args, **_kwargs: pytest.fail("stale consent cannot generate"))
+    assert service.submit_turn(slug, request)["state"] == "conflict"
+    assert tutor_service.course_revision(slug) == 0
+
+
+def test_source_start_cannot_bypass_consent_through_initialization_retry(client, monkeypatch):
+    created = post(client, payload(), {"source_file": (
+        "fractions.md", b"Two halves make a whole.")}).json()
+    slug = created["slug"]
+    service = OpenLearnWebServices()
+    operation_id = service.focus(slug)["source_start_operation_id"]
+    monkeypatch.setattr(tutor_service, "start_turn",
+        lambda *_args, **_kwargs: pytest.fail("initialization retry cannot bypass source consent"))
+    result = service.retry_course_initialization(slug, operation_id)
+    assert result["state"] == "conflict"
+    assert "fresh screened source request" in result["error"]
+    assert tutor_service.course_revision(slug) == 0

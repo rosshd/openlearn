@@ -17,7 +17,7 @@
 </div>
 {% endblock %}
 {% block content %}
-<div class="focus-shell" data-focus-shell data-course-slug="{{ course.slug }}" data-revision="{{ course.revision or 0 }}"
+<div class="focus-shell" data-focus-shell data-course-slug="{{ course.slug }}" data-revision="{{ course.revision or 0 }}" data-source-start-operation-id="{{ course.source_start_operation_id or '' }}"
   {% if course.operation %}data-operation-id="{{ course.operation.id or '' }}" data-operation-state="{{ course.operation.state }}" data-operation-message="{{ course.operation.message }}" data-operation-error="{{ course.operation.error }}" data-operation-provider-recovery="{{ 'true' if course.operation.show_provider_recovery else 'false' }}"{% endif %}>
   <aside class="tool-rail" aria-label="Lesson tools">
     <button type="button" class="rail-button" data-tool-open="chat" aria-expanded="false" aria-controls="learning-tool-surface"><span aria-hidden="true">?</span> Chat</button>
@@ -28,7 +28,7 @@
   </aside>
 
   <section class="focus-column" aria-labelledby="move-title">
-    {% if course.source_start %}<p class="field-note">Your source is saved locally. Ask for your first source lesson in Chat, then review and approve the screened request. Source mode requires the selected DeepSeek model on OpenRouter.</p>{% endif %}
+    {% if course.source_start %}<aside class="source-start-card"><p>Your source is saved locally; review and approve the exact screened request before it is sent to the tutor.</p><button class="primary-action" type="button" data-source-start>Start first lesson</button></aside>{% endif %}
     <dialog data-source-preview aria-labelledby="source-preview-title">
       <h2 id="source-preview-title">Review screened tutor request</h2>
       <div class="dialog-request" tabindex="0" role="region" aria-label="Screened request and disclosure">
@@ -40,6 +40,7 @@
         <button class="primary-action compact" type="button" data-source-send>Send screened request</button>
       </div>
     </dialog>
+    {% include "provider_recovery.html" %}
     <article class="move-surface" data-current-move data-move-type="{{ course.move.kind|lower }}">
       {% if course.feedback %}
       <aside class="feedback-strip {{ course.feedback.tone or '' }}" aria-label="Tutor feedback">
@@ -55,6 +56,9 @@
       <div class="move-content" data-move-content>
         {% for block in course.move.blocks or [] %}
           {% if block.kind == 'paragraph' %}<p>{{ text_parts(block.text, block.parts) }}</p>
+          {% elif block.kind == 'prose_chunk' %}<p class="slide-prose-chunk">{{ block.text }}</p>
+          {% elif block.kind == 'takeaway' %}<section class="slide-takeaway"><span>Key idea</span><p>{{ text_parts(block.text, block.parts) }}</p></section>
+          {% elif block.kind == 'example' %}<section class="slide-example"><span>Example</span><p>{{ text_parts(block.text, block.parts) }}</p></section>
           {% elif block.kind == 'definition' %}<aside class="term-note"><strong>{{ block.term }}</strong><span>{{ block.text }}</span></aside>
           {% elif block.kind == 'unordered_list' %}<ul>{% for item in block['items'] %}<li>{{ text_parts(item, block.item_parts[loop.index0] if block.item_parts else none) }}</li>{% endfor %}</ul>
           {% elif block.kind == 'ordered_list' %}<ol>{% for item in block['items'] %}<li>{{ text_parts(item, block.item_parts[loop.index0] if block.item_parts else none) }}</li>{% endfor %}</ol>

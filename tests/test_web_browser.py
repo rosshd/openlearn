@@ -458,7 +458,9 @@ def test_real_browser_course_polling_theme_conflict_and_keyboard_submit(
                 ) as conflict:
                     stale.locator("#learner-response").press("Control+Enter")
                 assert conflict.value.status == 409
-                assert "course changed" in stale.locator("[data-operation-state]").inner_text()
+                playwright.expect(stale.locator("[data-operation-state]")).to_contain_text(
+                    "course changed"
+                )
 
                 retry_question = "What is the average lookup cost of a hash map?"
                 topic = cli.read_topic(slug)
@@ -1850,9 +1852,8 @@ def test_source_creation_user_entrypoints_navigation_drafts_and_consent(tmp_path
                 page.wait_for_url("**/courses/synthetic-quick-learn?tool=chat")
                 assert page.locator("[data-source-mode]").is_checked()
                 assert "Corrected Quick Learn" in page.locator(".focus-identity").inner_text()
-                page.get_by_label("Your question", exact=True).fill("Teach me about equal parts.")
                 before_preview = (home / "learning-topics" / "synthetic-quick-learn.md").read_bytes()
-                page.get_by_role("button", name="Ask tutor", exact=True).click()
+                page.get_by_role("button", name="Start first lesson", exact=True).click()
                 page.locator("[data-source-preview]").wait_for(state="visible")
                 assert "equal parts" in page.locator("[data-source-preview-text]").inner_text()
                 for theme in ("light", "dark"):
@@ -1865,22 +1866,33 @@ def test_source_creation_user_entrypoints_navigation_drafts_and_consent(tmp_path
                         for control in ("[data-source-cancel]", "[data-source-send]", "#source-preview-title"):
                             assert page.locator(control).evaluate("e => { const r = e.getBoundingClientRect(); return r.top >= 0 && r.bottom <= innerHeight; }"), page.locator(control).evaluate("e => {const d=e.closest('dialog'),p=d.querySelector('pre');return JSON.stringify({control:e.outerHTML,rect:e.getBoundingClientRect().toJSON(),height:innerHeight,dialog:d.getBoundingClientRect().toJSON(),modal:d.matches(':modal'),position:getComputedStyle(d).position,preHeight:getComputedStyle(p).maxHeight,pre:p.getBoundingClientRect().toJSON()});}")
                 page.set_viewport_size({"width": 390, "height": 844})
-                draft = page.get_by_label("Your question", exact=True).input_value()
                 page.locator("[data-source-cancel]").click()
-                assert page.get_by_label("Your question", exact=True).input_value() == draft
-                page.get_by_role("button", name="Ask tutor", exact=True).click()
+                page.get_by_role("button", name="Start first lesson", exact=True).click()
                 page.locator("[data-source-preview]").wait_for(state="visible")
                 page.locator("[data-source-cancel]").click()
                 assert (home / "learning-topics" / "synthetic-quick-learn.md").read_bytes() == before_preview
                 assert page.locator(".chat-exchange").count() == 0
-                # Explicit approval now runs a mock source lesson, then survives resume.
-                page.get_by_role("button", name="Ask tutor", exact=True).click()
+                page.route("**/api/courses/*/turns", lambda route: route.fulfill(
+                    status=428, content_type="application/json",
+                    body=json.dumps({"error": "Connect your tutor to begin.", "state": "setup_required"}),
+                ))
+                page.get_by_role("button", name="Start first lesson", exact=True).click()
+                page.locator("[data-source-send]").click()
+                page.locator("[data-provider-setup-dialog]").wait_for(state="visible")
+                page.locator("[data-provider-setup-cancel]").click()
+                page.unroute("**/api/courses/*/turns")
+                # Explicit approval commits one canonical main lesson and survives resume.
+                revision = _revision(page)
+                page.get_by_role("button", name="Start first lesson", exact=True).click()
                 page.locator("[data-source-preview]").wait_for(state="visible")
                 page.locator("[data-source-send]").click()
-                playwright.expect(page.locator(".chat-exchange")).to_have_count(1)
-                assert "Source excerpts provided:" in page.locator(".chat-exchange").inner_text()
+                _wait_for_new_revision(page, revision)
+                assert page.get_by_role("button", name="Start first lesson", exact=True).count() == 0
+                assert "lesson" in page.locator("[data-move-kind]").inner_text().lower()
                 page.reload()
-                playwright.expect(page.locator(".chat-exchange")).to_have_count(1)
+                assert _revision(page) == 1
+                assert page.get_by_role("button", name="Start first lesson", exact=True).count() == 0
+                assert page.locator("[data-source-mode]").count() == 1
                 assert not errors
                 browser.close()
         finally:
