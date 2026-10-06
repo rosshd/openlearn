@@ -937,3 +937,80 @@ def test_uncertain_save_recovery_focus_clears_session_and_dock_with_optional_exp
     expect(review_page.get_by_role("heading", name="Review complete")).to_be_visible()
     assert app.posts("") == [original, original]
     assert app.errors == app.unexpected == []
+
+
+@pytest.mark.parametrize("font_size", [29, 32])
+def test_enlarged_visible_notice_does_not_cover_exact_save_retry(review_page, font_size):
+    from playwright.sync_api import expect
+
+    review_page.set_viewport_size({"width": 375, "height": 812})
+    review_page.clock.install()
+    app = ReviewBrowser(review_page, [card(question=LONG_QUESTION, course=LONG_COURSE)])
+    app.answer, app.explanation = LONG_ANSWER, LONG_EXPLANATION
+    app.grade_failure = {"ok": False, "error": "uncertain"}
+    app.open()
+    review_page.clock.pause_at(datetime.now(timezone.utc) + timedelta(seconds=1))
+    review_page.evaluate("size => document.documentElement.style.fontSize = `${size}px`", font_size)
+    review_page.get_by_role("button", name="Show answer", exact=True).click()
+    toggle = review_page.locator("[data-review-explanation] > summary")
+    toggle.click()
+    expect(toggle).to_have_text("Hide explanation")
+    review_page.locator("[data-review-grade='good']").click()
+    retry = review_page.get_by_role("button", name="Retry saving", exact=True)
+    expect(retry).to_be_focused()
+    expect(retry).to_be_enabled()
+    expect(review_page.locator("[data-review-toast]")).to_be_visible()
+    assert retry.evaluate("button => {const r = button.getBoundingClientRect(); return button.contains(document.elementFromPoint(r.x + r.width/2, r.y + r.height/2));}")
+    ARTIFACTS.mkdir(parents=True, exist_ok=True)
+    review_page.screenshot(path=str(ARTIFACTS / f"visible-recovery-{font_size}px-375x812.png"))
+    original = deepcopy(app.posts("")[0])
+    for control in review_page.locator("[data-review-actions] button").all():
+        expect(control).to_be_disabled()
+    app.grade_failure = None
+    retry.click(timeout=2000)
+    expect(review_page.get_by_role("heading", name="Review complete")).to_be_visible()
+    assert app.posts("") == [original, original]
+    expect(review_page.locator("[data-review-toast]")).to_have_count(0)
+    assert review_page.locator("[data-review-panel]").evaluate("panel => panel.style.getPropertyValue('--review-notice-clearance')") == "0px"
+    assert app.errors == app.unexpected == []
+
+
+@pytest.mark.parametrize("cleanup", ["dismiss", "expire"])
+def test_enlarged_notice_resize_and_cleanup_remove_recovery_clearance(review_page, cleanup):
+    from playwright.sync_api import expect
+
+    review_page.set_viewport_size({"width": 375, "height": 812})
+    review_page.clock.install()
+    app = ReviewBrowser(review_page, [card(question=LONG_QUESTION, course=LONG_COURSE)])
+    app.answer, app.explanation = LONG_ANSWER, LONG_EXPLANATION
+    app.grade_failure = {"ok": False, "error": "uncertain"}
+    app.open()
+    review_page.clock.pause_at(datetime.now(timezone.utc) + timedelta(seconds=1))
+    review_page.evaluate("document.documentElement.style.fontSize='29px'")
+    review_page.get_by_role("button", name="Show answer", exact=True).click()
+    review_page.locator("[data-review-explanation] > summary").click()
+    review_page.locator("[data-review-grade='good']").click()
+    retry = review_page.get_by_role("button", name="Retry saving", exact=True)
+    expect(retry).to_be_focused()
+    review_page.set_viewport_size({"width": 343, "height": 780})
+    review_page.clock.run_for(50)
+    review_page.wait_for_function("(() => {const b=document.querySelector('[data-review-retry]'); const r=b.getBoundingClientRect(); return b.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2));})()")
+    review_page.set_viewport_size({"width": 375, "height": 812})
+    review_page.clock.run_for(50)
+    expect(retry).to_be_focused()
+    if cleanup == "dismiss":
+        close = review_page.get_by_role("button", name="Dismiss notification")
+        close.focus()
+        review_page.keyboard.press("Enter")
+        expect(retry).to_be_focused()
+    else:
+        review_page.clock.run_for(10000)
+    expect(review_page.locator("[data-review-toast]")).to_have_count(0)
+    assert review_page.locator("[data-review-panel]").evaluate("panel => panel.style.getPropertyValue('--review-notice-clearance')") == "0px"
+    assert retry.evaluate("button => {const r=button.getBoundingClientRect(); return button.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2));}")
+    original = deepcopy(app.posts("")[0])
+    app.grade_failure = None
+    retry.click(timeout=2000)
+    expect(review_page.get_by_role("heading", name="Review complete")).to_be_visible()
+    assert app.posts("") == [original, original]
+    assert app.errors == app.unexpected == []

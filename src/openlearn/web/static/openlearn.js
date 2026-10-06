@@ -2217,6 +2217,16 @@ function initializeReview() {
     const bottom = Math.max(document.querySelector(".site-header")?.getBoundingClientRect().bottom || 0,
       session.getBoundingClientRect().bottom);
     shell.style.setProperty("--review-notice-top", `${Math.max(16, bottom + 8)}px`);
+    const bounds = notice?.getBoundingClientRect();
+    panel.style.setProperty("--review-notice-clearance", `${bounds ? bounds.bottom + 16 : 0}px`);
+    const active = document.activeElement;
+    if (!bounds || !active?.matches("[data-review-recovery] button:not(:disabled)")) return;
+    const target = active.getBoundingClientRect();
+    if (target.top < 0 || target.bottom > window.innerHeight
+      || (target.left < bounds.right && target.right > bounds.left
+        && target.top < bounds.bottom && target.bottom > bounds.top)) {
+      active.scrollIntoView({block: "nearest"});
+    }
   }
   function clearNotice() {
     clearTimeout(noticeTimer);
@@ -2225,6 +2235,7 @@ function initializeReview() {
     notice?.remove();
     notice = null;
     noticeRemaining = 0;
+    panel.style.setProperty("--review-notice-clearance", "0px");
   }
   function pauseNotice() {
     if (!notice) return;
@@ -2433,6 +2444,7 @@ function initializeReview() {
         ? lockedFocus : panel.querySelector("[data-review-retry]:not(:disabled)");
       target?.focus({preventScroll: true});
     }
+    if (!value) positionNotice();
   }
   panel.addEventListener("click", (event) => {
     if (busy && event.target.closest("a, summary")) event.preventDefault();
