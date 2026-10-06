@@ -5,8 +5,10 @@ usage() {
   cat <<'EOF'
 usage:
   scripts/repo-workflow status
-  scripts/repo-workflow start <type> <name>
+  scripts/repo-workflow start <type> <name> [base-ref]
   scripts/repo-workflow finish <name>
+  scripts/repo-workflow register <task-id> <GitHub-issue-url>
+  scripts/repo-workflow retire
 
 Examples:
   scripts/repo-workflow start feat quick-review
@@ -61,6 +63,7 @@ status() {
 
   echo
   echo "Worktrees:"
+  "${PYTHON:-python3}" "$(dirname "$0")/worktree_owners.py" status
   while IFS= read -r path; do
     local summary
     summary="$(git -C "$path" status --short --branch | sed -n '1p')"
@@ -84,34 +87,28 @@ status() {
 start_worktree() {
   local type="$1"
   local name="$2"
+  local base="${3:-origin/main}"
   require_name "$type" "type"
   require_name "$name" "name"
-  require_root_checkout
 
-  local root branch path linked_count behind ahead
+  local root branch path linked_count
   root="$(root_checkout)"
   branch="$type/$name"
   path="$root/.worktrees/$name"
 
-  if [ "$(git -C "$root" branch --show-current)" != "main" ]; then
-    echo "The root checkout must be on main before creating a worktree." >&2
-    exit 1
+  if [ "$base" = "origin/main" ]; then
+    git -C "$root" fetch origin main
   fi
-  if [ -n "$(git -C "$root" status --porcelain)" ]; then
-    echo "The root checkout is dirty. Commit or restore it before creating a worktree." >&2
-    exit 1
-  fi
+  git -C "$root" rev-parse --verify "$base^{commit}" >/dev/null
 
-  git -C "$root" fetch origin main
-  read -r behind ahead < <(git -C "$root" rev-list --left-right --count origin/main...main)
-  if [ "$behind" -ne 0 ] || [ "$ahead" -ne 0 ]; then
-    echo "main and origin/main must match before creating a worktree: behind $behind, ahead $ahead" >&2
-    exit 1
+  linked_count="$("${PYTHON:-python3}" "$(dirname "$0")/worktree_owners.py" count)"
+  local active_limit="${OPENLEARN_ACTIVE_LIMIT:-2}"
+  if [[ ! "$active_limit" =~ ^[1-9][0-9]*$ ]]; then
+    echo 'OPENLEARN_ACTIVE_LIMIT must be a positive integer.' >&2
+    exit 2
   fi
-
-  linked_count="$(( $(git -C "$root" worktree list --porcelain | sed -n 's/^worktree //p' | wc -l) - 1 ))"
-  if [ "$linked_count" -ge 2 ]; then
-    echo "Two linked worktrees already exist. Finish one or get explicit approval before adding another." >&2
+  if [ "$linked_count" -ge "$active_limit" ]; then
+    echo "Active or unresolved worktrees reach the approved limit ($active_limit). Resolve ownership or obtain approval for a larger OPENLEARN_ACTIVE_LIMIT." >&2
     exit 1
   fi
   if git -C "$root" show-ref --verify --quiet "refs/heads/$branch"; then
@@ -123,7 +120,8 @@ start_worktree() {
     exit 1
   fi
 
-  git -C "$root" worktree add -b "$branch" "$path" main
+  git -C "$root" worktree add -b "$branch" "$path" "$base"
+  echo 'Record ownership on the issue, then run scripts/repo-workflow register <task-id> <issue-url> in the new worktree.'
   echo "$path"
 }
 
@@ -153,6 +151,7 @@ finish_worktree() {
     echo "Branch is not merged into main and will not be removed: $branch" >&2
     exit 1
   fi
+  "${PYTHON:-python3}" "$(dirname "$0")/worktree_owners.py" can-finish "$branch"
 
   git -C "$root" worktree remove "$path"
   git -C "$root" branch -d "$branch"
@@ -167,12 +166,15 @@ case "$cmd" in
     status
     ;;
   start)
-    [ "$#" -eq 2 ] || { usage >&2; exit 2; }
-    start_worktree "$1" "$2"
+    [ "$#" -ge 2 ] && [ "$#" -le 3 ] || { usage >&2; exit 2; }
+    start_worktree "$@"
     ;;
   finish)
     [ "$#" -eq 1 ] || { usage >&2; exit 2; }
     finish_worktree "$1"
+    ;;
+  register|retire)
+    exec "${PYTHON:-python3}" "$(dirname "$0")/worktree_owners.py" "$cmd" "$@"
     ;;
   -h|--help|help)
     usage

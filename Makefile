@@ -4,7 +4,7 @@ REVIEW_DIR ?= .artifacts/review
 RELEASE_CANDIDATE ?= .artifacts/release-candidate
 TYPE ?= feat
 
-.PHONY: test unit pytest lint typecheck smoke e2e oci-live codex-dogfood tutor-behavior-eval outcome-eval package-assets release-build release-verify release-smoke-wheel release-smoke-sdist diff validate check review repo-status worktree finish
+.PHONY: test unit pytest lint typecheck smoke e2e oci-live codex-dogfood tutor-behavior-eval outcome-eval package-assets release-build release-verify release-smoke-wheel release-smoke-sdist diff validate check gate review qa-smoke setup-worktree repo-status worktree finish
 
 # --- Individual lanes ---------------------------------------------------------
 
@@ -90,7 +90,7 @@ repo-status:
 
 worktree:
 	@test -n "$(NAME)" || { echo "usage: make worktree NAME=<task> [TYPE=feat]" >&2; exit 2; }
-	@./scripts/repo-workflow start "$(TYPE)" "$(NAME)"
+	@./scripts/repo-workflow start "$(TYPE)" "$(NAME)" $(if $(BASE),"$(BASE)",)
 
 finish:
 	@test -n "$(NAME)" || { echo "usage: make finish NAME=<task>" >&2; exit 2; }
@@ -101,20 +101,20 @@ validate: check
 
 # --- The one obvious command --------------------------------------------------
 # Fully green gate: lint + tests + focused and interface-wide mock smoke.
-check: lint pytest smoke e2e
+check:
+	$(PYTHON) scripts/workflow_evidence.py check --openlearn "$(OPENLEARN)"
+
+gate: lint pytest smoke e2e
 	@echo "check: all green"
 
 # --- Optional evidence collection --------------------------------------------
-# Reruns the gate and writes logs + diff to $(REVIEW_DIR)/<timestamp>/.
+# Reuses a valid receipt or runs the gate, then collects diff and evidence.
 # This does not replace an independent review.
 review:
-	@stamp=$$(date +%Y%m%d-%H%M%S); out="$(REVIEW_DIR)/$$stamp"; mkdir -p "$$out"; \
-	echo "Evidence: $$out"; \
-	git diff --stat | tee "$$out/diff.stat"; \
-	git diff > "$$out/diff.patch"; \
-	if $(MAKE) check > "$$out/check.log" 2>&1; then \
-		echo "GATE: PASS (see $$out/check.log)"; \
-	else \
-		echo "GATE: FAIL — tail of $$out/check.log:"; tail -20 "$$out/check.log"; \
-		exit 1; \
-	fi
+	$(PYTHON) scripts/workflow_evidence.py review --out "$(REVIEW_DIR)" --base "$(or $(BASE),origin/main)" --openlearn "$(OPENLEARN)"
+
+setup-worktree:
+	./scripts/setup-worktree $(if $(BROWSER),--browser,)
+
+qa-smoke:
+	$(PYTHON) scripts/qa_smoke.py

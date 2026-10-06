@@ -118,6 +118,54 @@ class RepoWorkflowTests(unittest.TestCase):
         self.assertIn("Run this command from the root checkout", result.stderr)
         self.assertTrue(worktree.exists())
 
+    def test_settled_historical_worktrees_do_not_consume_active_capacity(self) -> None:
+        self.workflow("start", "docs", "old-one")
+        self.workflow("start", "docs", "old-two")
+        result = self.workflow("start", "docs", "third")
+        self.assertIn("third", result.stdout)
+        self.assertIn("settled", self.workflow("status").stdout)
+
+    def test_registered_owners_consume_capacity_and_retirement_releases_it(self) -> None:
+        for name in ("first", "second"):
+            self.workflow("start", "docs", name)
+            self.workflow_from(self.repo / ".worktrees" / name, "register", name,
+                               "https://github.com/rosshd/openlearn/issues/114")
+        denied = self.workflow("start", "docs", "third", check=False)
+        self.assertNotEqual(denied.returncode, 0)
+        self.assertIn("approved limit", denied.stderr)
+        self.workflow_from(self.repo / ".worktrees/first", "retire")
+        self.workflow("start", "docs", "third")
+
+    def test_unregistered_dirty_worktrees_are_unresolved(self) -> None:
+        for name in ("first", "second"):
+            self.workflow("start", "docs", name)
+            (self.repo / ".worktrees" / name / "owned.txt").write_text("unfinished")
+        denied = self.workflow("start", "docs", "third", check=False)
+        self.assertNotEqual(denied.returncode, 0)
+        self.assertIn("unresolved", self.workflow("status").stdout)
+
+    def test_child_starts_from_parent_without_touching_dirty_primary(self) -> None:
+        self.workflow("start", "feat", "parent")
+        parent = self.repo / ".worktrees/parent"
+        (parent / "feature.txt").write_text("parent feature")
+        self.git("add", "feature.txt", cwd=parent)
+        self.git("commit", "-m", "Parent feature", cwd=parent)
+        (self.repo / "private.txt").write_text("primary work")
+        self.workflow_from(parent, "start", "feat", "child", "feat/parent")
+        child = self.repo / ".worktrees/child"
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=parent).stdout,
+                         self.git("rev-parse", "HEAD", cwd=child).stdout)
+        self.assertEqual((self.repo / "private.txt").read_text(), "primary work")
+
+    def test_finish_refuses_active_registered_owner(self) -> None:
+        self.workflow("start", "docs", "active")
+        self.workflow_from(self.repo / ".worktrees/active", "register", "owner",
+                           "https://github.com/rosshd/openlearn/issues/114")
+        denied = self.workflow("finish", "active", check=False)
+        self.assertNotEqual(denied.returncode, 0)
+        self.assertIn("active owner", denied.stderr)
+        self.assertTrue((self.repo / ".worktrees/active").exists())
+
 
 if __name__ == "__main__":
     unittest.main()
