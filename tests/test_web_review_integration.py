@@ -92,11 +92,12 @@ def review_fixture(tmp_path, monkeypatch):
     cli.clear_config_cache()
 
 
-def bridge(context, client):
+def bridge(context, client, *, drop_regeneration_response=False):
     """Serve actual templates/assets/APIs through TestClient, with no fake API payloads."""
     security = client.app.state.security
 
     def handle(route):
+        nonlocal drop_regeneration_response
         request = route.request
         url = urlsplit(request.url)
         headers = {
@@ -112,6 +113,11 @@ def bridge(context, client):
             request.method, path + (f"?{url.query}" if url.query else ""),
             headers=headers, content=request.post_data_buffer, follow_redirects=False,
         )
+        if drop_regeneration_response and path.endswith("/api/review/prepare") and json.loads(request.post_data or "{}").get("regenerate") is True:
+            drop_regeneration_response = False
+            assert response.status_code == 200 and response.json()["ok"]
+            route.abort("failed")
+            return
         route.fulfill(
             status=response.status_code,
             headers={key: value for key, value in response.headers.items()
@@ -120,6 +126,35 @@ def bridge(context, client):
         )
 
     context.route("**/*", handle)
+
+
+def test_committed_regeneration_with_lost_response_refreshes_without_false_preservation_claim(review_fixture):
+    playwright = pytest.importorskip("playwright.sync_api")
+    client, _clock, generations = review_fixture
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch()
+        context = browser.new_context()
+        bridge(context, client, drop_regeneration_response=True)
+        page = context.new_page()
+        page.goto("http://127.0.0.1/review?course=review-integration")
+        page.get_by_role("button", name="Prepare card", exact=True).click()
+        page.get_by_role("button", name="Show answer", exact=True).wait_for()
+        original = client.get("/api/review/session?course=review-integration").json()["items"][0]
+        page.locator("[data-review-card-options] > summary").click()
+        page.get_by_role("button", name="Regenerate card", exact=True).click()
+        page.locator("[data-review-regeneration-status]").filter(has_text="Could not confirm regeneration. Try again.").wait_for()
+        fresh = client.get("/api/review/session?course=review-integration").json()["items"][0]
+        assert fresh["card_id"] != original["card_id"]
+        assert "previous card was kept" not in page.locator("[data-review-panel]").inner_text().lower()
+        page.get_by_role("button", name="Show answer", exact=True).click()
+        page.get_by_role("button", name="Refresh review", exact=True).click()
+        page.get_by_role("button", name="Show answer", exact=True).click()
+        page.locator("[data-review-answer]").wait_for()
+        assert len(generations) == 2
+        assert cli.read_topic("review-integration").metadata["review_due"][0]["review_card"]["card_id"] == fresh["card_id"]
+        page.locator("[data-review-grade='good']").click()
+        page.get_by_role("heading", name="Review complete").wait_for()
+        browser.close()
 
 
 @pytest.mark.parametrize("width", [1280, 375])

@@ -1105,7 +1105,7 @@ def test_failed_regeneration_preserves_question_reveal_and_safe_persistent_retry
     expect(retry).to_be_focused()
     expect(review_page.get_by_role("button", name="Show answer", exact=True)).to_be_enabled()
     expect(review_page.locator("[data-review-question]")).to_have_text(QUESTION)
-    expect(review_page.locator("[data-review-regeneration-status]")).to_have_text("Could not regenerate. Your previous card was kept.")
+    expect(review_page.locator("[data-review-regeneration-status]")).to_have_text("Could not confirm regeneration. Try again.")
     assert app.items == [original]
     assert "PRIVATE" not in review_page.content()
     review_page.clock.run_for(10000)

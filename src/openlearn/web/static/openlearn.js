@@ -2580,7 +2580,7 @@ function initializeReview() {
       if (id !== operation || current !== previous) return;
       if (conflict(error)) showConflict();
       else {
-        const message = "Could not regenerate. Your previous card was kept.";
+        const message = "Could not confirm regeneration. Try again.";
         const status = panel.querySelector("[data-review-regeneration-status]");
         status.textContent = message;
         status.hidden = false;
