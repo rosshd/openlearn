@@ -225,6 +225,11 @@ def generate_card(concept: str, sources: list[dict], model: str) -> dict:
         "such as 'According to the supplied materials' while retaining necessary "
         "source-specific qualifiers. The answer is the minimum complete response "
         "needed to judge recall, targeting 25-35 words and allowing at most 60. "
+        "Answer every aspect actually asked. If the question asks why, include the "
+        "reason in the answer itself, not only in the optional explanation. For a "
+        "comparison, cover both sides and the relevant distinction. A yes/no label "
+        "alone is insufficient when the question requests a reason. Keep claims "
+        "within the supplied source's context instead of making universal claims. "
         "Use one or two short plain paragraphs; keep examples and teaching detail "
         "for the explanation unless essential to answering the question. The explanation "
         "is optional reading after the answer: target 20-30 words, at most 40, adding "
@@ -279,7 +284,13 @@ def prepare(request) -> dict:
             item = _find(metadata, request.concept)
             if item is None or revision(item) != request.review_revision:
                 return conflict()
-            if _card(item):
+            existing = _card(item)
+            if request.regenerate:
+                clock = now()
+                eligible = _relearn(item)
+                if not existing or not _outstanding(item, clock) or (eligible and eligible > clock):
+                    return conflict()
+            elif existing:
                 return {"ok": True, "item": public_item(request.slug, metadata, item, now())}
             sources = selected_sources(request.slug, body, request.concept)
             model = cli.configured_model({**cli.read_config(), **metadata})
@@ -293,7 +304,9 @@ def prepare(request) -> dict:
             item = _find(metadata, request.concept)
             if item is None or revision(item) != request.review_revision:
                 return conflict()
-            if not _card(item):
+            if request.regenerate and selected_sources(request.slug, body, item["concept"]) != sources:
+                return conflict()
+            if request.regenerate or not _card(item):
                 card["slug"] = request.slug
                 card["concept"] = item["concept"]
                 item["review_card"] = card

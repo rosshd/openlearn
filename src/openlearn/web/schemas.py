@@ -208,7 +208,7 @@ class PlacementRequest(BaseModel):
         return self
 
 
-class ReviewPrepareRequest(BaseModel):
+class ReviewOccurrenceRequest(BaseModel):
     slug: str
     concept: str = Field(min_length=1, max_length=4000)
     review_revision: str = Field(min_length=1, max_length=128)
@@ -219,7 +219,11 @@ class ReviewPrepareRequest(BaseModel):
         return canonical_slug(value)
 
 
-class ReviewRevealRequest(ReviewPrepareRequest):
+class ReviewPrepareRequest(ReviewOccurrenceRequest):
+    regenerate: bool = Field(default=False, strict=True)
+
+
+class ReviewRevealRequest(ReviewOccurrenceRequest):
     card_id: str = Field(min_length=1, max_length=128)
     content_version: int = Field(ge=1)
 

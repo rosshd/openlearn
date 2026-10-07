@@ -71,6 +71,9 @@ def test_explicit_preparation_source_validation_and_offline_reload(home, monkeyp
     saved = prepare(monkeypatch, calls)
     assert "conceptual rationale or example in clear plain paragraphs" in calls[0][0][1]
     assert "no self-rating instructions or checklist" in calls[0][0][1]
+    assert "Answer every aspect actually asked" in calls[0][0][1]
+    assert "reason in the answer itself" in calls[0][0][1]
+    assert "cover both sides" in calls[0][0][1]
     card = raw()["review_due"][0]["review_card"]
     assert card["explanation_kind"] == "conceptual"
     assert card["slug"] == "review-course"
@@ -675,3 +678,132 @@ def test_saved_over_budget_cards_reveal_and_rate_without_rewriting_content(home,
         else:
             scheduled.pop(key, None)
     assert after_rating == before_metadata
+
+
+def test_explicit_regeneration_replaces_card_without_changing_schedule_or_history(home, monkeypatch):
+    from copy import deepcopy
+
+    saved = prepare(monkeypatch)
+    shown = reveal(saved)
+    before = deepcopy(raw())
+    calls = []
+    replacement = {**GENERATED, "question": "Can an unusual observation still be valid?"}
+    def provider(*args, **kwargs):
+        calls.append(kwargs)
+        return json.dumps(replacement)
+    monkeypatch.setattr(cli, "call_openai", provider)
+    result = review_cards.prepare(ReviewPrepareRequest(**saved, regenerate=True))
+    assert result["ok"]
+    fresh = result["item"]
+    assert len(calls) == 1 and calls[0]["max_attempts"] == 1
+    assert fresh["card_id"] != saved["card_id"]
+    assert fresh["review_revision"] != saved["review_revision"]
+    assert fresh["question"] == replacement["question"]
+    assert fresh["state"] == "question"
+    after = raw()
+    after["review_due"][0]["review_card"] = before["review_due"][0]["review_card"]
+    assert after == before
+    assert review_cards.grade(grade_request(saved, shown))["state"] == "conflict"
+    assert reveal(fresh)["answer"] == replacement["answer"]
+
+
+@pytest.mark.parametrize("failure", ["invalid", "provider", "missing_source"])
+def test_failed_regeneration_keeps_existing_card_usable(home, monkeypatch, failure):
+    saved = prepare(monkeypatch)
+    if failure == "missing_source":
+        topic = cli.read_topic("review-course")
+        cli.write_topic(topic.path, topic.metadata, "# No supporting material\n")
+    before_text = cli.topic_path("review-course").read_text()
+    def provider(*args, **kwargs):
+        if failure == "missing_source":
+            pytest.fail("missing material called provider")
+        if failure == "provider":
+            raise cli.OpenLearnError("secret-key private-provider-detail")
+        return "{}"
+    monkeypatch.setattr(cli, "call_openai", provider)
+    result = review_cards.prepare(ReviewPrepareRequest(**saved, regenerate=True))
+    assert not result["ok"] and "secret" not in json.dumps(result)
+    assert cli.topic_path("review-course").read_text() == before_text
+    assert item() == saved
+    assert reveal(saved)["answer"] == GENERATED["answer"]
+
+
+def test_regeneration_discards_result_if_selected_source_changes(home, monkeypatch):
+    from copy import deepcopy
+
+    saved = prepare(monkeypatch)
+    before_card = deepcopy(raw()["review_due"][0]["review_card"])
+    def provider(*args, **kwargs):
+        topic = cli.read_topic("review-course")
+        cli.write_topic(topic.path, topic.metadata, topic.body + "\nNew source qualification applies.\n")
+        return json.dumps(GENERATED)
+    monkeypatch.setattr(cli, "call_openai", provider)
+    assert review_cards.prepare(ReviewPrepareRequest(**saved, regenerate=True))["state"] == "conflict"
+    assert raw()["review_due"][0]["review_card"] == before_card
+    assert "New source qualification" in cli.topic_path("review-course").read_text()
+
+
+def test_regeneration_discards_result_if_rating_commits_during_provider(home, monkeypatch):
+    from copy import deepcopy
+
+    saved = prepare(monkeypatch)
+    shown = reveal(saved)
+    before_card = deepcopy(raw()["review_due"][0]["review_card"])
+    def provider(*args, **kwargs):
+        assert review_cards.grade(grade_request(saved, shown, "good"))["state"] == "committed"
+        return json.dumps(GENERATED)
+    monkeypatch.setattr(cli, "call_openai", provider)
+    assert review_cards.prepare(ReviewPrepareRequest(**saved, regenerate=True))["state"] == "conflict"
+    assert raw()["review_due"][0]["review_card"] == before_card
+    assert raw()["review_rating_receipts"]
+    assert review_cards.session(["review-course"])["count"] == 0
+
+
+@pytest.mark.parametrize("state", ["unprepared", "reviewed", "waiting", "stale"])
+def test_regeneration_rejects_ineligible_or_stale_occurrence_before_provider(home, monkeypatch, state):
+    saved = item() if state == "unprepared" else prepare(monkeypatch)
+    if state in {"reviewed", "waiting"}:
+        shown = reveal(saved)
+        assert review_cards.grade(grade_request(saved, shown, "again" if state == "waiting" else "good"))["state"] == "committed"
+        if state == "waiting":
+            saved = item()
+    if state == "stale":
+        saved = {**saved, "review_revision": "outdated"}
+    monkeypatch.setattr(cli, "call_openai", lambda *args, **kwargs: pytest.fail("ineligible regenerated"))
+    assert review_cards.prepare(ReviewPrepareRequest(**saved, regenerate=True))["state"] == "conflict"
+
+
+@pytest.mark.parametrize("invalid", ["true", "false", 1, None])
+def test_regeneration_http_flag_requires_explicit_boolean(home, monkeypatch, invalid):
+    from fastapi.testclient import TestClient
+    from openlearn.web import create_app
+
+    saved = prepare(monkeypatch)
+    monkeypatch.setattr(cli, "call_openai", lambda *args, **kwargs: pytest.fail("invalid flag called provider"))
+    with TestClient(create_app(testing=True)) as client:
+        session = client.get("/api/review/session?course=review-course")
+        response = client.post("/api/review/prepare", json={**saved, "regenerate": invalid},
+                               headers={"x-csrf-token": session.cookies["openlearn_csrf"]})
+    assert response.status_code == 400
+    assert item() == saved
+
+
+def test_existing_rating_receipt_hash_is_unchanged_by_prepare_flag(home, monkeypatch):
+    from hashlib import sha256
+
+    saved = prepare(monkeypatch)
+    request = grade_request(saved, reveal(saved))
+    payload = request.model_dump()
+    assert set(payload) == {"slug", "concept", "review_revision", "card_id", "content_version",
+                            "reveal_token", "result", "submission_id"}
+    old_response = {"ok": True, "state": "committed", "submission_id": request.submission_id,
+                    "next_due": "2026-10-10", "relearn_at": None, "item": None}
+    topic = cli.read_topic("review-course")
+    topic.metadata["review_rating_receipts"] = {request.submission_id: {
+        "input_hash": sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest(),
+        "response": old_response,
+    }}
+    cli.write_topic(topic.path, topic.metadata, topic.body)
+    before = cli.topic_path("review-course").read_text()
+    assert review_cards.grade(request) == old_response
+    assert cli.topic_path("review-course").read_text() == before

@@ -123,6 +123,83 @@ def bridge(context, client):
 
 
 @pytest.mark.parametrize("width", [1280, 375])
+def test_real_service_explicit_regeneration_preserves_schedule_and_refreshes_identity(review_fixture, monkeypatch, width):
+    playwright = pytest.importorskip("playwright.sync_api")
+    client, _clock, generations = review_fixture
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch()
+        context = browser.new_context(viewport={"width": width, "height": 900})
+        bridge(context, client)
+        page = context.new_page()
+        page.goto("http://127.0.0.1/review?course=review-integration")
+        page.get_by_role("button", name="Prepare card", exact=True).click()
+        page.get_by_role("button", name="Show answer", exact=True).wait_for()
+        original_item = client.get("/api/review/session?course=review-integration").json()["items"][0]
+        before = deepcopy(cli.read_topic("review-integration").metadata)
+        original_generate = cli.call_openai
+        fresh_question = "Why can an unusual observation still be valid?"
+        def generate(*args, **kwargs):
+            output = json.loads(original_generate(*args, **kwargs))
+            output["question"] = fresh_question
+            return json.dumps(output)
+        monkeypatch.setattr(cli, "call_openai", generate)
+        options = page.locator("[data-review-card-options] > summary")
+        options.focus()
+        options.press("Enter")
+        page.get_by_role("button", name="Regenerate card", exact=True).click()
+        page.locator("[data-review-question]").filter(has_text=fresh_question).wait_for()
+        assert len(generations) == 2
+        fresh_item = client.get("/api/review/session?course=review-integration").json()["items"][0]
+        assert fresh_item["card_id"] != original_item["card_id"]
+        assert fresh_item["review_revision"] != original_item["review_revision"]
+        after = deepcopy(cli.read_topic("review-integration").metadata)
+        after["review_due"][0]["review_card"] = before["review_due"][0]["review_card"]
+        assert after == before
+        assert not page.locator("[data-review-grade]").count()
+        assert ANSWER not in page.locator("[data-review-panel]").inner_text()
+        page.get_by_role("button", name="Show answer", exact=True).click()
+        page.locator("[data-review-answer]").wait_for()
+        assert page.locator("[data-review-card-options]").count() == 0
+        assert not page.locator("[data-review-explanation]").evaluate("element => element.open")
+        page.locator("[data-review-grade='good']").click()
+        page.get_by_role("heading", name="Review complete").wait_for()
+        assert len(generations) == 2
+        assert client.get("/api/review/session?course=review-integration").json()["count"] == 0
+        browser.close()
+
+
+@pytest.mark.parametrize("width", [1280, 375])
+def test_real_service_regeneration_failure_keeps_old_card_reviewable(review_fixture, monkeypatch, width):
+    playwright = pytest.importorskip("playwright.sync_api")
+    client, _clock, generations = review_fixture
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch()
+        context = browser.new_context(viewport={"width": width, "height": 900})
+        bridge(context, client)
+        page = context.new_page()
+        page.goto("http://127.0.0.1/review?course=review-integration")
+        page.get_by_role("button", name="Prepare card", exact=True).click()
+        page.get_by_role("button", name="Show answer", exact=True).wait_for()
+        before = deepcopy(cli.read_topic("review-integration").metadata)
+        def failure(*args, **kwargs):
+            raise cli.OpenLearnError("secret-provider-detail")
+        monkeypatch.setattr(cli, "call_openai", failure)
+        page.locator("[data-review-card-options] > summary").click()
+        page.get_by_role("button", name="Regenerate card", exact=True).click()
+        page.locator("[data-review-toast]").wait_for()
+        assert "secret-provider" not in page.locator("body").inner_text()
+        assert cli.read_topic("review-integration").metadata == before
+        assert page.get_by_role("button", name="Show answer", exact=True).is_enabled()
+        page.get_by_role("button", name="Show answer", exact=True).click()
+        page.locator("[data-review-answer]").wait_for()
+        assert ANSWER in page.locator("[data-review-panel]").inner_text()
+        page.locator("[data-review-grade='good']").click()
+        page.get_by_role("heading", name="Review complete").wait_for()
+        assert len(generations) == 1
+        browser.close()
+
+
+@pytest.mark.parametrize("width", [1280, 375])
 @pytest.mark.parametrize("legacy", [False, True])
 def test_real_service_preparation_offline_relearning_and_completion(review_fixture, width, legacy):
     playwright = pytest.importorskip("playwright.sync_api")
