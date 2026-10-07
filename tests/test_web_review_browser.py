@@ -16,7 +16,7 @@ from openlearn.web.app import PlaceholderServices
 
 
 STATIC = Path(__file__).resolve().parents[1] / "src/openlearn/web/static"
-ARTIFACTS = Path(__file__).resolve().parents[1] / ".artifacts/review-rapid"
+ARTIFACTS = Path(__file__).resolve().parents[1] / ".artifacts/review-evaluation"
 ANSWER = "An outlier can be a valid observation. Noise obscures the signal."
 QUESTION = "How does an outlier differ from noise, and can an outlier be valid?"
 pytestmark = pytest.mark.skipif(
@@ -59,6 +59,7 @@ class ReviewBrowser:
         self.reveal_failure = None
         self.answer = ANSWER
         self.explanation = "Being unusual alone does not make an observation noise.\n\nA valid observation may still lie far from the overall pattern."
+        self.regenerated_question = "How does a valid rare event differ from measurement noise?"
         self.prepare_failure = None
         self.prepare_hold = False
         self.prepare_route = None
@@ -98,9 +99,14 @@ class ReviewBrowser:
                     self.prepare_route = route
                     return
                 if self.prepare_failure:
-                    route.fulfill(json=self.prepare_failure)
+                    route.fulfill(status=409 if self.prepare_failure.get("state") == "conflict" else 200, json=self.prepare_failure)
                 else:
                     prepared = card(body["concept"])
+                    if body.get("regenerate") is True:
+                        previous = next(item for item in self.items if item["concept"] == body["concept"])
+                        prepared = {**previous, "question": self.regenerated_question,
+                                    "card_id": "regenerated-card", "content_version": previous["content_version"] + 1,
+                                    "review_revision": "regenerated-occurrence", "state": "question"}
                     self.items = [prepared if item["concept"] == body["concept"] else item for item in self.items]
                     route.fulfill(json={"ok": True, "item": prepared})
             elif path.endswith("/reveal"):
@@ -1045,4 +1051,190 @@ def test_visible_save_notice_allows_scrolling_back_to_answer(review_page, font_s
     expect(review_page.locator("[data-review-toast]")).to_be_visible()
     expect(retry).to_be_focused()
     assert app.posts("") == [original]
+    assert app.errors == app.unexpected == []
+
+
+def test_regeneration_native_options_keyboard_payload_and_new_identity(review_page):
+    from playwright.sync_api import expect
+
+    original = card(due="2026-10-03")
+    app = ReviewBrowser(review_page, [original])
+    app.open()
+    options = review_page.locator("[data-review-card-options]")
+    toggle = options.locator("summary")
+    expect(toggle).to_have_text("Card options")
+    assert not options.evaluate("element => element.open")
+    toggle.focus()
+    review_page.keyboard.press("Space")
+    expect(review_page.get_by_role("button", name="Regenerate card", exact=True)).to_be_visible()
+    review_page.keyboard.press("1")
+    assert app.calls == []
+    expect(options.get_by_text("Uses your AI provider and current course material.", exact=True)).to_be_visible()
+    control = review_page.get_by_role("button", name="Regenerate card", exact=True)
+    control.focus()
+    review_page.keyboard.press("Enter")
+    expect(review_page.locator("[data-review-question]")).to_have_text(app.regenerated_question)
+    expect(review_page.locator("[data-review-question]")).to_be_focused()
+    assert app.posts("/prepare") == [{"slug": original["slug"], "concept": original["concept"], "review_revision": original["review_revision"], "regenerate": True}]
+    assert app.items[0]["due"] == original["due"]
+    expect(review_page.locator("[data-review-summary]")).to_have_text("1 remaining · 0 reviewed")
+    assert not options.evaluate("element => element.open")
+    review_page.get_by_role("button", name="Show answer", exact=True).click()
+    expect(review_page.locator("[data-review-card-options], [data-review-regenerate]")).to_have_count(0)
+    assert app.posts("/reveal")[0]["card_id"] == "regenerated-card"
+    assert app.posts("/reveal")[0]["review_revision"] == "regenerated-occurrence"
+    assert not review_page.locator("[data-review-explanation]").evaluate("element => element.open")
+    review_page.locator("[data-review-grade='good']").click()
+    expect(review_page.get_by_role("heading", name="Review complete")).to_be_visible()
+    assert app.posts("")[0]["card_id"] == "regenerated-card"
+    assert app.errors == app.unexpected == []
+
+
+def test_failed_regeneration_preserves_question_reveal_and_safe_persistent_retry(review_page):
+    from playwright.sync_api import expect
+
+    original = card()
+    app = ReviewBrowser(review_page, [original])
+    app.prepare_failure = {"ok": False, "state": "preparation_failed", "error": "PRIVATE provider credential <img>"}
+    review_page.clock.install()
+    app.open()
+    review_page.clock.pause_at(datetime.now(timezone.utc) + timedelta(seconds=1))
+    review_page.locator("[data-review-card-options] > summary").click()
+    review_page.get_by_role("button", name="Regenerate card", exact=True).click()
+    retry = review_page.get_by_role("button", name="Try again", exact=True)
+    expect(retry).to_be_focused()
+    expect(review_page.get_by_role("button", name="Show answer", exact=True)).to_be_enabled()
+    expect(review_page.locator("[data-review-question]")).to_have_text(QUESTION)
+    expect(review_page.locator("[data-review-regeneration-status]")).to_have_text("Could not regenerate. Your previous card was kept.")
+    assert app.items == [original]
+    assert "PRIVATE" not in review_page.content()
+    review_page.clock.run_for(10000)
+    expect(review_page.locator("[data-review-toast]")).to_have_count(0)
+    expect(retry).to_be_enabled()
+    assert app.items == [original]
+    review_page.get_by_role("button", name="Show answer", exact=True).click()
+    expect(review_page.locator("[data-review-answer]")).to_have_text(ANSWER)
+    assert app.posts("/reveal")[0]["card_id"] == original["card_id"]
+    assert app.posts("") == []
+    assert app.errors == app.unexpected == []
+
+
+def test_regeneration_conflict_reuses_refresh_and_refresh_failure_recovery(review_page):
+    from playwright.sync_api import expect
+
+    app = ReviewBrowser(review_page, [card()])
+    app.prepare_failure = {"ok": False, "state": "conflict", "error": "PRIVATE stale"}
+    app.open()
+    review_page.locator("[data-review-card-options] > summary").click()
+    review_page.get_by_role("button", name="Regenerate card", exact=True).click()
+    expect(review_page.get_by_role("button", name="Refresh review", exact=True)).to_be_enabled()
+    assert review_page.locator("[data-review-card-options]").count() == 0
+    app.session_failure = {"ok": False, "error": "PRIVATE refresh"}
+    review_page.get_by_role("button", name="Refresh review", exact=True).click()
+    expect(review_page.get_by_role("button", name="Retry refresh", exact=True)).to_be_enabled()
+    app.session_failure = None
+    app.items = [card(question="Fresh externally updated question?", review_revision="external-revision")]
+    review_page.get_by_role("button", name="Retry refresh", exact=True).click()
+    expect(review_page.locator("[data-review-question]")).to_have_text("Fresh externally updated question?")
+    assert app.posts("") == []
+    assert "PRIVATE" not in review_page.content()
+    assert app.errors == app.unexpected == []
+
+
+def test_held_regeneration_locks_controls_and_late_response_cannot_replace_reload(review_page):
+    from playwright.sync_api import expect
+
+    app = ReviewBrowser(review_page, [card()])
+    app.prepare_hold = True
+    app.open()
+    review_page.locator("[data-review-card-options] > summary").click()
+    review_page.get_by_role("button", name="Regenerate card", exact=True).click()
+    expect(review_page.get_by_role("button", name="Regenerating…", exact=True)).to_be_disabled()
+    for control in review_page.locator("[data-review-panel] button").all():
+        expect(control).to_be_disabled()
+    expect(review_page.locator("[data-review-card-options] > summary")).to_have_attribute("aria-disabled", "true")
+    review_page.locator("[data-review-card-options] > summary").evaluate("element => element.click()")
+    assert review_page.locator("[data-review-card-options]").evaluate("element => element.open")
+    review_page.locator("[data-review-question]").focus()
+    review_page.keyboard.press("Space")
+    review_page.keyboard.press("1")
+    assert len(app.posts("/prepare")) == 1
+    assert app.posts("/reveal") == app.posts("") == []
+    old_route = app.prepare_route
+    assert old_route is not None
+    app.items = [card(question="New occurrence after regeneration reload?", review_revision="external-revision")]
+    review_page.reload()
+    expect(review_page.locator("[data-review-question]")).to_have_text("New occurrence after regeneration reload?")
+    old_route.fulfill(json={"ok": True, "item": card(question="LATE must not replace", card_id="late-card")})
+    expect(review_page.locator("[data-review-question]")).to_have_text("New occurrence after regeneration reload?")
+    assert app.errors == app.unexpected == []
+
+
+@pytest.mark.parametrize("width,height,font_size", [(1280, 800, 16), (375, 812, 29), (320, 480, 16)])
+def test_regeneration_failure_retry_hit_access_and_safe_new_question(review_page, width, height, font_size):
+    from playwright.sync_api import expect
+
+    review_page.set_viewport_size({"width": width, "height": height})
+    review_page.clock.install()
+    app = ReviewBrowser(review_page, [card(question=LONG_QUESTION, course=LONG_COURSE)])
+    app.prepare_failure = {"ok": False, "state": "needs_source", "error": "PRIVATE"}
+    app.regenerated_question = "What does <img src=x onerror=alert(1)> mean in this course?"
+    app.open()
+    review_page.clock.pause_at(datetime.now(timezone.utc) + timedelta(seconds=1))
+    review_page.evaluate("size => document.documentElement.style.fontSize = `${size}px`", font_size)
+    review_page.locator("[data-review-card-options] > summary").click()
+    review_page.get_by_role("button", name="Regenerate card", exact=True).click()
+    retry = review_page.get_by_role("button", name="Try again", exact=True)
+    expect(retry).to_be_focused()
+    expect(review_page.locator("[data-review-toast]")).to_be_visible()
+    assert retry.evaluate("button => {const r=button.getBoundingClientRect(); return button.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2));}")
+    ARTIFACTS.mkdir(parents=True, exist_ok=True)
+    review_page.screenshot(path=str(ARTIFACTS / f"regeneration-recovery-{width}x{height}-{font_size}px.png"))
+    app.prepare_failure = None
+    retry.click(timeout=2000)
+    expect(review_page.locator("[data-review-question]")).to_have_text(app.regenerated_question)
+    assert review_page.locator("[data-review-panel] img, [data-review-panel] script").count() == 0
+    assert app.posts("") == []
+    assert len(app.posts("/prepare")) == 2
+    expect(review_page.locator("[data-review-summary]")).to_have_text("1 remaining · 0 reviewed")
+    assert app.errors == app.unexpected == []
+
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+@pytest.mark.parametrize("width,height", [(1280, 800), (375, 812)])
+def test_answer_surface_regular_weight_explanation_hierarchy_and_rating_contrast(review_page, theme, width, height):
+    from playwright.sync_api import expect
+
+    review_page.set_viewport_size({"width": width, "height": height})
+    app = ReviewBrowser(review_page, [card()])
+    app.open()
+    review_page.evaluate("theme => setTheme(theme)", theme)
+    review_page.get_by_role("button", name="Show answer", exact=True).click()
+    expect(review_page.locator("[data-review-answer]")).to_have_text(ANSWER)
+    answer = review_page.locator("[data-review-prose='answer']")
+    assert answer.evaluate("element => getComputedStyle(element).fontWeight") == "400"
+    review_page.locator("[data-review-explanation] > summary").click()
+    expect(review_page.locator("[data-review-explanation] > summary")).to_have_text("Hide explanation")
+    assert review_page.locator("[data-review-prose='explanation']").evaluate("element => parseFloat(getComputedStyle(element).fontSize)") < answer.evaluate("element => parseFloat(getComputedStyle(element).fontSize)")
+    pairs = review_page.locator(".review-answer-text, .review-explanation, .review-rating-label, .review-rating-interval").evaluate_all("""elements => {
+        const ctx = document.createElement('canvas').getContext('2d');
+        const rgb = color => {ctx.clearRect(0,0,1,1);ctx.fillStyle=color;ctx.fillRect(0,0,1,1);return [...ctx.getImageData(0,0,1,1).data].slice(0,3);};
+        return elements.map(element => {let surface=element; while(getComputedStyle(surface).backgroundColor==='rgba(0, 0, 0, 0)') surface=surface.parentElement; return {foreground:rgb(getComputedStyle(element).color),background:rgb(getComputedStyle(surface).backgroundColor)};});
+    }""")
+    def luminance(values):
+        channels = [value / 255 for value in values]
+        linear = [value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4 for value in channels]
+        return sum(value * coefficient for value, coefficient in zip(linear, (0.2126, 0.7152, 0.0722)))
+    for pair in pairs:
+        low, high = sorted([luminance(pair["foreground"]), luminance(pair["background"])])
+        assert (high + 0.05) / (low + 0.05) >= 4.5
+    accents = review_page.locator("[data-review-grade]").evaluate_all("buttons => buttons.map(button => getComputedStyle(button).borderTopColor)")
+    assert len(set(accents)) == 4
+    for control in review_page.locator("[data-review-actions] button").all():
+        assert control.bounding_box()["height"] >= 44
+        assert control.get_attribute("aria-pressed") is None
+    assert review_page.get_by_role("heading", name="Answer", exact=True).count() == 0
+    assert review_page.get_by_role("heading", name="Explanation", exact=True).count() == 0
+    ARTIFACTS.mkdir(parents=True, exist_ok=True)
+    review_page.screenshot(path=str(ARTIFACTS / f"hierarchy-{theme}-{width}x{height}.png"))
     assert app.errors == app.unexpected == []

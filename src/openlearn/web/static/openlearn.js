@@ -2299,6 +2299,13 @@ function initializeReview() {
     area?.querySelector("[data-review-open-course]")?.remove();
     const status = area?.querySelector("[data-review-status]");
     if (status) { status.textContent = ""; status.hidden = true; }
+    const regenerationStatus = area?.querySelector("[data-review-regeneration-status]");
+    if (regenerationStatus) { regenerationStatus.textContent = ""; regenerationStatus.hidden = true; }
+    const regenerateControl = area?.querySelector("[data-review-regenerate]");
+    if (regenerateControl) {
+      regenerateControl.textContent = "Regenerate card";
+      delete regenerateControl.dataset.reviewRetry;
+    }
   }
   function setPrimaryLabel(label) {
     const control = panel.querySelector("[data-review-primary]");
@@ -2525,10 +2532,63 @@ function initializeReview() {
       control.title = "Show answer (Space)";
     }
     area.append(control);
+    if (mode === "question" && current.card_id && current.question) {
+      const options = node("details", undefined, "review-card-options");
+      options.dataset.reviewCardOptions = "";
+      const regenerateControl = button("Regenerate card", regenerate);
+      regenerateControl.dataset.reviewRegenerate = "";
+      const status = node("p", "", "review-status");
+      status.dataset.reviewRegenerationStatus = "";
+      status.id = "review-regeneration-status";
+      status.hidden = true;
+      regenerateControl.setAttribute("aria-describedby", status.id);
+      options.append(node("summary", "Card options"),
+        node("p", "Uses your AI provider and current course material.", "quiet-copy"),
+        regenerateControl, status);
+      area.append(options);
+    }
     panel.append(area);
     addSkip();
     updateSummary();
     if (focus) focusHeading(question || title);
+  }
+  async function regenerate() {
+    if (busy || pending || mode !== "question") return;
+    const previous = current;
+    const id = ++operation;
+    clearFeedback();
+    const control = panel.querySelector("[data-review-regenerate]");
+    control.textContent = "Regenerating…";
+    lock(true);
+    announce("Regenerating your review card.");
+    try {
+      const result = await post("/api/review/prepare", {
+        slug: previous.slug, concept: previous.concept, review_revision: previous.review_revision,
+        regenerate: true,
+      });
+      if (id !== operation || current !== previous) return;
+      const next = result.item;
+      if (!next?.question || next.state !== "question" || !next.card_id || !next.review_revision
+        || next.slug !== previous.slug || next.concept !== previous.concept || next.card_id === previous.card_id) {
+        throw new Error("The regenerated card could not be confirmed.");
+      }
+      replaceItem(next);
+      current = next;
+      showCard(true);
+      announce("Review card regenerated. Recall the new answer before revealing it.");
+    } catch (error) {
+      if (id !== operation || current !== previous) return;
+      if (conflict(error)) showConflict();
+      else {
+        const message = "Could not regenerate. Your previous card was kept.";
+        const status = panel.querySelector("[data-review-regeneration-status]");
+        status.textContent = message;
+        status.hidden = false;
+        control.textContent = "Try again";
+        control.dataset.reviewRetry = "";
+        showNotice(message);
+      }
+    } finally { if (id === operation) lock(false); }
   }
   async function prepare() {
     if (busy) return;
