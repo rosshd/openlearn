@@ -347,3 +347,99 @@ def test_low_score_cannot_be_offset_by_true_booleans_or_other_dimensions():
     value = judgment()
     value["scores"]["answer_completeness"] = 0.1
     assert evaluation.parse_judgment(json.dumps(value))["passed"] is False
+
+
+def test_judge_separates_actual_answer_from_fixture_focus_and_explanation():
+    fixtures = evaluation.load_fixtures()
+    case = fixtures["cases"][0]
+    missing_reason = fixtures["calibration_cards"][1]["card"]
+    payload = json.loads(evaluation.judge_prompt(case, missing_reason))
+    assert payload["answer_completeness_input"] == {
+        "question": missing_reason["question"], "answer": missing_reason["answer"],
+    }
+    assert set(payload["question_focus_context"]) == {
+        "retrieval_goal", "intended_answer_points", "quality_rubric",
+    }
+    assert "intended_answer_points" not in payload
+    system = evaluation.JUDGE_SYSTEM
+    assert "Read ONLY answer_completeness_input" in system
+    assert "answer_completeness must be false even if the explanation gives a perfect reason" in system
+    assert "Do not require an unasked intended fixture point for answer_completeness" in system
+    assert "can still pass answer_completeness" in system
+
+
+def test_two_selected_cases_keep_three_calibrations_within_seven_calls(isolated):
+    tmp_path, _ = isolated
+    report = run_mock(tmp_path, MockProvider(), max_calls=7,
+                      case_ids=["precision-bias-numbers", "normalization-context"])
+    assert report["actual_calls"] == 7
+    assert len(report["calibration"]) == 3
+    assert report["passed"]
+
+
+@pytest.mark.parametrize("failure,code", [
+    ("word-limit", "new_card_word_limit"),
+    ("missing-excerpts", "missing_supporting_excerpts"),
+    ("invalid-excerpt", "invalid_supporting_excerpt"),
+    ("unsupported-excerpt", "unsupported_source_excerpt"),
+    ("invalid-content", "invalid_card_content"),
+])
+def test_rejected_generation_reports_only_sanitized_parsed_fields(isolated, failure, code):
+    tmp_path, _ = isolated
+    secret = "private-configured-evaluation-credential"
+    provider = MockProvider()
+    case = provider.fixtures["cases"][0]
+    card = deepcopy(provider.fixtures["calibration_cards"][0]["card"])
+    card["answer"] += " " + secret
+    card["sources"] = [{"label": case["sources"][0]["label"], "excerpt": case["sources"][0]["text"]}]
+    card["private_debug"] = "Never retain this arbitrary provider field"
+    if failure == "word-limit":
+        card["question"] = "word " * 25
+    elif failure == "missing-excerpts":
+        card["sources"] = []
+    elif failure == "invalid-excerpt":
+        card["sources"] = [False]
+    elif failure == "unsupported-excerpt":
+        card["sources"][0]["excerpt"] = "An invented unsupported citation containing " + secret
+    else:
+        card["question"] = ""
+    provider.generation_errors[case["id"]] = json.dumps(card)
+    report = run_mock(tmp_path, provider, case_ids=[case["id"]], max_calls=4,
+                      credentials=config.ProviderCredentials("https://example.invalid", "generator-model", secret))
+    row = report["cases"][0]
+    assert row["status"] == "generation_error" and row["failure_code"] == code
+    assert row["generated_card"] is None and not report["passed"]
+    rejected = row["rejected_generation"]
+    assert set(rejected) == {"question", "answer", "explanation", "sources"}
+    assert rejected["answer"] != card["answer"]
+    assert report["actual_calls"] == 4
+    for name in ("report.json", "summary.md"):
+        text = (tmp_path / "run" / name).read_text()
+        assert secret not in text and "private_debug" not in text
+        assert "Never retain this arbitrary" not in text
+    metadata, _ = cli.parse_topic((tmp_path / "run/home/learning-topics/review-evaluation.md").read_text())
+    assert metadata["review_due"] == []
+
+
+def test_generation_diagnostics_bound_fields_and_never_retain_unparsed_text(isolated):
+    tmp_path, _ = isolated
+    provider = MockProvider(generation_errors={
+        "data-quality-desirability": "malformed private-provider-response",
+        "noise-outlier-overlap": cli.OpenLearnError("private-transport-response"),
+    })
+    report = run_mock(tmp_path, provider, case_ids=["data-quality-desirability", "noise-outlier-overlap"], max_calls=5)
+    assert [row["failure_code"] for row in report["cases"]] == ["invalid_json", "provider_or_runtime"]
+    assert all("rejected_generation" not in row for row in report["cases"])
+    assert "private-provider-response" not in (tmp_path / "run/report.json").read_text()
+    assert "private-transport-response" not in (tmp_path / "run/summary.md").read_text()
+    sanitizer = evaluation.EvidenceRecorder(tmp_path / "unused.jsonl", sensitive_values=("secret-value",))
+    raw = json.dumps({"question": "q" * 3000, "answer": "a" * 5000,
+                      "explanation": "e" * 3000, "sources": [
+                          {"label": "l" * 300, "excerpt": "x" * 2000, "unknown": "private"}
+                      ] * 6, "unknown": "private"})
+    diagnostic = evaluation._generation_diagnostic(raw, sanitizer)
+    assert [len(diagnostic[key]) for key in ("question", "answer", "explanation")] == [2000, 4000, 2000]
+    assert len(diagnostic["sources"]) == 4
+    assert all(len(source["label"]) == 256 and len(source["excerpt"]) == 1500 for source in diagnostic["sources"])
+    assert "unknown" not in json.dumps(diagnostic)
+    assert evaluation._generation_diagnostic("x" * 64_001, sanitizer) is None
