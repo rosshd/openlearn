@@ -1,0 +1,262 @@
+{
+  "fixture_version": "review-cards-v1",
+  "rubric_version": "review-card-quality-v1",
+  "description": "Authoritative synthetic teaching notes for bounded review-card evaluation; no learner data.",
+  "cases": [
+    {
+      "id": "data-quality-desirability",
+      "concept": "noise and valid outlier desirability",
+      "retrieval_goal": "Explain why measurement noise is unwanted while a valid unusual outlier can be useful.",
+      "sources": [
+        {
+          "label": "Synthetic data-quality notes",
+          "text": "In these data-quality notes, noise means random measurement error. It is unwanted because it obscures the real signal. An outlier is an observation unusually far from the usual pattern. An outlier can be a valid measurement of a rare real event and can preserve useful information. A valid unusually high temperature may identify a heatwave; removing it merely because it is unusual can discard the event of interest."
+        }
+      ],
+      "required_answer_points": [
+        "Noise is random measurement error in this stated context and obscures real signal.",
+        "A valid outlier may reflect a rare real event and preserve useful information.",
+        "Rarity alone does not justify discarding a valid outlier."
+      ],
+      "quality_rubric": [
+        "The answer addresses every aspect of the actual question, including any requested reason; the explanation cannot repair an omission in the answer.",
+        "The question targets the fixture retrieval goal; required answer points define that intended scope rather than requiring unasked facts in a narrower answer.",
+        "The question supplies necessary numeric inputs or clearly asks recall of a named source experiment; hidden source values are not automatically visible on its front.",
+        "Every factual claim in the question, answer, and explanation is supported by these synthetic sources and preserves their qualifiers.",
+        "The explanation adds a grounded reason or example instead of repeating the answer or giving self-rating instructions.",
+        "A comparison question must put the requested reasons for both desirability judgments in the answer itself."
+      ],
+      "expected_insufficient_source": false
+    },
+    {
+      "id": "noise-outlier-overlap",
+      "concept": "noise and outlier overlap",
+      "retrieval_goal": "Explain why being noisy and being an outlier do not imply one another.",
+      "sources": [
+        {
+          "label": "Synthetic overlap notes",
+          "text": "Here noise refers to measurement error, while outlier refers to an observation far from the usual pattern. A small measurement error can lie within the typical range and therefore need not be an outlier. An extreme observation can be a valid rare event and therefore need not be noise. A large erroneous measurement may be both noisy and an outlier. The categories can overlap, but neither category implies the other."
+        }
+      ],
+      "required_answer_points": [
+        "A noisy measurement may lie in the usual range and need not be an outlier.",
+        "A valid extreme observation can be an outlier without being noise.",
+        "The categories may overlap, but neither implies the other."
+      ],
+      "quality_rubric": [
+        "The answer addresses every aspect of the actual question, including any requested reason; the explanation cannot repair an omission in the answer.",
+        "The question targets the fixture retrieval goal; required answer points define that intended scope rather than requiring unasked facts in a narrower answer.",
+        "The question supplies necessary numeric inputs or clearly asks recall of a named source experiment; hidden source values are not automatically visible on its front.",
+        "Every factual claim in the question, answer, and explanation is supported by these synthetic sources and preserves their qualifiers.",
+        "The explanation adds a grounded reason or example instead of repeating the answer or giving self-rating instructions.",
+        "Do not infer that noise and outliers are disjoint or identical."
+      ],
+      "expected_insufficient_source": false
+    },
+    {
+      "id": "precision-bias-numbers",
+      "concept": "measurement precision versus bias with numbers",
+      "retrieval_goal": "Compare precision and bias for two sensors using their stated means and standard deviations.",
+      "sources": [
+        {
+          "label": "Synthetic sensor experiment",
+          "text": "A reference interval is 100.0 ms. Sensor A has mean 104.0 ms and standard deviation 0.2 ms. Sensor B has mean 100.0 ms and standard deviation 2.0 ms. In this experiment, precision refers to repeatability and is assessed by standard deviation: smaller standard deviation means greater precision. Bias is mean minus the reference value. Sensor A is more precise but has +4.0 ms bias. Sensor B is less precise and has 0.0 ms bias for these stated means. Precision does not establish low bias."
+        }
+      ],
+      "required_answer_points": [
+        "Smaller standard deviation indicates greater measurement precision here.",
+        "Sensor A is more precise, with +4.0 ms bias.",
+        "Sensor B is less precise, with 0.0 ms bias for the stated means.",
+        "Bias compares the mean with the 100.0 ms reference and is distinct from repeatability."
+      ],
+      "quality_rubric": [
+        "The answer addresses every aspect of the actual question, including any requested reason; the explanation cannot repair an omission in the answer.",
+        "The question targets the fixture retrieval goal; required answer points define that intended scope rather than requiring unasked facts in a narrower answer.",
+        "The question supplies necessary numeric inputs or clearly asks recall of a named source experiment; hidden source values are not automatically visible on its front.",
+        "Every factual claim in the question, answer, and explanation is supported by these synthetic sources and preserves their qualifiers.",
+        "The explanation adds a grounded reason or example instead of repeating the answer or giving self-rating instructions.",
+        "Preserve milliseconds, signed bias, and the stated experiment context; do not claim universal sensor accuracy."
+      ],
+      "expected_insufficient_source": false
+    },
+    {
+      "id": "normalization-context",
+      "concept": "min-max normalization with training-range caveats",
+      "retrieval_goal": "Explain this min-max normalization formula and its range and fitting caveats.",
+      "sources": [
+        {
+          "label": "Synthetic preprocessing notes",
+          "text": "These notes use min-max normalization, not every meaning of normalization. For a nonconstant training range, x' = (x - min_train) / (max_train - min_train). Training values at min_train and max_train map to 0 and 1. Fit these extrema on the training data and reuse them on held-out data to avoid leaking held-out information into fitting. A later value outside the training range may map outside [0, 1]. A constant training range makes the displayed denominator zero and needs a separate policy; no such policy is specified here."
+        }
+      ],
+      "required_answer_points": [
+        "The stated transform is min-max scaling using training extrema.",
+        "A nonconstant training range maps its minimum and maximum to 0 and 1.",
+        "Held-out values outside that training range can map outside [0, 1].",
+        "Training extrema are fitted only on training data and a constant range needs a separate policy."
+      ],
+      "quality_rubric": [
+        "The answer addresses every aspect of the actual question, including any requested reason; the explanation cannot repair an omission in the answer.",
+        "The question targets the fixture retrieval goal; required answer points define that intended scope rather than requiring unasked facts in a narrower answer.",
+        "The question supplies necessary numeric inputs or clearly asks recall of a named source experiment; hidden source values are not automatically visible on its front.",
+        "Every factual claim in the question, answer, and explanation is supported by these synthetic sources and preserves their qualifiers.",
+        "The explanation adds a grounded reason or example instead of repeating the answer or giving self-rating instructions.",
+        "Keep the nonconstant-range and held-out-context caveats; do not claim every normalization method or future value lies in [0, 1]."
+      ],
+      "expected_insufficient_source": false
+    },
+    {
+      "id": "classifier-precision-recall",
+      "concept": "binary classifier precision versus recall",
+      "retrieval_goal": "Distinguish classifier precision and recall and compute both for the stated screening example.",
+      "sources": [
+        {
+          "label": "Synthetic classification notes",
+          "text": "This binary screening example defines a positive as a detected disease case. The confusion matrix has TP = 30, FP = 10, and FN = 20. Classifier precision is TP / (TP + FP), the fraction of positive predictions that are true positives: 30 / 40 = 0.75 or 75%. Recall is TP / (TP + FN), the fraction of actual positive cases detected: 30 / 50 = 0.60 or 60%. Here classifier precision is a positive-prediction metric, not the standard-deviation notion of sensor precision. A false negative is a disease case missed by the classifier."
+        }
+      ],
+      "required_answer_points": [
+        "Precision uses positive predictions as its denominator and equals 75%.",
+        "Recall uses actual positives as its denominator and equals 60%.",
+        "The terms refer to binary classification in this screening example."
+      ],
+      "quality_rubric": [
+        "The answer addresses every aspect of the actual question, including any requested reason; the explanation cannot repair an omission in the answer.",
+        "The question targets the fixture retrieval goal; required answer points define that intended scope rather than requiring unasked facts in a narrower answer.",
+        "The question supplies necessary numeric inputs or clearly asks recall of a named source experiment; hidden source values are not automatically visible on its front.",
+        "Every factual claim in the question, answer, and explanation is supported by these synthetic sources and preserves their qualifiers.",
+        "The explanation adds a grounded reason or example instead of repeating the answer or giving self-rating instructions.",
+        "Do not conflate classifier precision with measurement repeatability or swap FP and FN."
+      ],
+      "expected_insufficient_source": false
+    },
+    {
+      "id": "bfs-shortest-path",
+      "concept": "BFS shortest paths and edge-weight limitation",
+      "retrieval_goal": "Explain why BFS finds shortest paths in an unweighted graph and the limitation with unequal weights.",
+      "sources": [
+        {
+          "label": "Synthetic graph notes",
+          "text": "Breadth-first search uses a FIFO queue and explores vertices in layers by number of edges from the start. In an unweighted graph, or when all edge costs are equal, this yields a path with the minimum number of edges and hence minimum total cost. With unequal edge weights, minimum edge count need not minimize total cost. In a graph with A->B cost 10, A->C cost 1, and C->B cost 1, BFS can select the one-edge A->B path although A->C->B has lower total cost 2."
+        }
+      ],
+      "required_answer_points": [
+        "FIFO layer order explains the minimum-edge guarantee.",
+        "The cost guarantee applies to unweighted or equal-edge-cost graphs.",
+        "With unequal weights, a fewest-edge path can cost more than a longer path."
+      ],
+      "quality_rubric": [
+        "The answer addresses every aspect of the actual question, including any requested reason; the explanation cannot repair an omission in the answer.",
+        "The question targets the fixture retrieval goal; required answer points define that intended scope rather than requiring unasked facts in a narrower answer.",
+        "The question supplies necessary numeric inputs or clearly asks recall of a named source experiment; hidden source values are not automatically visible on its front.",
+        "Every factual claim in the question, answer, and explanation is supported by these synthetic sources and preserves their qualifiers.",
+        "The explanation adds a grounded reason or example instead of repeating the answer or giving self-rating instructions.",
+        "Put a requested layer-order reason in the answer, and retain the edge-weight condition."
+      ],
+      "expected_insufficient_source": false
+    },
+    {
+      "id": "idempotency-retry",
+      "concept": "idempotency for repeated same-key requests",
+      "retrieval_goal": "Explain safe retries of the same logical request and conflict behavior when a key is reused with different input.",
+      "sources": [
+        {
+          "label": "Synthetic API contract",
+          "text": "This API stores an idempotency key, a canonical request hash, and the committed receipt atomically with the operation. Repeating the same key and identical canonical request returns the original committed receipt without applying effects again. Reusing that key with a different canonical request is a conflict and must not apply a second operation. A genuinely new logical operation needs a new key. If the server commits but the client times out before seeing the response, retrying the identical key and request recovers the receipt without duplicating the already committed effect."
+        }
+      ],
+      "required_answer_points": [
+        "Same key plus identical canonical request replays the original receipt without duplicate effects.",
+        "Same key plus different canonical request conflicts rather than overwriting or applying again.",
+        "A timeout does not prove the operation was uncommitted; same-request retry can recover the receipt."
+      ],
+      "quality_rubric": [
+        "The answer addresses every aspect of the actual question, including any requested reason; the explanation cannot repair an omission in the answer.",
+        "The question targets the fixture retrieval goal; required answer points define that intended scope rather than requiring unasked facts in a narrower answer.",
+        "The question supplies necessary numeric inputs or clearly asks recall of a named source experiment; hidden source values are not automatically visible on its front.",
+        "Every factual claim in the question, answer, and explanation is supported by these synthetic sources and preserves their qualifiers.",
+        "The explanation adds a grounded reason or example instead of repeating the answer or giving self-rating instructions.",
+        "Do not claim an idempotency key permits arbitrary new input or that a timeout proves failure."
+      ],
+      "expected_insufficient_source": false
+    },
+    {
+      "id": "insufficient-normalization",
+      "concept": "normalization without a supplied definition",
+      "retrieval_goal": "Give the normalization formula and its assumptions only if the source supplies them.",
+      "sources": [
+        {
+          "label": "Synthetic incomplete course note",
+          "text": "Next week the course will discuss normalization. The current note supplies no definition, formula, intended data range, fitting procedure, or assumptions."
+        }
+      ],
+      "required_answer_points": [],
+      "quality_rubric": [
+        "The answer addresses every aspect of the actual question, including any requested reason; the explanation cannot repair an omission in the answer.",
+        "The question targets the fixture retrieval goal; required answer points define that intended scope rather than requiring unasked facts in a narrower answer.",
+        "The question supplies necessary numeric inputs or clearly asks recall of a named source experiment; hidden source values are not automatically visible on its front.",
+        "Every factual claim in the question, answer, and explanation is supported by these synthetic sources and preserves their qualifiers.",
+        "The explanation adds a grounded reason or example instead of repeating the answer or giving self-rating instructions.",
+        "A genuine insufficient-source refusal is expected; general model knowledge cannot fill missing authoritative course facts."
+      ],
+      "expected_insufficient_source": true
+    }
+  ],
+  "calibration_cards": [
+    {
+      "id": "minimum-complete",
+      "fixture_id": "data-quality-desirability",
+      "card": {
+        "question": "Why is noise unwanted, while a valid outlier may be useful?",
+        "answer": "Noise is random measurement error that obscures the real signal. A valid outlier may reflect a rare event and preserve useful information.",
+        "explanation": "A valid unusually high temperature can identify a heatwave; filtering it merely because it is unusual could discard the event of interest.",
+        "sources": [
+          {
+            "label": "Synthetic data-quality notes",
+            "excerpt": "In these data-quality notes, noise means random measurement error. It is unwanted because it obscures the real signal. An outlier is an observation unusually far from the usual pattern. An outlier can be a valid measurement of a rare real event and can preserve useful information. A valid unusually high temperature may identify a heatwave; removing it merely because it is unusual can discard the event of interest."
+          }
+        ]
+      },
+      "expected_pass": true,
+      "expected_failed_criteria": []
+    },
+    {
+      "id": "missing-requested-reasons",
+      "fixture_id": "data-quality-desirability",
+      "card": {
+        "question": "Why is noise unwanted, while a valid outlier may be useful?",
+        "answer": "Noise is random measurement error. An outlier is an unusually distant observation that may be valid.",
+        "explanation": "Noise obscures real signal. A valid unusually high temperature can identify a heatwave.",
+        "sources": [
+          {
+            "label": "Synthetic data-quality notes",
+            "excerpt": "In these data-quality notes, noise means random measurement error. It is unwanted because it obscures the real signal. An outlier is an observation unusually far from the usual pattern. An outlier can be a valid measurement of a rare real event and can preserve useful information. A valid unusually high temperature may identify a heatwave; removing it merely because it is unusual can discard the event of interest."
+          }
+        ]
+      },
+      "expected_pass": false,
+      "expected_failed_criteria": [
+        "answer_completeness"
+      ]
+    },
+    {
+      "id": "unsupported-removal-rule",
+      "fixture_id": "data-quality-desirability",
+      "card": {
+        "question": "Why should noise and all outliers always be removed?",
+        "answer": "Noise is random measurement error that obscures the real signal. All outliers are noise and must always be removed.",
+        "explanation": "Removing unusual observations guarantees more accurate data.",
+        "sources": [
+          {
+            "label": "Synthetic data-quality notes",
+            "excerpt": "In these data-quality notes, noise means random measurement error. It is unwanted because it obscures the real signal. An outlier is an observation unusually far from the usual pattern. An outlier can be a valid measurement of a rare real event and can preserve useful information. A valid unusually high temperature may identify a heatwave; removing it merely because it is unusual can discard the event of interest."
+          }
+        ]
+      },
+      "expected_pass": false,
+      "expected_failed_criteria": [
+        "source_fidelity"
+      ]
+    }
+  ]
+}

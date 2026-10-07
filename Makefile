@@ -4,7 +4,7 @@ REVIEW_DIR ?= .artifacts/review
 RELEASE_CANDIDATE ?= .artifacts/release-candidate
 TYPE ?= feat
 
-.PHONY: test unit pytest lint typecheck smoke e2e oci-live codex-dogfood tutor-behavior-eval outcome-eval package-assets release-build release-verify release-smoke-wheel release-smoke-sdist diff validate check gate review qa-smoke setup-worktree repo-status worktree finish
+.PHONY: test unit pytest lint typecheck smoke e2e oci-live codex-dogfood tutor-behavior-eval outcome-eval review-card-eval package-assets release-build release-verify release-smoke-wheel release-smoke-sdist diff validate check gate review qa-smoke setup-worktree repo-status worktree finish
 
 # --- Individual lanes ---------------------------------------------------------
 
@@ -78,6 +78,11 @@ tutor-behavior-eval:
 outcome-eval:
 	@test -n "$(RUN_ROOT)" || { echo "usage: make outcome-eval RUN_ROOT=<new-private-path> JUDGE_MODEL=<model-distinct-from-tutor> [SCENARIO=<name>]" >&2; exit 2; }
 	PYTHON=$(PYTHON) ./scripts/run-outcome-eval "$(RUN_ROOT)" $(if $(JUDGE_MODEL),--judge-model "$(JUDGE_MODEL)",) $(if $(SCENARIO),--scenario "$(SCENARIO)",)
+
+# Explicit live opt-in only; the mocked harness tests remain in the normal gate.
+review-card-eval:
+	@test -n "$(RUN_ROOT)" || { echo "usage: make review-card-eval RUN_ROOT=<new-private-path> JUDGE_MODEL=<distinct-model> LIVE=1 [GENERATOR_MODEL=<model>] [MAX_CALLS=24] [CASE=<fixture-id>]" >&2; exit 2; }
+	PYTHON=$(PYTHON) ./scripts/run-review-card-eval "$(RUN_ROOT)" --judge-model "$(JUDGE_MODEL)" $(if $(filter 1,$(LIVE)),--live,) $(if $(GENERATOR_MODEL),--generator-model "$(GENERATOR_MODEL)",) $(if $(MAX_CALLS),--max-calls "$(MAX_CALLS)",) $(if $(CASE),--case "$(CASE)",)
 
 diff:
 	git diff --stat
