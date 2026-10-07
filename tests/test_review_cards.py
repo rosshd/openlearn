@@ -74,6 +74,7 @@ def test_explicit_preparation_source_validation_and_offline_reload(home, monkeyp
     assert "Answer every aspect actually asked" in calls[0][0][1]
     assert "reason in the answer itself" in calls[0][0][1]
     assert "cover both sides" in calls[0][0][1]
+    assert "give necessary numeric inputs" in calls[0][0][1]
     card = raw()["review_due"][0]["review_card"]
     assert card["explanation_kind"] == "conceptual"
     assert card["slug"] == "review-course"
