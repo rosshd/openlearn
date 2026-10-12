@@ -22,7 +22,7 @@ LESSON = "**Lesson:**\nA stack removes its most recently pushed item first.\n\nF
 
 
 @pytest.fixture
-def course(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def course(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request):
     monkeypatch.setenv("OPENLEARN_HOME", str(tmp_path))
     monkeypatch.setenv("OPENLEARN_MOCK", "1")
     monkeypatch.setenv("OPENLEARN_BASE_URL", sources.APPROVED_BASE_URL)
@@ -37,7 +37,7 @@ def course(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
                 "weak_spots": ["PRIVATE_WEAK"], "learner_profile": "PRIVATE_PROFILE"}
     topic.path.write_text(cli.format_topic(metadata, "PRIVATE_BODY_NOTES\n\n" + topic.body), encoding="utf-8")
     source = tmp_path / "class-notes.md"
-    source.write_text("A stack removes the last pushed item first.\nThe required rule is last-in, first-out.\n", encoding="utf-8")
+    source.write_text(getattr(request, "param", "A stack removes the last pushed item first.\nThe required rule is last-in, first-out.\n"), encoding="utf-8")
     imported = source_imports.import_course_source(source_imports.CourseSourceImportRequest(
         "class-stack", source_imports.LocalFileSource(source), sources.APPROVED_MODEL,
     ))
@@ -81,9 +81,100 @@ def test_web_source_preview_is_local_and_filtered(course):
     assert sources.APPROVED_MODEL in result["disclosure"]
     assert "last pushed item" in result["preview"]
     assert "PRIVATE_GOAL" not in result["preview"]
+    assert result["request"] == "quiz me on the stack"
+    assert result["sources"][0]["name"] == "class-notes.md"
+    assert "last pushed item" in "\n".join(result["sources"][0]["passages"])
     judge.assert_not_called()
     tutor.assert_not_called()
     assert (topic.path.read_bytes(), cli.load_state(topic.slug)) == before
+
+
+INTRO_SOURCE = "Stacks store items in insertion order.\nPopping removes the most recently added item.\n"
+
+
+@pytest.mark.parametrize("course", [INTRO_SOURCE], indirect=True)
+def test_first_continue_previews_introductory_prose_without_keyword_overlap(course):
+    from openlearn.web.services import OpenLearnWebServices
+    topic, record = course
+    before = topic.path.read_bytes(), copy.deepcopy(cli.load_state(topic.slug))
+    with mock.patch.object(cli, "call_openai") as judge, mock.patch.object(cli, "call_openai_streaming") as tutor:
+        result = OpenLearnWebServices().preview_source_turn(topic.slug, web_request(topic, intent="next", text=""))
+    assert result["ok"], result
+    assert "Popping removes" in result["preview"]
+    assert record.source_id in result["preview"]
+    assert "Introductory excerpts" in result["preview"]
+    assert "PRIVATE_GOAL" not in result["preview"]
+    judge.assert_not_called()
+    tutor.assert_not_called()
+    assert (topic.path.read_bytes(), cli.load_state(topic.slug)) == before
+
+
+@pytest.mark.parametrize("course", [INTRO_SOURCE], indirect=True)
+def test_first_continue_uses_approved_introductory_excerpts_when_generating(course):
+    from openlearn import tutor_service
+    from openlearn.web.services import OpenLearnWebServices
+    topic, record = course
+    service = OpenLearnWebServices()
+    request = web_request(topic, intent="next", text="")
+    preview = service.preview_source_turn(topic.slug, request)
+    assert preview["ok"], preview
+    request.source_approval = preview["approval"]
+    with mock.patch.object(cli, "call_openai_streaming", return_value=LESSON) as tutor, ThreadPoolExecutor(max_workers=1) as executor, mock.patch.object(tutor_service, "_EXECUTOR", executor):
+        service.submit_turn(topic.slug, request)
+    operation = tutor_service.operation_status(topic.slug, request.submission_id)
+    assert operation.status == "committed", operation.error_message
+    tutor.assert_called_once()
+    assert "Popping removes" in str(tutor.call_args)
+    assert "PRIVATE_GOAL" not in str(tutor.call_args)
+    assert record.source_id in cli.topic_events_path(topic.slug).read_text()
+    assert record.source_id not in cli.read_topic(topic.slug).body
+
+
+@pytest.mark.parametrize("course", [INTRO_SOURCE], indirect=True)
+@pytest.mark.parametrize("state", ["focused-question", "later-lesson", "pending-check", "stale", "missing"])
+def test_introductory_fallback_does_not_bypass_scope_or_source_validation(course, state):
+    topic, record = course
+    user = "Continue to the next useful concept."
+    if state == "focused-question":
+        user = "Explain photosynthesis"
+    elif state == "later-lesson":
+        cli.append_session(topic, "next", "Continue", LESSON)
+        topic = cli.read_topic(topic.slug)
+    elif state == "pending-check":
+        topic = replace(topic, metadata={**topic.metadata, "pending_question": {"question": "Which plant absorbs sunlight?"}})
+    elif state == "stale":
+        (cli.topic_context_dir(topic.slug) / record.context_file).write_text("Changed text", encoding="utf-8")
+    else:
+        (cli.topic_context_dir(topic.slug) / record.context_file).unlink()
+    with pytest.raises(cli.OpenLearnError, match="No usable class excerpt"):
+        sources.snapshot(topic, user, sources.APPROVED_MODEL, opted_in=True)
+
+
+@pytest.mark.parametrize("course", ["email: synthetic@example.invalid\n\n" + INTRO_SOURCE + "\n" + "x" * 1700], indirect=True)
+def test_introductory_fallback_keeps_screening_and_excerpt_limits(course):
+    topic, _ = course
+    context = sources.snapshot(topic, "Continue to the next useful concept.", sources.APPROVED_MODEL, opted_in=True)
+    assert "Popping removes" in context.prompt
+    assert "synthetic@example.invalid" not in context.prompt
+    assert "x" * 1700 not in context.prompt
+    assert len(context.prompt) <= sources.PROMPT_CHAR_LIMIT
+
+
+@pytest.mark.parametrize("configured,reason", [(False, "Add an API key, then test the connection."), (True, "Test this provider before starting a lesson.")])
+def test_source_preview_reports_provider_setup_before_source_selection(course, configured, reason):
+    from fastapi.testclient import TestClient
+    from openlearn.web.app import create_app
+    from openlearn.web.services import OpenLearnWebServices
+    topic, _ = course
+    service = OpenLearnWebServices()
+    with TestClient(create_app(services=service, testing=True)) as client:
+        page = client.get(f"/courses/{topic.slug}")
+        with mock.patch.object(service, "provider_status", return_value={"ready": False, "key_configured": configured, "reason": reason}), mock.patch.object(service, "ensure_provider_ready", side_effect=AssertionError("network validation")), mock.patch.object(service, "preview_source_turn", return_value={"ok": False, "error": "No usable class excerpt"}) as preview:
+            response = client.post(f"/api/courses/{topic.slug}/source-preview", headers={"x-csrf-token": page.cookies["openlearn_csrf"]}, json=web_request(topic, intent="next", text="").model_dump())
+    assert response.status_code == 428
+    assert response.json()["state"] == "setup_required"
+    assert response.json()["error"] == reason
+    preview.assert_not_called()
 
 
 @pytest.mark.parametrize("change", ["missing", "request", "source", "state"])
@@ -126,7 +217,8 @@ def test_web_worker_uses_consented_scope_and_saves_check(course):
     assert operation.status == "committed", operation.error_message
     assert len(calls) == 1
     assert "PRIVATE_GOAL" not in str(calls)
-    assert record.source_id in cli.read_topic(topic.slug).body
+    assert record.source_id in cli.topic_events_path(topic.slug).read_text()
+    assert record.source_id not in cli.read_topic(topic.slug).body
     assert cli.load_state(topic.slug)["pending_question"]["answer_key"] == "B"
     finish.assert_not_called()
 
@@ -237,7 +329,8 @@ def test_source_locator_repair_is_buffered_and_failure_preserves_state(course, r
             answer = cli.ask_topic(topic.slug, 'Explain the stack rule', source_mode=True,
                                    input_func=consent, output_func=output.append, turn_observer=observer)
             assert good in answer and bad not in answer
-            assert sources.LEDGER_MARKER in answer
+            assert sources.LEDGER_MARKER not in answer
+            assert "source_context_used" in cli.topic_events_path(topic.slug).read_text()
         else:
             with pytest.raises(cli.OpenLearnError, match='unsupported source references'):
                 cli.ask_topic(topic.slug, 'Explain the stack rule', source_mode=True,
@@ -373,8 +466,10 @@ def test_practice_sources_saved_once_without_contaminating_pending_check(course)
                                input_func=consent, output_func=lambda _: None)
     finish.assert_not_called()
     assert len(calls) == 1
-    assert record.source_id in answer
-    assert "Source excerpts provided:" in cli.read_topic(topic.slug).body
+    assert record.source_id not in answer
+    assert record.source_id in cli.topic_events_path(topic.slug).read_text()
+    assert "Source excerpts provided:" not in cli.read_topic(topic.slug).body
+    assert "source_context_used" in cli.topic_events_path(topic.slug).read_text()
     pending = cli.load_state(topic.slug)["pending_question"]
     assert pending["answer_key"] == "B"
     assert "Source excerpts" not in pending["question"]
@@ -459,7 +554,8 @@ def test_first_lesson_ledger_does_not_create_false_coverage_or_break_validation(
     with mock.patch.object(cli, "call_openai_streaming", return_value=LESSON), mock.patch.object(cli, "finish_turn_update"):
         answer = cli.ask_topic(topic.slug, cli.lesson_policy.COURSE_INITIALIZATION_PROMPT,
                                source_mode=True, input_func=consent, output_func=lambda _: None)
-    assert "Source excerpts provided:" in answer
+    assert "Source excerpts provided:" not in answer
+    assert "source_context_used" in cli.topic_events_path(topic.slug).read_text()
     assert sources.without_ledger(answer) == LESSON
     assert not cli.load_state(topic.slug).get("slide_coverage")
 
@@ -594,12 +690,13 @@ def test_public_cli_confirmation_flow_saves_visible_provenance(course):
                             env={**os.environ, "PYTHONPATH": str(Path(cli.__file__).parents[1])})
     assert result.returncode == 0, result.stderr
     assert "screened source-mode request preview" in result.stdout
-    assert "Source excerpts provided:" in cli.read_topic(topic.slug).body
+    assert "Source excerpts provided:" not in cli.read_topic(topic.slug).body
+    assert "source_context_used" in cli.topic_events_path(topic.slug).read_text()
     assert record.source_id in result.stdout
     assert "PRIVATE_PROFILE" not in result.stdout
 
 
-def test_web_history_readback_preserves_source_ledger_without_html_execution(course):
+def test_web_history_readback_hides_provenance_saved_separately(course):
     pytest.importorskip("fastapi")
     from fastapi.testclient import TestClient
     from openlearn.web import create_app
@@ -609,7 +706,35 @@ def test_web_history_readback_preserves_source_ledger_without_html_execution(cou
     with TestClient(create_app(testing=True)) as client:
         response = client.get(f"/courses/{topic.slug}/history", headers={"accept": "application/json"})
         assert response.status_code == 200
-        assert record.source_id in response.json()["items"][0]["content"]
+        assert record.source_id not in response.json()["items"][0]["content"]
+        assert "stack" in response.json()["items"][0]["content"]
+        assert record.source_id in cli.topic_events_path(topic.slug).read_text()
         html = client.get(f"/courses/{topic.slug}/history")
         assert html.status_code == 200
-        assert "Source excerpts provided:" in html.text
+        assert "Source excerpts provided:" not in html.text
+
+
+def test_readable_sources_merge_overlaps_without_inventing_gap_text(course):
+    topic, _ = course
+    context = sources.snapshot(topic, "quiz me on the stack", sources.APPROVED_MODEL, opted_in=True)
+    context = replace(context, excerpts=(
+        sources.SourceExcerpt("a.txt", "notes.docx", 2, "two\nthree\n"),
+        sources.SourceExcerpt("a.txt", "notes.docx", 1, "one\ntwo\n"),
+        sources.SourceExcerpt("a.txt", "notes.docx", 6, "six\n"),
+        sources.SourceExcerpt("b.txt", "notes.docx", 1, "different document\n"),
+    ))
+    assert sources.learner_sources(context) == [
+        {"name": "notes.docx", "passages": ["one\ntwo\nthree", "six"]},
+        {"name": "notes.docx", "passages": ["different document"]},
+    ]
+
+
+def test_readable_sources_only_contain_selected_screened_text(course):
+    topic, record = course
+    context = sources.snapshot(topic, "quiz me on the stack", sources.APPROVED_MODEL, opted_in=True)
+    assert context.excerpts
+    for excerpt in context.excerpts:
+        assert excerpt.text in context.prompt
+        assert excerpt.context_file == record.context_file
+        assert sources.screened(excerpt.text, sources.EXCERPT_CHAR_LIMIT) == excerpt.text.rstrip()
+    assert "PRIVATE_" not in json.dumps(sources.learner_sources(context))

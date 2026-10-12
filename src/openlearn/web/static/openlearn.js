@@ -1349,6 +1349,31 @@ async function approveSourceRequest(payload) {
     if (!result.ok) throw new Error(result.error || "Source preview is unavailable.");
     dialog.querySelector("[data-source-disclosure]").textContent = result.disclosure;
     dialog.querySelector("[data-source-preview-text]").textContent = result.preview;
+    dialog.querySelector("[data-source-request]").textContent = result.request;
+    const excerpts = dialog.querySelector("[data-source-excerpts]");
+    excerpts.replaceChildren();
+    for (const source of result.sources) {
+      const section = document.createElement("section");
+      section.className = "source-preview-document";
+      const name = document.createElement("h4");
+      name.textContent = source.name;
+      section.append(name);
+      for (const [index, text] of source.passages.entries()) {
+        if (index) {
+          const gap = document.createElement("p");
+          gap.className = "source-preview-note";
+          gap.textContent = "Text between excerpts is not included.";
+          section.append(gap);
+        }
+        const passage = document.createElement("p");
+        passage.className = "source-preview-passage";
+        passage.textContent = text;
+        section.append(passage);
+      }
+      excerpts.append(section);
+    }
+    dialog.querySelectorAll("details").forEach((details) => { details.open = false; });
+    dialog.querySelector(".dialog-request").scrollTop = 0;
     return await new Promise((resolve) => {
       const finish = (approved) => {
         dialog.close();
@@ -1362,6 +1387,7 @@ async function approveSourceRequest(payload) {
       dialog.querySelector("[data-source-cancel]").onclick = () => finish(false);
       dialog.querySelector("[data-source-send]").onclick = () => finish(true);
       dialog.showModal();
+      dialog.querySelector("#source-preview-title").focus();
     });
   } finally {
     sourcePreviewInFlight = false;
@@ -1385,7 +1411,9 @@ async function submitTurn(overrideIntent = null) {
   try {
     if (!await approveSourceRequest(payload)) return;
   } catch (error) {
-    setOperationState(error.message, true);
+    setOperationState(error.message, true, {
+      show_provider_recovery: error.payload?.state === "setup_required",
+    });
     return;
   }
   lockTurnForm(true);
@@ -1642,6 +1670,10 @@ chatForm?.addEventListener("submit", async (event) => {
     if (completed.state === "committed") {
       chatForm.elements.text.value = "";
       storeChatDraft();
+      if (result.starts_source_course) {
+        window.location.assign(appUrl(`/courses/${encodeURIComponent(focusShell.dataset.courseSlug)}`));
+        return;
+      }
       chatForm.elements.submission_id.value = crypto.randomUUID();
       await refreshChat();
       setChatStatus("Answered. Your lesson is still open.");
@@ -1760,7 +1792,7 @@ for (const button of document.querySelectorAll("[data-drawer-toggle]")) {
 
 for (const close of document.querySelectorAll("[data-drawer-close]")) close.addEventListener("click", closeDrawers);
 document.addEventListener("keydown", (event) => {
-  if (event.key !== "Escape") return;
+  if (event.key !== "Escape" || document.querySelector("dialog[open]")) return;
   if (
     toolSurface
     && !toolSurface.hidden

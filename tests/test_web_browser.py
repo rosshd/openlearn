@@ -1756,10 +1756,10 @@ def test_real_browser_reads_cli_source_provenance_after_restart(
                 page = browser.new_page(viewport={"width": 320, "height": 720})
                 page.goto(bootstrap_url)
                 page.goto(f"{app_url}/courses/stack-notes/history")
-                playwright.expect(page.locator(".history-list")).to_contain_text("Source excerpts provided:")
-                playwright.expect(page.locator(".history-list")).to_contain_text(record.source_id)
+                playwright.expect(page.locator(".history-list")).not_to_contain_text("Source excerpts provided:")
+                playwright.expect(page.locator(".history-list")).not_to_contain_text(record.source_id)
                 page.reload()
-                playwright.expect(page.locator(".history-list")).to_contain_text("extracted text lines")
+                playwright.expect(page.locator(".history-list")).to_contain_text("A stack removes the last item pushed.")
                 assert page.locator('input[name="source_mode"]').count() == 0
                 assert cli.topic_path("stack-notes").read_bytes() == before
                 page.goto(f"{app_url}/courses/stack-notes")
@@ -1778,7 +1778,7 @@ def test_real_browser_reads_cli_source_provenance_after_restart(
                 playwright.expect(page.locator("[data-source-preview]")).to_be_visible()
                 page.locator("[data-source-send]").click()
                 playwright.expect(page.locator("[data-chat-status]")).to_contain_text("Answered.", timeout=10000)
-                playwright.expect(page.locator("[data-chat-conversation]")).to_contain_text("Source excerpts provided:")
+                playwright.expect(page.locator("[data-chat-conversation]")).not_to_contain_text("Source excerpts provided:")
                 browser.close()
         finally:
             process.terminate()
@@ -2074,7 +2074,20 @@ def test_source_creation_user_entrypoints_navigation_drafts_and_consent(tmp_path
                    "OPENLEARN_MODEL": "deepseek/deepseek-v4.1-flash"}
     for name in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENLEARN_API_KEY", "OPENROUTER_API_KEY"):
         environment.pop(name, None)
-    command = f"from openlearn.web.launcher import run; run(port={port}, open_browser=False)"
+    command = f"""
+import json, re
+from openlearn import cli
+from openlearn.web.launcher import run
+original = cli.call_openai
+def provider(model, system, user, **kwargs):
+    if system.startswith("Build a short learning sequence"):
+        identity = re.search(r"source ID ([^;\\s]+)", system).group(1)
+        return json.dumps({{"concepts": [{{"label": "Fractions", "objective": "Explain equal parts of a whole.", "source_ids": [identity]}}]}})
+    return original(model, system, user, **kwargs)
+cli.call_openai = provider
+cli.call_openai_streaming = lambda **kwargs: "**Lesson:**\\nA fraction describes equal parts of a whole.\\n\\nFor example, one of four equal pizza slices is one quarter.\\n<!-- covered: Fractions -->"
+run(port={port}, open_browser=False)
+"""
     with (tmp_path / "source-creation-web.log").open("wb") as log:
         process = subprocess.Popen([sys.executable, "-c", command], cwd=tmp_path,
                                    env=environment, stdout=log, stderr=subprocess.STDOUT)
@@ -2187,37 +2200,76 @@ def test_source_creation_user_entrypoints_navigation_drafts_and_consent(tmp_path
                 page.wait_for_url("**/courses/synthetic-quick-learn?tool=chat")
                 assert page.locator("[data-source-mode]").is_checked()
                 assert "Corrected Quick Learn" in page.locator(".focus-identity").inner_text()
-                page.get_by_label("Your question", exact=True).fill("Teach me about equal parts.")
                 before_preview = (home / "learning-topics" / "synthetic-quick-learn.md").read_bytes()
+                assert page.locator("#move-title").inner_text() == "Ready to learn"
+                assert page.locator("#move-title").evaluate("e => parseFloat(getComputedStyle(e).fontSize)") <= 24
+                assert page.locator(".slide-takeaway").count() == 0
+                page.screenshot(path=str(tmp_path / "ready-state.png"))
+                # A first Continue must work without source keywords in its request.
+                page.get_by_role("button", name="Continue", exact=True).click()
+                page.locator("[data-source-preview]").wait_for(state="visible")
+                assert "equal parts" in page.locator("[data-source-excerpts]").inner_text()
+                assert "Introductory excerpts" in page.locator("[data-source-preview-text]").text_content()
+                page.locator("[data-source-cancel]").click()
+                assert (home / "learning-topics" / "synthetic-quick-learn.md").read_bytes() == before_preview
+                page.route("**/source-preview", lambda route: route.fulfill(
+                    status=428, content_type="application/json",
+                    body=json.dumps({"error": "Test this provider before starting a lesson.", "state": "setup_required"}),
+                ))
+                page.get_by_role("button", name="Continue", exact=True).click()
+                playwright.expect(page.locator("[data-operation-message]")).to_contain_text("Test this provider")
+                playwright.expect(page.locator("[data-provider-recovery]")).to_be_visible()
+                assert not page.locator("[data-source-preview]").is_visible()
+                page.unroute("**/source-preview")
+                page.get_by_label("Your question", exact=True).fill("Teach me about equal parts.")
                 page.get_by_role("button", name="Ask tutor", exact=True).click()
                 page.locator("[data-source-preview]").wait_for(state="visible")
-                assert "equal parts" in page.locator("[data-source-preview-text]").inner_text()
+                assert "equal parts" in page.locator("[data-source-excerpts]").inner_text()
+                assert page.get_by_role("heading", name="Send these excerpts to your tutor?").is_visible()
+                assert page.locator("[data-source-request]").inner_text() == "Teach me about equal parts."
+                assert page.locator("[data-source-excerpts] h4").inner_text() == "fractions.md"
+                assert not page.locator("[data-source-preview-text]").is_visible()
+                screenshots = Path(__file__).resolve().parents[1] / ".artifacts" / "source-dialog-qa"
+                screenshots.mkdir(parents=True, exist_ok=True)
+                manifest = []
                 for theme in ("light", "dark"):
                     page.evaluate("theme => setTheme(theme)", theme)
                     for width, height in ((390, 844), (768, 1024), (1280, 800), (1600, 1000)):
                         page.set_viewport_size({"width": width, "height": height})
                         _assert_no_page_overflow(page)
                         dialog = page.locator("[data-source-preview]")
+                        dialog.locator("details").evaluate_all("elements => elements.forEach(e => {e.open = false;})")
+                        dialog.locator(".dialog-request").evaluate("e => {e.scrollTop = 0;}")
+                        page.screenshot(path=str(screenshots / f"{theme}-{width}.png"))
+                        manifest.append({"state": "approval", "theme": theme, "viewport": [width, height], "page_width": page.evaluate("document.documentElement.scrollWidth"), "errors": list(errors)})
+                        page.get_by_text("Technical details", exact=True).click()
+                        assert page.locator("[data-source-preview-text]").is_visible()
+                        dialog.locator(".dialog-request").evaluate("e => {e.scrollTop = e.scrollHeight;}")
                         assert dialog.evaluate("e => e.scrollWidth <= e.clientWidth")
                         for control in ("[data-source-cancel]", "[data-source-send]", "#source-preview-title"):
                             assert page.locator(control).evaluate("e => { const r = e.getBoundingClientRect(); return r.top >= 0 && r.bottom <= innerHeight; }"), page.locator(control).evaluate("e => {const d=e.closest('dialog'),p=d.querySelector('pre');return JSON.stringify({control:e.outerHTML,rect:e.getBoundingClientRect().toJSON(),height:innerHeight,dialog:d.getBoundingClientRect().toJSON(),modal:d.matches(':modal'),position:getComputedStyle(d).position,preHeight:getComputedStyle(p).maxHeight,pre:p.getBoundingClientRect().toJSON()});}")
+                (screenshots / "manifest.json").write_text(json.dumps(manifest, indent=2))
                 page.set_viewport_size({"width": 390, "height": 844})
                 draft = page.get_by_label("Your question", exact=True).input_value()
                 page.locator("[data-source-cancel]").click()
                 assert page.get_by_label("Your question", exact=True).input_value() == draft
                 page.get_by_role("button", name="Ask tutor", exact=True).click()
                 page.locator("[data-source-preview]").wait_for(state="visible")
-                page.locator("[data-source-cancel]").click()
+                assert not page.locator("[data-source-preview-text]").is_visible()
+                page.keyboard.press("Escape")
+                assert not page.locator("[data-source-preview]").is_visible()
+                assert page.get_by_role("button", name="Ask tutor", exact=True).is_visible()
+                assert page.get_by_label("Your question", exact=True).input_value() == draft
                 assert (home / "learning-topics" / "synthetic-quick-learn.md").read_bytes() == before_preview
                 assert page.locator(".chat-exchange").count() == 0
                 # Explicit approval now runs a mock source lesson, then survives resume.
                 page.get_by_role("button", name="Ask tutor", exact=True).click()
                 page.locator("[data-source-preview]").wait_for(state="visible")
                 page.locator("[data-source-send]").click()
-                playwright.expect(page.locator(".chat-exchange")).to_have_count(1)
-                assert "Source excerpts provided:" in page.locator(".chat-exchange").inner_text()
+                playwright.expect(page.locator("[data-current-move]")).to_contain_text("pizza slices", timeout=10000)
+                assert "Source excerpts provided:" not in page.locator("[data-current-move]").inner_text()
                 page.reload()
-                playwright.expect(page.locator(".chat-exchange")).to_have_count(1)
+                playwright.expect(page.locator("[data-current-move]")).to_contain_text("pizza slices")
                 # Custom creation uses the same importer, with no source by default.
                 page.goto(f"{app_url}/courses/new")
                 page.get_by_role("button", name="Remove", exact=True).click()

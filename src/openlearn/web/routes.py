@@ -1179,6 +1179,15 @@ async def preview_source_turn(request: Request, slug: str) -> JSONResponse:
         payload = TutorSubmissionRequest.model_validate(await request.json())
     except (ValidationError, ValueError):
         return _json_error("Check the source-mode request.")
+    # Preview is local: report configuration problems without testing the
+    # connection or contacting a provider before the learner approves anything.
+    status = public_mapping(await _call(request, "provider_status"))
+    if not status.get("ready"):
+        return _setup_required(
+            request,
+            next_path=str(request.url_for("focus", slug=slug).path),
+            message=str(status.get("reason") or "Test the provider connection before starting a lesson."),
+        )
     result = public_mapping(await _call(request, "preview_source_turn", slug, payload))
     return JSONResponse(result, status_code=200 if result.get("ok") else 422)
 

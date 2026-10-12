@@ -4189,44 +4189,23 @@ class CliStorageTests(unittest.TestCase):
         self.assertEqual(output, ["Extracted 1 pages from lecture.pdf"])
 
     def test_docx_import_extracts_paragraph_text(self) -> None:
+        from docx import Document
+
         source = Path(self.home.name) / "lecture.docx"
-        source.write_bytes(b"fake docx")
-        original_docx = sys.modules.get("docx")
-
-        class FakeDocument:
-            paragraphs = [
-                types.SimpleNamespace(text="First paragraph"),
-                types.SimpleNamespace(text="Second paragraph"),
-            ]
-
-        sys.modules["docx"] = types.SimpleNamespace(Document=lambda _path: FakeDocument())
-        try:
-            text = cli._extract_docx_text(source)
-        finally:
-            if original_docx is None:
-                sys.modules.pop("docx", None)
-            else:
-                sys.modules["docx"] = original_docx
-
-        self.assertEqual(text, "First paragraph\nSecond paragraph")
+        document = Document()
+        document.add_paragraph("First paragraph")
+        document.add_paragraph("Second paragraph")
+        document.save(source)
+        self.assertEqual(cli._extract_docx_text(source), "First paragraph\nSecond paragraph")
 
     def test_read_pending_context_accepts_docx(self) -> None:
+        from docx import Document
+
         source = Path(self.home.name) / "lecture.docx"
-        source.write_bytes(b"fake docx")
-        original_docx = sys.modules.get("docx")
-
-        class FakeDocument:
-            paragraphs = [types.SimpleNamespace(text="Docx lecture text")]
-
-        sys.modules["docx"] = types.SimpleNamespace(Document=lambda _path: FakeDocument())
-        try:
-            context = cli.read_pending_context(source)
-        finally:
-            if original_docx is None:
-                sys.modules.pop("docx", None)
-            else:
-                sys.modules["docx"] = original_docx
-
+        document = Document()
+        document.add_paragraph("Docx lecture text")
+        document.save(source)
+        context = cli.read_pending_context(source)
         self.assertEqual(context.filename, "lecture.txt")
         self.assertEqual(context.text, "Docx lecture text")
 

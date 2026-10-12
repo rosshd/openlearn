@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+from dataclasses import replace
 from hashlib import sha256
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +20,7 @@ from openlearn import (
     providers,
     review_cards,
     source_context,
+    source_lessons,
     source_imports,
     tutor_service,
     video_tools,
@@ -653,10 +655,20 @@ class OpenLearnWebServices:
     def __init__(self) -> None:
         self._validated_provider_fingerprint = ""
 
+    @staticmethod
+    def _provider_fingerprint(credentials: config.ProviderCredentials) -> str:
+        return sha256("\0".join((
+            credentials.base_url, credentials.model, credentials.api_key or "",
+        )).encode("utf-8")).hexdigest()
+
     def provider_status(self) -> dict[str, object]:
         try:
             status = application.provider_status()
             saved_config = config.read_config()
+            if status.managed_fields and self._validated_provider_fingerprint:
+                credentials = config.effective_provider_credentials()
+                if self._provider_fingerprint(credentials) == self._validated_provider_fingerprint:
+                    status = replace(status, verified=True)
         except config.ConfigError:
             selected = providers.PROVIDER_PRESETS["openrouter"]
             return {
@@ -717,15 +729,7 @@ class OpenLearnWebServices:
             credentials = config.effective_provider_credentials()
         except config.ConfigError:
             return status
-        fingerprint = sha256(
-            "\0".join(
-                (
-                    credentials.base_url,
-                    credentials.model,
-                    credentials.api_key or "",
-                )
-            ).encode("utf-8")
-        ).hexdigest()
+        fingerprint = self._provider_fingerprint(credentials)
         if status.get("managed") and fingerprint == self._validated_provider_fingerprint:
             return {**status, "ready": True, "verified": True, "reason": ""}
         validation = providers.validate_provider(credentials.base_url, credentials.api_key)
@@ -2028,6 +2032,14 @@ class OpenLearnWebServices:
         requires_response = bool(prompt)
         presented_answer = _without_check_section(answer) if prompt else answer
         response_kind, blocks = _present_response(presented_answer)
+        ready = (latest is None or source_lessons.needs_plan(topic)) and not prompt
+        if ready:
+            move_title = "Ready to learn"
+            blocks = [{"kind": "paragraph", "text": (
+                "Continue to build a learning sequence from your source and start the first concept."
+                if source_lessons.needs_plan(topic)
+                else "Continue to start your first lesson, or ask a question."
+            )}]
         if prompt and not blocks:
             response_kind = "Check"
         move_kind = "Current lesson" if response_kind == "Lesson" else response_kind
@@ -2078,6 +2090,7 @@ class OpenLearnWebServices:
         return {
             "slug": slug,
             "source_start": bool(topic.metadata.get("web_source_start")) and revision == 0,
+            "source_mode_enabled": bool(topic.metadata.get("web_source_start")),
             "title": snapshot.card.title,
             "current_unit": move_title,
             "revision": revision,
@@ -2085,6 +2098,7 @@ class OpenLearnWebServices:
             "move": {
                 "kind": move_kind,
                 "title": move_title,
+                "ready": ready,
                 "blocks": blocks,
                 "prompt": prompt,
                 "position": f"Step {max(1, revision)}",
@@ -2121,6 +2135,8 @@ class OpenLearnWebServices:
                         request.source_lesson_revision, context.revision, preview))
         return {"ok": True, "disclosure": source_context.CONSENT_TEXT + " The stored grading key is sent when needed but hidden in this learner preview.",
                 "preview": source_context.learner_request_preview(context),
+                "request": context.user,
+                "sources": source_context.learner_sources(context),
                 "approval": sha256(binding.encode()).hexdigest()}, preview
 
     def preview_source_turn(self, slug: str, request: TutorSubmissionRequest) -> dict[str, object]:
@@ -2128,6 +2144,7 @@ class OpenLearnWebServices:
 
     def submit_turn(self, slug: str, request: TutorSubmissionRequest) -> dict[str, object]:
         source_preview = None
+        starts_source_course = request.source_mode and source_lessons.needs_plan(cli.read_topic(slug))
         if request.source_mode:
             result, source_preview = self._preview_source_turn(slug, request)
             if not result.get("ok") or request.source_approval != result.get("approval"):
@@ -2183,7 +2200,7 @@ class OpenLearnWebServices:
                 model=config.configured_model(),
                 session_kind=(
                     cli.SIDE_CHAT_SESSION_KIND
-                    if request.intent in {"question", "stuck"}
+                    if request.intent in {"question", "stuck"} and not starts_source_course
                     else "chat"
                 ),
                 progression_intent=progression_intent,
@@ -2200,6 +2217,7 @@ class OpenLearnWebServices:
             "state": result.status,
             "submission_id": result.submission_id,
             "operation_id": result.submission_id,
+            "starts_source_course": starts_source_course,
             "message_kind": result.message_kind,
             "move": _move(result.move),
         }
@@ -2291,7 +2309,7 @@ class OpenLearnWebServices:
                     "blocks": blocks,
                     "content": "\n\n".join(
                         str(block.get("text", ""))
-                        if block["kind"] in {"paragraph", "code", "math"}
+                        if "text" in block
                         else "\n".join(str(item) for item in block.get("items", []))
                         for block in blocks
                     ),
