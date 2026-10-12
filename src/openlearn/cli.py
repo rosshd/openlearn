@@ -10095,35 +10095,28 @@ def generate_validated_tutor_answer(
 
         if stream_sink is not None:
             stream_sink("")
-        if attempt == 0:
-            user = prompt
-        elif first_lesson_initializing:
-            user = lesson_policy.first_lesson_repair_prompt(prompt)
-        else:
-            user = tutor_contract_repair_prompt(
-                candidate,
-                require_check=require_check,
-                forbid_check=forbid_check,
-                forbid_choice_claim=forbid_choice_claim,
+        if source_context is not None:
+            user = sources.generation_user(
+                prompt, initializing=first_lesson_initializing, repair=attempt > 0,
+                candidate=candidate, require_check=require_check, forbid_check=forbid_check,
+                forbid_choice_claim=forbid_choice_claim, reference_error=bool(source_reference_error),
             )
-            if source_context is not None:
-                # Only the bounded screened draft may be resent for repair.
-                candidate = sources.screened(candidate, 2000)
+        else:
+            if attempt == 0:
+                user = prompt
+            elif first_lesson_initializing:
+                user = lesson_policy.first_lesson_repair_prompt(prompt)
+            else:
                 user = tutor_contract_repair_prompt(
                     candidate, require_check=require_check, forbid_check=forbid_check,
                     forbid_choice_claim=forbid_choice_claim,
                 )
-        if first_lesson_initializing:
-            user = lesson_policy.initialization_generation_prompt(user)
+            if first_lesson_initializing:
+                user = lesson_policy.initialization_generation_prompt(user)
         if source_context is not None:
-            if source_reference_error:
-                user += (
-                    "\n" + source_reference_error
-                    + " Omit unsupported source references. Keep source identifiers and audit metadata out of learner-facing prose."
-                )
             sources.ensure_unchanged(topic, source_context, model)
             if len(system) + len(user) > sources.PROMPT_CHAR_LIMIT:
-                raise OpenLearnError("Source request exceeds its budget; no request was sent.")
+                raise sources.SourceRequestBudgetError()
         stream_options = (
             {"stream_sink": stream_sink}
             if stream_sink is not None and not first_lesson_initializing and source_context is None
@@ -10152,7 +10145,9 @@ def generate_validated_tutor_answer(
                 source_reference_error = "Tutor returned internal source audit metadata."
             if source_reference_error:
                 if attempt == 1:
-                    raise OpenLearnError(
+                    from openlearn.source_lessons import SourceLessonError
+
+                    raise SourceLessonError(
                         "Tutor returned unsupported source references. "
                         "The previous question and your answer were preserved for retry."
                     )
@@ -10216,6 +10211,10 @@ def generate_validated_tutor_answer(
             if source_context is not None and stream_sink is not None:
                 stream_sink(sanitize_model_output(candidate))
             return candidate
+    if source_context is not None:
+        from openlearn.source_lessons import SourceLessonError
+
+        raise SourceLessonError("The tutor could not prepare a useful source lesson; retry the lesson.")
     raise OpenLearnError(
         "Tutor returned two responses that violated the learner-action contract. "
         "The previous question and your answer were preserved for retry."

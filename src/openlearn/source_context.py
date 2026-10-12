@@ -21,6 +21,7 @@ TOTAL_READ_BYTE_LIMIT = 2000000
 FILE_LIMIT = 12
 EXCERPT_CHAR_LIMIT = 1600
 EXCERPT_LIMIT = 8
+REPAIR_DRAFT_CHAR_LIMIT = 2000
 LEDGER_MARKER = "\n\nSource excerpts provided:\n"
 CONSENT_TEXT = (
     "Source mode sends the screened class excerpts, source IDs/checksums/text-line "
@@ -61,6 +62,13 @@ _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 _PRIVATE_ARTIFACT = re.compile(
     r"(?i)(?:profile|placement|personal|reflection|learner|answer|solution|assessment)"
 )
+
+
+class SourceRequestBudgetError(cli.OpenLearnError):
+    """A source request cannot fit the existing bounded provider payload."""
+
+    def __init__(self):
+        super().__init__("This source request is too large. Try a shorter question or use fewer sources.")
 
 
 def without_ledger(text: str) -> str:
@@ -319,12 +327,22 @@ def snapshot(topic: Topic, user: str, model: str, *, opted_in: bool = False) -> 
             history.append("Relevant lesson exchange:\n" + content)
     notices.append("Bounded extracted text only: omitted text and image-only equations are unavailable. Provenance does not verify support or mathematical truth.")
     notice_text = "\n".join("- " + _label(value) for value in list(dict.fromkeys(notices))[:FILE_LIMIT + 2])
-    prompt = "\n\n".join(parts + history) + "\nSource limitations:\n" + notice_text + "\n" + SOURCE_POLICY
-    assert len(prompt) <= PROMPT_CHAR_LIMIT
     revision = hashlib.sha256(json.dumps(
         [topic.metadata, topic.body, cli.load_state(topic.slug)], sort_keys=True, ensure_ascii=False,
     ).encode("utf-8")).hexdigest()
-    return SourceContext(prompt, LEDGER_MARKER + "\n".join(refs) + "\n" + notice_text, clean_user, metadata, previous, revision, tuple(excerpts), plan_required)
+    while parts:
+        prompt = "\n\n".join(parts + history) + "\nSource limitations:\n" + notice_text + "\n" + SOURCE_POLICY
+        context = SourceContext(prompt, LEDGER_MARKER + "\n".join(refs) + "\n" + notice_text, clean_user, metadata, previous, revision, tuple(excerpts), plan_required)
+        if request_size_bound(context) <= PROMPT_CHAR_LIMIT:
+            return context
+        # Fit whole excerpts before approval. Freshness recomputes this exact set.
+        parts.pop()
+        refs.pop()
+        excerpts.pop()
+        omission = "- Additional excerpts omitted to reserve room for the lesson and repair."
+        if omission not in notice_text:
+            notice_text += "\n" + omission
+    raise SourceRequestBudgetError()
 
 
 def learner_sources(context: SourceContext) -> list[dict[str, object]]:
@@ -363,14 +381,16 @@ def _scoped_state(metadata: dict[str, object]) -> dict[str, object]:
             state[key] = value
     concepts = source_lessons.plan_concepts(metadata)
     if concepts:
-        state[source_lessons.PLAN_KEY] = {"schema": 1, "concepts": concepts}
+        number = max(1, min(cli.coerce_int(metadata.get("current_unit"), 1), len(concepts)))
+        state["selected_source_concept"] = concepts[number - 1]
+        state["source_concept_count"] = len(concepts)
         for key in ("current_unit", "current_slide"):
             value = metadata.get(key)
             if type(value) is int and 1 <= value <= source_lessons.MAX_CONCEPTS:
                 state[key] = value
         state["covered_concepts"] = [
-            label for number in range(1, len(concepts) + 1)
-            for label in cli.unit_covered_concepts(metadata, number)
+            concept["label"] for number, concept in enumerate(concepts, 1)
+            if cli.unit_covered_concepts(metadata, number)
         ]
     for key in ("last_answer_score", "difficulty", "consecutive_misses", "consecutive_correct"):
         value = metadata.get(key)
@@ -396,6 +416,7 @@ def _scoped_state(metadata: dict[str, object]) -> dict[str, object]:
 
 def tutor_prompt(
     context: SourceContext, metadata: dict[str, object], *, engagement_check_due: bool = False,
+    _check_budget: bool = True,
 ) -> str:
     state = dict(context.model_metadata)
     state.pop("pending_remediation", None)
@@ -414,17 +435,93 @@ For deferred remediation disclose the saved return date when provided.
 """
     prompt = policy + cli.tutor_turn_contract(state, engagement_check_due=engagement_check_due) + "\nScoped lesson state:\n" + json.dumps(state, ensure_ascii=False) + "\nCurrent relevant lesson:\n" + context.previous_lesson + "\n" + context.prompt + "\n" + SOURCE_POLICY
     prompt += "\n" + lesson_policy.SOURCE_TEACHING_INSTRUCTIONS
-    prompt += source_lessons.lesson_instructions(metadata)
-    if len(prompt) + len(context.user) > PROMPT_CHAR_LIMIT:
-        raise cli.OpenLearnError("The screened whole request exceeds its source-mode budget; no request was sent.")
+    prompt += source_lessons.lesson_instructions({**state, "_source_teaching": bool(metadata.get("_source_teaching"))})
+    if _check_budget and len(prompt) + len(context.user) > PROMPT_CHAR_LIMIT:
+        raise SourceRequestBudgetError()
     return prompt
 
 
+def generation_user(
+    user: str, *, initializing: bool = False, repair: bool = False,
+    candidate: str = "", require_check: bool = False, forbid_check: bool = False,
+    forbid_choice_claim: bool = False, reference_error: bool = False,
+) -> str:
+    """Build the same bounded source user payload for execution and budgeting."""
+    if repair:
+        user = (
+            lesson_policy.first_lesson_repair_prompt(user) if initializing else
+            cli.tutor_contract_repair_prompt(
+                screened(candidate, REPAIR_DRAFT_CHAR_LIMIT), require_check=require_check,
+                forbid_check=forbid_check, forbid_choice_claim=forbid_choice_claim,
+            )
+        )
+    if initializing:
+        user = lesson_policy.initialization_generation_prompt(user)
+    if reference_error:
+        user += "\nOmit unsupported source references and internal source audit metadata from learner-facing prose."
+    return user
+
+
+def request_size_bound(context: SourceContext) -> int:
+    """Reserve accepted plan fields, projected judgment and both repair variants."""
+    # Quotes occupy the maximum two JSON characters per accepted field character.
+    # Only the current objective is sent; the complete plan stays in local storage.
+    state = dict(context.model_metadata)
+    if context.plan_required or "selected_source_concept" in state:
+        state.update({
+            "selected_source_concept": {
+                "label": '"' * source_lessons.LABEL_CHAR_LIMIT,
+                "objective": '"' * source_lessons.OBJECTIVE_CHAR_LIMIT,
+                "source_ids": ["file:" + "a" * 64] * EXCERPT_LIMIT,
+            },
+            "source_concept_count": source_lessons.MAX_CONCEPTS,
+            "current_unit": source_lessons.MAX_CONCEPTS,
+            "current_slide": source_lessons.MAX_CONCEPTS,
+            "covered_concepts": ['"' * source_lessons.LABEL_CHAR_LIMIT] * source_lessons.MAX_CONCEPTS,
+        })
+    state.update({key: 1000000 for key in (
+        "last_answer_score", "difficulty", "consecutive_misses", "consecutive_correct",
+    )})
+    # Render every contract branch that judgment or navigation can select.
+    systems = []
+    for kind, status in [(kind, "needs_work") for kind in (
+        "answer", "question", "request", "confusion", "navigation", "practice", "other",
+    )] + [("answer", "correct"), ("answer", "partial")]:
+        projected = {**state, "current_turn_message_kind": kind, "last_answer_status": status}
+        bounded = replace(context, model_metadata=projected)
+        for stage in (None, "hint", "worked_example", "faded_check", "deferred"):
+            metadata = {**projected, "_source_teaching": True}
+            if stage:
+                metadata["pending_remediation"] = {
+                    "stage": stage, "deferred_review_due": "2026-10-12T12:00:00.12345678901+00:00",
+                }
+            for engagement in (False, True):
+                systems.append(len(tutor_prompt(
+                    bounded, metadata, engagement_check_due=engagement, _check_budget=False,
+                )))
+    # Scoped finite nonnegative floats can serialize longer than the integers used
+    # above to select the stuck-learner branch; reserve that difference as well.
+    scalar_growth = 4 * (len(repr(1.2345678901234567e-300)) - len(str(1000000)))
+    users = [len(generation_user(
+        context.user, initializing=initializing, repair=repair,
+        candidate="x\n" + "x" * (REPAIR_DRAFT_CHAR_LIMIT - 2), require_check=require_check,
+        forbid_check=forbid_check, forbid_choice_claim=True, reference_error=True,
+    )) for initializing in (False, True) for repair in (False, True)
+       for require_check in (False, True) for forbid_check in (False, True)]
+    return max(
+        max(systems) + scalar_growth + max(users),
+        len(source_lessons.planning_preview(context)) + len(context.user) if context.plan_required else 0,
+        len(judge_prompt(context)) + len(cli.METADATA_EXTRACTOR_SYSTEM),
+    )
+
+
 def request_preview(context: SourceContext) -> str:
+    if request_size_bound(context) > PROMPT_CHAR_LIMIT:
+        raise SourceRequestBudgetError()
     tutor = tutor_prompt(context, context.model_metadata)
     judge = judge_prompt(context)
     if len(judge) + len(cli.METADATA_EXTRACTOR_SYSTEM) > PROMPT_CHAR_LIMIT:
-        raise cli.OpenLearnError("The scoped judgment exceeds its source-mode budget; no request was sent.")
+        raise SourceRequestBudgetError()
     return (
         "--- screened source-mode request preview ---\n"
         "Tutor system:\n" + tutor + "\nCurrent request/answer:\n" + context.user

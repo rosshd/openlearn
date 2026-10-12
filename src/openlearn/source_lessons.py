@@ -10,6 +10,18 @@ from openlearn.models import Topic
 
 PLAN_KEY = "source_learning_plan"
 MAX_CONCEPTS = 12
+LABEL_CHAR_LIMIT = 80
+OBJECTIVE_CHAR_LIMIT = 240
+
+
+class SourcePlanError(cli.OpenLearnError):
+    """The source planner did not return a usable grounded sequence."""
+
+
+class SourceLessonError(cli.OpenLearnError):
+    """The source tutor did not return a validated lesson."""
+
+
 PLAN_INSTRUCTIONS = """Build a short learning sequence from the selected source excerpts.
 Source exercises describe skills to teach, not tasks for you to complete.
 Identify concepts and the prerequisites needed to understand them, ordered from
@@ -40,11 +52,11 @@ def plan_concepts(metadata: dict[str, object]) -> list[dict[str, object]]:
     if plan is None:
         return []
     if not isinstance(plan, dict) or plan.get("schema") != 1:
-        raise cli.OpenLearnError("The saved source concept sequence is invalid; no request was sent.")
+        raise SourcePlanError("The saved source concept sequence is invalid; no request was sent.")
     try:
         return validate_concepts(plan.get("concepts"))
     except ValueError:
-        raise cli.OpenLearnError("The saved source concept sequence is invalid; no request was sent.") from None
+        raise SourcePlanError("The saved source concept sequence is invalid; no request was sent.") from None
 
 
 def validate_concepts(concepts, known_ids: set[str] | None = None) -> list[dict[str, object]]:
@@ -56,7 +68,7 @@ def validate_concepts(concepts, known_ids: set[str] | None = None) -> list[dict[
     for concept in concepts:
         if not isinstance(concept, dict) or set(concept) != {"label", "objective", "source_ids"}:
             raise ValueError
-        for key, limit in (("label", 80), ("objective", 240)):
+        for key, limit in (("label", LABEL_CHAR_LIMIT), ("objective", OBJECTIVE_CHAR_LIMIT)):
             text = concept[key]
             if (
                 not isinstance(text, str) or not text.strip() or len(text) > limit
@@ -116,7 +128,7 @@ def generate_plan(topic: Topic, context, model: str) -> dict[str, object]:
 
     system = planning_preview(context)
     if len(system) + len(context.user) > sources.PROMPT_CHAR_LIMIT:
-        raise cli.OpenLearnError("Source planning exceeds its request budget; no request was sent.")
+        raise sources.SourceRequestBudgetError()
     sources.ensure_unchanged(topic, context, model)
     raw = cli.call_openai(model, system, context.user, json_response=True, max_tokens=1800)
     sources.ensure_unchanged(topic, context, model)
@@ -128,7 +140,7 @@ def generate_plan(topic: Topic, context, model: str) -> dict[str, object]:
         concepts = validate_concepts(value["concepts"], known_ids)
         return {"schema": 1, "concepts": concepts}
     except (ValueError, TypeError, KeyError):
-        raise cli.OpenLearnError(
+        raise SourcePlanError(
             "The tutor could not build a grounded concept sequence. Your source is saved; retry the lesson."
         ) from None
 
@@ -149,10 +161,14 @@ def apply_plan(metadata: dict[str, object], plan: dict[str, object]) -> None:
 
 def lesson_instructions(metadata: dict[str, object]) -> str:
     concepts = plan_concepts(metadata)
-    if not concepts:
-        return ""
-    number = max(1, min(cli.coerce_int(metadata.get("current_unit"), 1), len(concepts)))
-    concept = concepts[number - 1]
+    if concepts:
+        number = max(1, min(cli.coerce_int(metadata.get("current_unit"), 1), len(concepts)))
+        concept = concepts[number - 1]
+    else:
+        concept = metadata.get("selected_source_concept")
+        if not isinstance(concept, dict):
+            return ""
+        validate_concepts([concept])
     return (
         "\nSelected learning objective (application-owned course data):\n"
         + json.dumps(concept, ensure_ascii=False)
@@ -175,7 +191,7 @@ def enforce_lesson(metadata: dict[str, object], answer: str) -> str:
         r"|\bskip\s+question\s*\d",
         answer,
     ):
-        raise cli.OpenLearnError("The tutor tried to complete the source exercise instead of teaching its concept.")
+        raise SourceLessonError("The tutor tried to complete the source exercise instead of teaching its concept.")
     unit = cli.course_unit_at(metadata, cli.coerce_int(metadata.get("current_unit"), 1))
     selected = {**metadata, "course_units": [unit] if unit else []}
     try:
@@ -183,4 +199,4 @@ def enforce_lesson(metadata: dict[str, object], answer: str) -> str:
             selected, lesson_policy.COURSE_INITIALIZATION_PROMPT, answer,
         )
     except lesson_policy.FirstLessonUnavailable as error:
-        raise cli.OpenLearnError(str(error)) from None
+        raise SourceLessonError(str(error)) from error
