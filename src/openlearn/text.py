@@ -53,6 +53,17 @@ def last_lines(text: str, limit: int) -> str:
     return "\n".join(deque(text.splitlines(), maxlen=limit))
 
 
+def sanitize_json_output(text: str) -> str:
+    """Remove outer model wrappers without applying prose edits inside JSON."""
+    text = text.strip()
+    text = re.sub(
+        r"(?is)\A(?:<(think|analysis|reasoning|system-reminder)\b[^>]*>.*?</\1>\s*)+",
+        "", text,
+    )
+    fence = re.fullmatch(r"```(?:json)?\s*\n(.*?)\n```", text, flags=re.DOTALL | re.IGNORECASE)
+    return (fence.group(1) if fence else text).strip()
+
+
 def sanitize_model_output(text: str) -> str:
     hidden_tags = r"(?:think|analysis|reasoning)"
     text = re.sub(rf"(?is)<{hidden_tags}\b[^>]*>.*?</{hidden_tags}>", "", text)

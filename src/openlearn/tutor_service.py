@@ -1072,9 +1072,11 @@ def _turn_failure(exc: Exception) -> tuple[str, str]:
                 "Your response is saved. This source request is too large. Try a shorter question or use fewer sources.",
             )
         if isinstance(current, source_lessons.SourcePlanError):
+            detail = f" {current.safe_reason}" if current.safe_reason else ""
             return (
                 "source_plan_invalid",
-                "Your response is saved, but the tutor could not build a usable concept sequence. Retry the lesson.",
+                "Your response is saved, but the tutor could not build a usable concept sequence."
+                + detail + " Retry the lesson.",
             )
         if isinstance(current, source_lessons.SourceLessonError):
             return (

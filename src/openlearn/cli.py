@@ -131,6 +131,7 @@ from openlearn.text import (
     last_lines,
     one_line,
     parse_metadata_update,
+    sanitize_json_output,
     sanitize_model_output,
     sanitize_stream_preview,
     snippet,
@@ -19737,7 +19738,7 @@ def call_openai(
             retry_sleep(delay)
 
     text = extract_response_text(data)
-    text = sanitize_model_output(text)
+    text = sanitize_json_output(text) if json_response else sanitize_model_output(text)
     if not text:
         raise UnusableModelResponse(
             "The provider returned no usable output text."

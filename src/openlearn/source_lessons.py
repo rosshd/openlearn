@@ -12,10 +12,34 @@ PLAN_KEY = "source_learning_plan"
 MAX_CONCEPTS = 12
 LABEL_CHAR_LIMIT = 80
 OBJECTIVE_CHAR_LIMIT = 240
+PLAN_FAILURE_REASONS = {
+    "json": "The returned plan was not valid JSON.",
+    "shape": "The returned plan had an unexpected structure.",
+    "fields": "A concept had missing or unexpected fields.",
+    "count": "The plan contained an invalid number of concepts.",
+    "length": "A concept name or objective was too long.",
+    "format": "A concept contained unsupported formatting.",
+    "source": "A concept cited an unrecognized source.",
+    "screened": "A concept did not pass source screening.",
+    "duplicate": "The plan contained duplicate concept names.",
+    "assignment": "The plan requested assignment answers instead of learning concepts.",
+}
 
 
 class SourcePlanError(cli.OpenLearnError):
     """The source planner did not return a usable grounded sequence."""
+
+    def __init__(self, message: str, *, reason: str = ""):
+        super().__init__(message)
+        self.safe_reason = PLAN_FAILURE_REASONS.get(reason, "")
+
+
+class PlanValidationError(ValueError):
+    """A fixed rejection reason, never model output or arbitrary exception text."""
+
+    def __init__(self, reason: str):
+        super().__init__("Invalid source concept plan.")
+        self.reason = reason
 
 
 class SourceLessonError(cli.OpenLearnError):
@@ -36,6 +60,8 @@ Return JSON only: {"concepts": [{"label": "Concept name", "objective":
 "What the learner will understand or do", "source_ids": ["provided source ID"]}]}.
 Use 1-12 concepts, labels of at most 80 characters and objectives of at most
 240 characters. Each concept must name at least one provided source ID.
+Use plain text for labels and objectives, without Markdown backticks, angle
+brackets or line breaks. Do not add fields beyond label, objective and source_ids.
 """
 
 
@@ -63,22 +89,26 @@ def validate_concepts(concepts, known_ids: set[str] | None = None) -> list[dict[
     from openlearn import source_context as sources
 
     if not isinstance(concepts, list) or not 1 <= len(concepts) <= MAX_CONCEPTS:
-        raise ValueError
+        raise PlanValidationError("count")
     labels: set[str] = set()
     for concept in concepts:
         if not isinstance(concept, dict) or set(concept) != {"label", "objective", "source_ids"}:
-            raise ValueError
+            raise PlanValidationError("fields")
         for key, limit in (("label", LABEL_CHAR_LIMIT), ("objective", OBJECTIVE_CHAR_LIMIT)):
             text = concept[key]
-            if (
-                not isinstance(text, str) or not text.strip() or len(text) > limit
-                or "\n" in text or "<" in text or "`" in text
-                or sources.screened(text, limit) != text
-            ):
-                raise ValueError
+            if not isinstance(text, str) or not text.strip():
+                raise PlanValidationError("fields")
+            if len(text) > limit:
+                raise PlanValidationError("length")
+            if "\n" in text or "<" in text or "`" in text:
+                raise PlanValidationError("format")
+            if sources.screened(text, limit) != text:
+                raise PlanValidationError("screened")
         label = concept["label"].casefold()
-        if label in labels or re.match(r"(?i)^(?:question\s*\d|solve\b|answer\b|compute\b)", label):
-            raise ValueError
+        if label in labels:
+            raise PlanValidationError("duplicate")
+        if re.match(r"(?i)^(?:question\s*\d|solve\b|answer\b|compute\b)", label):
+            raise PlanValidationError("assignment")
         labels.add(label)
         ids = concept["source_ids"]
         if not isinstance(ids, list) or not 1 <= len(ids) <= sources.EXCERPT_LIMIT or any(
@@ -86,7 +116,7 @@ def validate_concepts(concepts, known_ids: set[str] | None = None) -> list[dict[
             or not re.fullmatch(r"(?:file|url):[a-f0-9]{16,64}", identity)
             or known_ids is not None and identity not in known_ids for identity in ids
         ):
-            raise ValueError
+            raise PlanValidationError("source")
     return concepts
 
 
@@ -135,13 +165,17 @@ def generate_plan(topic: Topic, context, model: str) -> dict[str, object]:
     try:
         value = json.loads(raw)
         if not isinstance(value, dict) or set(value) != {"concepts"}:
-            raise ValueError
+            raise PlanValidationError("shape")
         known_ids = set(re.findall(r"(?:^|;\s*)source ID ([^;\s]+)", context.ledger, re.MULTILINE))
         concepts = validate_concepts(value["concepts"], known_ids)
         return {"schema": 1, "concepts": concepts}
-    except (ValueError, TypeError, KeyError):
+    except (ValueError, TypeError, KeyError) as error:
+        reason = "json" if isinstance(error, json.JSONDecodeError) else (
+            error.reason if isinstance(error, PlanValidationError) else ""
+        )
         raise SourcePlanError(
-            "The tutor could not build a grounded concept sequence. Your source is saved; retry the lesson."
+            "The tutor could not build a grounded concept sequence. Your source is saved; retry the lesson.",
+            reason=reason,
         ) from None
 
 
