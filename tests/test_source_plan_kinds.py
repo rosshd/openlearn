@@ -48,10 +48,15 @@ def imported_course(source_course, tmp_path, request):
     return cli.read_topic(topic.slug), record
 
 
-def test_first_and_later_source_lessons_accept_imported_identities(imported_course):
+@pytest.mark.parametrize("source_form", ["canonical", "checksum"])
+def test_first_and_later_source_lessons_accept_imported_identities(imported_course, source_form):
     topic, record = imported_course
     service = OpenLearnWebServices()
-    with mock.patch.object(cli, "call_openai", return_value=plan(record)) as planner, mock.patch.object(
+    payload = json.loads(plan(record))
+    if source_form == "checksum":
+        for concept in payload["concepts"]:
+            concept["source_ids"] = [record.checksum]
+    with mock.patch.object(cli, "call_openai", return_value=json.dumps(payload)) as planner, mock.patch.object(
         cli, "call_openai_streaming", side_effect=[lesson(), lesson("Stack operations")],
     ):
         first = submit(service, web_request(topic, intent="next", text=""), topic.slug)

@@ -103,6 +103,8 @@ Use 1-12 concepts, labels of at most 80 characters and objectives of at most
 240 characters. Each concept must name at least one provided source ID.
 Use plain text for labels and objectives, without Markdown backticks, angle
 brackets or line breaks. Do not add fields beyond label, objective and source_ids.
+Copy the complete source ID, including its file:, folder:, github: or url: prefix.
+Do not substitute a filename or an original checksum for the source ID.
 """
 
 
@@ -213,6 +215,28 @@ def planning_preview(context) -> str:
     return PLAN_INSTRUCTIONS + "\nSelected untrusted source data:\n" + context.prompt
 
 
+def _resolve_plan_source_ids(concepts, known_ids: set[str]):
+    """Resolve checksum shorthand only when one selected identity matches exactly."""
+    from openlearn import source_context as sources
+
+    if not isinstance(concepts, list) or not 1 <= len(concepts) <= MAX_CONCEPTS:
+        return concepts
+    resolved = []
+    for concept in concepts:
+        if (not isinstance(concept, dict) or not isinstance(concept.get("source_ids"), list)
+                or not 1 <= len(concept["source_ids"]) <= sources.EXCERPT_LIMIT):
+            resolved.append(concept)
+            continue
+        identities = []
+        for identity in concept["source_ids"]:
+            matches = [value for value in known_ids if value.partition(":")[2] == identity] if (
+                isinstance(identity, str) and re.fullmatch(r"[a-f0-9]{16,64}", identity)
+            ) else []
+            identities.append(matches[0] if len(matches) == 1 else identity)
+        resolved.append({**concept, "source_ids": identities})
+    return resolved
+
+
 def generate_plan(topic: Topic, context, model: str) -> dict[str, object]:
     from openlearn import source_context as sources
 
@@ -232,7 +256,7 @@ def generate_plan(topic: Topic, context, model: str) -> dict[str, object]:
         if not isinstance(value, dict) or set(value) != {"concepts"}:
             raise PlanValidationError("shape")
         known_ids = set(re.findall(r"(?:^|;\s*)source ID ([^;\s]+)", context.ledger, re.MULTILINE))
-        concepts = validate_concepts(value["concepts"], known_ids)
+        concepts = validate_concepts(_resolve_plan_source_ids(value["concepts"], known_ids), known_ids)
         return {"schema": 1, "concepts": concepts}
     except (ValueError, TypeError, KeyError) as error:
         reason = "json" if isinstance(error, json.JSONDecodeError) else (

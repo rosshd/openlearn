@@ -2,11 +2,12 @@
 
 import io
 import json
+from dataclasses import replace
 from unittest import mock
 
 import pytest
 
-from openlearn import cli, source_lessons, tutor_service
+from openlearn import cli, source_context, source_lessons, tutor_service
 from openlearn.text import sanitize_json_output
 from openlearn.web.services import OpenLearnWebServices
 from tests.test_source_context import web_request
@@ -35,7 +36,7 @@ def test_unknown_plan_error_reason_cannot_expose_exception_text():
     assert "PRIVATE" not in message
 
 
-@pytest.mark.parametrize("failure", ["extra_shape", "private_shape", "prefix", "checksum", "filename", "json"])
+@pytest.mark.parametrize("failure", ["extra_shape", "private_shape", "prefix", "unknown_checksum", "filename", "json"])
 def test_plan_diagnostics_survive_reload_without_private_values(source_course, failure):
     topic, record = source_course
     payload = json.loads(plan(record))
@@ -49,15 +50,15 @@ def test_plan_diagnostics_survive_reload_without_private_values(source_course, f
     elif failure == "json":
         expected = {"plan_reason": "json", "plan_json_line": 1, "plan_json_column": 1}
     else:
-        identity = "folder:" + record.checksum if failure == "prefix" else record.checksum if failure == "checksum" else "PRIVATE_FILE.txt"
+        identity = "folder:" + record.checksum if failure == "prefix" else "0" * 16 if failure == "unknown_checksum" else "PRIVATE_FILE.txt"
         payload["concepts"][0]["source_ids"] = [identity]
         expected.update(
             plan_reason="source", plan_field="source_ids", plan_concept_index=1,
             plan_source_index=1, plan_source_count=1, plan_known_source_count=1,
             plan_source_length=len(identity), plan_source_prefix="folder" if failure == "prefix" else "other",
-            plan_source_form="identity" if failure == "prefix" else "checksum" if failure == "checksum" else "filename",
+            plan_source_form="identity" if failure == "prefix" else "checksum" if failure == "unknown_checksum" else "filename",
             plan_source_issue="unselected" if failure == "prefix" else "malformed",
-            plan_checksum_match_count=1 if failure in {"prefix", "checksum"} else 0,
+            plan_checksum_match_count=1 if failure == "prefix" else 0,
         )
     raw = "PRIVATE_RAW_RESPONSE" if failure == "json" else json.dumps(payload)
     request = web_request(topic, intent="next", text="")
@@ -88,11 +89,30 @@ def test_plan_diagnostics_filter_untrusted_mutations():
     }
 
 
+def test_ambiguous_checksum_shorthand_is_not_resolved(source_course):
+    topic, record = source_course
+    context = source_context.snapshot(topic, "Continue to the next useful concept.", source_context.APPROVED_MODEL, opted_in=True)
+    context = replace(context, ledger=context.ledger + f"\n- duplicate; source ID folder:{record.checksum}; extracted text lines 1-2\n")
+    payload = json.loads(plan(record))
+    payload["concepts"][0]["source_ids"] = [record.checksum]
+    with mock.patch.object(cli, "call_openai", return_value=json.dumps(payload)), mock.patch.object(source_context, "ensure_unchanged"):
+        with pytest.raises(source_lessons.SourcePlanError) as error:
+            source_lessons.generate_plan(topic, context, source_context.APPROVED_MODEL)
+    assert error.value.diagnostics["plan_source_issue"] == "malformed"
+    assert error.value.diagnostics["plan_source_form"] == "checksum"
+    assert error.value.diagnostics["plan_checksum_match_count"] == 2
+
+
 @pytest.mark.parametrize("wrapper", ["{}", "```json\n{}\n```", "<analysis>PRIVATE_REASONING</analysis>\n{}"])
-def test_actual_provider_json_commits_source_lesson(source_course, monkeypatch, wrapper):
+@pytest.mark.parametrize("source_form", ["canonical", "checksum"])
+def test_actual_provider_json_commits_source_lesson(source_course, monkeypatch, wrapper, source_form):
     topic, record = source_course
     payload = json.loads(plan(record))
     payload["concepts"][0]["objective"] = "Compare A: linear search and B: binary search."
+    expected_concepts = json.loads(json.dumps(payload["concepts"]))
+    if source_form == "checksum":
+        for concept in payload["concepts"]:
+            concept["source_ids"] = [record.checksum]
     raw = wrapper.format(json.dumps(payload, indent=2))
     response = json.dumps({"choices": [{"message": {"content": raw}}]}).encode()
     monkeypatch.setenv("OPENLEARN_MOCK", "0")
@@ -103,7 +123,7 @@ def test_actual_provider_json_commits_source_lesson(source_course, monkeypatch, 
     network.assert_called_once()
     assert json.loads(network.call_args.args[0].data)["response_format"] == {"type": "json_object"}
     saved = cli.read_topic(topic.slug)
-    assert saved.metadata["source_learning_plan"]["concepts"] == payload["concepts"]
+    assert saved.metadata["source_learning_plan"]["concepts"] == expected_concepts
     assert "PRIVATE_REASONING" not in saved.path.read_text()
 
 
