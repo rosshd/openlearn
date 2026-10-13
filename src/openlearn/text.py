@@ -116,8 +116,8 @@ def has_source_audit_metadata(text: str) -> bool:
             prose.append(re.sub(r"`[^`]*`", "", line))
     visible = "\n".join(prose)
     return bool(
-        re.search(r"\bsource[_ -]?id\s*[:=]\s*\S+", visible, flags=re.IGNORECASE)
-        or re.search(r"\bchecksum\s*[:=]\s*\S+", visible, flags=re.IGNORECASE)
+        re.search(r"\bsource[_ -]?id\s*(?:[:=]\s*|\s+)(?:file|url):\S+", visible, flags=re.IGNORECASE)
+        or re.search(r"\bchecksum\s*(?:[:=]\s*|\s+)\S+", visible, flags=re.IGNORECASE)
         and re.search(r"\blines?\s+\d+\s*[-:]\s*\d+", visible, flags=re.IGNORECASE)
     )
 
@@ -152,8 +152,8 @@ def strip_source_audit_footer(text: str) -> str:
                       line, flags=re.IGNORECASE):
             audit_section = False
         if audit_section and (
-            re.match(r"^\s*[-*+]\s+", line) and has_source_audit_metadata(line)
-            or re.match(r"^\s*Only bounded extracted text\b", line, flags=re.IGNORECASE)
+            re.match(r"^\s*[-*+]\s+", line)
+            or re.match(r"^\s*(?:[-*+]\s*)?(?:Only bounded extracted text|Bounded extracted text only|Introductory excerpts selected|Additional excerpts omitted|Additional files omitted)\b", line, flags=re.IGNORECASE)
         ):
             continue
         lines.append(line)

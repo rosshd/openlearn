@@ -92,11 +92,12 @@ def review_fixture(tmp_path, monkeypatch):
     cli.clear_config_cache()
 
 
-def bridge(context, client):
+def bridge(context, client, *, drop_regeneration_response=False):
     """Serve actual templates/assets/APIs through TestClient, with no fake API payloads."""
     security = client.app.state.security
 
     def handle(route):
+        nonlocal drop_regeneration_response
         request = route.request
         url = urlsplit(request.url)
         headers = {
@@ -112,6 +113,11 @@ def bridge(context, client):
             request.method, path + (f"?{url.query}" if url.query else ""),
             headers=headers, content=request.post_data_buffer, follow_redirects=False,
         )
+        if drop_regeneration_response and path.endswith("/api/review/prepare") and json.loads(request.post_data or "{}").get("regenerate") is True:
+            drop_regeneration_response = False
+            assert response.status_code == 200 and response.json()["ok"]
+            route.abort("failed")
+            return
         route.fulfill(
             status=response.status_code,
             headers={key: value for key, value in response.headers.items()
@@ -120,6 +126,112 @@ def bridge(context, client):
         )
 
     context.route("**/*", handle)
+
+
+def test_committed_regeneration_with_lost_response_refreshes_without_false_preservation_claim(review_fixture):
+    playwright = pytest.importorskip("playwright.sync_api")
+    client, _clock, generations = review_fixture
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch()
+        context = browser.new_context()
+        bridge(context, client, drop_regeneration_response=True)
+        page = context.new_page()
+        page.goto("http://127.0.0.1/review?course=review-integration")
+        page.get_by_role("button", name="Prepare card", exact=True).click()
+        page.get_by_role("button", name="Show answer", exact=True).wait_for()
+        original = client.get("/api/review/session?course=review-integration").json()["items"][0]
+        page.locator("[data-review-card-options] > summary").click()
+        page.get_by_role("button", name="Regenerate card", exact=True).click()
+        page.locator("[data-review-regeneration-status]").filter(has_text="Could not confirm regeneration. Try again.").wait_for()
+        fresh = client.get("/api/review/session?course=review-integration").json()["items"][0]
+        assert fresh["card_id"] != original["card_id"]
+        assert "previous card was kept" not in page.locator("[data-review-panel]").inner_text().lower()
+        page.get_by_role("button", name="Show answer", exact=True).click()
+        page.get_by_role("button", name="Refresh review", exact=True).click()
+        page.get_by_role("button", name="Show answer", exact=True).click()
+        page.locator("[data-review-answer]").wait_for()
+        assert len(generations) == 2
+        assert cli.read_topic("review-integration").metadata["review_due"][0]["review_card"]["card_id"] == fresh["card_id"]
+        page.locator("[data-review-grade='good']").click()
+        page.get_by_role("heading", name="Review complete").wait_for()
+        browser.close()
+
+
+@pytest.mark.parametrize("width", [1280, 375])
+def test_real_service_explicit_regeneration_preserves_schedule_and_refreshes_identity(review_fixture, monkeypatch, width):
+    playwright = pytest.importorskip("playwright.sync_api")
+    client, _clock, generations = review_fixture
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch()
+        context = browser.new_context(viewport={"width": width, "height": 900})
+        bridge(context, client)
+        page = context.new_page()
+        page.goto("http://127.0.0.1/review?course=review-integration")
+        page.get_by_role("button", name="Prepare card", exact=True).click()
+        page.get_by_role("button", name="Show answer", exact=True).wait_for()
+        original_item = client.get("/api/review/session?course=review-integration").json()["items"][0]
+        before = deepcopy(cli.read_topic("review-integration").metadata)
+        original_generate = cli.call_openai
+        fresh_question = "Why can an unusual observation still be valid?"
+        def generate(*args, **kwargs):
+            output = json.loads(original_generate(*args, **kwargs))
+            output["question"] = fresh_question
+            return json.dumps(output)
+        monkeypatch.setattr(cli, "call_openai", generate)
+        options = page.locator("[data-review-card-options] > summary")
+        options.focus()
+        options.press("Enter")
+        page.get_by_role("button", name="Regenerate card", exact=True).click()
+        page.locator("[data-review-question]").filter(has_text=fresh_question).wait_for()
+        assert len(generations) == 2
+        fresh_item = client.get("/api/review/session?course=review-integration").json()["items"][0]
+        assert fresh_item["card_id"] != original_item["card_id"]
+        assert fresh_item["review_revision"] != original_item["review_revision"]
+        after = deepcopy(cli.read_topic("review-integration").metadata)
+        after["review_due"][0]["review_card"] = before["review_due"][0]["review_card"]
+        assert after == before
+        assert not page.locator("[data-review-grade]").count()
+        assert ANSWER not in page.locator("[data-review-panel]").inner_text()
+        page.get_by_role("button", name="Show answer", exact=True).click()
+        page.locator("[data-review-answer]").wait_for()
+        assert page.locator("[data-review-card-options]").count() == 0
+        assert not page.locator("[data-review-explanation]").evaluate("element => element.open")
+        page.locator("[data-review-grade='good']").click()
+        page.get_by_role("heading", name="Review complete").wait_for()
+        assert len(generations) == 2
+        assert client.get("/api/review/session?course=review-integration").json()["count"] == 0
+        browser.close()
+
+
+@pytest.mark.parametrize("width", [1280, 375])
+def test_real_service_regeneration_failure_keeps_old_card_reviewable(review_fixture, monkeypatch, width):
+    playwright = pytest.importorskip("playwright.sync_api")
+    client, _clock, generations = review_fixture
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch()
+        context = browser.new_context(viewport={"width": width, "height": 900})
+        bridge(context, client)
+        page = context.new_page()
+        page.goto("http://127.0.0.1/review?course=review-integration")
+        page.get_by_role("button", name="Prepare card", exact=True).click()
+        page.get_by_role("button", name="Show answer", exact=True).wait_for()
+        before = deepcopy(cli.read_topic("review-integration").metadata)
+        def failure(*args, **kwargs):
+            raise cli.OpenLearnError("secret-provider-detail")
+        monkeypatch.setattr(cli, "call_openai", failure)
+        page.locator("[data-review-card-options] > summary").click()
+        page.get_by_role("button", name="Regenerate card", exact=True).click()
+        page.locator("[data-review-toast]").wait_for()
+        assert "secret-provider" not in page.locator("body").inner_text()
+        assert cli.read_topic("review-integration").metadata == before
+        assert page.get_by_role("button", name="Show answer", exact=True).is_enabled()
+        page.get_by_role("button", name="Show answer", exact=True).click()
+        page.locator("[data-review-answer]").wait_for()
+        assert ANSWER in page.locator("[data-review-panel]").inner_text()
+        page.locator("[data-review-grade='good']").click()
+        page.get_by_role("heading", name="Review complete").wait_for()
+        assert len(generations) == 1
+        browser.close()
 
 
 @pytest.mark.parametrize("width", [1280, 375])
@@ -153,14 +265,26 @@ def test_real_service_preparation_offline_relearning_and_completion(review_fixtu
             saved_card["explanation"] = "Check your recall against the answer before rating."
             cli.write_topic(topic.path, topic.metadata, topic.body)
         page.reload()
-        page.get_by_role("button", name="Show answer and explanation", exact=True).wait_for()
+        page.get_by_role("button", name="Show answer", exact=True).wait_for()
         assert len(generations) == 1
         page.locator("[data-review-question]").click()
         page.keyboard.press("Space")
         page.locator("[data-review-answer]").wait_for()
         assert ANSWER in page.locator("[data-review-panel]").inner_text()
-        assert (EXPLANATION in page.locator("[data-review-panel]").inner_text()) is not legacy
+        assert EXPLANATION not in page.locator("[data-review-panel]").inner_text()
         assert page.locator(".review-explanation").count() == (0 if legacy else 1)
+        disclosure = page.locator("[data-review-explanation]")
+        assert disclosure.count() == (0 if legacy else 1)
+        if not legacy:
+            metadata_before_toggle = deepcopy(cli.read_topic("review-integration").metadata)
+            summary = disclosure.locator("summary")
+            summary.press("Enter")
+            assert EXPLANATION in page.locator("[data-review-panel]").inner_text()
+            summary.press("Space")
+            assert EXPLANATION not in page.locator("[data-review-panel]").inner_text()
+            assert cli.read_topic("review-integration").metadata == metadata_before_toggle
+            assert len(generations) == 1
+            page.locator("[data-review-answer]").focus()
         assert "Check your recall" not in page.locator("[data-review-panel]").inner_text()
         assert page.locator(".review-sources, .review-hint, .review-rating-meaning").count() == 0
         assert page.locator("[data-review-grade]").count() == 4
@@ -186,7 +310,7 @@ def test_real_service_preparation_offline_relearning_and_completion(review_fixtu
 
         clock[0] += timedelta(seconds=61)
         page.reload()
-        page.get_by_role("button", name="Show answer and explanation", exact=True).click()
+        page.get_by_role("button", name="Show answer", exact=True).click()
         page.locator("[data-review-grade='good']").click()
         page.get_by_role("heading", name="Review complete", exact=True).wait_for()
         assert client.get("/api/review/session?course=review-integration").json()["count"] == 0
@@ -210,10 +334,10 @@ def test_real_service_two_tabs_cannot_rate_same_occurrence(review_fixture):
         first = context.new_page()
         first.goto("http://127.0.0.1/review?course=review-integration")
         first.get_by_role("button", name="Prepare card", exact=True).click()
-        first.get_by_role("button", name="Show answer and explanation", exact=True).click()
+        first.get_by_role("button", name="Show answer", exact=True).click()
         second = context.new_page()
         second.goto("http://127.0.0.1/review?course=review-integration")
-        second.get_by_role("button", name="Show answer and explanation", exact=True).click()
+        second.get_by_role("button", name="Show answer", exact=True).click()
         first.locator("[data-review-grade='good']").click()
         first.get_by_role("heading", name="Review complete", exact=True).wait_for()
         second.locator("[data-review-grade='easy']").click()
@@ -235,9 +359,11 @@ def test_saved_long_card_readable_and_ratable_without_rewrite(review_fixture, wi
         context = browser.new_context(viewport={"width": width, "height": height}, reduced_motion="reduce")
         bridge(context, client)
         page = context.new_page()
+        requests = []
+        page.on("request", lambda request: requests.append(request.url) if "/api/" in request.url else None)
         page.goto("http://127.0.0.1/review?course=review-integration")
         page.get_by_role("button", name="Prepare card", exact=True).click()
-        page.get_by_role("button", name="Show answer and explanation", exact=True).wait_for()
+        page.get_by_role("button", name="Show answer", exact=True).wait_for()
         topic = cli.read_topic("review-integration")
         saved = topic.metadata["review_due"][0]["review_card"]
         saved.update(question=LONG_QUESTION, answer=LONG_ANSWER, explanation=LONG_EXPLANATION)
@@ -246,9 +372,12 @@ def test_saved_long_card_readable_and_ratable_without_rewrite(review_fixture, wi
         page.reload()
         page.evaluate("theme => setTheme(theme)", theme)
         assert LONG_ANSWER not in page.content()
-        page.get_by_role("button", name="Show answer and explanation", exact=True).click()
+        page.get_by_role("button", name="Show answer", exact=True).click()
         page.locator("[data-review-answer]").wait_for()
         assert page.locator("[data-review-question]").inner_text() == LONG_QUESTION
+        disclosure = page.locator("[data-review-explanation]")
+        assert not disclosure.evaluate("element => element.open")
+        assert not page.locator(".review-explanation").first.is_visible()
         for selector, expected in ((".review-answer-text", LONG_ANSWER), (".review-explanation", LONG_EXPLANATION)):
             visible = " ".join(page.locator(selector).all_text_contents())
             assert re.sub(r"\s+", " ", visible).strip() == expected
@@ -256,15 +385,33 @@ def test_saved_long_card_readable_and_ratable_without_rewrite(review_fixture, wi
             rect = control.bounding_box()
             assert rect and rect["y"] >= 0 and rect["y"] + rect["height"] <= height
         assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
-        screenshots = Path(__file__).resolve().parents[1] / ".artifacts" / "review-readability"
+        screenshots = Path(__file__).resolve().parents[1] / ".artifacts" / "review-rapid"
         screenshots.mkdir(parents=True, exist_ok=True)
-        page.screenshot(path=str(screenshots / f"saved-long-{theme}-{width}.png"))
+        page.screenshot(path=str(screenshots / f"saved-long-collapsed-{theme}-{width}.png"))
+        after_reveal = deepcopy(cli.read_topic("review-integration").metadata)
+        request_count = len(requests)
+        summary = disclosure.locator("summary")
+        summary.press("Enter")
+        assert disclosure.evaluate("element => element.open")
+        assert page.locator(".review-explanation").first.is_visible()
+        summary.press("1")
+        assert len(requests) == request_count
+        summary.press("Space")
+        assert not disclosure.evaluate("element => element.open")
+        summary.press("Enter")
+        assert cli.read_topic("review-integration").metadata == after_reveal
+        assert len(requests) == request_count
+        assert len(generations) == 1
+        page.screenshot(path=str(screenshots / f"saved-long-expanded-{theme}-{width}.png"))
         last = page.locator(".review-explanation").last
         last.evaluate("node => node.scrollIntoView({block: 'end'})")
         rect = last.bounding_box()
         rating = page.locator("[data-review-grade]").first.bounding_box()
         assert rect and rating and rect["y"] >= 0
         assert rect["y"] + rect["height"] <= rating["y"]
+        progress = page.locator("[data-review-summary]").bounding_box()
+        assert progress and progress["y"] >= 0 and progress["y"] + progress["height"] <= height
+        page.screenshot(path=str(screenshots / f"saved-long-last-sentence-{theme}-{width}.png"))
         assert cli.read_topic("review-integration").metadata["review_due"][0]["review_card"] == before
         assert len(generations) == 1
         page.locator("[data-review-grade='good']").click()
@@ -308,7 +455,7 @@ def test_preparation_failure_notice_expires_but_exact_recovery_remains(review_fi
         assert recovery_text.strip()
         assert cli.read_topic("review-integration").metadata == before
         assert len(attempts) == 1
-        screenshots = Path(__file__).resolve().parents[1] / ".artifacts" / "review-feedback"
+        screenshots = Path(__file__).resolve().parents[1] / ".artifacts" / "review-rapid"
         screenshots.mkdir(parents=True, exist_ok=True)
         page.screenshot(path=str(screenshots / f"preparation-failure-{width}.png"))
         page.clock.fast_forward(10_000)
@@ -317,11 +464,11 @@ def test_preparation_failure_notice_expires_but_exact_recovery_remains(review_fi
         assert retry.is_visible() and retry.is_enabled()
         assert cli.read_topic("review-integration").metadata == before
         retry.click()
-        page.get_by_role("button", name="Show answer and explanation", exact=True).wait_for()
+        page.get_by_role("button", name="Show answer", exact=True).wait_for()
         assert len(attempts) == 2 and len(generations) == 1
         assert not page.locator("[data-review-status]").is_visible()
         assert not toast.is_visible()
-        page.get_by_role("button", name="Show answer and explanation", exact=True).click()
+        page.get_by_role("button", name="Show answer", exact=True).click()
         page.locator("[data-review-answer]").wait_for()
         assert page.get_by_role("heading", name="Answer", exact=True).count() == 0
         assert page.get_by_role("heading", name="Explanation", exact=True).count() == 0

@@ -39,17 +39,39 @@
   </aside>
 
   <section class="focus-column" aria-labelledby="move-title">
-    {% if course.source_start %}<p class="field-note">Your source is saved locally. Ask for your first source lesson in Chat, then review and approve the screened request. Source mode requires the selected DeepSeek model on OpenRouter.</p>{% endif %}
+    {% if course.source_start %}<p class="field-note">Your source is saved locally. Continue to build your lessons, then review and approve the selected excerpts.</p>{% endif %}
     <dialog data-source-preview aria-labelledby="source-preview-title">
-      <h2 id="source-preview-title">Review screened tutor request</h2>
+      <h2 id="source-preview-title" tabindex="-1">Send these excerpts to your tutor?</h2>
       <div class="dialog-request" tabindex="0" role="region" aria-label="Screened request and disclosure">
-        <p data-source-disclosure></p>
-        <pre data-source-preview-text></pre>
+        <p class="source-preview-intro">Your request, selected excerpts, and relevant lesson context will be sent to OpenRouter using <span>deepseek/deepseek-v4.1-flash</span>.</p>
+        <p class="source-preview-note">Screening can miss personal information. Review the text before sending.</p>
+        <p class="source-preview-note">When needed, the tutor first builds a concept sequence from these excerpts, then teaches one concept at a time.</p>
+        <section class="source-preview-request" aria-labelledby="source-request-title">
+          <h3 id="source-request-title">Your request</h3>
+          <p data-source-request></p>
+        </section>
+        <section class="source-preview-excerpts" aria-labelledby="source-excerpts-title">
+          <h3 id="source-excerpts-title">Source excerpts</h3>
+          <div data-source-excerpts></div>
+          <p class="source-preview-note">Only selected extracted text is included. Images and omitted text are unavailable.</p>
+        </section>
+        <details class="source-preview-details">
+          <summary>What else is included?</summary>
+          <p data-source-disclosure></p>
+        </details>
+        <details class="source-preview-details">
+          <summary>Technical details</summary>
+          <p class="source-preview-note">Full screened request, including tutor instructions and source references. The stored grading key is hidden in this preview.</p>
+          <pre data-source-preview-text></pre>
+        </details>
       </div>
-      <div class="dialog-actions">
-        <button class="secondary-action" type="button" data-source-cancel>Cancel</button>
-        <button class="primary-action compact" type="button" data-source-send>Send screened request</button>
-      </div>
+      <footer class="source-preview-footer">
+        <p class="source-preview-note">Approval is for this request only, including grading or repair calls.</p>
+        <div class="dialog-actions">
+          <button class="secondary-action" type="button" data-source-cancel>Cancel</button>
+          <button class="primary-action compact" type="button" data-source-send>Send to tutor</button>
+        </div>
+      </footer>
     </dialog>
     <article class="move-surface" data-current-move data-move-type="{{ course.move.kind|lower }}">
       {% if course.feedback %}
@@ -62,7 +84,7 @@
         <p class="eyebrow" data-move-kind>{{ course.move.kind or 'Current move' }}</p>
         <span class="move-number">{{ course.move.position or course.position or 'Now' }}</span>
       </div>
-      <h1 id="move-title"{% if (course.move.blocks or [])|selectattr('kind', 'equalto', 'takeaway')|list %} class="lesson-title-with-lead"{% endif %} tabindex="-1">{{ course.move.title or 'Ready when you are' }}</h1>
+      <h1 id="move-title"{% if course.move.ready %} class="lesson-ready-title"{% elif (course.move.blocks or [])|selectattr('kind', 'equalto', 'takeaway')|list %} class="lesson-title-with-lead"{% endif %} tabindex="-1">{{ course.move.title or 'Ready when you are' }}</h1>
       <div class="move-content" data-move-content>
         {% for block in course.move.blocks or [] %}
           {% if block.kind == 'paragraph' %}<p>{{ prose(block) }}</p>
@@ -181,7 +203,7 @@
 
     <section class="tool-panel" data-tool-panel="options" hidden aria-labelledby="options-tool-title">
       <h3 class="sr-only" id="options-tool-title">Source use and settings</h3>
-      <label class="check-row"><input type="checkbox" data-source-mode{% if course.source_start %} checked{% endif %}> Use screened class sources for this turn</label>
+      <label class="check-row"><input type="checkbox" data-source-mode{% if course.source_mode_enabled %} checked{% endif %}> Use screened class sources for this turn</label>
       <a class="quiet-link" href="{{ url_for('course_settings', slug=course.slug) }}">Course settings</a>
       <a class="quiet-link" href="{{ url_for('setup') }}">Tutor settings</a>
     </section>

@@ -85,6 +85,13 @@ def first_lesson_instructions() -> str:
         "Teach exactly one concept. "
         "Begin with the first concept on unit 1's Concepts: line when a plan exists. "
         "Do not frame this as continuing a previous lesson; nothing has been taught yet. "
+        + concept_lesson_instructions()
+    )
+
+
+def concept_lesson_instructions() -> str:
+    """One explanation and concrete example, usable at any course position."""
+    return (
         "Use exactly one **Lesson:** section and no other primary label. "
         "Use two short paragraphs: explain the concept first, then start the "
         "second paragraph with 'For example,' and make it concrete. Keep the "

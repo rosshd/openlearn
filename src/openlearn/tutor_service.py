@@ -1053,7 +1053,7 @@ def _clear_live_turn(key: tuple[str, str]) -> None:
 
 
 def _turn_failure(exc: Exception) -> tuple[str, str]:
-    from openlearn import cli, lesson_policy
+    from openlearn import cli, lesson_policy, source_context, source_lessons
 
     current: BaseException | None = exc
     while current is not None:
@@ -1066,6 +1066,21 @@ def _turn_failure(exc: Exception) -> tuple[str, str]:
         current = current.__cause__ or current.__context__
     current = exc
     while current is not None:
+        if isinstance(current, source_context.SourceRequestBudgetError):
+            return (
+                "source_request_budget",
+                "Your response is saved. This source request is too large. Try a shorter question or use fewer sources.",
+            )
+        if isinstance(current, source_lessons.SourcePlanError):
+            return (
+                "source_plan_invalid",
+                "Your response is saved, but the tutor could not build a usable concept sequence. Retry the lesson.",
+            )
+        if isinstance(current, source_lessons.SourceLessonError):
+            return (
+                "source_lesson_invalid",
+                "Your response is saved, but the tutor could not prepare a useful source lesson. Retry the lesson.",
+            )
         if isinstance(current, lesson_policy.FirstLessonUnavailable):
             return "first_lesson_unavailable", lesson_policy.FIRST_LESSON_RETRY_MESSAGE
         if isinstance(current, cli.ProviderRequestError):

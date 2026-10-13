@@ -123,6 +123,7 @@ from openlearn.constants import (
 )
 from openlearn.models import PendingContext, Topic, TopicSummary, TutorSessionKind
 from openlearn.text import (
+    has_source_audit_metadata,
     concept_key,
     extract_answer_key,
     extract_covered_concepts,
@@ -184,6 +185,7 @@ TURN_METADATA_PATCH_KEYS = {
     "current_slide",
     "last_video_focus",
     "course_units",
+    "course_started",
     "learner_preferences",
 }
 REMEDIATION_MINIMUM_SCORE = 0.7
@@ -226,6 +228,7 @@ DYNAMIC_METADATA_KEYS = {
     "rolling_pass_rate",
     "course_completed",
     "slide_coverage",
+    "source_learning_plan",
     "interview_curriculum",
 }
 
@@ -9558,6 +9561,7 @@ def ask_topic(
     )
     model = model or str(topic.metadata.get("model") or configured_model())
     source_snapshot = None
+    source_plan = None
     if approved_source_preview is not None and not source_mode:
         raise OpenLearnError("A source approval cannot enable ordinary tutoring.")
     if source_mode:
@@ -9575,12 +9579,16 @@ def ask_topic(
                 raise OpenLearnError("Source request cancelled; no provider call was made.")
         source_context.ensure_unchanged(topic, source_snapshot, model)
         prompt = source_snapshot.user
+        if source_snapshot.plan_required and session_kind != SIDE_CHAT_SESSION_KIND:
+            from openlearn import source_lessons
+
+            source_plan = source_lessons.generate_plan(topic, source_snapshot, model)
     set_active_topic(topic.slug)
     is_review_session = topic.metadata.get("review_session_active") is True
     original_metadata = copy.deepcopy(topic.metadata)
     initializing = (
         session_kind != SIDE_CHAT_SESSION_KIND
-        and lesson_policy.is_course_initialization_prompt(prompt)
+        and (lesson_policy.is_course_initialization_prompt(prompt) or source_plan is not None)
     )
     has_pending_question = isinstance(topic.metadata.get("pending_question"), dict)
     explicit_message_kind = (
@@ -9590,12 +9598,16 @@ def ask_topic(
     )
     practice_requested = (
         session_kind != SIDE_CHAT_SESSION_KIND
-        and explicit_message_kind not in {"navigation", "confusion"}
-        and learner_requests_practice(prompt)
+        and (explicit_message_kind not in {"navigation", "confusion"}
+             or source_mode and explicit_message_kind == "navigation")
+        and (learner_requests_practice(prompt)
+             or source_mode and prompt == "Practice now using a covered curriculum concept.")
     )
     restoring_check = practice_requested and has_pending_question
     if practice_requested:
         explicit_message_kind = "practice"
+        if source_plan is not None:
+            initializing = False
     needs_judgment = (
         not initializing
         and not explicit_message_kind
@@ -9623,6 +9635,14 @@ def ask_topic(
     queued_events: list[tuple[str, str, dict[str, object]]] = []
     state_before = copy.deepcopy(load_state(topic.slug))
     projected_metadata = copy.deepcopy(topic.metadata)
+    if source_plan is not None:
+        source_lessons.apply_plan(projected_metadata, source_plan)
+    elif source_snapshot is not None and session_kind != SIDE_CHAT_SESSION_KIND:
+        from openlearn import source_lessons
+
+        if source_lessons.plan_concepts(projected_metadata):
+            projected_metadata["current_unit"] = source_lessons.target_number(topic, prompt)
+            projected_metadata["current_slide"] = 1
 
     def queue_event(slug: str, event_type: str, data: dict[str, object]) -> None:
         queued_events.append((slug, event_type, data))
@@ -9631,6 +9651,8 @@ def ask_topic(
         nonlocal projected_metadata
         projected_metadata = copy.deepcopy(metadata)
 
+    if source_plan is not None:
+        topic = Topic(slug=topic.slug, path=topic.path, metadata=projected_metadata, body=topic.body)
     if is_navigation:
         previous_pending, skipped_remediation = apply_navigation_metadata(
             projected_metadata, prompt
@@ -9665,7 +9687,8 @@ def ask_topic(
     engagement_check_due = (
         is_navigation
         and session_kind == "chat"
-        and lesson_engagement_check_due(topic, session_entries_for_turn)
+        and (lesson_engagement_check_due(topic, session_entries_for_turn)
+             or source_snapshot is not None and source_lessons.sequence_covered(topic.metadata))
     )
 
     if needs_judgment:
@@ -9696,6 +9719,17 @@ def ask_topic(
             metadata={**topic.metadata, "current_turn_message_kind": message_kind},
             body=topic.body,
         )
+    source_teaching = bool(
+        source_snapshot is not None
+        and session_kind != SIDE_CHAT_SESSION_KIND
+        and not practice_requested
+        and not engagement_check_due
+        and (source_plan is not None or is_navigation)
+        and source_lessons.plan_concepts(projected_metadata)
+    )
+    if source_teaching:
+        topic = Topic(slug=topic.slug, path=topic.path,
+                      metadata={**topic.metadata, "_source_teaching": True}, body=topic.body)
     generation_prompt = (
         side_chat_generation_prompt(
             topic,
@@ -9745,9 +9779,10 @@ def ask_topic(
         if response_metadata.covered_concepts and not extract_covered_concepts(policy_answer):
             declared = "; ".join(response_metadata.covered_concepts)
             policy_answer += f"\n<!-- covered: {declared} -->"
-        generated_answer = enforce_first_lesson_response(topic, prompt, policy_answer)
-        if source_snapshot is not None:
-            generated_answer = source_snapshot.attach(generated_answer)
+        generated_answer = (
+            source_lessons.enforce_lesson(topic.metadata, policy_answer)
+            if source_teaching else enforce_first_lesson_response(topic, prompt, policy_answer)
+        )
         _visible_initialization, response_metadata = tutor_response_metadata(generated_answer)
     if generated_answer_override is not None or response_metadata == TutorResponseMetadata():
         _visible_override, response_metadata = tutor_response_metadata(
@@ -9781,7 +9816,7 @@ def ask_topic(
             projected_metadata["current_focus"] = focus_title
             projected_metadata["last_video_focus"] = None
     previous_pending = projected_metadata.get("pending_question")
-    if interview_target is None and initializing:
+    if interview_target is None and (initializing or source_teaching):
         unit_number = projected_metadata.get("current_unit")
         slide = projected_metadata.get("current_slide")
         if isinstance(unit_number, int) and isinstance(slide, int):
@@ -9942,6 +9977,11 @@ def ask_topic(
         )
     if commit_events_hook is not None:
         queued_events.extend(commit_events_hook(answer, projected_metadata, state_after))
+    if source_snapshot is not None:
+        queued_events.append((topic.slug, "source_context_used", {
+            "ledger": source_snapshot.ledger,
+            "source_revision": source_snapshot.revision,
+        }))
     _commit_projected_turn(
         topic.slug,
         state_before,
@@ -10004,9 +10044,10 @@ def generate_validated_tutor_answer(
     source_context=None,
 ) -> str:
     """Generate, validate, then reveal one tutor response."""
+    source_teaching = source_context is not None and topic.metadata.get("_source_teaching") is True
     first_lesson_initializing = (
         interview_target is None and lesson_policy.is_course_initialization_prompt(prompt)
-    )
+    ) or source_teaching
     message_kind = topic.metadata.get("current_turn_message_kind")
     verify_target = (
         isinstance(interview_target, dict)
@@ -10054,35 +10095,28 @@ def generate_validated_tutor_answer(
 
         if stream_sink is not None:
             stream_sink("")
-        if attempt == 0:
-            user = prompt
-        elif first_lesson_initializing:
-            user = lesson_policy.first_lesson_repair_prompt(prompt)
-        else:
-            user = tutor_contract_repair_prompt(
-                candidate,
-                require_check=require_check,
-                forbid_check=forbid_check,
-                forbid_choice_claim=forbid_choice_claim,
+        if source_context is not None:
+            user = sources.generation_user(
+                prompt, initializing=first_lesson_initializing, repair=attempt > 0,
+                candidate=candidate, require_check=require_check, forbid_check=forbid_check,
+                forbid_choice_claim=forbid_choice_claim, reference_error=bool(source_reference_error),
             )
-            if source_context is not None:
-                # Only the bounded screened draft may be resent for repair.
-                candidate = sources.screened(candidate, 2000)
+        else:
+            if attempt == 0:
+                user = prompt
+            elif first_lesson_initializing:
+                user = lesson_policy.first_lesson_repair_prompt(prompt)
+            else:
                 user = tutor_contract_repair_prompt(
                     candidate, require_check=require_check, forbid_check=forbid_check,
                     forbid_choice_claim=forbid_choice_claim,
                 )
-        if first_lesson_initializing:
-            user = lesson_policy.initialization_generation_prompt(user)
+            if first_lesson_initializing:
+                user = lesson_policy.initialization_generation_prompt(user)
         if source_context is not None:
-            if source_reference_error:
-                user += (
-                    "\n" + source_reference_error
-                    + " Omit unsupported source references; the application adds the real excerpt ledger."
-                )
             sources.ensure_unchanged(topic, source_context, model)
             if len(system) + len(user) > sources.PROMPT_CHAR_LIMIT:
-                raise OpenLearnError("Source request exceeds its budget; no request was sent.")
+                raise sources.SourceRequestBudgetError()
         stream_options = (
             {"stream_sink": stream_sink}
             if stream_sink is not None and not first_lesson_initializing and source_context is None
@@ -10107,9 +10141,13 @@ def generate_validated_tutor_answer(
             candidate = call_openai_streaming(**metadata_arguments)
         if source_context is not None:
             source_reference_error = source_context.reference_error(candidate)
+            if has_source_audit_metadata(candidate):
+                source_reference_error = "Tutor returned internal source audit metadata."
             if source_reference_error:
                 if attempt == 1:
-                    raise OpenLearnError(
+                    from openlearn.source_lessons import SourceLessonError
+
+                    raise SourceLessonError(
                         "Tutor returned unsupported source references. "
                         "The previous question and your answer were preserved for retry."
                     )
@@ -10122,8 +10160,13 @@ def generate_validated_tutor_answer(
                 declared = "; ".join(candidate_metadata.covered_concepts)
                 policy_answer += f"\n<!-- covered: {declared} -->"
             try:
-                candidate = enforce_first_lesson_response(topic, prompt, policy_answer)
-            except OpenLearnError:
+                if source_teaching:
+                    from openlearn import source_lessons
+
+                    candidate = source_lessons.enforce_lesson(topic.metadata, policy_answer)
+                else:
+                    candidate = enforce_first_lesson_response(topic, prompt, policy_answer)
+            except (OpenLearnError, lesson_policy.FirstLessonUnavailable):
                 if attempt == 1:
                     raise
                 continue
@@ -10132,8 +10175,6 @@ def generate_validated_tutor_answer(
                 stream_sink(sanitize_model_output(candidate))
             if response_metadata_sink is not None:
                 response_metadata_sink(candidate_metadata)
-            if source_context is not None:
-                candidate = source_context.attach(candidate)
             emit_tutor_output(sanitize_model_output(candidate), output_func)
             return candidate
         if interview_target is not None:
@@ -10167,12 +10208,13 @@ def generate_validated_tutor_answer(
                 response_metadata_sink(candidate_metadata)
             for line in buffered_output:
                 output_func(line)
-            if source_context is not None:
-                candidate = source_context.attach(candidate)
-                output_func(source_context.ledger.strip())
-                if stream_sink is not None:
-                    stream_sink(sanitize_model_output(candidate))
+            if source_context is not None and stream_sink is not None:
+                stream_sink(sanitize_model_output(candidate))
             return candidate
+    if source_context is not None:
+        from openlearn.source_lessons import SourceLessonError
+
+        raise SourceLessonError("The tutor could not prepare a useful source lesson; retry the lesson.")
     raise OpenLearnError(
         "Tutor returned two responses that violated the learner-action contract. "
         "The previous question and your answer were preserved for retry."
@@ -16271,8 +16313,17 @@ def _extract_docx_bytes(data: bytes, source_name: str) -> str:
     except ImportError as exc:
         raise OpenLearnError("DOCX import requires python-docx") from exc
     try:
+        from docx.table import Table
+        from docx.text.paragraph import Paragraph
+
         document = Document(io.BytesIO(data))
-        text = "\n".join(paragraph.text for paragraph in document.paragraphs)
+        parts = []
+        for block in document.iter_inner_content():
+            if isinstance(block, Paragraph):
+                parts.append(block.text)
+            elif isinstance(block, Table):
+                parts.extend(" | ".join(cell.text for cell in row.cells) for row in block.rows)
+        text = "\n".join(parts)
     except Exception as exc:
         raise OpenLearnError(f"could not extract DOCX text from {source_name}: {exc}") from exc
     if not text.strip():

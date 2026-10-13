@@ -2300,6 +2300,11 @@ def test_managed_provider_validation_is_cached_for_the_process(
 
     assert services.ensure_provider_ready()["ready"] is True
     assert services.ensure_provider_ready()["ready"] is True
+    assert services.provider_status()["ready"] is True
+    assert services.provider_status()["verified"] is True
+    monkeypatch.setenv("OPENAI_API_KEY", "changed-managed-test-key")
+    assert services.provider_status()["ready"] is False
+    assert services.provider_status()["verified"] is False
     assert calls == {"provider": 1, "model": 1}
 
 

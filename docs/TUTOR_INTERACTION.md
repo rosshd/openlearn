@@ -190,6 +190,17 @@ Quick Learn plans must stay grounded in imported source summaries.
 Each unit has a `Concepts:` contract, each lesson response hides an exact `<!-- covered: ... -->` marker, and openLearn stores per-slide coverage so later prompts avoid re-teaching covered concepts.
 When a unit or course would otherwise end with uncovered concepts, openLearn can add bounded make-up slides before marking the course complete.
 
+## Source courses
+
+An imported exercise defines learning objectives rather than an instruction to complete the assignment.
+After approval, a source course builds one bounded concept sequence from the screened excerpts and teaches its first concept with a new illustrative example.
+The sequence uses the existing course units and coverage state; coverage records introduction, not mastery.
+Planning and the first lesson commit together, so failed generation leaves the prior learner state intact.
+Later approved requests include the derived concept objectives, selected source passages and relevant learning state, without unrelated goals or profiles.
+Source provenance is stored in a separate `source_context_used` event and is excluded from lesson, Chat and History prose.
+Legacy source ledgers are hidden when displayed without rewriting saved history.
+DOCX imports include paragraph and table text in document order; image-only material remains unavailable.
+
 ## Context Fidelity
 
 For learner-specific tools, keybindings, and setup, the tutor must trust explicit context over generic defaults.

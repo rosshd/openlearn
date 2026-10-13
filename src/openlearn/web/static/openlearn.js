@@ -1349,6 +1349,31 @@ async function approveSourceRequest(payload) {
     if (!result.ok) throw new Error(result.error || "Source preview is unavailable.");
     dialog.querySelector("[data-source-disclosure]").textContent = result.disclosure;
     dialog.querySelector("[data-source-preview-text]").textContent = result.preview;
+    dialog.querySelector("[data-source-request]").textContent = result.request;
+    const excerpts = dialog.querySelector("[data-source-excerpts]");
+    excerpts.replaceChildren();
+    for (const source of result.sources) {
+      const section = document.createElement("section");
+      section.className = "source-preview-document";
+      const name = document.createElement("h4");
+      name.textContent = source.name;
+      section.append(name);
+      for (const [index, text] of source.passages.entries()) {
+        if (index) {
+          const gap = document.createElement("p");
+          gap.className = "source-preview-note";
+          gap.textContent = "Text between excerpts is not included.";
+          section.append(gap);
+        }
+        const passage = document.createElement("p");
+        passage.className = "source-preview-passage";
+        passage.textContent = text;
+        section.append(passage);
+      }
+      excerpts.append(section);
+    }
+    dialog.querySelectorAll("details").forEach((details) => { details.open = false; });
+    dialog.querySelector(".dialog-request").scrollTop = 0;
     return await new Promise((resolve) => {
       const finish = (approved) => {
         dialog.close();
@@ -1362,6 +1387,7 @@ async function approveSourceRequest(payload) {
       dialog.querySelector("[data-source-cancel]").onclick = () => finish(false);
       dialog.querySelector("[data-source-send]").onclick = () => finish(true);
       dialog.showModal();
+      dialog.querySelector("#source-preview-title").focus();
     });
   } finally {
     sourcePreviewInFlight = false;
@@ -1385,7 +1411,9 @@ async function submitTurn(overrideIntent = null) {
   try {
     if (!await approveSourceRequest(payload)) return;
   } catch (error) {
-    setOperationState(error.message, true);
+    setOperationState(error.message, true, {
+      show_provider_recovery: error.payload?.state === "setup_required",
+    });
     return;
   }
   lockTurnForm(true);
@@ -1642,6 +1670,10 @@ chatForm?.addEventListener("submit", async (event) => {
     if (completed.state === "committed") {
       chatForm.elements.text.value = "";
       storeChatDraft();
+      if (result.starts_source_course) {
+        window.location.assign(appUrl(`/courses/${encodeURIComponent(focusShell.dataset.courseSlug)}`));
+        return;
+      }
       chatForm.elements.submission_id.value = crypto.randomUUID();
       await refreshChat();
       setChatStatus("Answered. Your lesson is still open.");
@@ -1760,7 +1792,7 @@ for (const button of document.querySelectorAll("[data-drawer-toggle]")) {
 
 for (const close of document.querySelectorAll("[data-drawer-close]")) close.addEventListener("click", closeDrawers);
 document.addEventListener("keydown", (event) => {
-  if (event.key !== "Escape") return;
+  if (event.key !== "Escape" || document.querySelector("dialog[open]")) return;
   if (
     toolSurface
     && !toolSurface.hidden
@@ -2162,6 +2194,7 @@ function initializeReview() {
   const shell = document.querySelector("[data-review-shell]");
   if (!shell) return;
   const panel = shell.querySelector("[data-review-panel]");
+  const session = shell.querySelector("[data-review-session]");
   const summary = shell.querySelector("[data-review-summary]");
   const snapshot = JSON.parse(shell.querySelector("[data-review-snapshot]").textContent);
   let items = snapshot.items;
@@ -2212,9 +2245,20 @@ function initializeReview() {
     element.addEventListener("click", action);
     return element;
   }
-  function positionNotice() {
-    const bottom = document.querySelector(".site-header")?.getBoundingClientRect().bottom || 0;
+  function positionNotice(ensureRecovery = false) {
+    const bottom = Math.max(document.querySelector(".site-header")?.getBoundingClientRect().bottom || 0,
+      session.getBoundingClientRect().bottom);
     shell.style.setProperty("--review-notice-top", `${Math.max(16, bottom + 8)}px`);
+    const bounds = notice?.getBoundingClientRect();
+    panel.style.setProperty("--review-notice-clearance", `${bounds ? bounds.bottom + 16 : 0}px`);
+    const active = document.activeElement;
+    if (ensureRecovery !== true || !bounds || !active?.matches("[data-review-recovery] button:not(:disabled)")) return;
+    const target = active.getBoundingClientRect();
+    if (target.top < 0 || target.bottom > window.innerHeight
+      || (target.left < bounds.right && target.right > bounds.left
+        && target.top < bounds.bottom && target.bottom > bounds.top)) {
+      active.scrollIntoView({block: "nearest"});
+    }
   }
   function clearNotice() {
     clearTimeout(noticeTimer);
@@ -2223,6 +2267,7 @@ function initializeReview() {
     notice?.remove();
     notice = null;
     noticeRemaining = 0;
+    panel.style.setProperty("--review-notice-clearance", "0px");
   }
   function pauseNotice() {
     if (!notice) return;
@@ -2274,11 +2319,11 @@ function initializeReview() {
       shell.append(notice);
     } else pauseNotice();
     noticeRemaining = 8000;
-    positionNotice();
+    positionNotice(true);
     resumeNotice();
   }
   window.addEventListener("scroll", positionNotice, {passive: true});
-  window.addEventListener("resize", positionNotice);
+  window.addEventListener("resize", () => positionNotice(true));
   document.addEventListener("visibilitychange", () => document.hidden ? pauseNotice() : resumeNotice());
   function clearFeedback() {
     clearNotice();
@@ -2286,6 +2331,13 @@ function initializeReview() {
     area?.querySelector("[data-review-open-course]")?.remove();
     const status = area?.querySelector("[data-review-status]");
     if (status) { status.textContent = ""; status.hidden = true; }
+    const regenerationStatus = area?.querySelector("[data-review-regeneration-status]");
+    if (regenerationStatus) { regenerationStatus.textContent = ""; regenerationStatus.hidden = true; }
+    const regenerateControl = area?.querySelector("[data-review-regenerate]");
+    if (regenerateControl) {
+      regenerateControl.textContent = "Regenerate card";
+      delete regenerateControl.dataset.reviewRetry;
+    }
   }
   function setPrimaryLabel(label) {
     const control = panel.querySelector("[data-review-primary]");
@@ -2335,10 +2387,24 @@ function initializeReview() {
     }
     showNotice(message);
   }
-  function reviewHeaderHeight() {
+  function navigationHeight() {
     const header = document.querySelector(".site-header");
     return header && ["sticky", "fixed"].includes(getComputedStyle(header).position) ? header.offsetHeight : 0;
   }
+  function updateSession() {
+    const navHeight = navigationHeight();
+    session.style.top = `${navHeight}px`;
+    session.classList.toggle("review-session--flow", window.innerHeight < 576
+      || navHeight + session.offsetHeight > window.innerHeight * 0.22);
+    panel.style.setProperty("--review-header-offset", `${reviewHeaderHeight() + 16}px`);
+    positionNotice(true);
+  }
+  function reviewHeaderHeight() {
+    return navigationHeight() + (getComputedStyle(session).position === "sticky" ? session.offsetHeight : 0);
+  }
+  new ResizeObserver(() => { updateSession(); updateActionDock?.(); }).observe(session);
+  window.addEventListener("resize", updateSession);
+  updateSession();
   function clearActionDock() {
     dockObserver?.disconnect();
     dockObserver = null;
@@ -2417,6 +2483,7 @@ function initializeReview() {
         ? lockedFocus : panel.querySelector("[data-review-retry]:not(:disabled)");
       target?.focus({preventScroll: true});
     }
+    if (!value) positionNotice(true);
   }
   panel.addEventListener("click", (event) => {
     if (busy && event.target.closest("a, summary")) event.preventDefault();
@@ -2490,17 +2557,70 @@ function initializeReview() {
     }
     const area = node("div", undefined, "review-recovery");
     area.dataset.reviewRecovery = "";
-    const control = button(mode === "preparation" ? "Prepare card" : "Show answer and explanation", mode === "preparation" ? prepare : reveal, "primary-action");
+    const control = button(mode === "preparation" ? "Prepare card" : "Show answer", mode === "preparation" ? prepare : reveal, "primary-action");
     control.dataset.reviewPrimary = "";
     if (mode === "question") {
       control.setAttribute("aria-keyshortcuts", "Space");
-      control.title = "Show answer and explanation (Space)";
+      control.title = "Show answer (Space)";
     }
     area.append(control);
+    if (mode === "question" && current.card_id && current.question) {
+      const options = node("details", undefined, "review-card-options");
+      options.dataset.reviewCardOptions = "";
+      const regenerateControl = button("Regenerate card", regenerate);
+      regenerateControl.dataset.reviewRegenerate = "";
+      const status = node("p", "", "review-status");
+      status.dataset.reviewRegenerationStatus = "";
+      status.id = "review-regeneration-status";
+      status.hidden = true;
+      regenerateControl.setAttribute("aria-describedby", status.id);
+      options.append(node("summary", "Card options"),
+        node("p", "Uses your AI provider and current course material.", "quiet-copy"),
+        regenerateControl, status);
+      area.append(options);
+    }
     panel.append(area);
     addSkip();
     updateSummary();
     if (focus) focusHeading(question || title);
+  }
+  async function regenerate() {
+    if (busy || pending || mode !== "question") return;
+    const previous = current;
+    const id = ++operation;
+    clearFeedback();
+    const control = panel.querySelector("[data-review-regenerate]");
+    control.textContent = "Regenerating…";
+    lock(true);
+    announce("Regenerating your review card.");
+    try {
+      const result = await post("/api/review/prepare", {
+        slug: previous.slug, concept: previous.concept, review_revision: previous.review_revision,
+        regenerate: true,
+      });
+      if (id !== operation || current !== previous) return;
+      const next = result.item;
+      if (!next?.question || next.state !== "question" || !next.card_id || !next.review_revision
+        || next.slug !== previous.slug || next.concept !== previous.concept || next.card_id === previous.card_id) {
+        throw new Error("The regenerated card could not be confirmed.");
+      }
+      replaceItem(next);
+      current = next;
+      showCard(true);
+      announce("Review card regenerated. Recall the new answer before revealing it.");
+    } catch (error) {
+      if (id !== operation || current !== previous) return;
+      if (conflict(error)) showConflict();
+      else {
+        const message = "Could not confirm regeneration. Try again.";
+        const status = panel.querySelector("[data-review-regeneration-status]");
+        status.textContent = message;
+        status.hidden = false;
+        control.textContent = "Try again";
+        control.dataset.reviewRetry = "";
+        showNotice(message);
+      }
+    } finally { if (id === operation) lock(false); }
   }
   async function prepare() {
     if (busy) return;
@@ -2538,7 +2658,17 @@ function initializeReview() {
     const answer = node("section", undefined, "review-answer");
     answer.setAttribute("aria-label", "Answer and explanation");
     appendProse(answer, revealed.answer, "review-answer-text", "answer");
-    if (revealed.explanation) appendProse(answer, revealed.explanation, "review-explanation", "explanation");
+    if (revealed.explanation) {
+      const disclosure = node("details", undefined, "review-explanation-disclosure");
+      disclosure.dataset.reviewExplanation = "";
+      const toggle = node("summary", "Show explanation");
+      disclosure.append(toggle);
+      appendProse(disclosure, revealed.explanation, "review-explanation", "explanation");
+      disclosure.addEventListener("toggle", () => {
+        toggle.textContent = disclosure.open ? "Hide explanation" : "Show explanation";
+      });
+      answer.append(disclosure);
+    }
     const target = answer.querySelector(".review-answer-text");
     target.tabIndex = -1;
     target.dataset.reviewAnswer = "";
@@ -2558,15 +2688,15 @@ function initializeReview() {
     }
     panel.append(answer);
     addSkip(ratings);
-    focusHeading(target, "start");
-    announce("Answer and explanation revealed. Choose a rating.");
+    focusHeading(target);
+    announce(revealed.explanation ? "Answer revealed. Optional explanation is collapsed. Choose a rating." : "Answer revealed. Choose a rating.");
   }
   async function reveal() {
     if (busy || mode !== "question") return;
     const id = ++operation;
     const identity = itemKey(current);
     clearFeedback();
-    setPrimaryLabel("Show answer and explanation");
+    setPrimaryLabel("Show answer");
     lock(true);
     try {
       const result = await post("/api/review/reveal", payload());
