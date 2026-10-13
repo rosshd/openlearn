@@ -472,7 +472,8 @@ def request_size_bound(context: SourceContext) -> int:
             "selected_source_concept": {
                 "label": '"' * source_lessons.LABEL_CHAR_LIMIT,
                 "objective": '"' * source_lessons.OBJECTIVE_CHAR_LIMIT,
-                "source_ids": ["file:" + "a" * 64] * EXCERPT_LIMIT,
+                # folder: and github: are the longest accepted identity prefixes.
+                "source_ids": ["github:" + "a" * 64] * EXCERPT_LIMIT,
             },
             "source_concept_count": source_lessons.MAX_CONCEPTS,
             "current_unit": source_lessons.MAX_CONCEPTS,
