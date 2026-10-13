@@ -493,7 +493,9 @@ def request_size_bound(context: SourceContext) -> int:
             metadata = {**projected, "_source_teaching": True}
             if stage:
                 metadata["pending_remediation"] = {
-                    "stage": stage, "deferred_review_due": "2026-10-12T12:00:00.12345678901+00:00",
+                    # A valid 35-character date survives scoped-state validation;
+                    # the accepted control separator reserves JSON escaping too.
+                    "stage": stage, "deferred_review_due": "2026-10-12\x0012:00:00.123456789+00:00",
                 }
             for engagement in (False, True):
                 systems.append(len(tutor_prompt(

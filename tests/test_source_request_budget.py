@@ -94,11 +94,19 @@ def test_maximum_plan_fields_and_repair_are_reserved(source_course):
     source_lessons.apply_plan(metadata, payload)
     metadata.update(_source_teaching=True, current_unit=12, current_slide=12,
                     current_turn_message_kind="answer", last_answer_status="needs_work",
-                    consecutive_misses=1000000, pending_remediation={"stage": "deferred", "deferred_review_due": "2026-10-12T12:00:00.12345678901+00:00"})
+                    consecutive_misses=1000000,
+                    last_answer_score=1.2345678901234567e-300,
+                    difficulty=1.2345678901234567e-300,
+                    consecutive_correct=1.2345678901234567e-300,
+                    pending_remediation={"stage": "deferred", "deferred_review_due": "2026-10-12\x0012:00:00.123456789+00:00"})
     metadata["slide_coverage"] = {f"{n}:1": [c["label"]] for n, c in enumerate(payload["concepts"], 1)}
-    system = sources.tutor_prompt(context, metadata)
+    assert sources._scoped_state(metadata)["pending_remediation"] == metadata["pending_remediation"]
     bound = sources.request_size_bound(context)
     assert bound <= sources.PROMPT_CHAR_LIMIT
+    context = replace(context, prompt=context.prompt + "x" * (sources.PROMPT_CHAR_LIMIT - bound))
+    bound = sources.request_size_bound(context)
+    assert bound == sources.PROMPT_CHAR_LIMIT
+    system = sources.tutor_prompt(context, metadata)
     for initializing in (False, True):
         for require_check, forbid_check in ((True, False), (False, True), (False, False)):
             user = sources.generation_user(
