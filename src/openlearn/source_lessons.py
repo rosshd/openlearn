@@ -113,7 +113,7 @@ def validate_concepts(concepts, known_ids: set[str] | None = None) -> list[dict[
         ids = concept["source_ids"]
         if not isinstance(ids, list) or not 1 <= len(ids) <= sources.EXCERPT_LIMIT or any(
             not isinstance(identity, str)
-            or not re.fullmatch(r"(?:file|url):[a-f0-9]{16,64}", identity)
+            or not re.fullmatch(r"(?:file|folder|github|url):[a-f0-9]{16,64}", identity)
             or known_ids is not None and identity not in known_ids for identity in ids
         ):
             raise PlanValidationError("source")
