@@ -45,6 +45,21 @@ GOOD_CARDS = {
 }
 
 
+@pytest.mark.parametrize("without_fchmod", [False, True])
+@pytest.mark.parametrize("existing", [False, True])
+def test_private_report_write_without_unix_only_calls(tmp_path, monkeypatch, without_fchmod, existing):
+    path = tmp_path / "report.json"
+    if existing:
+        path.write_text("old report contents", encoding="utf-8")
+        path.chmod(0o666)
+    if without_fchmod:
+        monkeypatch.delattr(evaluation.os, "fchmod", raising=False)
+    evaluation._write_private(path, "new report: \u03bb\n")
+    assert path.read_text(encoding="utf-8") == "new report: \u03bb\n"
+    if os.name != "nt":
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
 def judgment(failed=()):
     return {"criteria": {key: key not in failed for key in evaluation.CRITERIA},
             "scores": {key: 0.3 if key in failed else 0.9 for key in evaluation.CRITERIA},

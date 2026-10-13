@@ -204,7 +204,10 @@ def _generation_diagnostic(raw: str, sanitizer: EvidenceRecorder) -> dict | None
 def _write_private(path: Path, text: str) -> None:
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        os.fchmod(handle.fileno(), 0o600)
+        if hasattr(os, "fchmod"):
+            os.fchmod(handle.fileno(), 0o600)
+        else:
+            path.chmod(0o600)
         handle.write(text)
 
 
