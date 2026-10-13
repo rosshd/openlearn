@@ -4,6 +4,7 @@ import json
 import stat
 import sys
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -65,8 +66,8 @@ def _fast_limits(variant: CodexMissionVariant) -> ExplorerLimits:
         max_turns=12 if variant is CodexMissionVariant.DIRECT else 14,
         max_elapsed_seconds=30,
         observation_chars=12_000,
-        quiet_interval=0.15,
-        observation_timeout=2,
+        quiet_interval=0.02,
+        observation_timeout=0.25,
     )
 
 
@@ -118,20 +119,33 @@ def test_fake_source_composes_public_pty_mission_across_route_variations(
             "import time\nfrom openlearn import cli\n"
             "original = cli.write_text_atomic\n"
             "def delayed(path, text):\n"
-            "    time.sleep(0.12)\n"
+            "    time.sleep(0.4)\n"
             "    return original(path, text)\n"
             "cli.write_text_atomic = delayed\n"
             "raise SystemExit(cli.main())\n",
             encoding="utf-8",
         )
         command = (sys.executable, wrapper, "menu")
-    outcome = run_codex_draft_course_mission(
-        tmp_path / variant.value,
-        command=command,
-        decision_source=source,
-        variant=variant,
-        limits=_fast_limits(variant),
-    )
+    # A fixed decision script must observe each real prompt before advancing.
+    # Quiet output can otherwise consume a decision while a draft is still saving.
+    prompts = iter([r"> "] * (len(prefix) + 1) + [
+        "Choose: ", "Course name: ", "Choose: ", "Goal: ", "Choose: ",
+        r"Save this course draft for later\? \[y/N\]: ", r"> ",
+    ])
+
+    class PromptRunner(codex_missions.PtyMissionRunner):
+        def observe(self, *, quiet_interval, timeout):
+            self.expect(next(prompts))
+            return super().observe(quiet_interval=quiet_interval, timeout=timeout)
+
+    with mock.patch.object(codex_missions, "PtyMissionRunner", PromptRunner):
+        outcome = run_codex_draft_course_mission(
+            tmp_path / variant.value,
+            command=command,
+            decision_source=source,
+            variant=variant,
+            limits=_fast_limits(variant),
+        )
 
     manifest = json.loads(
         (outcome.evidence / "manifest.json").read_text(encoding="utf-8")
