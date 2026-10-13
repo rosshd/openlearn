@@ -35,7 +35,7 @@ def test_unknown_plan_error_reason_cannot_expose_exception_text():
     assert "PRIVATE" not in message
 
 
-@pytest.mark.parametrize("failure", ["extra_shape", "private_shape", "prefix", "filename", "json"])
+@pytest.mark.parametrize("failure", ["extra_shape", "private_shape", "prefix", "checksum", "filename", "json"])
 def test_plan_diagnostics_survive_reload_without_private_values(source_course, failure):
     topic, record = source_course
     payload = json.loads(plan(record))
@@ -49,15 +49,15 @@ def test_plan_diagnostics_survive_reload_without_private_values(source_course, f
     elif failure == "json":
         expected = {"plan_reason": "json", "plan_json_line": 1, "plan_json_column": 1}
     else:
-        identity = "folder:" + record.checksum if failure == "prefix" else "PRIVATE_FILE.txt"
+        identity = "folder:" + record.checksum if failure == "prefix" else record.checksum if failure == "checksum" else "PRIVATE_FILE.txt"
         payload["concepts"][0]["source_ids"] = [identity]
         expected.update(
             plan_reason="source", plan_field="source_ids", plan_concept_index=1,
             plan_source_index=1, plan_source_count=1, plan_known_source_count=1,
             plan_source_length=len(identity), plan_source_prefix="folder" if failure == "prefix" else "other",
-            plan_source_form="identity" if failure == "prefix" else "filename",
+            plan_source_form="identity" if failure == "prefix" else "checksum" if failure == "checksum" else "filename",
             plan_source_issue="unselected" if failure == "prefix" else "malformed",
-            plan_checksum_match_count=1 if failure == "prefix" else 0,
+            plan_checksum_match_count=1 if failure in {"prefix", "checksum"} else 0,
         )
     raw = "PRIVATE_RAW_RESPONSE" if failure == "json" else json.dumps(payload)
     request = web_request(topic, intent="next", text="")

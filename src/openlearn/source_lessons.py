@@ -37,7 +37,7 @@ def safe_plan_diagnostics(raw: object) -> dict[str, object]:
         "plan_field": {"label", "objective", "source_ids"},
         "plan_source_issue": {"container", "count", "type", "malformed", "unselected"},
         "plan_source_prefix": {"file", "folder", "github", "url", "other"},
-        "plan_source_form": {"identity", "filename", "index", "other"},
+        "plan_source_form": {"identity", "checksum", "filename", "index", "other"},
     }
     for key, allowed in enums.items():
         if isinstance(raw.get(key), str) and raw[key] in allowed:
@@ -164,10 +164,13 @@ def validate_concepts(concepts, known_ids: set[str] | None = None) -> list[dict[
                 raise PlanValidationError("source", **detail, plan_source_issue="type")
             valid = bool(re.fullmatch(r"(?:file|folder|github|url):[a-f0-9]{16,64}", identity))
             prefix, _, checksum = identity.partition(":")
+            bare_checksum = bool(re.fullmatch(r"[a-f0-9]{16,64}", identity))
+            if bare_checksum:
+                checksum = identity
             detail.update(
                 plan_source_length=len(identity),
                 plan_source_prefix=prefix if prefix in {"file", "folder", "github", "url"} else "other",
-                plan_source_form="identity" if valid else "filename" if re.search(r"\.(?:txt|md|py|pdf|docx)$", identity, re.I) else "index" if identity.isdecimal() else "other",
+                plan_source_form="identity" if valid else "checksum" if bare_checksum else "filename" if re.search(r"\.(?:txt|md|py|pdf|docx)$", identity, re.I) else "index" if identity.isdecimal() else "other",
                 plan_checksum_match_count=sum(value.partition(":")[2] == checksum for value in known_ids or ()) if checksum else 0,
             )
             if not valid:
