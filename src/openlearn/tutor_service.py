@@ -1106,8 +1106,14 @@ def _turn_failure(exc: Exception) -> tuple[str, str]:
     )
 
 
-def _turn_provider_diagnostics(exc: BaseException) -> dict[str, object]:
-    from openlearn import cli
+def _safe_turn_error_diagnostics(raw: object) -> dict[str, object]:
+    from openlearn import cli, source_lessons
+
+    return {**cli._safe_provider_diagnostics(raw), **source_lessons.safe_plan_diagnostics(raw)}
+
+
+def _turn_error_diagnostics(exc: BaseException) -> dict[str, object]:
+    from openlearn import cli, source_lessons
 
     current: BaseException | None = exc
     seen: set[int] = set()
@@ -1115,6 +1121,8 @@ def _turn_provider_diagnostics(exc: BaseException) -> dict[str, object]:
         seen.add(id(current))
         if isinstance(current, cli.ProviderRequestError):
             return cli._safe_provider_diagnostics(current.diagnostics)
+        if isinstance(current, source_lessons.SourcePlanError):
+            return source_lessons.safe_plan_diagnostics(current.diagnostics)
         current = current.__cause__ or current.__context__
     return {}
 
@@ -1144,7 +1152,7 @@ def _save_operation(
     def update(state: dict[str, object]) -> None:
         internal = _internal_state(state)
         error_at = _now() if error_code else None
-        diagnostics = cli._safe_provider_diagnostics(error_diagnostics)
+        diagnostics = _safe_turn_error_diagnostics(error_diagnostics)
         active_key = _active_operation_key(session_kind)
         previous_active = internal.get(active_key)
         previous_active = previous_active if isinstance(previous_active, dict) else {}
@@ -2286,7 +2294,7 @@ def _execute_prepared_turn_inner(
                 prompt=normalized,
                 result=result,
                 error_code=error_code,
-                error_diagnostics=_turn_provider_diagnostics(exc),
+                error_diagnostics=_turn_error_diagnostics(exc),
                 payload_hash=payload_hash,
                 session_kind=session_kind,
             )
@@ -2368,7 +2376,7 @@ def _execute_prepared_turn(
                 prompt=normalized,
                 result=result,
                 error_code=error_code,
-                error_diagnostics=_turn_provider_diagnostics(exc),
+                error_diagnostics=_turn_error_diagnostics(exc),
                 payload_hash=payload_hash,
                 session_kind=session_kind,
             )

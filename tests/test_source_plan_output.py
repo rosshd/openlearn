@@ -2,11 +2,12 @@
 
 import io
 import json
+from dataclasses import replace
 from unittest import mock
 
 import pytest
 
-from openlearn import cli, source_lessons, tutor_service
+from openlearn import cli, source_context, source_lessons, tutor_service
 from openlearn.text import sanitize_json_output
 from openlearn.web.services import OpenLearnWebServices
 from tests.test_source_context import web_request
@@ -35,11 +36,83 @@ def test_unknown_plan_error_reason_cannot_expose_exception_text():
     assert "PRIVATE" not in message
 
 
+@pytest.mark.parametrize("failure", ["extra_shape", "private_shape", "prefix", "unknown_checksum", "filename", "json"])
+def test_plan_diagnostics_survive_reload_without_private_values(source_course, failure):
+    topic, record = source_course
+    payload = json.loads(plan(record))
+    expected = {"plan_top_type": "object", "plan_top_fields": ["concepts"], "plan_unknown_field_count": 0}
+    if failure == "extra_shape":
+        payload["schema"] = 1
+        expected.update(plan_reason="shape", plan_top_fields=["concepts", "schema"])
+    elif failure == "private_shape":
+        payload = {"PRIVATE_FIELD": "PRIVATE_VALUE"}
+        expected.update(plan_reason="shape", plan_top_fields=[], plan_unknown_field_count=1)
+    elif failure == "json":
+        expected = {"plan_reason": "json", "plan_json_line": 1, "plan_json_column": 1}
+    else:
+        identity = "folder:" + record.checksum if failure == "prefix" else "0" * 16 if failure == "unknown_checksum" else "PRIVATE_FILE.txt"
+        payload["concepts"][0]["source_ids"] = [identity]
+        expected.update(
+            plan_reason="source", plan_field="source_ids", plan_concept_index=1,
+            plan_source_index=1, plan_source_count=1, plan_known_source_count=1,
+            plan_source_length=len(identity), plan_source_prefix="folder" if failure == "prefix" else "other",
+            plan_source_form="identity" if failure == "prefix" else "checksum" if failure == "unknown_checksum" else "filename",
+            plan_source_issue="unselected" if failure == "prefix" else "malformed",
+            plan_checksum_match_count=1 if failure == "prefix" else 0,
+        )
+    raw = "PRIVATE_RAW_RESPONSE" if failure == "json" else json.dumps(payload)
+    request = web_request(topic, intent="next", text="")
+    before = topic.path.read_bytes()
+    with mock.patch.object(cli, "call_openai", return_value=raw), mock.patch.object(cli, "call_openai_streaming") as tutor:
+        result = submit(OpenLearnWebServices(), request, topic.slug)
+    assert result.status == "retryable_error"
+    assert result.error_code == "source_plan_invalid"
+    internal = cli.load_state(topic.slug)["_openlearn_internal"]
+    assert internal["turn_results"][request.submission_id]["error_diagnostics"] == expected
+    assert internal["last_turn_error"]["diagnostics"] == expected
+    cli.clear_config_cache()
+    assert "error_diagnostics" not in tutor_service._receipt_dict(tutor_service.operation_status(topic.slug, request.submission_id))
+    assert "PRIVATE" not in cli.topic_state_path(topic.slug).read_text()
+    assert topic.path.read_bytes() == before
+    tutor.assert_not_called()
+
+
+def test_plan_diagnostics_filter_untrusted_mutations():
+    error = source_lessons.SourcePlanError("PRIVATE", reason="source", diagnostics={
+        "plan_concept_index": 1, "plan_source_issue": "unselected",
+    })
+    error.diagnostics.update(raw="PRIVATE", plan_top_type="PRIVATE", plan_source_index=True,
+                             plan_top_fields=["concepts", "PRIVATE", {"PRIVATE": "PRIVATE"}])
+    assert tutor_service._turn_error_diagnostics(error) == {
+        "plan_reason": "source", "plan_source_issue": "unselected",
+        "plan_concept_index": 1, "plan_top_fields": ["concepts"],
+    }
+
+
+def test_ambiguous_checksum_shorthand_is_not_resolved(source_course):
+    topic, record = source_course
+    context = source_context.snapshot(topic, "Continue to the next useful concept.", source_context.APPROVED_MODEL, opted_in=True)
+    context = replace(context, ledger=context.ledger + f"\n- duplicate; source ID folder:{record.checksum}; extracted text lines 1-2\n")
+    payload = json.loads(plan(record))
+    payload["concepts"][0]["source_ids"] = [record.checksum]
+    with mock.patch.object(cli, "call_openai", return_value=json.dumps(payload)), mock.patch.object(source_context, "ensure_unchanged"):
+        with pytest.raises(source_lessons.SourcePlanError) as error:
+            source_lessons.generate_plan(topic, context, source_context.APPROVED_MODEL)
+    assert error.value.diagnostics["plan_source_issue"] == "malformed"
+    assert error.value.diagnostics["plan_source_form"] == "checksum"
+    assert error.value.diagnostics["plan_checksum_match_count"] == 2
+
+
 @pytest.mark.parametrize("wrapper", ["{}", "```json\n{}\n```", "<analysis>PRIVATE_REASONING</analysis>\n{}"])
-def test_actual_provider_json_commits_source_lesson(source_course, monkeypatch, wrapper):
+@pytest.mark.parametrize("source_form", ["canonical", "checksum"])
+def test_actual_provider_json_commits_source_lesson(source_course, monkeypatch, wrapper, source_form):
     topic, record = source_course
     payload = json.loads(plan(record))
     payload["concepts"][0]["objective"] = "Compare A: linear search and B: binary search."
+    expected_concepts = json.loads(json.dumps(payload["concepts"]))
+    if source_form == "checksum":
+        for concept in payload["concepts"]:
+            concept["source_ids"] = [record.checksum]
     raw = wrapper.format(json.dumps(payload, indent=2))
     response = json.dumps({"choices": [{"message": {"content": raw}}]}).encode()
     monkeypatch.setenv("OPENLEARN_MOCK", "0")
@@ -50,7 +123,7 @@ def test_actual_provider_json_commits_source_lesson(source_course, monkeypatch, 
     network.assert_called_once()
     assert json.loads(network.call_args.args[0].data)["response_format"] == {"type": "json_object"}
     saved = cli.read_topic(topic.slug)
-    assert saved.metadata["source_learning_plan"]["concepts"] == payload["concepts"]
+    assert saved.metadata["source_learning_plan"]["concepts"] == expected_concepts
     assert "PRIVATE_REASONING" not in saved.path.read_text()
 
 
