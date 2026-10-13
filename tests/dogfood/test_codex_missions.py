@@ -65,8 +65,8 @@ def _fast_limits(variant: CodexMissionVariant) -> ExplorerLimits:
         max_turns=12 if variant is CodexMissionVariant.DIRECT else 14,
         max_elapsed_seconds=30,
         observation_chars=12_000,
-        quiet_interval=0.02,
-        observation_timeout=0.25,
+        quiet_interval=0.15,
+        observation_timeout=2,
     )
 
 
@@ -97,21 +97,37 @@ def _topic_text(name: str, slug: str, goal: str) -> str:
         (CodexMissionVariant.DIRECT, ["99"], 8),
     ],
 )
+@pytest.mark.parametrize("delayed_saves", [False, True])
 @POSIX_PTY_ONLY
 def test_fake_source_composes_public_pty_mission_across_route_variations(
     tmp_path: Path,
     variant: CodexMissionVariant,
     prefix: list[str],
     expected_turns: int,
+    delayed_saves: bool,
 ) -> None:
     source = FakeDecisionSource(
         [CodexDecision("submit_text", text=value) for value in prefix]
         + _direct_decisions()
     )
 
+    command = (installed_openlearn(), "menu")
+    if delayed_saves:
+        wrapper = tmp_path / "delayed-save.py"
+        wrapper.write_text(
+            "import time\nfrom openlearn import cli\n"
+            "original = cli.write_text_atomic\n"
+            "def delayed(path, text):\n"
+            "    time.sleep(0.12)\n"
+            "    return original(path, text)\n"
+            "cli.write_text_atomic = delayed\n"
+            "raise SystemExit(cli.main())\n",
+            encoding="utf-8",
+        )
+        command = (sys.executable, wrapper, "menu")
     outcome = run_codex_draft_course_mission(
         tmp_path / variant.value,
-        command=(installed_openlearn(), "menu"),
+        command=command,
         decision_source=source,
         variant=variant,
         limits=_fast_limits(variant),
