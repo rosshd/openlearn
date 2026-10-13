@@ -4,6 +4,7 @@ import json
 import stat
 import sys
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -97,25 +98,54 @@ def _topic_text(name: str, slug: str, goal: str) -> str:
         (CodexMissionVariant.DIRECT, ["99"], 8),
     ],
 )
+@pytest.mark.parametrize("delayed_saves", [False, True])
 @POSIX_PTY_ONLY
 def test_fake_source_composes_public_pty_mission_across_route_variations(
     tmp_path: Path,
     variant: CodexMissionVariant,
     prefix: list[str],
     expected_turns: int,
+    delayed_saves: bool,
 ) -> None:
     source = FakeDecisionSource(
         [CodexDecision("submit_text", text=value) for value in prefix]
         + _direct_decisions()
     )
 
-    outcome = run_codex_draft_course_mission(
-        tmp_path / variant.value,
-        command=(installed_openlearn(), "menu"),
-        decision_source=source,
-        variant=variant,
-        limits=_fast_limits(variant),
-    )
+    command = (installed_openlearn(), "menu")
+    if delayed_saves:
+        wrapper = tmp_path / "delayed-save.py"
+        wrapper.write_text(
+            "import time\nfrom openlearn import cli\n"
+            "original = cli.write_text_atomic\n"
+            "def delayed(path, text):\n"
+            "    time.sleep(0.4)\n"
+            "    return original(path, text)\n"
+            "cli.write_text_atomic = delayed\n"
+            "raise SystemExit(cli.main())\n",
+            encoding="utf-8",
+        )
+        command = (sys.executable, wrapper, "menu")
+    # A fixed decision script must observe each real prompt before advancing.
+    # Quiet output can otherwise consume a decision while a draft is still saving.
+    prompts = iter([r"> "] * (len(prefix) + 1) + [
+        "Choose: ", "Course name: ", "Choose: ", "Goal: ", "Choose: ",
+        r"Save this course draft for later\? \[y/N\]: ", r"> ",
+    ])
+
+    class PromptRunner(codex_missions.PtyMissionRunner):
+        def observe(self, *, quiet_interval, timeout):
+            self.expect(next(prompts))
+            return super().observe(quiet_interval=quiet_interval, timeout=timeout)
+
+    with mock.patch.object(codex_missions, "PtyMissionRunner", PromptRunner):
+        outcome = run_codex_draft_course_mission(
+            tmp_path / variant.value,
+            command=command,
+            decision_source=source,
+            variant=variant,
+            limits=_fast_limits(variant),
+        )
 
     manifest = json.loads(
         (outcome.evidence / "manifest.json").read_text(encoding="utf-8")

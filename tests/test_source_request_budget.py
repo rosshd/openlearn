@@ -80,13 +80,16 @@ def test_large_source_turn_commits_full_plan(source_course, repair):
     assert cli.read_topic(topic.slug).metadata["source_learning_plan"] == payload
 
 
-def test_maximum_plan_fields_and_repair_are_reserved(source_course):
+@pytest.mark.parametrize("kind", ["file", "folder", "github", "url"])
+@pytest.mark.parametrize("misses", [1000000, 1.2345678901234567e-300])
+def test_maximum_plan_fields_and_repair_are_reserved(source_course, kind, misses):
     topic, _ = source_course
     context = sources.snapshot(topic, cli.lesson_policy.COURSE_INITIALIZATION_PROMPT, sources.APPROVED_MODEL, opted_in=True)
     payload = {"schema": 1, "concepts": [
-        {"label": str(n) + '"' * (source_lessons.LABEL_CHAR_LIMIT - len(str(n))),
+        {"label": '"' * source_lessons.LABEL_CHAR_LIMIT if n == 11 else
+         chr(65 + n) + '"' * (source_lessons.LABEL_CHAR_LIMIT - 1),
          "objective": '"' * source_lessons.OBJECTIVE_CHAR_LIMIT,
-         "source_ids": ["file:" + "a" * 64] * sources.EXCERPT_LIMIT}
+         "source_ids": [kind + ":" + "a" * 64] * sources.EXCERPT_LIMIT}
         for n in range(source_lessons.MAX_CONCEPTS)
     ]}
     source_lessons.validate_concepts(payload["concepts"])
@@ -94,7 +97,7 @@ def test_maximum_plan_fields_and_repair_are_reserved(source_course):
     source_lessons.apply_plan(metadata, payload)
     metadata.update(_source_teaching=True, current_unit=12, current_slide=12,
                     current_turn_message_kind="answer", last_answer_status="needs_work",
-                    consecutive_misses=1000000,
+                    consecutive_misses=misses,
                     last_answer_score=1.2345678901234567e-300,
                     difficulty=1.2345678901234567e-300,
                     consecutive_correct=1.2345678901234567e-300,
