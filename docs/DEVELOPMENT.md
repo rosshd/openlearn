@@ -116,7 +116,10 @@ All generation, judging, extraction, repair, and retry subcalls count; guarded t
 Stop the batch on the first rate-limit, funding/access restriction, or unknown-usage transport failure, without a manual retry.
 Retain unknown-cost reservations instead of treating failures as free, clearing the ledger, changing its pricing/caps, or switching providers to continue.
 A new batch needs separate authorization and a separate ledger; carry every earlier reservation into cumulative reporting rather than resetting prior evidence.
-Review and approve each screened source-mode request in the application; prior consent does not carry over.
+Web source permission is approved once for the current course sources and named provider, at creation or on an existing course's first source request.
+Changed sources require fresh approval; Options can revoke it.
+CLI source-mode approval remains per request.
+Product permission does not authorize extra paid acceptance calls or expand the separately approved test batch.
 
 Report a short evidence checklist:
 

@@ -2187,6 +2187,7 @@ run(port={port}, open_browser=False)
                 assert page.get_by_label("Course name", exact=True).input_value() == "Synthetic Quick Learn"
                 page.get_by_label("Source file", exact=True).set_input_files(
                     {"name": "synthetic.txt", "mimeType": "text/plain", "buffer": b"OPENAI_API_KEY=sk-abcdefghijklmnopqrstuv"})
+                page.locator("[data-creation-consent-check]").check()
                 page.get_by_role("button", name="Create Quick Learn").click()
                 page.locator("[data-form-error]").wait_for(state="visible")
                 assert "credential" in page.locator("[data-form-error]").inner_text().lower()
@@ -2196,10 +2197,17 @@ run(port={port}, open_browser=False)
                 page.get_by_label("Your goal", exact=True).fill("Corrected equal parts goal")
                 page.get_by_label("Source file", exact=True).set_input_files(
                     {"name": "fractions.md", "mimeType": "text/markdown", "buffer": b"One half is one of two equal parts of a whole."})
+                page.locator("[data-creation-consent-check]").check()
                 page.get_by_role("button", name="Create Quick Learn").click()
                 page.wait_for_url("**/courses/synthetic-quick-learn?tool=chat")
                 assert page.locator("[data-source-mode]").is_checked()
                 assert "Corrected Quick Learn" in page.locator(".focus-identity").inner_text()
+                assert page.locator("[data-source-revoke]").count() == 1
+                # Revocation makes this an existing course needing one new approval.
+                page.locator('[data-tool-open="options"]').click()
+                page.locator("[data-source-revoke]").click()
+                page.wait_for_load_state("load")
+                playwright.expect(page.locator("[data-source-revoke]")).not_to_be_visible()
                 before_preview = (home / "learning-topics" / "synthetic-quick-learn.md").read_bytes()
                 assert page.locator("#move-title").inner_text() == "Ready to learn"
                 assert page.locator("#move-title").evaluate("e => parseFloat(getComputedStyle(e).fontSize)") <= 24
@@ -2221,11 +2229,12 @@ run(port={port}, open_browser=False)
                 playwright.expect(page.locator("[data-provider-recovery]")).to_be_visible()
                 assert not page.locator("[data-source-preview]").is_visible()
                 page.unroute("**/source-preview")
+                page.locator('[data-tool-open="chat"]').first.click()
                 page.get_by_label("Your question", exact=True).fill("Teach me about equal parts.")
                 page.get_by_role("button", name="Ask tutor", exact=True).click()
                 page.locator("[data-source-preview]").wait_for(state="visible")
                 assert "equal parts" in page.locator("[data-source-excerpts]").inner_text()
-                assert page.get_by_role("heading", name="Send these excerpts to your tutor?").is_visible()
+                assert page.get_by_role("heading", name="Allow sources for this course?").is_visible()
                 assert page.locator("[data-source-request]").inner_text() == "Teach me about equal parts."
                 assert page.locator("[data-source-excerpts] h4").inner_text() == "fractions.md"
                 assert not page.locator("[data-source-preview-text]").is_visible()
@@ -2277,6 +2286,7 @@ run(port={port}, open_browser=False)
                 assert page.get_by_role("button", name="Choose file", exact=True).is_visible()
                 page.get_by_label("Source file", exact=True).set_input_files(
                     {"name": "custom-notes.md", "mimeType": "text/markdown", "buffer": b"Stacks remove the most recently added item first."})
+                page.locator("[data-creation-consent-check]").check()
                 page.get_by_role("button", name="Create course", exact=True).click()
                 page.wait_for_url("**/courses/synthetic-custom-course?tool=chat")
                 assert page.locator("[data-source-mode]").is_checked()
@@ -2298,6 +2308,7 @@ run(port={port}, open_browser=False)
                 assert page.locator("#experience").evaluate("e => e === document.activeElement")
                 page.get_by_label("Source file", exact=True).set_input_files(
                     {"name": "rejected.txt", "mimeType": "text/plain", "buffer": b"OPENAI_API_KEY=sk-abcdefghijklmnopqrstuv"})
+                page.locator("[data-creation-consent-check]").check()
                 page.get_by_role("button", name="Create course", exact=True).click()
                 page.locator("[data-form-error]").wait_for(state="visible")
                 pending_id = page.locator('[name="submission_id"]').input_value()
@@ -2410,6 +2421,7 @@ run(port={port}, open_browser=False)
                 plain.get_by_label("Source type", exact=True).select_option("file")
                 plain.get_by_label("Source file", exact=True).set_input_files(
                     {"name": "native.md", "mimeType": "text/markdown", "buffer": b"A half is one of two equal parts."})
+                plain.locator("[data-creation-consent-check]").check()
                 plain.get_by_role("button", name="Create course", exact=True).click()
                 assert plain.url.endswith("/courses/no-javascript-source?tool=chat")
                 assert plain.locator("[data-source-mode]").is_checked()

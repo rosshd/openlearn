@@ -57,6 +57,7 @@ class CourseCreateRequest(BaseModel):
 
 
 class SourceCourseCreateRequest(CourseCreateRequest):
+    source_course_approval: bool = False
     mode: Literal["course", "quick"] = "course"
     source_kind: Literal["file", "folder", "github"]
     source_value: str = Field(default="", max_length=2048)
@@ -131,6 +132,7 @@ class TutorSubmissionRequest(BaseModel):
     expected_revision: int = Field(ge=0)
     source_mode: bool = False
     source_approval: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    source_course_approval: bool = False
     source_lesson_id: str | None = Field(default=None, min_length=1, max_length=96)
     source_lesson_title: str | None = Field(default=None, min_length=1, max_length=160)
     source_lesson_revision: int | None = Field(default=None, ge=0)

@@ -201,6 +201,7 @@ if (createForm) {
       if (valueLabel) valueLabel.textContent = kind.value === "github" ? "Public GitHub repository URL" : "Local folder path";
       value.placeholder = kind.value === "github" ? "https://github.com/owner/repository" : "/path/to/your/notes";
       const hasSource = Boolean(kind.value);
+      createForm.querySelector("[data-creation-consent]").hidden = !hasSource;
       file.disabled = false;
       value.disabled = false;
       browse.hidden = kind.value === "github";
@@ -223,7 +224,7 @@ if (createForm) {
         createForm.toggleAttribute("data-multipart", hasSource);
         const status = createForm.querySelector("[data-form-status]");
         if (createForm.querySelector("[data-form-error]").hidden && !createForm.dataset.submitting) {
-          status.textContent = hasSource ? "Your source stays local until you review and approve a tutor request." : "You can add a source later, too.";
+          status.textContent = hasSource ? "Approve source use once for this course." : "You can add a source later, too.";
         }
       }
     };
@@ -356,6 +357,13 @@ for (const form of document.querySelectorAll("[data-json-form]")) {
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     if (form.dataset.submitting === "true") return;
+    if (form === createForm && createForm.elements.source_kind?.value && !createForm.elements.source_course_approval.checked) {
+      const box = form.querySelector("[data-form-error]");
+      box.textContent = "Approve source use for this course before creating it.";
+      box.hidden = false;
+      createForm.elements.source_course_approval.focus();
+      return;
+    }
     form.dataset.submitting = "true";
     if (form === createForm) saveCreationDraft();
     const submit = form.querySelector('[type="submit"]');
@@ -431,7 +439,7 @@ for (const form of document.querySelectorAll("[data-enter-flow]")) {
       || event.isComposing
     ) return;
     const fields = [...form.querySelectorAll('input:not([type="hidden"]):not([type="file"]), textarea')]
-      .filter((field) => !field.disabled);
+      .filter((field) => !field.disabled && !field.closest("[hidden]"));
     const index = fields.indexOf(event.target);
     if (index < 0) return;
     event.preventDefault();
@@ -1334,6 +1342,18 @@ for (const button of document.querySelectorAll("[data-progression-action]")) {
   });
 }
 
+focusShell?.querySelector("[data-source-revoke]")?.addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  try {
+    await requestJson(`/api/courses/${encodeURIComponent(focusShell.dataset.courseSlug)}/source-consent`, {method: "DELETE"});
+    window.location.reload();
+  } catch (error) {
+    focusShell.querySelector("[data-source-permission-status]").textContent = error.message;
+    button.disabled = false;
+  }
+});
+
 let sourcePreviewInFlight = false;
 async function approveSourceRequest(payload) {
   if (sourcePreviewInFlight) return false;
@@ -1347,6 +1367,7 @@ async function approveSourceRequest(payload) {
       method: "POST", body: JSON.stringify(payload),
     });
     if (!result.ok) throw new Error(result.error || "Source preview is unavailable.");
+    if (result.course_approved) return true;
     dialog.querySelector("[data-source-disclosure]").textContent = result.disclosure;
     dialog.querySelector("[data-source-preview-text]").textContent = result.preview;
     dialog.querySelector("[data-source-request]").textContent = result.request;
@@ -1380,7 +1401,10 @@ async function approveSourceRequest(payload) {
         dialog.oncancel = null;
         dialog.querySelector("[data-source-cancel]").onclick = null;
         dialog.querySelector("[data-source-send]").onclick = null;
-        if (approved) payload.source_approval = result.approval;
+        if (approved) {
+          payload.source_approval = result.approval;
+          payload.source_course_approval = true;
+        }
         resolve(approved);
       };
       dialog.oncancel = (event) => { event.preventDefault(); finish(false); };

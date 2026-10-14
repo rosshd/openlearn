@@ -44,6 +44,8 @@ from .schemas import (
     public_mapping,
 )
 
+from . import source_consent
+
 router = APIRouter()
 
 
@@ -117,6 +119,7 @@ def _context(request: Request, **values: Any) -> dict[str, Any]:
     return {
         "request": request,
         "csrf_token": request.app.state.security.csrf_token,
+        "source_consent_disclosure": source_consent.DISCLOSURE,
         "app_root": request.scope.get("root_path", ""),
         "submission_id": str(uuid4()),
         "secondary_submission_id": str(uuid4()),
@@ -550,6 +553,8 @@ async def _create_source_course(request: Request, form: Any, *, mode: str | None
         payload = SourceCourseCreateRequest.model_validate(values)
         if payload.template_id:
             raise ValueError("Source courses do not use a starter template.")
+        if not payload.source_course_approval:
+            raise ValueError("Approve source use for this course before creating it.")
         if payload.source_kind == "file":
             if not isinstance(upload, FormUploadFile):
                 raise ValueError("Choose a source file.")
@@ -1190,6 +1195,16 @@ async def preview_source_turn(request: Request, slug: str) -> JSONResponse:
         )
     result = public_mapping(await _call(request, "preview_source_turn", slug, payload))
     return JSONResponse(result, status_code=200 if result.get("ok") else 422)
+
+
+@router.delete("/api/courses/{slug}/source-consent", response_class=JSONResponse)
+async def revoke_source_consent(request: Request, slug: str) -> JSONResponse:
+    try:
+        slug = canonical_slug(slug)
+    except ValueError:
+        return _json_error("Invalid course identifier.")
+    result = public_mapping(await _call(request, "revoke_source_consent", slug))
+    return JSONResponse(result, status_code=404 if result.get("missing") else 200)
 
 
 @router.post("/api/courses/{slug}/turns", response_class=JSONResponse)
