@@ -233,6 +233,7 @@ def test_source_lesson_browser_journey(source_course, intent, text):
                 page.locator("[data-chat-submit]").click()
             else:
                 page.get_by_role("button", name="Continue", exact=True).click()
+            expect(page.locator("[data-source-preview]")).to_be_visible()
             page.locator("[data-source-send]").click()
             expect(page.locator("[data-current-move]")).to_contain_text("blue plate", timeout=10000)
             page.reload()
@@ -241,10 +242,10 @@ def test_source_lesson_browser_journey(source_course, intent, text):
             for fragment in ("checksum", "Source excerpts provided:", record.source_id):
                 assert fragment not in page.locator("[data-current-move]").inner_text()
             page.get_by_role("button", name="Continue", exact=True).click()
-            page.locator("[data-source-send]").click()
+            expect(page.locator("[data-source-preview]")).not_to_be_visible()
             expect(page.locator("[data-current-move]")).to_contain_text("Stack operations", timeout=10000)
             page.get_by_role("button", name="Continue", exact=True).click()
-            page.locator("[data-source-send]").click()
+            expect(page.locator("[data-source-preview]")).not_to_be_visible()
             expect(page.locator("[data-current-move]")).to_contain_text("which item", timeout=10000)
             page.reload()
             expect(page.locator("[data-current-move]")).to_contain_text("which item")

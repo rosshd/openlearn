@@ -34,6 +34,14 @@
       {% include "creation_sources.html" %}
     </details>
     {% endif %}
+    <section data-creation-consent aria-label="Course source permission">
+      <label class="check-row"><input type="checkbox" name="source_course_approval" value="true" data-creation-consent-check> Use these sources with my tutor for this course</label>
+      <p class="field-note">Screened excerpts, answers, questions and lesson context go to OpenRouter using DeepSeek as you study. Screening can miss personal details. Revoke this in Options.</p>
+      <details class="creation-disclosure">
+        <summary>Source privacy details</summary>
+        <p class="field-note">{{ source_consent_disclosure }}</p>
+      </details>
+    </section>
     <details class="creation-disclosure" data-creation-experience{% if values.get('experience') %} open{% endif %}>
       <summary>Prior experience <span class="optional">Optional</span></summary>
       <div class="form-field">
@@ -41,7 +49,7 @@
         <textarea id="experience" name="experience" rows="2" maxlength="4000" placeholder="A few words about what you know so far.">{{ values.get('experience') or '' }}</textarea>
       </div>
     </details>
-    <p class="field-note creation-status" role="status" aria-live="polite" aria-atomic="true" data-form-status>{{ 'Your source stays local until you review and approve a tutor request.' if quick or source_kind else 'You can add a source later, too.' }}</p>
+    <p class="field-note creation-status" role="status" aria-live="polite" aria-atomic="true" data-form-status>{{ 'Approve source use once for this course.' if quick or source_kind else 'You can add a source later, too.' }}</p>
     <div class="creation-actions">
       <button class="primary-action" type="submit">{{ 'Create Quick Learn' if quick else 'Create course' }} <span aria-hidden="true">→</span></button>
       <a class="quiet-link" href="{{ url_for('dashboard') }}">Cancel</a>

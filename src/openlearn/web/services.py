@@ -43,6 +43,8 @@ from openlearn.courses import (
     course_conversation_source,
 )
 
+from . import source_consent
+
 from .schemas import (
     CodeToolRequest,
     CourseCreateRequest,
@@ -1329,8 +1331,8 @@ class OpenLearnWebServices:
                 cli.write_text_atomic(topic.path, cli.format_topic(cli.stable_metadata_for_topic(metadata), body))
                 creation_state = {key: state[key] for key in (CALIBRATION_STATE_KEY, CREATION_SUBMISSION_STATE_KEY)
                                   if key in state}
-        # Importing stops at the existing per-request consent boundary;
-        # no ordinary, ungrounded lesson or provider request starts here.
+        # Importing stays local; explicit course permission does not start tutoring.
+        # Legacy clients without permission still approve before the first request.
         imported = self._import_source(slug, source)
         # The importer owns dynamic source state; retain creation calibration.
         cli.update_state_atomic(slug, lambda state: state.update(creation_state))
@@ -1347,6 +1349,8 @@ class OpenLearnWebServices:
                                 quick_source_label=str(sources[0]["label"]), coverage_contract=True)
             metadata["web_source_pending"] = False
             cli.write_text_atomic(topic.path, cli.format_topic(cli.stable_metadata_for_topic(metadata), topic.body))
+        if request.source_course_approval:
+            source_consent.grant(slug, source_consent.scope(slug))
         return {**result, "state": "source_ready"}
 
     def create_course(self, request: CourseCreateRequest) -> dict[str, object]:
@@ -2091,6 +2095,8 @@ class OpenLearnWebServices:
             "slug": slug,
             "source_start": bool(topic.metadata.get("web_source_start")) and revision == 0,
             "source_mode_enabled": bool(topic.metadata.get("web_source_start")),
+            "source_permission_saved": source_consent.approved(slug),
+            "source_permission_recorded": source_consent.recorded(slug),
             "title": snapshot.card.title,
             "current_unit": move_title,
             "revision": revision,
@@ -2123,32 +2129,51 @@ class OpenLearnWebServices:
         if not request.source_mode:
             return {"ok": False, "error": "Enable source mode for this request first."}, None
         try:
+            consent_scope = source_consent.scope(slug)
             context = source_context.snapshot(
                 cli.read_topic(slug), self._source_request_text(request),
                 config.configured_model(), opted_in=True,
             )
             preview = source_context.request_preview(context)
+            if source_consent.scope(slug) != consent_scope:
+                raise cli.OpenLearnError("Course sources changed. Refresh before approving them.")
         except cli.OpenLearnError as error:
             return {"ok": False, "error": str(error)}, None
         binding = repr((slug, request.intent, request.text, request.expected_revision,
                         request.source_lesson_id, request.source_lesson_title,
-                        request.source_lesson_revision, context.revision, preview))
-        return {"ok": True, "disclosure": source_context.CONSENT_TEXT + " The stored grading key is sent when needed but hidden in this learner preview.",
+                        request.source_lesson_revision, context.revision, preview, consent_scope))
+        return {"ok": True, "disclosure": source_consent.DISCLOSURE + " The stored grading key is sent when needed but hidden in this learner preview.",
+                "course_approved": source_consent.approved(slug, consent_scope),
+                "consent_scope": consent_scope,
                 "preview": source_context.learner_request_preview(context),
                 "request": context.user,
                 "sources": source_context.learner_sources(context),
                 "approval": sha256(binding.encode()).hexdigest()}, preview
 
     def preview_source_turn(self, slug: str, request: TutorSubmissionRequest) -> dict[str, object]:
-        return self._preview_source_turn(slug, request)[0]
+        result, _preview = self._preview_source_turn(slug, request)
+        return {key: value for key, value in result.items() if key != "consent_scope"}
+
+    def revoke_source_consent(self, slug: str) -> dict[str, object]:
+        try:
+            cli.read_topic(slug)
+        except (cli.OpenLearnError, OSError):
+            return {"ok": False, "missing": True, "error": "Course not found."}
+        source_consent.revoke(slug)
+        return {"ok": True}
 
     def submit_turn(self, slug: str, request: TutorSubmissionRequest) -> dict[str, object]:
         source_preview = None
         starts_source_course = request.source_mode and source_lessons.needs_plan(cli.read_topic(slug))
         if request.source_mode:
             result, source_preview = self._preview_source_turn(slug, request)
-            if not result.get("ok") or request.source_approval != result.get("approval"):
-                return {"state": "conflict", "error": "Review and approve a fresh screened request before sending."}
+            if not result.get("ok"):
+                return {"state": "conflict", "error": str(result.get("error") or "Source preview is unavailable.")}
+            if not result.get("course_approved"):
+                if request.source_approval != result.get("approval"):
+                    return {"state": "conflict", "error": "Approve source use for this course before sending."}
+                if request.source_course_approval and not source_consent.grant(slug, str(result["consent_scope"])):
+                    return {"state": "conflict", "error": "Course sources changed. Refresh before approving them."}
         intent = {
             "answer": "answer",
             "question": "question",

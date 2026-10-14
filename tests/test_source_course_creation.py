@@ -28,7 +28,7 @@ def client(tmp_path, monkeypatch):
 
 def payload(mode="quick", **changes):
     return {"title": "Synthetic fractions", "goal": "Understand halves", "experience": "New learner",
-            "submission_id": str(uuid4()), "mode": mode, "source_kind": "file", **changes}
+            "submission_id": str(uuid4()), "mode": mode, "source_kind": "file", "source_course_approval": "true", **changes}
 
 
 def post(client, data, files=None, *, json=True, path="/courses/from-source"):
@@ -139,7 +139,8 @@ def test_source_creation_imports_before_any_tutor_call_and_replays(client, monke
     assert len(source_imports.list_course_sources(slug)) == 1
     focus = client.get(f"/courses/{slug}", follow_redirects=False)
     assert focus.status_code == 200
-    assert "review and approve" in focus.text
+    assert "Revoke source permission" in focus.text
+    assert "data-source-revoke hidden" not in focus.text
     assert "data-source-mode checked" in focus.text
     assert client.get(f"/courses/{slug}?tool=chat").status_code == 200
 

@@ -39,12 +39,12 @@
   </aside>
 
   <section class="focus-column" aria-labelledby="move-title">
-    {% if course.source_start %}<p class="field-note">Your source is saved locally. Continue to build your lessons, then review and approve the selected excerpts.</p>{% endif %}
+    {% if course.source_start %}<p class="field-note">Your source is saved locally. Continue to build your lessons.{% if not course.source_permission_saved %} Approve source use once for this course.{% endif %}</p>{% endif %}
     <dialog data-source-preview aria-labelledby="source-preview-title">
-      <h2 id="source-preview-title" tabindex="-1">Send these excerpts to your tutor?</h2>
+      <h2 id="source-preview-title" tabindex="-1">Allow sources for this course?</h2>
       <div class="dialog-request" tabindex="0" role="region" aria-label="Screened request and disclosure">
-        <p class="source-preview-intro">Your request, selected excerpts, and relevant lesson context will be sent to OpenRouter using <span>deepseek/deepseek-v4.1-flash</span>.</p>
-        <p class="source-preview-note">Screening can miss personal information. Review the text before sending.</p>
+        <p class="source-preview-intro">As you study, screened excerpts from these sources, your answers and questions, and relevant lesson context will be sent to OpenRouter using <span>deepseek/deepseek-v4.1-flash</span>.</p>
+        <p class="source-preview-note">Screening can miss personal information. Review your sources before allowing them.</p>
         <p class="source-preview-note">When needed, the tutor first builds a concept sequence from these excerpts, then teaches one concept at a time.</p>
         <section class="source-preview-request" aria-labelledby="source-request-title">
           <h3 id="source-request-title">Your request</h3>
@@ -66,10 +66,10 @@
         </details>
       </div>
       <footer class="source-preview-footer">
-        <p class="source-preview-note">Approval is for this request only, including grading or repair calls.</p>
+        <p class="source-preview-note">Allow once for this course, including planning, grading and repair. Revoke in Options. Changed sources require approval again.</p>
         <div class="dialog-actions">
           <button class="secondary-action" type="button" data-source-cancel>Cancel</button>
-          <button class="primary-action compact" type="button" data-source-send>Send to tutor</button>
+          <button class="primary-action compact" type="button" data-source-send>Allow and continue</button>
         </div>
       </footer>
     </dialog>
@@ -203,7 +203,9 @@
 
     <section class="tool-panel" data-tool-panel="options" hidden aria-labelledby="options-tool-title">
       <h3 class="sr-only" id="options-tool-title">Source use and settings</h3>
-      <label class="check-row"><input type="checkbox" data-source-mode{% if course.source_mode_enabled %} checked{% endif %}> Use screened class sources for this turn</label>
+      <label class="check-row"><input type="checkbox" data-source-mode{% if course.source_mode_enabled %} checked{% endif %}> Use course sources</label>
+      <p class="field-note" data-source-permission-status>{{ 'Source use is approved for this course.' if course.source_permission_saved else 'Source use needs approval once for this course.' }}</p>
+      <button class="quiet-link" type="button" data-source-revoke{% if not course.source_permission_recorded %} hidden{% endif %}>Revoke source permission</button>
       <a class="quiet-link" href="{{ url_for('course_settings', slug=course.slug) }}">Course settings</a>
       <a class="quiet-link" href="{{ url_for('setup') }}">Tutor settings</a>
     </section>
