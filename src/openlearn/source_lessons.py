@@ -142,6 +142,14 @@ def subject_sections(lines: list[str]) -> tuple[list[tuple[int, int]], set[int]]
         if match:
             label = re.sub(r"^\d+[.)]?\s+", "", match[2]).strip()
             headings.append((index, len(match[1]), label))
+    document_title = None
+    if len(headings) > 1:
+        first_index, first_level, _first_label = headings[0]
+        # A root above all section headings, or above an administrative
+        # preface, is a document title. Peer subject headings are not titles.
+        if (all(level > first_level for _index, level, _label in headings[1:])
+                or (headings[1][1] > first_level and _STUDY_HEADING.search(headings[1][2]))):
+            document_title = first_index
     ignored: set[int] = set()
     eligible = []
     skip_level = None
@@ -150,7 +158,7 @@ def subject_sections(lines: list[str]) -> tuple[list[tuple[int, int]], set[int]]
             skip_level = None
         # A document title may contain all its subject headings. Never exclude
         # its entire subtree merely because the title says 'study guide'.
-        if index == 0:
+        if index == document_title:
             continue
         if skip_level is None and _STUDY_HEADING.search(label):
             skip_level = level

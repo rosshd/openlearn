@@ -221,3 +221,37 @@ def test_rebuilding_existing_plan_preserves_source_and_history(source_course):
     assert source_path.read_bytes() == source_before
     assert source_lessons.plan_concepts(saved.metadata)[0]["label"] == "Euclid"
     assert saved.metadata["current_unit"] == 1
+
+
+@pytest.mark.parametrize("course", [
+    "\n\n# Algorithms review\n## Exam scope\nConsult the instructor.\n## Binary search\nBinary search halves a sorted interval.\n## Dynamic programming\nReuse stored subproblem results.\n",
+    "# Binary search\nBinary search halves a sorted interval.\n# Dynamic programming\nReuse stored subproblem results.\n",
+], indirect=True, ids=["leading-blanks", "titleless-peer-subjects"])
+def test_subject_selection_distinguishes_document_titles_from_first_subject(source_course):
+    topic, _ = source_course
+    context = sources.snapshot(topic, "Continue to the next useful concept.", sources.APPROVED_MODEL, opted_in=True)
+    assert "Binary search halves a sorted interval." in context.prompt
+    assert "Reuse stored subproblem results." in context.prompt
+    assert context.subject_sections
+
+
+@pytest.mark.parametrize("rule", [
+    "Excluded topics: topological sort and strongly connected components.",
+    "Excluded by the instructor:\n- topological sort\n- strongly connected components",
+])
+def test_complete_exclusion_rules_survive_subject_filtering(source_course, rule):
+    topic, record = source_course
+    text = GUIDE.replace("ADMIN_SCOPE Consult the controlling document for the exam scope.", rule)
+    # Use a fresh registered import so all normal checksum checks still apply.
+    from openlearn import source_imports
+    original = cli.project_home() / "complete-guide.md"
+    original.write_text(text)
+    source_imports.import_course_source(source_imports.CourseSourceImportRequest(topic.slug, source_imports.LocalFileSource(original)))
+    context = sources.snapshot(cli.read_topic(topic.slug), "Continue to the next useful concept.", sources.APPROVED_MODEL, opted_in=True)
+    assert rule in context.prompt
+    matching = [excerpt for excerpt in context.excerpts if rule in excerpt.text]
+    assert len(matching) == 1
+    assert matching[0].text.strip() == rule
+    assert "Euclid" in context.prompt
+    assert len(context.excerpts) <= sources.EXCERPT_LIMIT
+    sources.ensure_unchanged(cli.read_topic(topic.slug), context, sources.APPROVED_MODEL)

@@ -58,7 +58,7 @@ _PERSONAL = re.compile(
     r"birthday|contact|private\s+note|personal\s+note|annotation)\s*[:=]|"
     r"\b(?:my|home)\s+address\b|\b\d+\s+\w+\s+(?:street|road|avenue|lane)\b)"
 )
-_COURSE_RULE = re.compile(r"(?i)\b(?:excluded by|(?:are|is) excluded|out of scope|must use|required method|instructor(?:.s)? rule)\b")
+_COURSE_RULE = re.compile(r"(?i)\b(?:excluded(?: by| topics\s*:|\s*:)|(?:are|is) excluded|out of scope|must use|required method|instructor(?:.s)? rule)(?!\w)")
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 _PRIVATE_ARTIFACT = re.compile(
     r"(?i)(?:profile|placement|personal|reflection|learner|answer|solution|assessment)"
@@ -288,13 +288,21 @@ def snapshot(topic: Topic, user: str, model: str, *, opted_in: bool = False) -> 
         stops = dict(sections) if plan_required else {}
         # Study wrappers can carry binding instructor constraints. Keep those
         # lines as explicitly labelled source data, never as curriculum headings.
+        constraint_lines: set[int] = set()
         for index in sorted(ignored):
-            if not _COURSE_RULE.search(lines[index]):
+            if index in constraint_lines or not _COURSE_RULE.search(lines[index]):
                 continue
-            excerpt = lines[index]
-            if not excerpt.strip() or len(excerpt) > EXCERPT_CHAR_LIMIT or screened(excerpt, EXCERPT_CHAR_LIMIT) != excerpt.rstrip():
+            stop = index + 1
+            # Rules often wrap onto continuation lines or a Markdown list.
+            # Keep their whole bounded paragraph, with accurate line locators.
+            while stop < len(lines) and stop in ignored and lines[stop].strip() and not re.match(r"^\s*#", lines[stop]):
+                stop += 1
+            excerpt = "".join(lines[index:stop])
+            if len(excerpt) > EXCERPT_CHAR_LIMIT or screened(excerpt, EXCERPT_CHAR_LIMIT) != excerpt.rstrip():
+                notices.append(f"{label}: overlong or sensitive course constraint withheld; scope support unknown.")
                 continue
-            candidates.append((100, name, index + 1, index + 1, excerpt, provenance, True))
+            constraint_lines.update(range(index, stop))
+            candidates.append((100, name, index + 1, stop, excerpt, provenance, True))
         scored = []
         linked_target = bool(selected and record and record.source_id in selected["source_ids"])
         for index, line in enumerate(lines):
