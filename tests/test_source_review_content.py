@@ -235,23 +235,24 @@ def test_subject_selection_distinguishes_document_titles_from_first_subject(sour
     assert context.subject_sections
 
 
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
 @pytest.mark.parametrize("rule", [
     "Excluded topics: topological sort and strongly connected components.",
     "Excluded by the instructor:\n- topological sort\n- strongly connected components",
 ])
-def test_complete_exclusion_rules_survive_subject_filtering(source_course, rule):
+def test_complete_exclusion_rules_survive_subject_filtering(source_course, rule, newline):
     topic, record = source_course
     text = GUIDE.replace("ADMIN_SCOPE Consult the controlling document for the exam scope.", rule)
     # Use a fresh registered import so all normal checksum checks still apply.
     from openlearn import source_imports
     original = cli.project_home() / "complete-guide.md"
-    original.write_text(text)
+    original.write_bytes(text.replace("\n", newline).encode("utf-8"))
     source_imports.import_course_source(source_imports.CourseSourceImportRequest(topic.slug, source_imports.LocalFileSource(original)))
     context = sources.snapshot(cli.read_topic(topic.slug), "Continue to the next useful concept.", sources.APPROVED_MODEL, opted_in=True)
-    assert rule in context.prompt
-    matching = [excerpt for excerpt in context.excerpts if rule in excerpt.text]
+    assert rule in context.prompt.replace("\r\n", "\n")
+    matching = [excerpt for excerpt in context.excerpts if rule in excerpt.text.replace("\r\n", "\n")]
     assert len(matching) == 1
-    assert matching[0].text.strip() == rule
+    assert matching[0].text.splitlines() == rule.splitlines()
     assert "Euclid" in context.prompt
     assert len(context.excerpts) <= sources.EXCERPT_LIMIT
     sources.ensure_unchanged(cli.read_topic(topic.slug), context, sources.APPROVED_MODEL)
