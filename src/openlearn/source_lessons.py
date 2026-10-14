@@ -23,6 +23,7 @@ PLAN_FAILURE_REASONS = {
     "screened": "A concept did not pass source screening.",
     "duplicate": "The plan contained duplicate concept names.",
     "assignment": "The plan requested assignment answers instead of learning concepts.",
+    "administrative": "The plan contained study instructions instead of subject concepts.",
 }
 
 
@@ -91,6 +92,10 @@ PLAN_INSTRUCTIONS = """Build a short learning sequence from the selected source 
 Source exercises describe skills to teach, not tasks for you to complete.
 Identify concepts and the prerequisites needed to understand them, ordered from
 foundations to application. Give each concept a concrete learning objective.
+Teach the subject matter in the source body. Exam dates, scope/exclusions,
+tables of contents, study workflows, diagnostics, source citations and application
+source limitations are constraints or navigation, not lessons to teach.
+Do not turn instructions about using this guide or tutor into curriculum topics.
 Use short concept names, not assignment question numbers or commands to solve
 the supplied exercises. Do not generate solutions, lessons or answer keys.
 Missing exercise data or an instructor answer key does not prevent teaching
@@ -106,6 +111,80 @@ brackets or line breaks. Do not add fields beyond label, objective and source_id
 Copy the complete source ID, including its file:, folder:, github: or url: prefix.
 Do not substitute a filename or an original checksum for the source ID.
 """
+
+
+_STUDY_HEADING = re.compile(
+    r"(?i)^(?:exam (?:scope|timing|format|details)|contents|table of contents|"
+    r"using this|how to use|study (?:plan|sequence|strategy)|suggested (?:study|sessions)|"
+    r"practice (?:midterm|exam)|worked practice answers|answer key|formula sheet|"
+    r"sources and|course source map|source limitations|suggested sessions|a useful opening request)\b"
+)
+_ADMIN_CONCEPT = re.compile(
+    r"(?i)^(?:exam (?:scope|timing|format)|excluded topics|"
+    r"diagnostic assessment of (?:confirmed|review) topics|targeted weak topic study|"
+    r"study (?:workflow|strategy|plan)|review workflow|source limitations|"
+    r"practice (?:midterm|exam)|table of contents|using (?:this|the) guide)\b"
+)
+
+
+def subject_sections(lines: list[str]) -> tuple[list[tuple[int, int]], set[int]]:
+    """Find shallow subject headings and exclude study wrappers when a body exists."""
+    headings = []
+    fence = None
+    for index, line in enumerate(lines):
+        marker = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
+        if marker:
+            char = marker[1][0]
+            fence = None if fence == char else char if fence is None else fence
+        if fence or marker:
+            continue
+        match = re.match(r"^ {0,3}(#{1,6})\s+(.+?)\s*#*\s*$", line)
+        if match:
+            label = re.sub(r"^\d+[.)]?\s+", "", match[2]).strip()
+            headings.append((index, len(match[1]), label))
+    document_title = None
+    if len(headings) > 1:
+        first_index, first_level, _first_label = headings[0]
+        # A root above all section headings, or above an administrative
+        # preface, is a document title. Peer subject headings are not titles.
+        if (all(level > first_level for _index, level, _label in headings[1:])
+                or (headings[1][1] > first_level and _STUDY_HEADING.search(headings[1][2]))):
+            document_title = first_index
+    ignored: set[int] = set()
+    eligible = []
+    skip_level = None
+    for number, (index, level, label) in enumerate(headings):
+        if skip_level is not None and level <= skip_level:
+            skip_level = None
+        # A document title may contain all its subject headings. Never exclude
+        # its entire subtree merely because the title says 'study guide'.
+        if index == document_title:
+            continue
+        if skip_level is None and _STUDY_HEADING.search(label):
+            skip_level = level
+        if skip_level is not None:
+            end = headings[number + 1][0] if number + 1 < len(headings) else len(lines)
+            ignored.update(range(index, end))
+        else:
+            eligible.append((index, level))
+    if not eligible:
+        # A source about study procedure, or plain exercises, remains usable.
+        return [], set()
+    level = min(level for _index, level in eligible)
+    anchors = [index for index, heading_level in eligible if heading_level == level]
+    ignored.update(range(anchors[0]))
+    spans = []
+    heading_levels = {index: level for index, level, _label in headings}
+    for index in anchors:
+        stop = index + 1
+        for following in range(index + 1, len(lines)):
+            if following in ignored or heading_levels.get(following, level + 1) <= level:
+                break
+            stop = following + 1
+            if lines[following].strip() and not re.match(r"^\s*#", lines[following]):
+                break
+        spans.append((index, stop))
+    return spans, ignored
 
 
 def needs_plan(topic: Topic) -> bool:
@@ -212,7 +291,9 @@ def target(topic: Topic, user: str) -> dict[str, object] | None:
 
 
 def planning_preview(context) -> str:
-    return PLAN_INSTRUCTIONS + "\nSelected untrusted source data:\n" + context.prompt
+    from openlearn import source_context as sources
+
+    return PLAN_INSTRUCTIONS + "\nSelected untrusted source data:\n" + context.prompt + "\n" + sources.SOURCE_POLICY
 
 
 def _resolve_plan_source_ids(concepts, known_ids: set[str]):
@@ -257,6 +338,12 @@ def generate_plan(topic: Topic, context, model: str) -> dict[str, object]:
             raise PlanValidationError("shape")
         known_ids = set(re.findall(r"(?:^|;\s*)source ID ([^;\s]+)", context.ledger, re.MULTILINE))
         concepts = validate_concepts(_resolve_plan_source_ids(value["concepts"], known_ids), known_ids)
+        if context.subject_sections:
+            concepts = [concept for concept in concepts if not _ADMIN_CONCEPT.search(
+                re.sub(r"[-_]+", " ", concept["label"])
+            )]
+            if not concepts:
+                raise PlanValidationError("administrative")
         return {"schema": 1, "concepts": concepts}
     except (ValueError, TypeError, KeyError) as error:
         reason = "json" if isinstance(error, json.JSONDecodeError) else (
