@@ -257,3 +257,22 @@ def test_revocation_invalidates_an_unused_approval_token(course):
         assert service.submit_turn(topic.slug, request)["state"] == "conflict"
     start.assert_not_called()
     assert not source_consent.approved(topic.slug)
+
+
+def test_revocation_between_approval_validation_and_grant_wins(course, monkeypatch):
+    topic, _ = course
+    service = OpenLearnWebServices()
+    request = web_request(topic)
+    request.source_approval = service.preview_source_turn(topic.slug, request)["approval"]
+    request.source_course_approval = True
+    original_grant = source_consent.grant
+    def revoke_then_grant(slug, expected_scope):
+        source_consent.revoke(slug)
+        return original_grant(slug, expected_scope)
+    monkeypatch.setattr(source_consent, "grant", revoke_then_grant)
+    with mock.patch.object(tutor_service, "start_turn", return_value=mock.Mock(
+        status="accepted", submission_id=request.submission_id, message_kind="navigation", move=None
+    )) as start:
+        assert service.submit_turn(topic.slug, request)["state"] == "conflict"
+    start.assert_not_called()
+    assert not source_consent.approved(topic.slug)

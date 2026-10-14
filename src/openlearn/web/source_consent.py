@@ -43,8 +43,10 @@ def scope(slug: str) -> str:
         except (OSError, UnicodeError, ValueError, cli.OpenLearnError):
             checksum = "unavailable"
         files.append((name, checksum))
+    internal = cli.load_state(slug).get("_openlearn_internal", {})
+    generation = internal.get(REVISION_KEY, 0) if isinstance(internal, dict) else 0
     value = [VERSION, slug, source_context.APPROVED_BASE_URL, source_context.APPROVED_MODEL,
-             names, files, [asdict(record) for record in records]]
+             generation, names, files, [asdict(record) for record in records]]
     return sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 
