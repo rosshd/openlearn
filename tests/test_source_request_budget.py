@@ -219,7 +219,7 @@ def test_source_failure_browser_reload_and_retry(source_course):
                 directory.mkdir(parents=True, exist_ok=True)
                 page.screenshot(path=str(directory / f"error-{width}.png"), full_page=True)
             page.get_by_role("button", name="Continue", exact=True).click()
-            page.locator("[data-source-send]").click()
+            expect(page.locator("[data-source-preview]")).not_to_be_visible()
             expect(page.locator("[data-current-move]")).to_contain_text("blue plate", timeout=10000)
             browser.close()
     finally:

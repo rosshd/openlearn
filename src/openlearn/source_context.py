@@ -58,6 +58,7 @@ _PERSONAL = re.compile(
     r"birthday|contact|private\s+note|personal\s+note|annotation)\s*[:=]|"
     r"\b(?:my|home)\s+address\b|\b\d+\s+\w+\s+(?:street|road|avenue|lane)\b)"
 )
+_COURSE_RULE = re.compile(r"(?i)\b(?:excluded by|(?:are|is) excluded|out of scope|must use|required method|instructor(?:.s)? rule)\b")
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 _PRIVATE_ARTIFACT = re.compile(
     r"(?i)(?:profile|placement|personal|reflection|learner|answer|solution|assessment)"
@@ -110,6 +111,7 @@ class SourceContext:
     revision: str
     excerpts: tuple[SourceExcerpt, ...] = ()
     plan_required: bool = False
+    subject_sections: bool = False
 
     def reference_error(self, answer: str) -> str | None:
         """Reject unavailable source identities/locators, not mathematical claims."""
@@ -228,6 +230,12 @@ def snapshot(topic: Topic, user: str, model: str, *, opted_in: bool = False) -> 
     metadata: dict[str, object] = {"pending_question": clean_pending} if clean_pending else {}
     metadata.update(_scoped_state(topic.metadata))
     terms = set(re.findall(r"[\w-]{3,}", (clean_user + " " + str(clean_pending.get("question", ""))).casefold())) - {"the", "and", "with", "for", "this", "that", "from", "lesson", "please"}
+    default_navigation = clean_user in {
+        "Continue to the next useful concept.", "Skip this for now and continue with a useful next move.",
+        cli.lesson_policy.COURSE_INITIALIZATION_PROMPT,
+    }
+    if default_navigation:
+        terms = set()
     selected = source_lessons.target(topic, clean_user)
     if selected:
         terms.update(re.findall(r"[\w-]{3,}", str(selected["label"]).casefold()))
@@ -242,9 +250,10 @@ def snapshot(topic: Topic, user: str, model: str, *, opted_in: bool = False) -> 
     if directory.is_symlink() or directory.parent.is_symlink():
         raise cli.OpenLearnError("Unsafe selected-course source directory; no request was sent.")
     names = sorted(set(records) | {p.name for p in cli.context_source_files(topic.slug)})
-    candidates: list[tuple[int, str, int, int, str, str]] = []
+    candidates: list[tuple[int, str, int, int, str, str, bool]] = []
     notices: list[str] = []
     remaining = TOTAL_READ_BYTE_LIMIT
+    selected_subject_sections = False
     for name in names[:FILE_LIMIT]:
         label = _label(name)
         if _PERSONAL.search(name) or _PRIVATE_ARTIFACT.search(name) or _CONTROL.search(name):
@@ -274,18 +283,36 @@ def snapshot(topic: Topic, user: str, model: str, *, opted_in: bool = False) -> 
                 identity += "; legacy extracted-text baseline unknown"
         provenance = f"{label}; {identity}; extracted-text checksum {revision}"
         lines = text.splitlines(keepends=True)
+        sections, ignored = source_lessons.subject_sections(lines) if plan_required or default_navigation else ([], set())
+        selected_subject_sections = selected_subject_sections or bool(sections)
+        stops = dict(sections) if plan_required else {}
+        # Study wrappers can carry binding instructor constraints. Keep those
+        # lines as explicitly labelled source data, never as curriculum headings.
+        for index in sorted(ignored):
+            if not _COURSE_RULE.search(lines[index]):
+                continue
+            excerpt = lines[index]
+            if not excerpt.strip() or len(excerpt) > EXCERPT_CHAR_LIMIT or screened(excerpt, EXCERPT_CHAR_LIMIT) != excerpt.rstrip():
+                continue
+            candidates.append((100, name, index + 1, index + 1, excerpt, provenance, True))
         scored = []
         linked_target = bool(selected and record and record.source_id in selected["source_ids"])
         for index, line in enumerate(lines):
+            if index in ignored or (stops and index not in stops):
+                continue
             matches = len(terms & set(re.findall(r"[\w-]{3,}", line.casefold())))
             rule = bool(re.search(r"(?i)\b(?:instructor|must|required|rule|equation|formula|update|objective)\b|[=∑Σμ]", line))
-            if matches or rule or ((introductory or linked_target) and line.strip()):
-                scored.append((matches * 5 + 2 * rule + 3 * linked_target, index))
+            if matches or rule or stops or ((introductory or linked_target) and line.strip()):
+                scored.append((matches * 5 + 2 * rule + 3 * linked_target + 3 * bool(stops) + int(bool(sections) and index == sections[-1][0]), index))
         used: set[int] = set()
         for score, index in sorted(scored, key=lambda item: (-item[0], item[1]))[:EXCERPT_LIMIT]:
             if index in used:
                 continue
-            start, stop = max(0, index - 1), min(len(lines), index + 2)
+            start, stop = (index, stops[index]) if index in stops else (max(0, index - 1), min(len(lines), index + 2))
+            while start < index and start in ignored:
+                start += 1
+            while stop > index + 1 and stop - 1 in ignored:
+                stop -= 1
             excerpt = "".join(lines[start:stop])
             if not excerpt.strip() or len(excerpt) > EXCERPT_CHAR_LIMIT:
                 notices.append(f"{label}: overlong lines omitted without shortening equations.")
@@ -294,7 +321,7 @@ def snapshot(topic: Topic, user: str, model: str, *, opted_in: bool = False) -> 
                 notices.append(f"{label}: sensitive/unsafe excerpt withheld.")
                 continue
             used.update(range(start, stop))
-            candidates.append((score, name, start + 1, stop, excerpt, provenance))
+            candidates.append((score, name, start + 1, stop, excerpt, provenance, False))
     # Prefer relevant matches across all sources. Only a first-lesson continuation
     # may fall back to the opening prose, through the same screening and budgets.
     if any(candidate[0] > 0 for candidate in candidates):
@@ -304,20 +331,34 @@ def snapshot(topic: Topic, user: str, model: str, *, opted_in: bool = False) -> 
     parts: list[str] = []
     refs: list[str] = []
     excerpts: list[SourceExcerpt] = []
-    for _score, _name, start, stop, excerpt, provenance in sorted(candidates, key=lambda item: (-item[0], item[1], item[2])):
+    constraint_flags: list[bool] = []
+    ordered = sorted(candidates, key=lambda item: (-item[0], item[1], item[2]))
+    # Leave room for subject evidence even when several course rules match.
+    constraints = [item for item in ordered if item[-1]][:EXCERPT_LIMIT - 1]
+    subjects = [item for item in ordered if not item[-1]]
+    if plan_required:
+        # Planning needs breadth, not several nearby matches from the preface.
+        subjects = sorted(subjects, key=lambda item: (item[1], item[2]))
+        slots = EXCERPT_LIMIT - len(constraints)
+        if len(subjects) > slots:
+            indices = [round(i * (len(subjects) - 1) / (slots - 1)) for i in range(slots)] if slots > 1 else [0]
+            subjects = [subjects[index] for index in indices]
+    for _score, _name, start, stop, excerpt, provenance, constraint in constraints + subjects:
         locator = f"{provenance}; extracted text lines {start}-{stop}"
-        part = f"Untrusted excerpt: {locator}\n{excerpt}"
+        kind = "Untrusted course constraint (not a teaching topic)" if constraint else "Untrusted excerpt"
+        part = f"{kind}: {locator}\n{excerpt}"
         if len(refs) >= EXCERPT_LIMIT or sum(map(len, parts)) + len(part) > 10000:
             notices.append("Additional excerpts omitted by the request budget.")
             continue
         parts.append(part)
+        constraint_flags.append(constraint)
         refs.append(f"- {locator}")
         record = records.get(_name)
         label = _label(screened(record.label, 140)) if record else _label(_name)
         excerpts.append(SourceExcerpt(_name, label or _label(_name), start, excerpt))
     if len(names) > FILE_LIMIT:
         notices.append("Additional files omitted by the read budget.")
-    if not refs:
+    if not refs or all(constraint_flags):
         raise cli.OpenLearnError("No usable class excerpt: missing, stale, unsupported or unapproved source material. No request was sent.")
     history = []
     _notes, log = cli.split_session_log(topic.body)
@@ -331,14 +372,28 @@ def snapshot(topic: Topic, user: str, model: str, *, opted_in: bool = False) -> 
         [topic.metadata, topic.body, cli.load_state(topic.slug)], sort_keys=True, ensure_ascii=False,
     ).encode("utf-8")).hexdigest()
     while parts:
-        prompt = "\n\n".join(parts + history) + "\nSource limitations:\n" + notice_text + "\n" + SOURCE_POLICY
-        context = SourceContext(prompt, LEDGER_MARKER + "\n".join(refs) + "\n" + notice_text, clean_user, metadata, previous, revision, tuple(excerpts), plan_required)
+        prompt = "\n\n".join(parts + history) + "\nSource limitations:\n" + notice_text
+        context = SourceContext(prompt, LEDGER_MARKER + "\n".join(refs) + "\n" + notice_text, clean_user, metadata, previous, revision, tuple(excerpts), plan_required, selected_subject_sections)
         if request_size_bound(context) <= PROMPT_CHAR_LIMIT:
             return context
-        # Fit whole excerpts before approval. Freshness recomputes this exact set.
-        parts.pop()
-        refs.pop()
-        excerpts.pop()
+        # Prefer source support and the complete stored Check over optional
+        # lesson history. Freshness recomputes this same deterministic reduction.
+        if history:
+            history.pop(0)
+            continue
+        if previous:
+            previous = ""
+            continue
+        # Fit whole excerpts before approval. Never cut an equation mid-line.
+        # Retain constraints together with at least one subject passage.
+        if constraint_flags[-1] or (constraint_flags.count(False) == 1 and any(constraint_flags)):
+            raise SourceRequestBudgetError()
+        subject_indices = [i for i, constraint in enumerate(constraint_flags) if not constraint]
+        remove = subject_indices[len(subject_indices) // 2] if plan_required and len(subject_indices) > 2 else len(parts) - 1
+        constraint_flags.pop(remove)
+        parts.pop(remove)
+        refs.pop(remove)
+        excerpts.pop(remove)
         omission = "- Additional excerpts omitted to reserve room for the lesson and repair."
         if omission not in notice_text:
             notice_text += "\n" + omission
@@ -538,7 +593,7 @@ def request_preview(context: SourceContext) -> str:
 def judge_prompt(context: SourceContext) -> str:
     return cli.metadata_update_prompt(
         context.model_metadata, context.user, context.previous_lesson,
-    ) + "\n\nSelected class context (untrusted):\n" + context.prompt
+    ) + "\n\nSelected class context (untrusted):\n" + context.prompt + "\n" + SOURCE_POLICY
 
 
 def learner_request_preview(context: SourceContext) -> str:
